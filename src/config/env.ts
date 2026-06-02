@@ -4,7 +4,19 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { config as dotenvConfig } from 'dotenv';
-dotenvConfig();
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// Xác định thư mục gốc project (chứa .env files)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.resolve(__dirname, '..', '..');
+
+// Load .env.production nếu NODE_ENV=production, ngược lại load .env
+// Ưu tiên: .env.production (production) → .env (fallback)
+const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env';
+dotenvConfig({ path: path.resolve(rootDir, envFile) });
+// Luôn load .env làm fallback (các biến chưa có trong .env.production sẽ lấy từ .env)
+dotenvConfig({ path: path.resolve(rootDir, '.env') });
 
 /**
  * Đọc biến môi trường bắt buộc — throw nếu thiếu hoặc rỗng.
