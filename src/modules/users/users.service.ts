@@ -62,9 +62,13 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
     query(
       `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
               u.role, u.is_active, u.tenant_id, u.last_login_at, u.created_at,
-              t.name AS tenant_name
+              t.name AS tenant_name,
+              pg.id AS permission_group_id,
+              pg.name AS permission_group_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
+       LEFT JOIN user_permission_groups upg ON upg.user_id = u.id
+       LEFT JOIN permission_groups pg ON pg.id = upg.permission_group_id
        ${where}
        ORDER BY u.created_at DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -122,7 +126,7 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
   // Determine tenant: superadmin có thể chỉ định, user khác dùng tenant mình
   const tenantId = input.tenant_id || callerTenantId;
 
-  // Kiểm tra username/email unique
+  // Kiểm tra username/email unique (global — không phân theo tenant)
   const existing = await query(
     'SELECT id FROM users WHERE username = $1 OR email = $2 LIMIT 1',
     [input.username, input.email],
@@ -184,8 +188,15 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
-  // If role changed FROM learner → remove from all teams
-  if (oldRole === 'learner' && input.role !== 'learner') {
+  // If role changed FROM staff/superuser → learner: remove from teams + permission groups
+  if (input.role === 'learner' && oldRole && oldRole !== 'learner') {
+    if (oldRole === 'learner') {
+      // Already handled below but just in case
+    }
+    await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
+    await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
+  } else if (oldRole === 'learner' && input.role !== 'learner') {
+    // From learner → other role: remove from teams (existing behavior)
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
   }
 
@@ -196,14 +207,20 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
  * Xóa user (hard delete).
  */
 export async function deleteUser(userId: string) {
-  const result = await query('DELETE FROM users WHERE id = $1 RETURNING id', [userId]);
+  const result = await query('DELETE FROM users WHERE id = $1 RETURNING id, avatar_url', [userId]);
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  return result.rows[0];
 }
 
 /**
  * Gán user vào permission groups (replace toàn bộ).
  */
 export async function assignPermissionGroups(userId: string, groupIds: string[]) {
+  // Enforce max 1 group per staff/superuser
+  if (groupIds.length > 1) {
+    throw new AppError('Mỗi staff chỉ được gán tối đa 1 nhóm quyền', 400);
+  }
+
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -211,7 +228,7 @@ export async function assignPermissionGroups(userId: string, groupIds: string[])
     // Xóa tất cả gán cũ
     await client.query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
 
-    // Gán mới
+    // Gán mới (max 1)
     for (const groupId of groupIds) {
       await client.query(
         'INSERT INTO user_permission_groups (user_id, permission_group_id) VALUES ($1, $2)',
@@ -271,9 +288,29 @@ export async function updateProfile(
 
   if (input.name !== undefined) { sets.push(`full_name = $${idx++}`); params.push(input.name); }
   if (input.bio !== undefined) { sets.push(`bio = $${idx++}`); params.push(input.bio); }
-  if (input.gender !== undefined) { sets.push(`gender = $${idx++}`); params.push(input.gender); }
+  if (input.gender !== undefined) {
+    const validGenders = ['male', 'female', 'other', ''];
+    if (!validGenders.includes(input.gender)) {
+      throw new AppError(`Giới tính không hợp lệ: "${input.gender}". Chỉ chấp nhận: male, female, other`, 400);
+    }
+    if (input.gender === '') {
+      sets.push(`gender = $${idx++}`); params.push(null);
+    } else {
+      sets.push(`gender = $${idx++}`); params.push(input.gender);
+    }
+  }
   if (input.country !== undefined) { sets.push(`country = $${idx++}`); params.push(input.country); }
-  if (input.level_of_education !== undefined) { sets.push(`level_of_education = $${idx++}`); params.push(input.level_of_education); }
+  if (input.level_of_education !== undefined) {
+    const validEdu = ['primary', 'junior_high', 'high_school', 'associate', 'bachelor', 'master', 'doctorate', 'other', 'none', ''];
+    if (!validEdu.includes(input.level_of_education)) {
+      throw new AppError(`Trình độ học vấn không hợp lệ: "${input.level_of_education}"`, 400);
+    }
+    if (input.level_of_education === '') {
+      sets.push(`level_of_education = $${idx++}`); params.push(null);
+    } else {
+      sets.push(`level_of_education = $${idx++}`); params.push(input.level_of_education);
+    }
+  }
   if (input.language !== undefined) { sets.push(`language = $${idx++}`); params.push(input.language); }
   if (input.year_of_birth !== undefined) { sets.push(`year_of_birth = $${idx++}`); params.push(input.year_of_birth); }
   if (input.phone_number !== undefined) { sets.push(`phone = $${idx++}`); params.push(input.phone_number); }

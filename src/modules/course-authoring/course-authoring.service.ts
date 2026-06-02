@@ -158,12 +158,9 @@ export async function createBlock(
     [courseId, parentId, blockType, defaultName, JSON.stringify(data ?? {}), metadata ?? {}, sortOrder],
   );
 
-  // Mark parent as having changes
+  // Mark parent + ancestors as having changes (quả cầu vàng)
   if (parentId) {
-    await query(
-      `UPDATE course_blocks SET has_draft_changes = true, updated_at = now() WHERE id = $1`,
-      [parentId],
-    );
+    await markAncestorsDirty(result.rows[0].id);
   }
 
   return { id: result.rows[0].id };
@@ -207,7 +204,7 @@ export async function updateBlock(
     is_published?: boolean;
   },
 ): Promise<BlockInfo> {
-  const setClauses: string[] = ['has_draft_changes = true', 'updated_at = now()'];
+  const setClauses: string[] = ['updated_at = now()'];
   const params: any[] = [blockId];
   let paramIdx = 2;
 
@@ -217,9 +214,6 @@ export async function updateBlock(
   }
   if (updates.data !== undefined) {
     setClauses.push(`data = $${paramIdx++}`);
-    // jsonb column: serialize properly
-    // - string (HTML/XML) → JSON.stringify wraps it as a JSON string value: '"<p>...</p>"'
-    // - object → JSON.stringify wraps as JSON object: '{"key":"val"}'
     params.push(JSON.stringify(updates.data));
   }
   if (updates.metadata !== undefined) {
@@ -229,9 +223,11 @@ export async function updateBlock(
   if (updates.is_published !== undefined) {
     setClauses.push(`is_published = $${paramIdx++}`);
     params.push(updates.is_published);
-    if (updates.is_published) {
-      setClauses.push('has_draft_changes = false');
-    }
+    // Publish → clear draft flag; unpublish → mark as draft
+    setClauses.push(`has_draft_changes = ${updates.is_published ? 'false' : 'true'}`);
+  } else {
+    // Editing content → mark as draft
+    setClauses.push('has_draft_changes = true');
   }
 
   const result = await query<BlockInfo>(
@@ -243,7 +239,35 @@ export async function updateBlock(
   );
 
   if (result.rowCount === 0) throw new Error('Block not found');
-  return result.rows[0];
+
+  const block = result.rows[0];
+
+  // Propagate has_draft_changes lên toàn bộ ancestor chain (giống edX)
+  // Khi edit child → parent, grandparent, ... đều hiện quả cầu vàng
+  if (!updates.is_published && block.parent_id) {
+    await markAncestorsDirty(block.id);
+  }
+
+  return block;
+}
+
+/**
+ * Đánh dấu tất cả ancestors có has_draft_changes = true.
+ * Dùng recursive CTE đi ngược từ block → root trong 1 query.
+ */
+async function markAncestorsDirty(blockId: string): Promise<void> {
+  await query(
+    `WITH RECURSIVE ancestors AS (
+       SELECT parent_id FROM course_blocks WHERE id = $1 AND parent_id IS NOT NULL
+       UNION ALL
+       SELECT cb.parent_id FROM course_blocks cb
+       JOIN ancestors a ON cb.id = a.parent_id
+       WHERE cb.parent_id IS NOT NULL
+     )
+     UPDATE course_blocks SET has_draft_changes = true, updated_at = now()
+     WHERE id IN (SELECT parent_id FROM ancestors)`,
+    [blockId],
+  );
 }
 
 export async function renameBlock(blockId: string, displayName: string): Promise<BlockInfo> {
@@ -251,7 +275,26 @@ export async function renameBlock(blockId: string, displayName: string): Promise
 }
 
 export async function publishBlock(blockId: string): Promise<BlockInfo> {
-  return updateBlock(blockId, { is_published: true });
+  // Cascade: publish block + tất cả children (recursive) trong 1 query
+  // Copy data → published_data, metadata → published_metadata (giống edX draft/published branches)
+  await query(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+     )
+     UPDATE course_blocks
+     SET is_published = true,
+         has_draft_changes = false,
+         published_data = data,
+         published_metadata = metadata,
+         updated_at = now()
+     WHERE id IN (SELECT id FROM descendants)`,
+    [blockId],
+  );
+
+  return getBlockInfo(blockId);
 }
 
 export async function deleteBlock(blockId: string): Promise<void> {

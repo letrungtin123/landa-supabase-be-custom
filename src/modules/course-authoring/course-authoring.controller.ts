@@ -5,9 +5,7 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
-import path from 'path';
-import fs from 'fs';
-import { env } from '../../config/env.js';
+import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
 /** GET /api/course-authoring/outline/:courseId */
 export async function getOutline(req: Request, res: Response) {
@@ -159,22 +157,15 @@ export async function uploadAsset(req: Request, res: Response) {
   if (!req.file) return sendError(res, 'No file uploaded', 400);
 
   const file = req.file;
-  const fileName = `${Date.now()}_${file.originalname}`;
-  // Storage path: tenants/{tenant_id}/courses/{course_id}/assets/{filename}
-  const storagePath = `tenants/${tenantId}/courses/${courseId}/assets/${fileName}`;
+  const originalName = fixMulterFilename(file.originalname);
+  const fileName = buildFileName(originalName);
+  const storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
 
-  // Save to local uploads directory (can be swapped to Supabase Storage later)
-  const uploadsDir = path.join(process.cwd(), 'uploads', tenantId, courseId);
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
-  }
-  const filePath = path.join(uploadsDir, fileName);
-  fs.writeFileSync(filePath, file.buffer);
-
-  const url = `/uploads/${tenantId}/${courseId}/${fileName}`;
+  // Upload to Supabase Storage
+  const url = await uploadFile(storagePath, file.buffer, file.mimetype);
 
   const asset = await svc.createAssetRecord(
-    courseId, tenantId, file.originalname, file.mimetype,
+    courseId, tenantId, originalName, file.mimetype,
     file.size, storagePath, url, userId,
   );
 
@@ -186,11 +177,10 @@ export async function deleteAsset(req: Request, res: Response) {
   const result = await svc.deleteAsset(req.params.assetId);
   if (!result) return sendError(res, 'Asset not found', 404);
 
-  // Try to delete physical file
-  try {
-    const filePath = path.join(process.cwd(), result.storage_path);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch { /* ignore */ }
+  // Delete from Supabase Storage
+  if (result.storage_path) {
+    await deleteFile(result.storage_path).catch(() => {});
+  }
 
   sendSuccess(res, { success: true });
 }

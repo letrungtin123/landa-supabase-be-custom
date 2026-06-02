@@ -213,10 +213,15 @@ export async function addMembersToGroup(groupId: string, userIds: string[]) {
 
     let addedCount = 0;
     for (const userId of userIds) {
+      // Enforce 1 group per user: xóa assignment cũ trước khi gán group mới
+      await client.query(
+        'DELETE FROM user_permission_groups WHERE user_id = $1',
+        [userId],
+      );
+
       const result = await client.query(
         `INSERT INTO user_permission_groups (user_id, permission_group_id)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id, permission_group_id) DO NOTHING`,
+         VALUES ($1, $2)`,
         [userId, groupId],
       );
       if (result.rowCount! > 0) addedCount++;

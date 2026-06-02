@@ -132,16 +132,53 @@ export async function updateProgress(
 
 export async function recordStudySession(
   userId: string,
-  courseId: string,
+  courseId: string | null,
   tenantId: string,
   durationMinutes: number,
+  startedAt?: string,
 ): Promise<void> {
-  const startedAt = new Date(Date.now() - durationMinutes * 60 * 1000);
+  const start = startedAt ? new Date(startedAt) : new Date();
+  // duration_minutes là GENERATED column (tự tính từ ended_at - started_at)
+  // → tính ended_at = started_at + duration
+  // Dùng múi giờ VN để xác định ngày (00:00-07:00 UTC vẫn là ngày hôm đó ở VN)
+  const vnDate = new Date(start.getTime() + 7 * 60 * 60 * 1000); // UTC+7
+  const studyDate = vnDate.toISOString().slice(0, 10); // yyyy-MM-dd theo VN
+  const endedAt = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
   await query(
-    `INSERT INTO study_sessions (user_id, course_id, tenant_id, started_at, ended_at)
-     VALUES ($1, $2, $3, $4, now())`,
-    [userId, courseId, tenantId, startedAt],
+    `INSERT INTO study_sessions (user_id, course_id, tenant_id, started_at, ended_at, study_date)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, study_date)
+     DO UPDATE SET
+       ended_at = GREATEST(study_sessions.ended_at, EXCLUDED.ended_at)`,
+    [userId, courseId, tenantId, start, endedAt, studyDate],
   );
+}
+
+/**
+  * Lấy study time tuần hiện tại (Thứ 2 → CN) cho user.
+ * Tối ưu: dùng unique index (user_id, study_date) → O(1) per day, tổng 7 lookups.
+ */
+export async function getWeeklyStudyTime(
+  userId: string,
+): Promise<{ entries: Array<{ date: string; minutes: number }> }> {
+  // Dùng múi giờ Asia/Ho_Chi_Minh để xác định "hôm nay" và tuần hiện tại
+  // Cast ::TEXT tránh pg driver serialize DATE thành JS Date (bị lệch timezone)
+  const result = await query<{ date: string; minutes: string }>(
+    `WITH today AS (SELECT (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::DATE AS d),
+          week_start AS (SELECT date_trunc('week', today.d)::DATE AS d FROM today)
+     SELECT g::DATE::TEXT AS date,
+            COALESCE(ss.duration_minutes, 0) AS minutes
+     FROM week_start, generate_series(week_start.d, week_start.d + 6, '1 day') AS g
+     LEFT JOIN study_sessions ss
+       ON ss.study_date = g::DATE AND ss.user_id = $1
+     ORDER BY g`,
+    [userId],
+  );
+
+  return {
+    entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes) })),
+  };
 }
 
 // ── Query: User's Enrollments ──

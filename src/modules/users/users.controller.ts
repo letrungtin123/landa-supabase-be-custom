@@ -7,6 +7,7 @@ import * as usersService from './users.service.js';
 import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
+import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
 
 /** GET /api/users */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -53,7 +54,11 @@ export async function updateController(req: Request, res: Response, next: NextFu
 /** DELETE /api/users/:id */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await usersService.deleteUser(req.params.id);
+    const deleted = await usersService.deleteUser(req.params.id);
+    // Cleanup avatar from storage
+    if (deleted?.avatar_url) {
+      await deleteFileByUrl(deleted.avatar_url).catch(() => {});
+    }
     auditFromReq(req, 'DELETE', 'user', req.params.id);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
@@ -100,20 +105,21 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
 
     if (!req.file) { sendError(res, 'No file uploaded', 400); return; }
 
-    const file = req.file;
-    const fileName = `${Date.now()}_${file.originalname}`;
-    const { default: path } = await import('path');
-    const { default: fs } = await import('fs');
-
-    const uploadsDir = path.join(process.cwd(), 'uploads', 'avatars', tenantId);
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
+    // Delete old avatar from storage (if exists, may have different extension)
+    const oldUser = await usersService.getUserById(userId);
+    if (oldUser?.avatar_url) {
+      await deleteFileByUrl(oldUser.avatar_url).catch(() => {});
     }
 
-    const filePath = path.join(uploadsDir, fileName);
-    fs.writeFileSync(filePath, file.buffer);
+    const file = req.file;
+    // Use userId in filename for easy overwrite with upsert=true
+    const ext = file.originalname.split('.').pop() || 'jpg';
+    const fileName = `${userId}.${ext}`;
+    const storagePath = buildStoragePath(tenantId, 'avatars', fileName);
 
-    const avatarUrl = `/uploads/avatars/${tenantId}/${fileName}`;
+    // Upload to Supabase Storage (upsert: overwrite old avatar)
+    const avatarUrl = await uploadFile(storagePath, file.buffer, file.mimetype, true);
+
     await usersService.updateAvatar(userId, avatarUrl);
 
     sendSuccess(res, { avatar_url: avatarUrl });

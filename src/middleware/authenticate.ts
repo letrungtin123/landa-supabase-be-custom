@@ -26,10 +26,20 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
   try {
     const payload = verifyAccessToken(token);
 
+    // Xác định tenant_id:
+    // 1. Từ JWT token (tid) — mặc định
+    // 2. Từ header X-Tenant-ID — CHỈ cho superadmin chuyển tenant
+    let tenantId = payload.tid;
+    const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
+
+    if (headerTenantId && (!tenantId || payload.role === 'superadmin')) {
+      tenantId = headerTenantId;
+    }
+
     // Gắn user info vào request
     req.user = {
       id: payload.sub,
-      tenantId: payload.tid,
+      tenantId,
       role: payload.role as AuthUser['role'],
       username: payload.username,
     };
@@ -53,9 +63,14 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
   if (authHeader?.startsWith('Bearer ')) {
     try {
       const payload = verifyAccessToken(authHeader.slice(7));
+      let tenantId = payload.tid;
+      const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
+      if (headerTenantId && (!tenantId || payload.role === 'superadmin')) {
+        tenantId = headerTenantId;
+      }
       req.user = {
         id: payload.sub,
-        tenantId: payload.tid,
+        tenantId,
         role: payload.role as AuthUser['role'],
         username: payload.username,
       };

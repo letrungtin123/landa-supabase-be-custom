@@ -17,6 +17,25 @@ router.use(authenticate);
 router.get('/courses', ctrl.listCourses);
 router.get('/courses/:courseId', ctrl.getCourseDetail);
 router.get('/courses/:courseId/blocks', ctrl.getCourseBlocks);
+router.get('/courses/:courseId/files', ctrl.getCourseFiles);
+
+// ── Course Modals (Welcome / Confirm / Complete) ──
+router.get('/courses/:courseId/modal-config', ctrl.getCourseModalConfig);
+router.get('/courses/:courseId/modal-state', ctrl.getCourseModalState);
+router.patch('/courses/:courseId/modal-state', ctrl.updateCourseModalState);
+
+// ── Section Modals (Khích lệ từng section) ──
+router.get('/courses/:courseId/section-modal-configs', ctrl.getSectionModalConfigs);
+router.get('/courses/:courseId/section-modal-shown', ctrl.getSectionModalShown);
+router.post('/courses/:courseId/section-modal-shown', ctrl.markSectionModalShown);
+
+// ── Library (Kho tài liệu nội bộ) ──
+router.get('/library/categories', ctrl.getLibraryCategories);
+router.get('/library/documents', ctrl.getLibraryDocuments);
+
+// ── Single Block Detail ──
+router.get('/blocks/:blockId', ctrl.getBlockDetail);
+router.post('/blocks/:blockId/submit', ctrl.submitBlockAnswer);
 
 // ── Enrollments ──
 router.get('/enrollments', ctrl.listEnrollments);
@@ -36,7 +55,7 @@ router.patch('/badges', ctrl.updateBadge);
 // ── Notifications ──
 router.get('/notifications', ctrl.listNotifications);
 router.get('/notifications/unread-count', ctrl.getUnreadCount);
-router.patch('/notifications/:id/read', ctrl.markRead);
 router.patch('/notifications/read-all', ctrl.markAllRead);
+router.patch('/notifications/:id/read', ctrl.markRead);
 
 export default router;

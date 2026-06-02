@@ -57,8 +57,9 @@ export async function updateDocCategory(catId: string, input: { name?: string })
 }
 
 export async function deleteDocCategory(catId: string) {
-  const result = await query('DELETE FROM document_categories WHERE id = $1 RETURNING id', [catId]);
+  const result = await query('DELETE FROM document_categories WHERE id = $1 RETURNING id, name', [catId]);
   if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
+  return result.rows[0];
 }
 
 export async function bulkDeleteDocCategories(ids: string[]) {
@@ -128,14 +129,15 @@ export async function updateDocument(docId: string, input: { title?: string; is_
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cập nhật', 400);
   params.push(docId);
-  const result = await query(`UPDATE documents SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id`, params);
+  const result = await query(`UPDATE documents SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, title`, params);
   if (result.rowCount === 0) throw new AppError('Document không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function deleteDocument(docId: string) {
-  const result = await query('DELETE FROM documents WHERE id = $1 RETURNING id', [docId]);
+  const result = await query('DELETE FROM documents WHERE id = $1 RETURNING id, title, file_url', [docId]);
   if (result.rowCount === 0) throw new AppError('Document không tồn tại', 404);
+  return result.rows[0];
 }
 
 export async function bulkDocumentAction(ids: string[], action: string, categoryId?: string | null) {

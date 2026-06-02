@@ -24,10 +24,20 @@ export async function getMyVisibleCourses(
   const sqlParams: unknown[] = [tenantId];
   let where = 'WHERE c.tenant_id = $1';
 
-  // learner: chỉ thấy courses assign qua team_courses → team_members
+  // learner: chỉ thấy courses assign qua team → category → course
+  // Path: team_members → team_course_categories → course_category_courses
+  // Fallback: team_courses (direct assignment, backward compat)
   if (role === 'learner') {
+    // Learner không thấy courses bị ẩn (visible_to_staff_only = true)
+    where += ' AND c.visible_to_staff_only = false';
     sqlParams.push(userId);
     where += ` AND c.id IN (
+      SELECT DISTINCT ccc.course_id
+      FROM team_course_categories tcc
+      JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+      JOIN team_members tm ON tm.team_id = tcc.team_id
+      WHERE tm.user_id = $${sqlParams.length}
+      UNION
       SELECT DISTINCT tc.course_id
       FROM team_courses tc
       JOIN team_members tm ON tm.team_id = tc.team_id
@@ -53,12 +63,40 @@ export async function getMyVisibleCourses(
   );
 
   const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const courseIds = result.rows.map((r: any) => r.id);
+
+  // Fetch categories for returned courses
+  let categoriesByCourse: Record<string, { id: string; name: string }[]> = {};
+  if (courseIds.length > 0) {
+    const catResult = await query<any>(
+      `SELECT ccc.course_id, cc.id, cc.name
+       FROM course_category_courses ccc
+       JOIN course_categories cc ON cc.id = ccc.category_id
+       WHERE ccc.course_id = ANY($1)
+       ORDER BY cc.name`,
+      [courseIds],
+    );
+    for (const row of catResult.rows) {
+      if (!categoriesByCourse[row.course_id]) categoriesByCourse[row.course_id] = [];
+      categoriesByCourse[row.course_id].push({ id: row.id, name: row.name });
+    }
+  }
+
+  // Fetch all categories for this tenant (for FE filter dropdown)
+  const allCatsResult = await query<any>(
+    `SELECT DISTINCT cc.id, cc.name
+     FROM course_categories cc
+     WHERE cc.tenant_id = $1
+     ORDER BY cc.name`,
+    [tenantId],
+  );
 
   return {
     data: result.rows.map((r: any) => {
       const { full_count, ...rest } = r;
-      return rest;
+      return { ...rest, categories: categoriesByCourse[r.id] || [] };
     }),
+    categories: allCatsResult.rows,
     total,
     page,
     page_size,
@@ -85,12 +123,26 @@ export async function getCourseDetail(
 
   if (result.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
 
-  // learner: kiểm tra quyền truy cập qua team
+  const course = result.rows[0];
+
+  // Learner không được xem course bị ẩn (visible_to_staff_only)
+  if (role === 'learner' && course.visible_to_staff_only) {
+    throw new AppError('Khóa học không tồn tại', 404);
+  }
+
+  // learner: kiểm tra quyền truy cập qua team → category → course
   if (role === 'learner') {
     const access = await query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM team_courses tc
-       JOIN team_members tm ON tm.team_id = tc.team_id
-       WHERE tc.course_id = $1 AND tm.user_id = $2`,
+      `SELECT COUNT(*) AS count FROM (
+        SELECT 1 FROM team_course_categories tcc
+        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+        JOIN team_members tm ON tm.team_id = tcc.team_id
+        WHERE ccc.course_id = $1 AND tm.user_id = $2
+        UNION ALL
+        SELECT 1 FROM team_courses tc
+        JOIN team_members tm ON tm.team_id = tc.team_id
+        WHERE tc.course_id = $1 AND tm.user_id = $2
+      ) AS access_check`,
       [courseId, userId],
     );
     if (parseInt(access.rows[0].count) === 0) {
@@ -112,6 +164,7 @@ export async function getCourseDetail(
 export async function getCourseBlocks(
   courseId: string,
   userId: string,
+  role = 'learner',
 ) {
   // Lấy enrollment_id (nếu có) để join block_completions
   const enrollResult = await query<{ id: string }>(
@@ -120,38 +173,539 @@ export async function getCourseBlocks(
   );
   const enrollmentId = enrollResult.rows[0]?.id ?? null;
 
-  // Lấy tất cả blocks published, kèm completion nếu enrolled
+  // staff/superuser/superadmin: xem draft data (tất cả blocks)
+  // learner: chỉ xem published_data/published_metadata (đã publish)
+  const isLearner = role === 'learner';
+  const publishFilter = isLearner ? 'AND b.is_published = true' : '';
+
+  // Learner đọc published_data (snapshot cuối cùng khi publish)
+  // Staff đọc data (bản draft hiện tại)
+  // KHÔNG dùng COALESCE — nếu chưa publish thì learner không thấy content
+  const dataCol = isLearner ? 'b.published_data' : 'b.data';
+  const metaCol = isLearner ? 'COALESCE(b.published_metadata, b.metadata)' : 'b.metadata';
+
   let sql: string;
   let params: unknown[];
 
   if (enrollmentId) {
-    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name, b.data, b.metadata,
-                  b.sort_order,
+    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+                  ${dataCol} AS data, ${metaCol} AS metadata,
+                  b.sort_order, b.is_published,
                   CASE WHEN bc.id IS NOT NULL THEN true ELSE false END AS completed
            FROM course_blocks b
            LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $2
-           WHERE b.course_id = $1 AND b.is_published = true
+           WHERE b.course_id = $1 ${publishFilter}
            ORDER BY b.sort_order`;
     params = [courseId, enrollmentId];
   } else {
-    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name, b.data, b.metadata,
-                  b.sort_order,
+    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+                  ${dataCol} AS data, ${metaCol} AS metadata,
+                  b.sort_order, b.is_published,
                   false AS completed
            FROM course_blocks b
-           WHERE b.course_id = $1 AND b.is_published = true
+           WHERE b.course_id = $1 ${publishFilter}
            ORDER BY b.sort_order`;
     params = [courseId];
   }
 
   const result = await query<any>(sql, params);
 
-  // Build tree structure
   const blocks = result.rows;
   const root = blocks.find((b: any) => b.block_type === 'course') ?? null;
+
+  console.log(`[getCourseBlocks] courseId=${courseId} role=${role} blocks=${blocks.length} root=${root?.id}`);
+  const leafBlocks = blocks.filter((b: any) => !['course','chapter','sequential','vertical'].includes(b.block_type));
+  console.log(`[getCourseBlocks] leaf blocks: ${leafBlocks.map((b: any) => `${b.block_type}(${b.display_name})`).join(', ')}`);
 
   return {
     root_id: root?.id ?? null,
     blocks,
+  };
+}
+
+/**
+ * Lấy chi tiết 1 block đơn lẻ.
+ * Learner: trả published_data, Staff/admin: trả draft data.
+ */
+export async function getBlockDetail(blockId: string, role = 'learner') {
+  const isLearner = role === 'learner';
+  // Learner: chỉ đọc published data (KHÔNG fallback draft)
+  const dataCol = isLearner ? 'b.published_data' : 'b.data';
+  const metaCol = isLearner ? 'COALESCE(b.published_metadata, b.metadata)' : 'b.metadata';
+
+  const result = await query<any>(
+    `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+            ${dataCol} AS data, ${metaCol} AS metadata,
+            b.sort_order, b.is_published
+     FROM course_blocks b
+     WHERE b.id = $1`,
+    [blockId],
+  );
+
+  if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
+  return result.rows[0];
+}
+
+/**
+ * Submit đáp án cho block (problem/crossword/sortable).
+ * Server-side grading: so sánh đáp án user với đáp án đúng trong DB.
+ */
+export async function submitBlockAnswer(
+  blockId: string,
+  userId: string,
+  role: string,
+  body: any,
+) {
+  // Lấy block data — luôn dùng published data để grading (tránh learner exploit draft)
+  const blockResult = await query<any>(
+    `SELECT b.id, b.block_type,
+            COALESCE(b.published_data, b.data) AS data,
+            COALESCE(b.published_metadata, b.metadata) AS metadata,
+            b.course_id
+     FROM course_blocks b WHERE b.id = $1 AND b.is_published = true`,
+    [blockId],
+  );
+
+  if (blockResult.rowCount === 0) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
+  const block = blockResult.rows[0];
+
+  switch (block.block_type) {
+    case 'problem':
+      return gradeProblem(block, body.answers || {});
+
+    case 'la_crossword':
+      return gradeCrossword(block, body.answers || {});
+
+    case 'la_sortable':
+      return gradeSortable(block, body.answer || []);
+
+    default:
+      return { status: 'ok', message: 'Block type không hỗ trợ submit', score: 0 };
+  }
+}
+
+/** Grade problem block — parse OLX XML, support all 5 problem types */
+function gradeProblem(block: any, userAnswers: Record<string, string | string[]>) {
+  const data = typeof block.data === 'string' ? block.data : '';
+  if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', correctness: {} };
+
+  console.log('[gradeProblem] userAnswers:', JSON.stringify(userAnswers));
+
+  // ── 1. multiplechoiceresponse (single-select radio) ──
+  if (data.includes('<multiplechoiceresponse') || (data.includes('<choicegroup') && !data.includes('<checkboxgroup'))) {
+    return gradeMultipleChoice(data, userAnswers);
+  }
+
+  // ── 2. choiceresponse (multi-select checkbox) ──
+  if (data.includes('<choiceresponse') || data.includes('<checkboxgroup')) {
+    return gradeCheckbox(data, userAnswers);
+  }
+
+  // ── 3. optionresponse (dropdown) ──
+  if (data.includes('<optionresponse')) {
+    return gradeDropdown(data, userAnswers);
+  }
+
+  // ── 4. stringresponse (text input) ──
+  if (data.includes('<stringresponse')) {
+    return gradeStringInput(data, userAnswers);
+  }
+
+  // ── 5. numericalresponse (number input) ──
+  if (data.includes('<numericalresponse')) {
+    return gradeNumericalInput(data, userAnswers);
+  }
+
+  return { status: 'error', message: 'Loại câu hỏi chưa được hỗ trợ', correctness: {} };
+}
+
+/** 1. Single-select (radio) */
+function gradeMultipleChoice(data: string, userAnswers: Record<string, string | string[]>) {
+  const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
+  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', correctness: {} };
+
+  const correctIndices: string[] = [];
+  const choiceTexts: Record<string, string> = {};
+  choiceMatches.forEach((m, i) => {
+    const id = `choice_${i}`;
+    choiceTexts[id] = m[2];
+    if (m[1] === 'true') correctIndices.push(id);
+  });
+
+  const userAnswer = Object.values(userAnswers)[0];
+  const userStr = Array.isArray(userAnswer) ? userAnswer[0] : String(userAnswer || '');
+
+  const isCorrect = correctIndices.includes(userStr) ||
+    choiceMatches.some(m => m[1] === 'true' && m[2] === userStr);
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    score: isCorrect ? 100 : 0,
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
+    correct_answers: correctIndices.map(id => choiceTexts[id]),
+  };
+}
+
+/** 2. Multi-select (checkbox) */
+function gradeCheckbox(data: string, userAnswers: Record<string, string | string[]>) {
+  const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
+  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', correctness: {} };
+
+  const correctSet = new Set<string>();
+  const choiceTexts: Record<string, string> = {};
+  choiceMatches.forEach((m, i) => {
+    const id = `choice_${i}`;
+    choiceTexts[id] = m[2];
+    if (m[1] === 'true') correctSet.add(id);
+  });
+
+  // FE sends { "olx_multi_0": ["choice_0", "choice_1", ...] }
+  const userVal = Object.values(userAnswers)[0];
+  const userSelected = new Set(Array.isArray(userVal) ? userVal : [String(userVal || '')]);
+
+  // Check exact match
+  const isCorrect = correctSet.size === userSelected.size &&
+    [...correctSet].every(id => userSelected.has(id));
+
+  const correctCount = [...correctSet].filter(id => userSelected.has(id)).length;
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : `Đúng ${correctCount}/${correctSet.size} đáp án. Thử lại nhé!`,
+    score: Math.round((correctCount / correctSet.size) * 100),
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
+    correct_answers: [...correctSet].map(id => choiceTexts[id]),
+  };
+}
+
+/** 3. Dropdown (optionresponse) */
+function gradeDropdown(data: string, userAnswers: Record<string, string | string[]>) {
+  // Parse correct answer from <optioninput correct="..."/>
+  const correctMatch = data.match(/<optioninput[^>]*\scorrect="([^"]+)"/i);
+  const correctAnswer = correctMatch ? correctMatch[1] : '';
+
+  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+
+  const userVal = Object.values(userAnswers)[0];
+  const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
+
+  // FE sends option text directly (id = text for dropdown)
+  const isCorrect = userStr === correctAnswer;
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    score: isCorrect ? 100 : 0,
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
+    correct_answers: [correctAnswer],
+  };
+}
+
+/** 4. String input (stringresponse) */
+function gradeStringInput(data: string, userAnswers: Record<string, string | string[]>) {
+  // Parse correct answer and type from <stringresponse answer="..." type="ci|cs">
+  const answerMatch = data.match(/<stringresponse\s+answer="([^"]+)"[^>]*/i);
+  const correctAnswer = answerMatch ? answerMatch[1] : '';
+  const isCaseInsensitive = data.includes('type="ci"');
+
+  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+
+  const userVal = Object.values(userAnswers)[0];
+  const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
+
+  const isCorrect = isCaseInsensitive
+    ? userStr.toLowerCase().trim() === correctAnswer.toLowerCase().trim()
+    : userStr.trim() === correctAnswer.trim();
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    score: isCorrect ? 100 : 0,
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
+    correct_answers: [correctAnswer],
+  };
+}
+
+/** 5. Numerical input (numericalresponse) */
+function gradeNumericalInput(data: string, userAnswers: Record<string, string | string[]>) {
+  // Parse correct answer from <numericalresponse answer="...">
+  const answerMatch = data.match(/<numericalresponse\s+answer="([^"]+)"/i);
+  const correctAnswer = answerMatch ? parseFloat(answerMatch[1]) : NaN;
+
+  // Parse tolerance from <responseparam type="tolerance" default="..."/>
+  const tolMatch = data.match(/<responseparam\s+type="tolerance"\s+default="([^"]+)"/i);
+  const tolerance = tolMatch ? parseFloat(tolMatch[1]) : 0;
+
+  if (isNaN(correctAnswer)) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+
+  const userVal = Object.values(userAnswers)[0];
+  const userNum = parseFloat(Array.isArray(userVal) ? userVal[0] : String(userVal || ''));
+
+  const isCorrect = !isNaN(userNum) && Math.abs(userNum - correctAnswer) <= tolerance;
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    score: isCorrect ? 100 : 0,
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
+    correct_answers: [String(correctAnswer)],
+  };
+}
+
+/** Grade crossword block — so sánh từng word answer */
+function gradeCrossword(block: any, userAnswers: Record<string, string>) {
+  const meta = block.metadata || {};
+  const cd = meta.crossword_data || {};
+  const words: any[] = cd.words || [];
+
+  if (words.length === 0) {
+    return { status: 'error', message: 'Không có dữ liệu ô chữ', score: 0 };
+  }
+
+  let correct = 0;
+  const results: Record<string, boolean> = {};
+
+  for (const word of words) {
+    const userAnswer = (userAnswers[String(word.id)] || '').toUpperCase().trim();
+    const correctAnswer = (word.answer || '').toUpperCase().trim();
+    const isCorrect = userAnswer === correctAnswer;
+    results[String(word.id)] = isCorrect;
+    if (isCorrect) correct++;
+  }
+
+  const score = Math.round((correct / words.length) * 100);
+
+  return {
+    status: correct === words.length ? 'correct' : 'incorrect',
+    message: correct === words.length
+      ? 'Hoàn thành ô chữ!'
+      : `Đúng ${correct}/${words.length} từ`,
+    score,
+    results,
+  };
+}
+
+/** Grade sortable block — check thứ tự */
+function gradeSortable(block: any, userOrder: number[]) {
+  const meta = block.metadata || {};
+  const sd = meta.sortable_data || {};
+  const items: any[] = sd.items || [];
+
+  if (items.length === 0) {
+    return { status: 'error', message: 'Không có dữ liệu sắp xếp', score: 0 };
+  }
+
+  // Correct order = thứ tự id trong items array (1,2,3,4,5)
+  const correctOrder = items.map((item: any) => item.id);
+  const isCorrect = JSON.stringify(userOrder) === JSON.stringify(correctOrder);
+
+  // Count how many are in correct position
+  let correctPositions = 0;
+  for (let i = 0; i < Math.min(userOrder.length, correctOrder.length); i++) {
+    if (userOrder[i] === correctOrder[i]) correctPositions++;
+  }
+
+  const score = Math.round((correctPositions / correctOrder.length) * 100);
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect
+      ? 'Sắp xếp đúng thứ tự!'
+      : `Đúng ${correctPositions}/${correctOrder.length} vị trí`,
+    score,
+    correct_order: correctOrder,
+  };
+}
+
+// ── Course Files (tài liệu tham khảo) ──
+
+/**
+ * Lấy danh sách file/tài liệu đính kèm của course.
+ * Learner chỉ thấy file chưa bị khóa (is_locked = false).
+ */
+export async function getCourseFiles(courseId: string, role = 'learner') {
+  const lockedFilter = role === 'learner' ? 'AND is_locked = false' : '';
+  const result = await query<any>(
+    `SELECT id, display_name, content_type, file_size, url, is_locked, created_at
+     FROM course_assets
+     WHERE course_id = $1 ${lockedFilter}
+     ORDER BY created_at DESC`,
+    [courseId],
+  );
+
+  return {
+    files: result.rows.map((r: any) => {
+      const ext = r.display_name?.split('.').pop()?.toLowerCase() || '';
+      return {
+        id: r.id,
+        display_name: r.display_name,
+        url: r.url,
+        extension: ext,
+        content_type: r.content_type,
+        size: parseInt(r.file_size) || 0,
+        date_added: r.created_at,
+      };
+    }),
+    total: result.rowCount || 0,
+  };
+}
+
+// ── Library (Kho tài liệu nội bộ, team-scoped) ──
+
+/**
+ * Lấy danh sách document categories mà learner được phép xem.
+ * Learner: chỉ thấy categories assign qua team_doc_categories.
+ * Staff/superuser/superadmin: thấy tất cả categories trong tenant.
+ */
+export async function getMyLibraryCategories(
+  userId: string,
+  tenantId: string,
+  role: string,
+) {
+  let sql: string;
+  let params: unknown[];
+
+  if (role === 'learner') {
+    sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
+                  COUNT(d.id) FILTER (WHERE d.is_visible = true) AS count
+           FROM document_categories dc
+           JOIN team_doc_categories tdc ON tdc.category_id = dc.id
+           JOIN team_members tm ON tm.team_id = tdc.team_id
+           LEFT JOIN documents d ON d.category_id = dc.id AND d.is_visible = true
+           WHERE dc.tenant_id = $1 AND tm.user_id = $2
+           GROUP BY dc.id
+           ORDER BY dc.sort_order, dc.name`;
+    params = [tenantId, userId];
+  } else {
+    // staff/superuser/superadmin: thấy tất cả (kể cả ẩn)
+    sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
+                  COUNT(d.id) AS count
+           FROM document_categories dc
+           LEFT JOIN documents d ON d.category_id = dc.id
+           WHERE dc.tenant_id = $1
+           GROUP BY dc.id
+           ORDER BY dc.sort_order, dc.name`;
+    params = [tenantId];
+  }
+
+  const result = await query<any>(sql, params);
+
+  return {
+    categories: result.rows.map((r: any) => ({
+      id: r.id,
+      name: r.name,
+      slug: r.slug || '',
+      count: parseInt(r.count) || 0,
+    })),
+    total: result.rowCount || 0,
+  };
+}
+
+/**
+ * Lấy documents mà learner được phép xem.
+ * Learner: chỉ docs thuộc categories assign qua team_doc_categories + is_visible.
+ * Staff+: tất cả docs visible trong tenant.
+ */
+export async function getMyLibraryDocuments(
+  userId: string,
+  tenantId: string,
+  role: string,
+  params: {
+    page?: number;
+    page_size?: number;
+    category?: string;     // category slug or id
+    extension?: string;
+    search?: string;
+    ordering?: string;
+  },
+) {
+  const { page = 1, page_size = 20, category, extension, search, ordering } = params;
+  const offset = (page - 1) * page_size;
+
+  const sqlParams: unknown[] = [tenantId];
+  const conditions: string[] = ['d.tenant_id = $1'];
+
+  // Learner: chỉ thấy docs visible + restrict to team categories
+  if (role === 'learner') {
+    conditions.push('d.is_visible = true');
+    sqlParams.push(userId);
+    conditions.push(`d.category_id IN (
+      SELECT tdc.category_id
+      FROM team_doc_categories tdc
+      JOIN team_members tm ON tm.team_id = tdc.team_id
+      WHERE tm.user_id = $${sqlParams.length}
+    )`);
+  }
+
+  // Filter by category (slug or id)
+  if (category) {
+    sqlParams.push(category);
+    conditions.push(`(dc.slug = $${sqlParams.length} OR dc.id::text = $${sqlParams.length})`);
+  }
+
+  // Filter by extension
+  if (extension) {
+    sqlParams.push(extension);
+    conditions.push(`d.extension = $${sqlParams.length}`);
+  }
+
+  // Search
+  if (search) {
+    sqlParams.push(`%${search}%`);
+    conditions.push(`d.title ILIKE $${sqlParams.length}`);
+  }
+
+  const where = conditions.join(' AND ');
+
+  // Ordering
+  let orderBy = 'd.created_at DESC';
+  if (ordering === 'title') orderBy = 'd.title ASC';
+  else if (ordering === '-title') orderBy = 'd.title DESC';
+  else if (ordering === 'created_at') orderBy = 'd.created_at ASC';
+  else if (ordering === 'file_size') orderBy = 'd.file_size DESC';
+
+  // Count
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) AS count
+     FROM documents d
+     LEFT JOIN document_categories dc ON dc.id = d.category_id
+     WHERE ${where}`,
+    sqlParams,
+  );
+  const total = parseInt(countResult.rows[0].count);
+
+  // Fetch page
+  sqlParams.push(page_size, offset);
+  const result = await query<any>(
+    `SELECT d.id, d.title, d.extension, d.file_size, d.file_url,
+            d.created_at, d.is_visible,
+            dc.name AS category_name, dc.slug AS category_slug,
+            u.full_name AS uploaded_by_name
+     FROM documents d
+     LEFT JOIN document_categories dc ON dc.id = d.category_id
+     LEFT JOIN users u ON u.id = d.uploaded_by
+     WHERE ${where}
+     ORDER BY ${orderBy}
+     LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
+    sqlParams,
+  );
+
+  return {
+    count: total,
+    next: page * page_size < total ? `page=${page + 1}` : null,
+    previous: page > 1 ? `page=${page - 1}` : null,
+    results: result.rows.map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      extension: r.extension || '',
+      file_size: parseInt(r.file_size) || 0,
+      category_name: r.category_name || '',
+      category_slug: r.category_slug || '',
+      download_url: r.file_url,
+      uploaded_by_name: r.uploaded_by_name || '',
+      created_at: r.created_at,
+    })),
   };
 }
 
@@ -237,7 +791,7 @@ export async function markBlocksComplete(
   // Lấy enrollment
   const enrollment = await query<{ id: string }>(
     `SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2 AND is_active = true LIMIT 1`,
-    [courseId, userId],
+    [userId, courseId],
   );
 
   if (enrollment.rowCount === 0) {
@@ -306,7 +860,11 @@ export async function getMyProgress(userId: string, courseId: string) {
     return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
   }
 
-  return result.rows[0];
+  const row = result.rows[0];
+  return {
+    ...row,
+    progress: parseFloat(row.progress) || 0, // pg numeric → JS number
+  };
 }
 
 // ── Badges ──
@@ -402,4 +960,141 @@ export async function markAllNotificationsRead(userId: string, tenantId: string)
      WHERE nr.notification_id = n.id AND nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
     [userId, tenantId],
   );
+}
+
+// ══════════════════════════════════════════════════
+// Course Modal Config + State (Welcome / Confirm / Complete)
+// ══════════════════════════════════════════════════
+
+/**
+ * Lấy cấu hình modal (admin đã setup) cho course.
+ * Trả defaults nếu chưa có config.
+ */
+export async function getCourseModalConfig(courseId: string) {
+  const result = await query<any>(
+    `SELECT welcome_enabled, welcome_title, welcome_description,
+            confirm_enabled, confirm_title, confirm_description, confirm_checkbox_text,
+            completion_enabled, completion_title, completion_description,
+            completion_social_type, completion_social_link
+     FROM course_modal_configs WHERE course_id = $1`,
+    [courseId],
+  );
+  if (result.rowCount === 0) {
+    return {
+      welcome_enabled: true,
+      welcome_title: '',
+      welcome_description: '',
+      confirm_enabled: true,
+      confirm_title: '',
+      confirm_description: '',
+      confirm_checkbox_text: '',
+      completion_enabled: true,
+      completion_title: '',
+      completion_description: '',
+      completion_social_type: null,
+      completion_social_link: null,
+    };
+  }
+  return result.rows[0];
+}
+
+/**
+ * Lấy trạng thái modal per-user per-course.
+ * Tạo row mặc định nếu chưa có.
+ */
+export async function getCourseModalState(userId: string, courseId: string) {
+  const result = await query<any>(
+    `INSERT INTO course_modal_states (user_id, course_id)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id, course_id) DO NOTHING
+     RETURNING *`,
+    [userId, courseId],
+  );
+  if (result.rowCount && result.rowCount > 0) {
+    return result.rows[0];
+  }
+  const existing = await query<any>(
+    `SELECT * FROM course_modal_states WHERE user_id = $1 AND course_id = $2`,
+    [userId, courseId],
+  );
+  return existing.rows[0] || { course_id: courseId, welcome_shown: false, confirm_shown: false, complete_shown: false };
+}
+
+/**
+ * Cập nhật trạng thái modal per-user per-course (partial update).
+ */
+export async function updateCourseModalState(
+  userId: string,
+  courseId: string,
+  updates: { welcome_shown?: boolean; confirm_shown?: boolean; complete_shown?: boolean },
+) {
+  const sets: string[] = [];
+  const params: unknown[] = [userId, courseId];
+  let idx = 3;
+
+  if (updates.welcome_shown !== undefined) { sets.push(`welcome_shown = $${idx++}`); params.push(updates.welcome_shown); }
+  if (updates.confirm_shown !== undefined) { sets.push(`confirm_shown = $${idx++}`); params.push(updates.confirm_shown); }
+  if (updates.complete_shown !== undefined) { sets.push(`complete_shown = $${idx++}`); params.push(updates.complete_shown); }
+
+  if (sets.length === 0) return getCourseModalState(userId, courseId);
+
+  sets.push('updated_at = NOW()');
+
+  // Upsert: nếu chưa có row thì tạo mới
+  await query(
+    `INSERT INTO course_modal_states (user_id, course_id)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id, course_id) DO NOTHING`,
+    [userId, courseId],
+  );
+
+  await query(
+    `UPDATE course_modal_states SET ${sets.join(', ')} WHERE user_id = $1 AND course_id = $2`,
+    params,
+  );
+
+  return getCourseModalState(userId, courseId);
+}
+
+// ══════════════════════════════════════════════════
+// Section Modal (Khích lệ từng section)
+// ══════════════════════════════════════════════════
+
+/**
+ * Lấy danh sách section modal configs (admin đã setup) cho course.
+ * Chỉ trả configs đã bật (enabled = true).
+ */
+export async function getSectionModalConfigs(courseId: string) {
+  const result = await query<any>(
+    `SELECT section_id, title, description
+     FROM section_modal_configs
+     WHERE course_id = $1 AND enabled = true`,
+    [courseId],
+  );
+  return result.rows;
+}
+
+/**
+ * Lấy danh sách section đã xem popup per-user per-course.
+ */
+export async function getSectionModalShown(userId: string, courseId: string) {
+  const result = await query<any>(
+    `SELECT section_id FROM section_modal_shown
+     WHERE user_id = $1 AND course_id = $2`,
+    [userId, courseId],
+  );
+  return { shown_sections: result.rows.map((r: any) => r.section_id) };
+}
+
+/**
+ * Đánh dấu section đã xem popup.
+ */
+export async function markSectionModalShown(userId: string, courseId: string, sectionId: string) {
+  await query(
+    `INSERT INTO section_modal_shown (user_id, course_id, section_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, course_id, section_id) DO NOTHING`,
+    [userId, courseId, sectionId],
+  );
+  return { success: true };
 }

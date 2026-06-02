@@ -58,6 +58,7 @@ export async function getCourseBlocks(req: Request, res: Response, next: NextFun
     const result = await learnerService.getCourseBlocks(
       req.params.courseId,
       req.user.id,
+      req.user.role,
     );
     sendSuccess(res, result);
   } catch (err) {
@@ -65,7 +66,86 @@ export async function getCourseBlocks(req: Request, res: Response, next: NextFun
   }
 }
 
-/** GET /api/learner/enrollments */
+/** GET /api/learner/courses/:courseId/files */
+export async function getCourseFiles(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+
+    const result = await learnerService.getCourseFiles(req.params.courseId, req.user.role);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/learner/library/categories */
+export async function getLibraryCategories(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+
+    const result = await learnerService.getMyLibraryCategories(req.user.id, tenantId, req.user.role);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/learner/library/documents */
+export async function getLibraryDocuments(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+
+    const result = await learnerService.getMyLibraryDocuments(
+      req.user.id,
+      tenantId,
+      req.user.role,
+      {
+        page: req.query.page ? parseInt(req.query.page as string) : undefined,
+        page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
+        category: req.query.category as string | undefined,
+        extension: req.query.extension as string | undefined,
+        search: req.query.search as string | undefined,
+        ordering: req.query.ordering as string | undefined,
+      },
+    );
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/learner/blocks/:blockId */
+export async function getBlockDetail(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+
+    const result = await learnerService.getBlockDetail(
+      req.params.blockId,
+      req.user.role,
+    );
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/learner/blocks/:blockId/submit */
+export async function submitBlockAnswer(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+
+    const result = await learnerService.submitBlockAnswer(
+      req.params.blockId,
+      req.user.id,
+      req.user.role,
+      req.body,
+    );
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function listEnrollments(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
@@ -221,4 +301,69 @@ export async function markAllRead(req: Request, res: Response, next: NextFunctio
   } catch (err) {
     next(err);
   }
+}
+
+// ── Course Modal Config ──
+
+/** GET /api/learner/courses/:courseId/modal-config */
+export async function getCourseModalConfig(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const result = await learnerService.getCourseModalConfig(req.params.courseId);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/learner/courses/:courseId/modal-state */
+export async function getCourseModalState(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const result = await learnerService.getCourseModalState(req.user.id, req.params.courseId);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** PATCH /api/learner/courses/:courseId/modal-state */
+export async function updateCourseModalState(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const { welcome_shown, confirm_shown, complete_shown } = req.body;
+    const result = await learnerService.updateCourseModalState(req.user.id, req.params.courseId, {
+      welcome_shown,
+      confirm_shown,
+      complete_shown,
+    });
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+// ── Section Modal (khích lệ từng section) ──
+
+/** GET /api/learner/courses/:courseId/section-modal-configs */
+export async function getSectionModalConfigs(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const result = await learnerService.getSectionModalConfigs(req.params.courseId);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/learner/courses/:courseId/section-modal-shown */
+export async function getSectionModalShown(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const result = await learnerService.getSectionModalShown(req.user.id, req.params.courseId);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+/** POST /api/learner/courses/:courseId/section-modal-shown */
+export async function markSectionModalShown(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const { section_id } = req.body;
+    if (!section_id) { sendError(res, 'Thiếu section_id', 400); return; }
+    const result = await learnerService.markSectionModalShown(req.user.id, req.params.courseId, section_id);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
 }

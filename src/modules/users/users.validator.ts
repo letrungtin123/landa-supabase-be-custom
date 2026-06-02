@@ -10,7 +10,7 @@ export const createUserSchema = z.object({
   password: z.string().min(6, 'Password tối thiểu 6 ký tự'),
   full_name: z.string().max(255).optional(),
   phone: z.string().max(20).optional(),
-  role: z.enum(['learner', 'staff', 'superuser']).default('learner'),
+  role: z.enum(['learner', 'staff', 'superuser', 'superadmin']).default('learner'),
   tenant_id: z.string().uuid('Tenant ID không hợp lệ').optional(),
 });
 
@@ -21,7 +21,7 @@ export const updateUserSchema = z.object({
   full_name: z.string().max(255).optional(),
   phone: z.string().max(20).optional(),
   avatar_url: z.string().url().nullable().optional(),
-  role: z.enum(['learner', 'staff', 'superuser']).optional(),
+  role: z.enum(['learner', 'staff', 'superuser', 'superadmin']).optional(),
   is_active: z.boolean().optional(),
 });
 

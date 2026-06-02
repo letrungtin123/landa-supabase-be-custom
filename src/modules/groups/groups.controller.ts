@@ -36,8 +36,8 @@ export async function updateOrgGroupController(req: Request, res: Response, next
 
 export async function deleteOrgGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.deleteOrgGroup(req.params.id);
-    auditFromReq(req, 'DELETE', 'org_group', req.params.id);
+    const deleted = await svc.deleteOrgGroup(req.params.id);
+    auditFromReq(req, 'DELETE', 'org_group', req.params.id, deleted.name);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -64,16 +64,16 @@ export async function getSubGroupDetailController(req: Request, res: Response, n
 
 export async function updateSubGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.updateSubGroup(req.params.id, req.body);
-    auditFromReq(req, 'UPDATE', 'sub_group', req.params.id);
+    const sg = await svc.updateSubGroup(req.params.id, req.body);
+    auditFromReq(req, 'UPDATE', 'sub_group', req.params.id, sg.name);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
 
 export async function deleteSubGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.deleteSubGroup(req.params.id);
-    auditFromReq(req, 'DELETE', 'sub_group', req.params.id);
+    const deleted = await svc.deleteSubGroup(req.params.id);
+    auditFromReq(req, 'DELETE', 'sub_group', req.params.id, deleted.name);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -100,16 +100,16 @@ export async function getTeamDetailController(req: Request, res: Response, next:
 
 export async function updateTeamController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.updateTeam(req.params.id, req.body);
-    auditFromReq(req, 'UPDATE', 'team', req.params.id);
+    const team = await svc.updateTeam(req.params.id, req.body);
+    auditFromReq(req, 'UPDATE', 'team', req.params.id, team.name);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
 
 export async function deleteTeamController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.deleteTeam(req.params.id);
-    auditFromReq(req, 'DELETE', 'team', req.params.id);
+    const deleted = await svc.deleteTeam(req.params.id);
+    auditFromReq(req, 'DELETE', 'team', req.params.id, deleted.name);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }

@@ -163,6 +163,7 @@ export async function getReportSummary(
        COALESCE(AVG(cp.progress), 0) AS avg_progress,
        COUNT(DISTINCT CASE WHEN e.enrolled_at >= $${eParamIdx} AND e.enrolled_at <= $${eParamIdx + 1} THEN e.id END) AS month_enrollments
      FROM enrollments e
+     JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      ${egf.joins}
      WHERE e.tenant_id = $1 AND e.is_active = true AND e.enrolled_at <= $${eParamIdx + 2}
@@ -395,6 +396,7 @@ async function batchMetricByMonth(
     }
     case 'completion_rate': {
       // AVG progress per month — uses enrolled_at month as bucket
+      // Chỉ tính cho learner, không tính staff/superuser/superadmin
       const egf = buildGroupFilter(groupId, subgroupId);
       let idx = 2;
       const conds = egf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
@@ -402,6 +404,7 @@ async function batchMetricByMonth(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COALESCE(AVG(cp.progress), 0) AS avg_p
          FROM enrollments e
+         JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
          LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
          ${egf.joins}
          WHERE e.tenant_id = $1 AND e.is_active = true
@@ -478,10 +481,12 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'completion_rate': {
+      // Chỉ tính cho learner
       const r = await query<{ m: number; avg_p: string }>(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COALESCE(AVG(cp.progress), 0) AS avg_p
          FROM enrollments e
+         JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
          LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
          JOIN team_members tm ON tm.user_id = e.user_id
          WHERE e.tenant_id = $1 AND e.is_active = true AND tm.team_id = $2
@@ -554,6 +559,7 @@ export async function getReportTopCourses(
             COUNT(*) OVER() AS full_count
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
+     JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
      ${gf.joins}
      WHERE ${whereClause}
      GROUP BY e.course_id, c.display_name
@@ -766,15 +772,19 @@ export async function getUserStudyTime(
   username: string,
   tenantId: string,
 ): Promise<{ username: string; entries: Array<{ date: string; minutes: number }> }> {
+  // Tuần hiện tại: Thứ 2 → CN — dùng múi giờ Asia/Ho_Chi_Minh
+  // Cast ::TEXT tránh pg driver serialize DATE thành JS Date (bị lệch timezone)
   const result = await query<{ date: string; minutes: string }>(
-    `SELECT ss.started_at::DATE AS date,
-            SUM(ss.duration_minutes) AS minutes
-     FROM study_sessions ss
-     JOIN users u ON u.id = ss.user_id
-     WHERE u.username = $1 AND u.tenant_id = $2
-       AND ss.started_at >= now() - INTERVAL '7 days'
-     GROUP BY ss.started_at::DATE
-     ORDER BY date`,
+    `WITH today AS (SELECT (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::DATE AS d),
+          week_start AS (SELECT date_trunc('week', today.d)::DATE AS d FROM today),
+          target_user AS (SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1)
+     SELECT g::DATE::TEXT AS date,
+            COALESCE(ss.duration_minutes, 0) AS minutes
+     FROM week_start, generate_series(week_start.d, week_start.d + 6, '1 day') AS g
+     LEFT JOIN study_sessions ss
+       ON ss.study_date = g::DATE
+       AND ss.user_id = (SELECT id FROM target_user)
+     ORDER BY g`,
     [username, tenantId],
   );
 

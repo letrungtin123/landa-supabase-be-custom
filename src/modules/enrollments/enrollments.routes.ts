@@ -22,6 +22,7 @@ router.patch('/progress', checkPermission('enrollments', 'can_edit'), ctrl.updat
 
 // Study session (learner can self-report)
 router.post('/study-session', ctrl.recordStudySession);
+router.get('/weekly-study-time', ctrl.getWeeklyStudyTime);
 
 // Queries
 router.get('/user/:userId', checkPermission('enrollments', 'can_view'), ctrl.getUserEnrollments);

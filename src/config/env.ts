@@ -47,6 +47,10 @@ export const env = {
   // CORS
   CORS_ORIGIN: required('CORS_ORIGIN'),
 
+  // Supabase Storage
+  SUPABASE_URL: required('SUPABASE_URL'),
+  SUPABASE_SERVICE_KEY: required('SUPABASE_SERVICE_KEY'),
+
   /** Kiểm tra môi trường production */
   get isProduction(): boolean {
     return env.NODE_ENV === 'production';

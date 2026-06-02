@@ -2,26 +2,29 @@
 // Notifications Controller
 // ═══════════════════════════════════════════════════════════════
 
-import type { Request, Response } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import * as svc from './notifications.service.js';
 
-export async function send(req: Request, res: Response) {
-  const { course_id, title, message } = req.body;
-  const tenantId = req.user!.tenantId!;
-  const userId = req.user!.id;
+export async function send(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { course_id, title, message } = req.body;
+    const tenantId = req.user!.tenantId!;
+    const userId = req.user!.id;
 
-  if (!course_id || !title) return sendError(res, 'course_id and title are required', 400);
+    if (!course_id || !title) { sendError(res, 'course_id và title là bắt buộc', 400); return; }
 
-  const result = await svc.sendCourseNotification(course_id, tenantId, title, message || '', userId);
-  sendSuccess(res, result);
+    const result = await svc.sendCourseNotification(course_id, tenantId, title, message || '', userId);
+    auditFromReq(req, 'CREATE', 'notification', course_id, title, `Gửi cho ${result.recipients} learners`);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
 }
 
-export async function list(req: Request, res: Response) {
-  const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 1;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 20, 100);
-
-  const result = await svc.getNotifications(tenantId, page, pageSize);
-  sendSuccess(res, result);
+export async function list(req: Request, res: Response, next: NextFunction) {
+  try {
+    const tenantId = req.user!.tenantId!;
+    const result = await svc.getNotifications(tenantId, req.query as Record<string, unknown>);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
 }

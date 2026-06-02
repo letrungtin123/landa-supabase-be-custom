@@ -62,53 +62,8 @@ export async function tenantContext(req: Request, res: Response, next: NextFunct
     return;
   }
 
-  // ── Superuser: hỗ trợ switch tenant qua X-Tenant-Id header ──
-  if (req.user.role === 'superuser') {
-    const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
-    const targetTenantId = headerTenantId || req.user.tenantId;
-
-    if (!targetTenantId) {
-      sendError(res, 'User không thuộc tenant nào', 403);
-      return;
-    }
-
-    // Validate tenant tồn tại + active
-    const tenantResult = await query<{ is_active: boolean }>(
-      'SELECT is_active FROM tenants WHERE id = $1',
-      [targetTenantId],
-    );
-
-    if (tenantResult.rowCount === 0) {
-      sendError(res, 'Tenant không tồn tại', 404);
-      return;
-    }
-
-    if (!tenantResult.rows[0].is_active) {
-      sendError(res, 'Tenant đã bị vô hiệu hóa', 403);
-      return;
-    }
-
-    // Nếu switch sang tenant khác (qua header) → validate quyền quản lý
-    if (headerTenantId && headerTenantId !== req.user.tenantId) {
-      const accessCheck = await query<{ count: string }>(
-        `SELECT COUNT(*) AS count FROM user_tenants
-         WHERE user_id = $1 AND tenant_id = $2`,
-        [req.user.id, headerTenantId],
-      );
-
-      if (parseInt(accessCheck.rows[0].count) === 0) {
-        sendError(res, 'Không có quyền truy cập tenant này', 403);
-        return;
-      }
-    }
-
-    // Inject tenant vào request context
-    req.user.tenantId = targetTenantId;
-    next();
-    return;
-  }
-
-  // ── Các role khác (staff): phải có tenant_id ──
+  // ── Các role khác (superuser, staff, learner): phải dùng tenant_id từ JWT ──
+  // Superuser toàn quyền trong 1 tenant duy nhất, KHÔNG switch tenant.
   const { tenantId } = req.user;
 
   if (!tenantId) {

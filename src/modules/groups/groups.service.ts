@@ -55,8 +55,9 @@ export async function updateOrgGroup(id: string, input: { name?: string; descrip
 }
 
 export async function deleteOrgGroup(id: string) {
-  const result = await query('DELETE FROM org_groups WHERE id = $1 RETURNING id', [id]);
+  const result = await query('DELETE FROM org_groups WHERE id = $1 RETURNING id, name', [id]);
   if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
+  return result.rows[0];
 }
 
 // ═══ Sub Groups (level 2) ═══
@@ -142,8 +143,9 @@ export async function updateSubGroup(id: string, input: { name: string }) {
 }
 
 export async function deleteSubGroup(id: string) {
-  const result = await query('DELETE FROM sub_groups WHERE id = $1 RETURNING id', [id]);
+  const result = await query('DELETE FROM sub_groups WHERE id = $1 RETURNING id, name', [id]);
   if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
+  return result.rows[0];
 }
 
 // ═══ Teams (level 3) ═══
@@ -232,8 +234,9 @@ export async function updateTeam(id: string, input: { name: string }) {
 }
 
 export async function deleteTeam(id: string) {
-  const result = await query('DELETE FROM teams WHERE id = $1 RETURNING id', [id]);
+  const result = await query('DELETE FROM teams WHERE id = $1 RETURNING id, name', [id]);
   if (result.rowCount === 0) throw new AppError('Team không tồn tại', 404);
+  return result.rows[0];
 }
 
 // ═══ Team Members ═══

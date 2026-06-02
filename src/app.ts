@@ -35,9 +35,16 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // cho phép /uploads cross-origin
 }));
 
-// ── Core Middleware ──
+// ── CORS — hỗ trợ nhiều origins (comma-separated trong env) ──
+const allowedOrigins = env.CORS_ORIGIN.split(',').map(o => o.trim()).filter(Boolean);
+
 app.use(cors({
-  origin: env.CORS_ORIGIN,
+  origin: (origin, callback) => {
+    // Cho phép requests không có Origin header (server-to-server, health checks)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(null, false);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id'],
@@ -79,7 +86,11 @@ app.get('/api/health', async function healthCheck(_req, res) {
 });
 
 // ── API Routes ──
-app.use('/api/auth', authLimiter, authRoutes);  // rate limit auth endpoints
+// authLimiter CHỈ áp cho login/refresh (brute-force protection)
+// Các auth endpoint khác (me, profile, change-password) dùng apiLimiter chung
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/refresh', authLimiter);
+app.use('/api/auth', authRoutes);
 app.use('/api', apiLimiter);                     // general rate limit
 app.use('/api/tenants', tenantsRoutes);
 app.use('/api/users', usersRoutes);

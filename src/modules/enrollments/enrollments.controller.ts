@@ -49,16 +49,23 @@ export async function updateProgress(req: Request, res: Response) {
 
 /** POST /api/enrollments/study-session — Record study time */
 export async function recordStudySession(req: Request, res: Response) {
-  const { course_id, duration_minutes } = req.body;
+  const { course_id, duration_minutes, started_at } = req.body;
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
 
-  if (!course_id || !duration_minutes) {
-    return sendError(res, 'course_id and duration_minutes are required', 400);
+  if (!duration_minutes) {
+    return sendError(res, 'duration_minutes is required', 400);
   }
 
-  await svc.recordStudySession(userId, course_id, tenantId, duration_minutes);
+  await svc.recordStudySession(userId, course_id || null, tenantId, duration_minutes, started_at);
   sendSuccess(res, { success: true });
+}
+
+/** GET /api/enrollments/weekly-study-time — Weekly study time for current user */
+export async function getWeeklyStudyTime(req: Request, res: Response) {
+  const userId = req.user!.id;
+  const result = await svc.getWeeklyStudyTime(userId);
+  sendSuccess(res, result);
 }
 
 /** GET /api/enrollments/user/:userId — User's enrolled courses */

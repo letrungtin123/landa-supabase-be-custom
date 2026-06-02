@@ -33,8 +33,49 @@ export function getClientIp(req: Request): string {
  * Ghi audit log — chạy async, không throw error.
  * Fire-and-forget: không block request flow.
  */
+// Mapping entity_type → { table, nameColumn } để auto-resolve tên khi thiếu
+const ENTITY_NAME_MAP: Record<string, { table: string; col: string }> = {
+  user: { table: 'users', col: 'username' },
+  tenant: { table: 'tenants', col: 'name' },
+  course: { table: 'courses', col: 'display_name' },
+  document: { table: 'documents', col: 'title' },
+  document_category: { table: 'document_categories', col: 'name' },
+  permission_group: { table: 'permission_groups', col: 'name' },
+  org_group: { table: 'org_groups', col: 'name' },
+  sub_group: { table: 'sub_groups', col: 'name' },
+  team: { table: 'teams', col: 'name' },
+  module: { table: 'modules', col: 'name' },
+  help_folder: { table: 'help_folders', col: 'name' },
+  help_page: { table: 'help_pages', col: 'title' },
+  course_category: { table: 'course_categories', col: 'name' },
+};
+
+/**
+ * Auto-resolve entity name từ DB nếu chưa truyền.
+ * Fire-and-forget, không block.
+ */
+async function resolveEntityName(entityType: string, entityId: string): Promise<string | null> {
+  const mapping = ENTITY_NAME_MAP[entityType];
+  if (!mapping) return null;
+  try {
+    const r = await query<Record<string, string>>(
+      `SELECT ${mapping.col} AS name FROM ${mapping.table} WHERE id = $1 LIMIT 1`,
+      [entityId],
+    );
+    return r.rows[0]?.name || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function logAudit(entry: AuditEntry): Promise<void> {
   try {
+    // Auto-resolve entity_name nếu thiếu mà có entityId
+    let entityName = entry.entityName || null;
+    if (!entityName && entry.entityId) {
+      entityName = await resolveEntityName(entry.entityType, entry.entityId);
+    }
+
     await query(
       `INSERT INTO audit_logs (tenant_id, actor_id, actor_username, action, entity_type, entity_id, entity_name, details, ip_address)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -45,7 +86,7 @@ export async function logAudit(entry: AuditEntry): Promise<void> {
         entry.action,
         entry.entityType,
         entry.entityId || null,
-        entry.entityName || null,
+        entityName,
         entry.details || '',
         entry.ipAddress || null,
       ],

@@ -247,7 +247,8 @@ export async function logout(refreshToken: string): Promise<void> {
 export async function getMe(userId: string) {
   const result = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.tenant_id,
+            u.role, u.tenant_id, u.bio, u.gender, u.country, u.language,
+            u.level_of_education, u.year_of_birth,
             t.name AS tenant_name
      FROM users u
      LEFT JOIN tenants t ON t.id = u.tenant_id
@@ -277,6 +278,12 @@ export async function getMe(userId: string) {
       role: user.role,
       tenant_id: user.tenant_id,
       tenant_name: user.tenant_name,
+      bio: user.bio || '',
+      gender: user.gender || '',
+      country: user.country || '',
+      language: user.language || '',
+      level_of_education: user.level_of_education || '',
+      year_of_birth: user.year_of_birth || null,
     },
     permissions,
     tenant_modules: tenantModules,
@@ -353,8 +360,9 @@ async function resolveTenantModules(tenantId: string | null): Promise<string[]> 
 }
 
 /**
- * Lấy danh sách tenants mà superuser được quản lý.
- * Kết hợp user_tenants + primary tenant_id (nếu chưa có trong user_tenants).
+ * Lấy danh sách tenants mà user được quản lý.
+ * - superadmin: TẤT CẢ tenants active
+ * - superuser: CHỈ tenant chính của họ (1 tenant duy nhất)
  */
 async function resolveManagedTenants(
   userId: string,
@@ -369,30 +377,16 @@ async function resolveManagedTenants(
     return result.rows;
   }
 
-  // superuser: lấy từ user_tenants
-  const result = await query<{ id: string; name: string }>(
-    `SELECT t.id, t.name
-     FROM user_tenants ut
-     JOIN tenants t ON t.id = ut.tenant_id
-     WHERE ut.user_id = $1 AND t.is_active = true
-     ORDER BY t.name ASC`,
-    [userId],
-  );
-
-  const tenants = result.rows;
-
-  // Nếu primary tenant_id chưa nằm trong list → thêm vào
-  if (primaryTenantId && !tenants.find(t => t.id === primaryTenantId)) {
-    const primary = await query<{ id: string; name: string }>(
+  // superuser: CHỈ tenant chính (không multi-tenant)
+  if (primaryTenantId) {
+    const result = await query<{ id: string; name: string }>(
       'SELECT id, name FROM tenants WHERE id = $1 AND is_active = true',
       [primaryTenantId],
     );
-    if (primary.rowCount && primary.rowCount > 0) {
-      tenants.unshift(primary.rows[0]);
-    }
+    return result.rows;
   }
 
-  return tenants;
+  return [];
 }
 
 /**
@@ -450,11 +444,15 @@ export async function updateProfile(userId: string, input: {
   const params: unknown[] = [];
   let idx = 1;
 
+  // Enum fields cần convert "" → null (PostgreSQL enum không chấp nhận "")
+  const enumFields = new Set(['gender', 'level_of_education']);
+
   const allowed = ['full_name', 'phone', 'bio', 'avatar_url', 'gender', 'country', 'language', 'level_of_education', 'year_of_birth'] as const;
   for (const key of allowed) {
     if ((input as any)[key] !== undefined) {
+      const val = (input as any)[key];
       sets.push(`${key} = $${idx++}`);
-      params.push((input as any)[key]);
+      params.push(enumFields.has(key) && val === '' ? null : val);
     }
   }
 

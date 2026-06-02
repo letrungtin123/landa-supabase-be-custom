@@ -27,7 +27,7 @@ export async function createFolder(tenantId: string, input: { title: string; ico
     'INSERT INTO help_folders (tenant_id, title, slug, icon) VALUES ($1, $2, $3, $4) RETURNING id, slug',
     [tenantId, input.title, slug, input.icon || 'BookOpen'],
   );
-  return { success: true, id: result.rows[0].id, slug: result.rows[0].slug };
+  return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
 
 export async function updateFolder(folderId: string, input: { title?: string; icon?: string }) {
@@ -37,15 +37,15 @@ export async function updateFolder(folderId: string, input: { title?: string; ic
   if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); sets.push(`slug = $${idx++}`); params.push(input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }
   if (input.icon !== undefined) { sets.push(`icon = $${idx++}`); params.push(input.icon); }
   params.push(folderId);
-  const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id`, params);
+  const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, title`, params);
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
-  return { success: true };
+  return result.rows[0];
 }
 
 export async function deleteFolder(folderId: string) {
-  const result = await query('DELETE FROM help_folders WHERE id = $1 RETURNING id', [folderId]);
+  const result = await query('DELETE FROM help_folders WHERE id = $1 RETURNING id, title', [folderId]);
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
-  return { success: true };
+  return result.rows[0];
 }
 
 export async function reorderFolders(orderedIds: string[]) {
@@ -96,7 +96,7 @@ export async function createPage(input: { folder_id: string; title: string; cont
      VALUES ($1, $2, $3, $4, $5, $5) RETURNING id, slug`,
     [input.folder_id, input.title, slug, input.content || '', userId],
   );
-  return { success: true, id: result.rows[0].id, slug: result.rows[0].slug };
+  return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
 
 export async function updatePage(pageId: string, input: { title?: string; content?: string; is_published?: boolean }, userId: string) {
@@ -107,15 +107,15 @@ export async function updatePage(pageId: string, input: { title?: string; conten
   if (input.content !== undefined) { sets.push(`content = $${idx++}`); params.push(input.content); }
   if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}`); params.push(input.is_published); }
   params.push(pageId);
-  const result = await query(`UPDATE help_pages SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id`, params);
+  const result = await query(`UPDATE help_pages SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, title`, params);
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
-  return { success: true };
+  return result.rows[0];
 }
 
 export async function deletePage(pageId: string) {
-  const result = await query('DELETE FROM help_pages WHERE id = $1 RETURNING id', [pageId]);
+  const result = await query('DELETE FROM help_pages WHERE id = $1 RETURNING id, title', [pageId]);
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
-  return { success: true };
+  return result.rows[0];
 }
 
 export async function reorderPages(folderId: string, orderedIds: string[]) {

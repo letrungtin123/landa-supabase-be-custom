@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import * as svc from './help-docs.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
+import { uploadFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
 // ═══ Folders ═══
 
@@ -17,23 +18,23 @@ export async function createFolderController(req: Request, res: Response, next: 
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const result = await svc.createFolder(tenantId, req.body);
-    auditFromReq(req, 'CREATE', 'help_folder', result.id);
+    auditFromReq(req, 'CREATE', 'help_folder', result.id, result.title);
     sendSuccess(res, result, 'Tạo folder thành công', 201);
   } catch (err) { next(err); }
 }
 
 export async function updateFolderController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.updateFolder(req.params.id, req.body);
-    auditFromReq(req, 'UPDATE', 'help_folder', req.params.id);
+    const folder = await svc.updateFolder(req.params.id, req.body);
+    auditFromReq(req, 'UPDATE', 'help_folder', req.params.id, folder.title);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
 
 export async function deleteFolderController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.deleteFolder(req.params.id);
-    auditFromReq(req, 'DELETE', 'help_folder', req.params.id);
+    const deleted = await svc.deleteFolder(req.params.id);
+    auditFromReq(req, 'DELETE', 'help_folder', req.params.id, deleted.title);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -62,23 +63,23 @@ export async function getPageController(req: Request, res: Response, next: NextF
 export async function createPageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = await svc.createPage(req.body, req.user!.id);
-    auditFromReq(req, 'CREATE', 'help_page', result.id);
+    auditFromReq(req, 'CREATE', 'help_page', result.id, result.title);
     sendSuccess(res, result, 'Tạo trang thành công', 201);
   } catch (err) { next(err); }
 }
 
 export async function updatePageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.updatePage(req.params.id, req.body, req.user!.id);
-    auditFromReq(req, 'UPDATE', 'help_page', req.params.id);
+    const page = await svc.updatePage(req.params.id, req.body, req.user!.id);
+    auditFromReq(req, 'UPDATE', 'help_page', req.params.id, page.title);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
 
 export async function deletePageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.deletePage(req.params.id);
-    auditFromReq(req, 'DELETE', 'help_page', req.params.id);
+    const deleted = await svc.deletePage(req.params.id);
+    auditFromReq(req, 'DELETE', 'help_page', req.params.id, deleted.title);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -89,5 +90,24 @@ export async function reorderPagesController(req: Request, res: Response, next: 
     if (!folder_id || !Array.isArray(ordered_ids)) { sendError(res, 'folder_id và ordered_ids bắt buộc', 400); return; }
     await svc.reorderPages(folder_id, ordered_ids);
     sendSuccess(res, { success: true });
+  } catch (err) { next(err); }
+}
+
+// ═══ Image Upload ═══
+
+/** POST /api/help-docs/upload-image */
+export async function uploadImageController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId || 'default';
+    if (!req.file) { sendError(res, 'No file uploaded', 400); return; }
+
+    const file = req.file;
+    const originalName = fixMulterFilename(file.originalname);
+    const fileName = buildFileName(originalName);
+    const storagePath = buildStoragePath(tenantId, 'help-docs', fileName);
+
+    const url = await uploadFile(storagePath, file.buffer, file.mimetype);
+
+    sendSuccess(res, { url, filename: originalName, size: file.size });
   } catch (err) { next(err); }
 }
