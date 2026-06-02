@@ -11,12 +11,17 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..', '..');
 
-// Load .env.production nếu NODE_ENV=production, ngược lại load .env
-// Ưu tiên: .env.production (production) → .env (fallback)
-const envFile = process.env.NODE_ENV === 'production' ? '.env.production' : '.env';
-dotenvConfig({ path: path.resolve(rootDir, envFile) });
-// Luôn load .env làm fallback (các biến chưa có trong .env.production sẽ lấy từ .env)
-dotenvConfig({ path: path.resolve(rootDir, '.env') });
+// Load env file theo NODE_ENV — KHÔNG fallback, KHÔNG cross-load
+const isProd = process.env.NODE_ENV === 'production';
+const envFile = isProd ? '.env.production' : '.env';
+const envPath = path.resolve(rootDir, envFile);
+const result = dotenvConfig({ path: envPath });
+
+if (result.error) {
+  console.error(`[Env] KHÔNG tìm thấy ${envFile} tại ${envPath}`);
+  process.exit(1);
+}
+console.log(`[Env] Loaded ${envFile}`);
 
 /**
  * Đọc biến môi trường bắt buộc — throw nếu thiếu hoặc rỗng.
