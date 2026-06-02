@@ -118,11 +118,14 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
     const storagePath = buildStoragePath(tenantId, 'avatars', fileName);
 
     // Upload to Supabase Storage (upsert: overwrite old avatar)
-    const avatarUrl = await uploadFile(storagePath, file.buffer, file.mimetype, true);
+    // uploadFile() trả về path, KHÔNG phải full URL
+    const avatarPath = await uploadFile(storagePath, file.buffer, file.mimetype, true);
 
-    await usersService.updateAvatar(userId, avatarUrl);
+    // DB lưu PATH, không lưu full URL
+    await usersService.updateAvatar(userId, avatarPath);
 
-    sendSuccess(res, { avatar_url: avatarUrl });
+    // sendSuccess tự động resolve path → full URL
+    sendSuccess(res, { avatar_url: avatarPath });
   } catch (err) { next(err); }
 }
 

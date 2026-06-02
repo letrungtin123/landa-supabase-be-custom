@@ -106,8 +106,9 @@ export async function uploadImageController(req: Request, res: Response, next: N
     const fileName = buildFileName(originalName);
     const storagePath = buildStoragePath(tenantId, 'help-docs', fileName);
 
-    const url = await uploadFile(storagePath, file.buffer, file.mimetype);
+    // uploadFile trả về path, sendSuccess auto-resolve thành URL
+    const path = await uploadFile(storagePath, file.buffer, file.mimetype);
 
-    sendSuccess(res, { url, filename: originalName, size: file.size });
+    sendSuccess(res, { url: path, filename: originalName, size: file.size });
   } catch (err) { next(err); }
 }

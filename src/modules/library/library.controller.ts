@@ -131,16 +131,16 @@ export async function uploadDocumentController(req: Request, res: Response, next
     const fileName = buildFileName(originalName);
     const storagePath = buildStoragePath(tenantId, 'library', fileName);
 
-    // Upload to Supabase Storage
-    const fileUrl = await uploadFile(storagePath, file.buffer, file.mimetype);
+    // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
+    await uploadFile(storagePath, file.buffer, file.mimetype);
 
     // Extract extension
     const ext = originalName.split('.').pop()?.toLowerCase() || '';
 
-    // Create document record
+    // Create document record — DB lưu PATH, không lưu full URL
     const doc = await libService.createDocument(tenantId, {
       title: req.body.title || originalName,
-      file_url: fileUrl,
+      file_url: storagePath,
       file_size: file.size,
       extension: ext,
       category_id: req.body.category_id || null,

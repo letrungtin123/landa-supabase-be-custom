@@ -43,7 +43,7 @@ export async function ensureBucket(): Promise<void> {
  * @param buffer - File buffer
  * @param contentType - MIME type
  * @param upsert - Overwrite if exists (default false)
- * @returns Public URL of the uploaded file
+ * @returns Storage path (NOT full URL) — DB chỉ lưu path, FE sẽ nhận URL qua toPublicUrl()
  */
 export async function uploadFile(
   storagePath: string,
@@ -65,7 +65,8 @@ export async function uploadFile(
     throw new Error(`[Storage] Upload failed (${storagePath}): ${error.message}`);
   }
 
-  return getPublicUrl(storagePath);
+  // Trả về PATH, không phải full URL — DB chỉ lưu path để không lộ infra
+  return storagePath;
 }
 
 /**
@@ -88,24 +89,53 @@ export function getPublicUrl(storagePath: string): string {
 }
 
 /**
- * Extract storage path from a public URL.
- * e.g. "http://127.0.0.1:54321/storage/v1/object/public/landa-storage/tenant/avatars/file.jpg"
- *   → "tenant/avatars/file.jpg"
+ * Convert a storage path to a full public URL.
+ * Dùng khi cần trả URL cho FE trong API response.
+ * DB lưu path, FE nhận full URL.
  */
-export function extractStoragePath(publicUrl: string): string | null {
-  const marker = `/object/public/${STORAGE_BUCKET}/`;
-  const idx = publicUrl.indexOf(marker);
-  if (idx === -1) return null;
-  return decodeURIComponent(publicUrl.substring(idx + marker.length));
+export function toPublicUrl(storagePath: string | null | undefined): string | null {
+  if (!storagePath) return null;
+  // Nếu đã là full URL (data cũ) → trả nguyên
+  if (storagePath.startsWith('http://') || storagePath.startsWith('https://')) {
+    return storagePath;
+  }
+  return getPublicUrl(storagePath);
 }
 
 /**
- * Delete a file from storage using its public URL.
- * Safe to call — silently ignores if URL is invalid or file doesn't exist.
+ * Resolve a value that could be either a storage path or a full URL.
+ * Dùng trong query results để xử lý cả data cũ (full URL) và data mới (path only).
  */
-export async function deleteFileByUrl(publicUrl: string | null | undefined): Promise<void> {
-  if (!publicUrl) return;
-  const path = extractStoragePath(publicUrl);
+export function resolveStorageUrl(value: string | null | undefined): string | null {
+  return toPublicUrl(value);
+}
+
+/**
+ * Extract storage path from a full URL or return as-is if already a path.
+ * e.g. "http://127.0.0.1:54321/storage/v1/object/public/landa-storage/tenant/avatars/file.jpg"
+ *   → "tenant/avatars/file.jpg"
+ * e.g. "tenant/avatars/file.jpg" → "tenant/avatars/file.jpg"
+ */
+export function extractStoragePath(value: string): string | null {
+  if (!value) return null;
+  // Nếu không phải URL → đã là path rồi
+  if (!value.startsWith('http://') && !value.startsWith('https://')) {
+    return value;
+  }
+  const marker = `/object/public/${STORAGE_BUCKET}/`;
+  const idx = value.indexOf(marker);
+  if (idx === -1) return null;
+  return decodeURIComponent(value.substring(idx + marker.length));
+}
+
+/**
+ * Delete a file from storage using its path or public URL.
+ * Safe to call — silently ignores if value is invalid or file doesn't exist.
+ * Handles both old full URLs and new path-only values.
+ */
+export async function deleteFileByUrl(value: string | null | undefined): Promise<void> {
+  if (!value) return;
+  const path = extractStoragePath(value);
   if (!path) return;
   await deleteFile(path);
 }

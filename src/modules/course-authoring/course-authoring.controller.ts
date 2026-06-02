@@ -161,12 +161,13 @@ export async function uploadAsset(req: Request, res: Response) {
   const fileName = buildFileName(originalName);
   const storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
 
-  // Upload to Supabase Storage
-  const url = await uploadFile(storagePath, file.buffer, file.mimetype);
+  // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
+  await uploadFile(storagePath, file.buffer, file.mimetype);
 
+  // DB lưu storagePath cho cả storage_path VÀ url columns
   const asset = await svc.createAssetRecord(
     courseId, tenantId, originalName, file.mimetype,
-    file.size, storagePath, url, userId,
+    file.size, storagePath, storagePath, userId,
   );
 
   sendSuccess(res, asset, undefined, 201);
