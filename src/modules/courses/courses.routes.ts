@@ -6,6 +6,7 @@ import {
   listController, createController, updateController, bulkActionController,
   getModalConfigController, updateModalConfigController,
   getSectionModalController, updateSectionModalController,
+  hardDeleteController,
 } from './courses.controller.js';
 
 const router = Router();
@@ -19,5 +20,6 @@ router.get('/:id/modal-config', checkPermission('courses', 'can_view'), getModal
 router.put('/:id/modal-config', checkPermission('courses', 'can_edit'), updateModalConfigController);
 router.get('/:id/section-modal-config', checkPermission('courses', 'can_view'), getSectionModalController);
 router.put('/:id/section-modal-config', checkPermission('courses', 'can_edit'), updateSectionModalController);
+router.delete('/:id', checkPermission('courses', 'can_delete'), hardDeleteController);
 
 export default router;

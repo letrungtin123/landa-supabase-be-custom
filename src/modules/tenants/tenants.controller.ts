@@ -7,6 +7,7 @@ import * as tenantsService from './tenants.service.js';
 import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema } from './tenants.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
+import { invalidateTenantCache } from '../../middleware/tenant-context.js';
 
 /** GET /api/tenants */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -43,6 +44,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
     const tenant = await tenantsService.updateTenant(req.params.id, parsed.data);
+    invalidateTenantCache(req.params.id);
     auditFromReq(req, 'UPDATE', 'tenant', tenant.id, tenant.name);
     sendSuccess(res, tenant, 'Cập nhật thành công');
   } catch (err) { next(err); }
@@ -52,6 +54,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     await tenantsService.deleteTenant(req.params.id);
+    invalidateTenantCache(req.params.id);
     auditFromReq(req, 'DELETE', 'tenant', req.params.id);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }

@@ -5,6 +5,7 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
+import { bulkEnrollSchema } from './enrollments.validator.js';
 
 /** POST /api/enrollments — Enroll user(s) into a course */
 export async function enroll(req: Request, res: Response) {
@@ -13,9 +14,11 @@ export async function enroll(req: Request, res: Response) {
 
   if (!course_id) return sendError(res, 'course_id is required', 400);
 
-  // Bulk enroll
+  // Bulk enroll — validate input
   if (Array.isArray(user_ids) && user_ids.length > 0) {
-    const result = await svc.bulkEnroll(user_ids, course_id, tenantId);
+    const parsed = bulkEnrollSchema.safeParse({ user_ids, course_id });
+    if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
+    const result = await svc.bulkEnroll(parsed.data.user_ids, parsed.data.course_id, tenantId);
     return sendSuccess(res, result, undefined, 201);
   }
 

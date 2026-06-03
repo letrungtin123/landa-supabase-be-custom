@@ -44,6 +44,18 @@ export function authorize(...allowedRoles: UserRole[]) {
  * - superuser: toàn quyền trong tenant
  * - staff/learner: kiểm tra permission_group_modules (UNION tất cả groups)
  */
+// ── Permission Cache — tránh query ma trận quyền mỗi request ──
+const permCache = new Map<string, { allowed: boolean; expires: number }>();
+const PERM_CACHE_TTL = 5 * 60_000; // 5 phút
+
+/** Xóa permission cache (gọi khi update quyền) */
+export function invalidatePermissionCache(userId?: string) {
+  if (!userId) { permCache.clear(); return; }
+  for (const key of permCache.keys()) {
+    if (key.startsWith(userId + ':')) permCache.delete(key);
+  }
+}
+
 export function checkPermission(moduleCode: string, action: PermissionAction) {
   return async function permissionMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!req.user) {
@@ -67,8 +79,19 @@ export function checkPermission(moduleCode: string, action: PermissionAction) {
     }
 
     try {
+      // Check cache first
+      const cacheKey = `${userId}:${tenantId}:${moduleCode}:${action}`;
+      const cached = permCache.get(cacheKey);
+      if (cached && cached.expires > Date.now()) {
+        if (!cached.allowed) {
+          sendError(res, `Không có quyền ${action} trên module ${moduleCode}`, 403);
+          return;
+        }
+        next();
+        return;
+      }
+
       // Query ma trận quyền: UNION tất cả groups user thuộc về
-      // Dùng bool_or() để lấy kết quả "có ít nhất 1 group cho phép"
       const result = await query<Record<string, boolean>>(
         `SELECT bool_or(pgm.${action}) AS allowed
          FROM user_permission_groups upg
@@ -82,6 +105,9 @@ export function checkPermission(moduleCode: string, action: PermissionAction) {
       );
 
       const allowed = result.rows[0]?.allowed === true;
+
+      // Cache result
+      permCache.set(cacheKey, { allowed, expires: Date.now() + PERM_CACHE_TTL });
 
       if (!allowed) {
         sendError(res, `Không có quyền ${action} trên module ${moduleCode}`, 403);

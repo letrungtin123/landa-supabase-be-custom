@@ -8,6 +8,7 @@ import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
+import { invalidatePermissionCache } from '../../middleware/authorize.js';
 
 /** GET /api/users */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -51,16 +52,26 @@ export async function updateController(req: Request, res: Response, next: NextFu
   } catch (err) { next(err); }
 }
 
-/** DELETE /api/users/:id */
+/** DELETE /api/users/:id — Hard delete user + cascade */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const deleted = await usersService.deleteUser(req.params.id);
-    // Cleanup avatar from storage
-    if (deleted?.avatar_url) {
-      await deleteFileByUrl(deleted.avatar_url).catch(() => {});
+    const { avatarUrl } = await usersService.hardDeleteUser(
+      req.params.id,
+      req.user!.id,
+      req.user!.role,
+      req.user!.tenantId || null,
+    );
+
+    // Async cleanup avatar từ Storage
+    if (avatarUrl) {
+      deleteFileByUrl(avatarUrl).catch(() => {});
     }
-    auditFromReq(req, 'DELETE', 'user', req.params.id);
-    sendSuccess(res, null, 'Xóa thành công');
+
+    // Invalidate caches
+    invalidatePermissionCache(req.params.id);
+
+    auditFromReq(req, 'DELETE', 'user', req.params.id, undefined, 'Hard delete');
+    sendSuccess(res, null, 'Xóa user thành công');
   } catch (err) { next(err); }
 }
 

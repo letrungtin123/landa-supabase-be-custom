@@ -204,12 +204,61 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 }
 
 /**
- * Xóa user (hard delete).
+ * Hard delete user — CASCADE xóa sạch 14+ bảng.
+ * Role hierarchy:
+ *   - KHÔNG cho xóa chính mình
+ *   - staff: KHÔNG xóa superadmin, superuser, staff khác
+ *   - superuser: xóa superuser khác, staff, learner (trong tenant)
+ *   - superadmin: xóa tất cả (trừ chính mình)
  */
-export async function deleteUser(userId: string) {
-  const result = await query('DELETE FROM users WHERE id = $1 RETURNING id, avatar_url', [userId]);
-  if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  return result.rows[0];
+export async function hardDeleteUser(
+  targetId: string,
+  callerId: string,
+  callerRole: string,
+  callerTenantId: string | null,
+) {
+  // Guard 1: không xóa chính mình
+  if (targetId === callerId) throw new AppError('Không thể xóa chính mình', 403);
+
+  // Lấy thông tin target user
+  const targetResult = await query<{ id: string; role: string; tenant_id: string | null; avatar_url: string | null }>(
+    'SELECT id, role, tenant_id, avatar_url FROM users WHERE id = $1',
+    [targetId],
+  );
+  if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  const target = targetResult.rows[0];
+
+  // Guard 2: tenant isolation (trừ superadmin)
+  if (callerRole !== 'superadmin' && callerTenantId && target.tenant_id !== callerTenantId) {
+    throw new AppError('Không có quyền xóa user ngoài tenant', 403);
+  }
+
+  // Guard 3: role hierarchy
+  const ROLE_LEVEL: Record<string, number> = { learner: 0, staff: 1, superuser: 2, superadmin: 3 };
+  const callerLevel = ROLE_LEVEL[callerRole] ?? 0;
+  const targetLevel = ROLE_LEVEL[target.role] ?? 0;
+
+  // superadmin (3) có thể xóa tất cả (trừ chính mình — đã check)
+  // superuser (2) có thể xóa: superuser khác (2), staff (1), learner (0)
+  // staff (1) chỉ có thể xóa: learner (0)
+  if (callerLevel <= targetLevel && callerRole !== 'superadmin') {
+    throw new AppError(`Không có quyền xóa ${target.role}`, 403);
+  }
+  // Đặc biệt: superadmin mới xóa được superadmin khác
+  if (target.role === 'superadmin' && callerRole !== 'superadmin') {
+    throw new AppError('Chỉ superadmin mới xóa được superadmin', 403);
+  }
+
+  // DELETE — CASCADE xóa sạch: enrollments, course_progress, block_completions,
+  //   refresh_tokens, team_members, user_permission_groups, user_tenants,
+  //   user_badges, study_sessions, notification_recipients,
+  //   course_modal_states, section_modal_shown
+  //   SET NULL: audit_logs.actor_id, course_assets.uploaded_by,
+  //   documents.uploaded_by, notifications.sent_by, help_pages.created_by/updated_by
+  const result = await query('DELETE FROM users WHERE id = $1 RETURNING id', [targetId]);
+  if (result.rowCount === 0) throw new AppError('Xóa user thất bại', 500);
+
+  return { avatarUrl: target.avatar_url };
 }
 
 /**

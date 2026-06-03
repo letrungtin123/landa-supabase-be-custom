@@ -4,6 +4,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './groups.service.js';
+import { createOrgGroupSchema, createSubGroupSchema, createTeamSchema } from './groups.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 
@@ -20,6 +21,8 @@ export async function createOrgGroupController(req: Request, res: Response, next
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const parsed = createOrgGroupSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const group = await svc.createOrgGroup(tenantId, req.body);
     auditFromReq(req, 'CREATE', 'org_group', group.id, group.name);
     sendSuccess(res, group, 'Tạo nhóm thành công', 201);
@@ -51,6 +54,8 @@ export async function listSubGroupsController(req: Request, res: Response, next:
 
 export async function createSubGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const parsed = createSubGroupSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const sg = await svc.createSubGroup(req.params.groupId, req.body);
     auditFromReq(req, 'CREATE', 'sub_group', sg.id, sg.name);
     sendSuccess(res, sg, 'Tạo phân nhóm thành công', 201);
@@ -87,6 +92,8 @@ export async function listTeamsController(req: Request, res: Response, next: Nex
 
 export async function createTeamController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const parsed = createTeamSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const team = await svc.createTeam(req.params.subgroupId, req.body);
     auditFromReq(req, 'CREATE', 'team', team.id, team.name);
     sendSuccess(res, team, 'Tạo team thành công', 201);

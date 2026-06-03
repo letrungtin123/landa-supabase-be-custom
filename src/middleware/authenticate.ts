@@ -32,7 +32,8 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
     let tenantId = payload.tid;
     const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
 
-    if (headerTenantId && (!tenantId || payload.role === 'superadmin')) {
+    // BẢO MẬT: CHỈ superadmin mới được override tenant qua header
+    if (headerTenantId && payload.role === 'superadmin') {
       tenantId = headerTenantId;
     }
 
@@ -65,7 +66,7 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
       const payload = verifyAccessToken(authHeader.slice(7));
       let tenantId = payload.tid;
       const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
-      if (headerTenantId && (!tenantId || payload.role === 'superadmin')) {
+      if (headerTenantId && payload.role === 'superadmin') {
         tenantId = headerTenantId;
       }
       req.user = {

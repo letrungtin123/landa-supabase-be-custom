@@ -5,6 +5,7 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
+import { reorderSchema } from './course-authoring.validator.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
 /** GET /api/course-authoring/outline/:courseId */
@@ -113,10 +114,10 @@ export async function deleteBlock(req: Request, res: Response) {
 
 /** POST /api/course-authoring/blocks/:blockId/reorder */
 export async function reorderChildren(req: Request, res: Response) {
-  const { children } = req.body;
-  if (!Array.isArray(children)) return sendError(res, 'children array is required', 400);
+  const parsed = reorderSchema.safeParse(req.body);
+  if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
 
-  await svc.reorderChildren(req.params.blockId, children);
+  await svc.reorderChildren(req.params.blockId, parsed.data.children);
   sendSuccess(res, { success: true });
 }
 

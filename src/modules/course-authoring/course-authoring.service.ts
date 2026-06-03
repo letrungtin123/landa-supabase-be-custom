@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { AppError } from '../../middleware/error-handler.js';
 
 // ── Types ──
 
@@ -310,19 +311,28 @@ export async function reorderChildren(
   parentId: string,
   childIds: string[],
 ): Promise<void> {
-  // Update sort_order for each child in a single query
   if (childIds.length === 0) return;
 
-  // Build a VALUES list for efficient batch update
-  const values = childIds.map((id, i) => `('${id}'::uuid, ${i})`).join(', ');
+  // Validate UUID format — chống SQL injection
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  for (const id of childIds) {
+    if (!uuidRegex.test(id)) throw new AppError('Invalid block ID format', 400);
+  }
+
+  // Parameterized VALUES — $1 = parentId, $2/$3 = id/order pairs
+  const params: unknown[] = [parentId];
+  const valuesList = childIds.map((id, i) => {
+    params.push(id, i);
+    return `($${params.length - 1}::uuid, $${params.length}::int)`;
+  }).join(', ');
 
   await query(
     `UPDATE course_blocks AS cb SET
        sort_order = v.new_order,
        updated_at = now()
-     FROM (VALUES ${values}) AS v(block_id, new_order)
+     FROM (VALUES ${valuesList}) AS v(block_id, new_order)
      WHERE cb.id = v.block_id AND cb.parent_id = $1`,
-    [parentId],
+    params,
   );
 }
 
