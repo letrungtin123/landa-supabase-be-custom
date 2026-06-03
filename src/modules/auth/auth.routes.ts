@@ -11,6 +11,8 @@ import {
   getMeController,
   changePasswordController,
   updateProfileController,
+  generateOTTController,
+  exchangeOTTController,
 } from './auth.controller.js';
 
 const router = Router();
@@ -18,12 +20,14 @@ const router = Router();
 // Public endpoints
 router.post('/login', loginController);
 router.post('/refresh', refreshController);
+router.post('/ott/exchange', exchangeOTTController);
 
 // Protected endpoints
 router.post('/logout', authenticate, logoutController);
 router.get('/me', authenticate, getMeController);
 router.post('/change-password', authenticate, changePasswordController);
 router.patch('/profile', authenticate, updateProfileController);
+router.post('/ott/generate', authenticate, generateOTTController);
 
 export default router;
 

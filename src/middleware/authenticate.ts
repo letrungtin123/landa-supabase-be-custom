@@ -8,6 +8,30 @@ import { verifyAccessToken } from '../utils/jwt.js';
 import { sendError } from '../utils/response.js';
 import type { AuthUser } from '../types/express.js';
 
+// ── In-memory blacklist: users cần force re-auth (role đã thay đổi) ──
+// Key = userId, Value = timestamp khi blacklist
+// Entries tự xóa sau TOKEN_BLACKLIST_TTL_MS (= JWT access token lifetime)
+const TOKEN_BLACKLIST_TTL_MS = 16 * 60 * 1000; // 16 phút (> 15m JWT expiry)
+const userBlacklist = new Map<string, number>();
+
+/** Thêm user vào blacklist — gọi khi admin thay đổi role */
+export function blacklistUser(userId: string): void {
+  userBlacklist.set(userId, Date.now());
+}
+
+/** Cleanup expired entries (chạy lazy, không cần interval riêng) */
+function cleanupBlacklist(): void {
+  const now = Date.now();
+  for (const [uid, ts] of userBlacklist) {
+    if (now - ts > TOKEN_BLACKLIST_TTL_MS) {
+      userBlacklist.delete(uid);
+    }
+  }
+}
+
+// Cleanup mỗi 5 phút
+setInterval(cleanupBlacklist, 5 * 60 * 1000);
+
 /**
  * Middleware xác thực JWT.
  * Đọc token từ header "Authorization: Bearer <token>".
@@ -25,6 +49,18 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
 
   try {
     const payload = verifyAccessToken(token);
+
+    // ── Check blacklist: user bị force re-auth (role thay đổi) ──
+    const blacklistedAt = userBlacklist.get(payload.sub);
+    if (blacklistedAt) {
+      // JWT được sign TRƯỚC khi blacklist → reject
+      // JWT được sign SAU blacklist → OK (đã có role mới)
+      const tokenIssuedAt = (payload as any).iat ? (payload as any).iat * 1000 : 0;
+      if (tokenIssuedAt < blacklistedAt) {
+        sendError(res, 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại', 401);
+        return;
+      }
+    }
 
     // Xác định tenant_id:
     // 1. Từ JWT token (tid) — mặc định
@@ -64,6 +100,18 @@ export function optionalAuth(req: Request, _res: Response, next: NextFunction): 
   if (authHeader?.startsWith('Bearer ')) {
     try {
       const payload = verifyAccessToken(authHeader.slice(7));
+
+      // Check blacklist
+      const blacklistedAt = userBlacklist.get(payload.sub);
+      if (blacklistedAt) {
+        const tokenIssuedAt = (payload as any).iat ? (payload as any).iat * 1000 : 0;
+        if (tokenIssuedAt < blacklistedAt) {
+          // Token cũ → bỏ qua, coi như chưa auth
+          next();
+          return;
+        }
+      }
+
       let tenantId = payload.tid;
       const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
       if (headerTenantId && payload.role === 'superadmin') {

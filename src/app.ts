@@ -26,6 +26,7 @@ import reportsRoutes from './modules/reports/reports.routes.js';
 import courseAuthoringRoutes from './modules/course-authoring/course-authoring.routes.js';
 import notificationsRoutes from './modules/notifications/notifications.routes.js';
 import learnerRoutes from './modules/learner/learner.routes.js';
+import storageRoutes from './modules/storage/storage.routes.js';
 import path from 'path';
 
 const app = express();
@@ -91,6 +92,10 @@ app.get('/api/health', async function healthCheck(_req, res) {
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/refresh', authLimiter);
 app.use('/api/auth', authRoutes);
+
+// Storage proxy — TRƯỚC apiLimiter, không cần auth (img tag không gửi Bearer)
+app.use('/api/storage', storageRoutes);
+
 app.use('/api', apiLimiter);                     // general rate limit
 app.use('/api/tenants', tenantsRoutes);
 app.use('/api/users', usersRoutes);

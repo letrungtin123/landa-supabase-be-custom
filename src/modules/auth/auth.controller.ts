@@ -116,3 +116,45 @@ export async function updateProfileController(req: Request, res: Response, next:
     next(err);
   }
 }
+
+/**
+ * POST /api/auth/ott/generate
+ * Tạo One-Time Token cho cross-app SSO.
+ * User phải đã authenticated. OTT sống 30 giây, dùng 1 lần.
+ */
+export async function generateOTTController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+
+    // Chỉ staff/superuser/superadmin mới cần SSO sang admin dashboard
+    if (req.user.role === 'learner') {
+      sendError(res, 'Không có quyền truy cập', 403);
+      return;
+    }
+
+    const token = authService.generateOTT(req.user.id);
+    sendSuccess(res, { ott: token, expires_in: 30 });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/auth/ott/exchange
+ * Exchange OTT → full auth session.
+ * Public endpoint (không cần auth header — OTT là auth).
+ */
+export async function exchangeOTTController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { ott } = req.body;
+    if (!ott || typeof ott !== 'string') {
+      sendError(res, 'Thiếu ott', 400);
+      return;
+    }
+
+    const result = await authService.exchangeOTT(ott);
+    sendSuccess(res, result, 'Đăng nhập thành công');
+  } catch (err) {
+    next(err);
+  }
+}

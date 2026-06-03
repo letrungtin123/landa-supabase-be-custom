@@ -7,6 +7,7 @@ import { query, getClient } from '../../config/database.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+import { blacklistUser } from '../../middleware/authenticate.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 
 /**
@@ -188,16 +189,23 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
-  // If role changed FROM staff/superuser → learner: remove from teams + permission groups
+  // If role changed FROM learner → remove from teams + permission groups
   if (input.role === 'learner' && oldRole && oldRole !== 'learner') {
-    if (oldRole === 'learner') {
-      // Already handled below but just in case
-    }
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
     await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
   } else if (oldRole === 'learner' && input.role !== 'learner') {
-    // From learner → other role: remove from teams (existing behavior)
+    // From learner → other role: remove from teams
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
+  }
+
+  // ── CRITICAL: Revoke ALL refresh tokens khi role thay đổi ──
+  // JWT cũ vẫn chứa role cũ → nếu không revoke, user tiếp tục dùng
+  // token với role cũ nhưng team_members đã bị xóa → API trả rỗng.
+  // Force re-login để nhận JWT với role mới.
+  if (input.role !== undefined && oldRole && input.role !== oldRole) {
+    await query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [userId]);
+    // Blacklist user ngay lập tức — access token cũ bị reject TỨC THÌ
+    blacklistUser(userId);
   }
 
   return result.rows[0];

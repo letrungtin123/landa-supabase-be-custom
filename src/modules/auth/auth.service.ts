@@ -399,6 +399,107 @@ export async function cleanupExpiredTokens(): Promise<number> {
   return result.rowCount ?? 0;
 }
 
+// ── One-Time Token (OTT) — Cross-app SSO ──
+// In-memory store: token → { userId, expiresAt }
+// Dùng để chuyển auth giữa FE 5173 ↔ Admin Dashboard
+// Token tồn tại 30 giây, dùng 1 lần rồi xóa.
+
+const OTT_TTL_MS = 30_000; // 30 giây
+const ottStore = new Map<string, { userId: string; expiresAt: number }>();
+
+// Cleanup expired OTTs mỗi phút
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, data] of ottStore) {
+    if (now > data.expiresAt) ottStore.delete(token);
+  }
+}, 60_000);
+
+/**
+ * Tạo One-Time Token cho user — dùng để cross-app SSO.
+ * User phải đã authenticated (có userId từ JWT).
+ */
+export function generateOTT(userId: string): string {
+  const token = uuidv4();
+  ottStore.set(token, { userId, expiresAt: Date.now() + OTT_TTL_MS });
+  return token;
+}
+
+/**
+ * Exchange OTT → full auth session (access_token + refresh_token).
+ * Token bị xóa ngay sau khi dùng (one-time).
+ */
+export async function exchangeOTT(token: string) {
+  const entry = ottStore.get(token);
+  if (!entry) throw new AppError('Token không hợp lệ hoặc đã hết hạn', 401);
+
+  // Xóa ngay — one-time use
+  ottStore.delete(token);
+
+  // Check hết hạn
+  if (Date.now() > entry.expiresAt) {
+    throw new AppError('Token đã hết hạn', 401);
+  }
+
+  // Lấy user từ DB (giống getMe nhưng tạo token pair)
+  const userResult = await query(
+    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
+            u.role, u.is_active, u.tenant_id,
+            t.name AS tenant_name, t.is_active AS tenant_active
+     FROM users u
+     LEFT JOIN tenants t ON t.id = u.tenant_id
+     WHERE u.id = $1`,
+    [entry.userId],
+  );
+
+  if (userResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  const user = userResult.rows[0];
+  if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
+
+  // Tạo token pair (giống login)
+  const accessToken = signAccessToken({
+    sub: user.id,
+    tid: user.tenant_id,
+    role: user.role,
+    username: user.username,
+  });
+
+  const refreshToken = uuidv4();
+  const refreshHash = hashToken(refreshToken);
+  const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
+
+  await query(
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+    [user.id, refreshHash, refreshExpiresAt],
+  );
+
+  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
+  const tenantModules = await resolveTenantModules(user.tenant_id);
+  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
+    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
+    : [];
+
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      full_name: user.full_name,
+      phone: user.phone,
+      avatar_url: user.avatar_url,
+      role: user.role,
+      tenant_id: user.tenant_id,
+      tenant_name: user.tenant_name,
+    },
+    permissions,
+    tenant_modules: tenantModules,
+    managed_tenants: managedTenants,
+  };
+}
+
 /**
  * Đổi mật khẩu — verify mật khẩu cũ + set mật khẩu mới.
  */
