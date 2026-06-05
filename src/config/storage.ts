@@ -167,7 +167,7 @@ export function buildFileName(originalName: string): string {
  */
 export function buildStoragePath(
   tenantId: string,
-  category: 'avatars' | 'courses' | 'library' | 'help-docs',
+  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding',
   fileName: string,
   subFolder?: string,
 ): string {

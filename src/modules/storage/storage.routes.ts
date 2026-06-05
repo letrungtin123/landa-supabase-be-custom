@@ -84,11 +84,11 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     // Xác định content type
     const contentType = getMimeType(storagePath);
 
-    // Avatars dùng same path khi re-upload (userId.jpg) → cần revalidate
+    // Avatars + branding dùng same path khi re-upload → cần revalidate
     // Các file khác (course assets, docs) thì cache aggressive
-    const isAvatar = storagePath.includes('/avatars/');
+    const needsRevalidate = storagePath.includes('/avatars/') || storagePath.includes('/branding/');
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', isAvatar
+    res.setHeader('Cache-Control', needsRevalidate
       ? 'no-cache, must-revalidate'
       : 'public, max-age=3600, immutable',
     );

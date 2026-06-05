@@ -173,16 +173,14 @@ export async function getCourseBlocks(
   );
   const enrollmentId = enrollResult.rows[0]?.id ?? null;
 
-  // staff/superuser/superadmin: xem draft data (tất cả blocks)
-  // learner: chỉ xem published_data/published_metadata (đã publish)
-  const isLearner = role === 'learner';
-  const publishFilter = isLearner ? 'AND b.is_published = true' : '';
+  // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
+  // Staff/admin muốn xem draft → dùng CMS route, KHÔNG dùng learner route.
+  const isLearner = true;
+  const publishFilter = 'AND b.is_published = true';
 
-  // Learner đọc published_data (snapshot cuối cùng khi publish)
-  // Staff đọc data (bản draft hiện tại)
-  // KHÔNG dùng COALESCE — nếu chưa publish thì learner không thấy content
-  const dataCol = isLearner ? 'b.published_data' : 'b.data';
-  const metaCol = isLearner ? 'COALESCE(b.published_metadata, b.metadata)' : 'b.metadata';
+  // Learner route: luôn đọc published_data/published_metadata
+  const dataCol = 'b.published_data';
+  const metaCol = 'COALESCE(b.published_metadata, b.metadata)';
 
   let sql: string;
   let params: unknown[];
@@ -225,13 +223,14 @@ export async function getCourseBlocks(
 
 /**
  * Lấy chi tiết 1 block đơn lẻ.
- * Learner: trả published_data, Staff/admin: trả draft data.
+ * Learner route → LUÔN trả published_data, bất kể role.
  */
 export async function getBlockDetail(blockId: string, role = 'learner') {
-  const isLearner = role === 'learner';
+  // Learner route: luôn chỉ trả published data
+  const isLearner = true;
   // Learner: chỉ đọc published data (KHÔNG fallback draft)
-  const dataCol = isLearner ? 'b.published_data' : 'b.data';
-  const metaCol = isLearner ? 'COALESCE(b.published_metadata, b.metadata)' : 'b.metadata';
+  const dataCol = 'b.published_data';
+  const metaCol = 'COALESCE(b.published_metadata, b.metadata)';
 
   const result = await query<any>(
     `SELECT b.id, b.parent_id, b.block_type, b.display_name,

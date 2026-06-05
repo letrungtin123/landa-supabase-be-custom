@@ -27,6 +27,7 @@ import courseAuthoringRoutes from './modules/course-authoring/course-authoring.r
 import notificationsRoutes from './modules/notifications/notifications.routes.js';
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
+import brandingRoutes from './modules/branding/branding.routes.js';
 import path from 'path';
 
 const app = express();
@@ -95,6 +96,9 @@ app.use('/api/auth', authRoutes);
 
 // Storage proxy — TRƯỚC apiLimiter, không cần auth (img tag không gửi Bearer)
 app.use('/api/storage', storageRoutes);
+
+// Branding — /by-domain/:domain is public (no auth), rest is protected
+app.use('/api/branding', brandingRoutes);
 
 app.use('/api', apiLimiter);                     // general rate limit
 app.use('/api/tenants', tenantsRoutes);

@@ -19,12 +19,12 @@ export async function listTenants(queryParams: Record<string, unknown>) {
 
   if (search) {
     params.push(`%${search}%`);
-    where = `WHERE name ILIKE $${params.length} OR slug ILIKE $${params.length}`;
+    where = `WHERE name ILIKE $${params.length} OR slug ILIKE $${params.length} OR domain ILIKE $${params.length}`;
   }
 
   params.push(pageSize, offset);
   const result = await query<any>(
-    `SELECT id, name, slug, is_active, settings, created_at, updated_at,
+    `SELECT id, name, slug, domain, is_active, settings, created_at, updated_at,
             COUNT(*) OVER() AS full_count
      FROM tenants ${where}
      ORDER BY created_at DESC
@@ -51,7 +51,7 @@ export async function listTenants(queryParams: Record<string, unknown>) {
  */
 export async function getTenantById(id: string) {
   const result = await query(
-    'SELECT id, name, slug, is_active, settings, created_at, updated_at FROM tenants WHERE id = $1',
+    'SELECT id, name, slug, domain, is_active, settings, created_at, updated_at FROM tenants WHERE id = $1',
     [id],
   );
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
@@ -71,10 +71,10 @@ export async function createTenant(input: CreateTenantInput) {
     await client.query('BEGIN');
 
     const result = await client.query(
-      `INSERT INTO tenants (name, slug, settings)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, slug`,
-      [input.name, input.slug, JSON.stringify(input.settings || {})],
+      `INSERT INTO tenants (name, slug, domain, settings)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, slug, domain`,
+      [input.name, input.slug, input.domain ?? null, JSON.stringify(input.settings || {})],
     );
     const tenant = result.rows[0];
 
@@ -106,6 +106,7 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
 
   if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
   if (input.slug !== undefined) { sets.push(`slug = $${idx++}`); params.push(input.slug); }
+  if (input.domain !== undefined) { sets.push(`domain = $${idx++}`); params.push(input.domain); }
   if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
   if (input.settings !== undefined) { sets.push(`settings = $${idx++}`); params.push(JSON.stringify(input.settings)); }
 
@@ -113,7 +114,7 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
 
   params.push(id);
   const result = await query(
-    `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, is_active`,
+    `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, domain, is_active`,
     params,
   );
 
