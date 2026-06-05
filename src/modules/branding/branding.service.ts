@@ -109,7 +109,9 @@ export async function uploadBrandingImage(
 
   const isCarousel = imageKey.startsWith('carousel_');
   const ext = originalName.substring(originalName.lastIndexOf('.')) || '.png';
-  const storagePath = `${tenantId}/branding/${imageKey}${ext}`;
+  // Thêm timestamp để path luôn unique → tránh browser/CDN cache
+  const ts = Date.now();
+  const storagePath = `${tenantId}/branding/${imageKey}_${ts}${ext}`;
 
   // Xóa file cũ nếu là single image key
   if (!isCarousel && branding[imageKey]) {
