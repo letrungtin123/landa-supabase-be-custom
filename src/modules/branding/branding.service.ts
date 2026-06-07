@@ -29,6 +29,7 @@ export interface BrandingConfig {
 interface BrandingResponse {
   tenant_id: string;
   tenant_name: string;
+  domain_admin: string | null;
   images: Record<string, string | null>;
   carousels: string[];
   size_hints: Record<string, string>;
@@ -63,8 +64,8 @@ async function writeBrandingSettings(tenantId: string, branding: BrandingConfig)
  * FE 5173 gọi trước khi user login.
  */
 export async function getBrandingByDomain(domain: string): Promise<BrandingResponse | null> {
-  const result = await query<{ id: string; name: string; settings: Record<string, unknown> }>(
-    'SELECT id, name, settings FROM tenants WHERE domain = $1 AND is_active = true',
+  const result = await query<{ id: string; name: string; domain_admin: string | null; settings: Record<string, unknown> }>(
+    "SELECT id, name, domain_admin, settings FROM tenants WHERE (domain_learner = $1 OR domain_admin ILIKE '%' || $1 || '%') AND is_active = true",
     [domain],
   );
 
@@ -73,7 +74,7 @@ export async function getBrandingByDomain(domain: string): Promise<BrandingRespo
   const tenant = result.rows[0];
   const branding: BrandingConfig = (tenant.settings as any)?.branding || {};
 
-  return formatBrandingResponse(tenant.id, tenant.name, branding);
+  return formatBrandingResponse(tenant.id, tenant.name, branding, tenant.domain_admin);
 }
 
 /**
@@ -90,7 +91,7 @@ export async function getBrandingByTenantId(tenantId: string): Promise<BrandingR
   const tenant = result.rows[0];
   const branding: BrandingConfig = (tenant.settings as any)?.branding || {};
 
-  return formatBrandingResponse(tenant.id, tenant.name, branding);
+  return formatBrandingResponse(tenant.id, tenant.name, branding, null);
 }
 
 /**
@@ -176,6 +177,7 @@ function formatBrandingResponse(
   tenantId: string,
   tenantName: string,
   branding: BrandingConfig,
+  domainAdmin: string | null,
 ): BrandingResponse {
   const images: Record<string, string | null> = {};
 
@@ -190,6 +192,7 @@ function formatBrandingResponse(
   return {
     tenant_id: tenantId,
     tenant_name: tenantName,
+    domain_admin: domainAdmin,
     images,
     carousels: carouselPaths,
     size_hints: { ...IMAGE_SIZE_HINTS },

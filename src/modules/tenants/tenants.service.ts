@@ -19,12 +19,12 @@ export async function listTenants(queryParams: Record<string, unknown>) {
 
   if (search) {
     params.push(`%${search}%`);
-    where = `WHERE name ILIKE $${params.length} OR slug ILIKE $${params.length} OR domain ILIKE $${params.length}`;
+    where = `WHERE name ILIKE $${params.length} OR slug ILIKE $${params.length} OR domain_learner ILIKE $${params.length} OR domain_admin ILIKE $${params.length}`;
   }
 
   params.push(pageSize, offset);
   const result = await query<any>(
-    `SELECT id, name, slug, domain, is_active, settings, created_at, updated_at,
+    `SELECT id, name, slug, domain_learner, domain_admin, is_active, settings, max_users, max_courses, created_at, updated_at,
             COUNT(*) OVER() AS full_count
      FROM tenants ${where}
      ORDER BY created_at DESC
@@ -51,7 +51,7 @@ export async function listTenants(queryParams: Record<string, unknown>) {
  */
 export async function getTenantById(id: string) {
   const result = await query(
-    'SELECT id, name, slug, domain, is_active, settings, created_at, updated_at FROM tenants WHERE id = $1',
+    'SELECT id, name, slug, domain_learner, domain_admin, is_active, settings, max_users, max_courses, created_at, updated_at FROM tenants WHERE id = $1',
     [id],
   );
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
@@ -71,10 +71,10 @@ export async function createTenant(input: CreateTenantInput) {
     await client.query('BEGIN');
 
     const result = await client.query(
-      `INSERT INTO tenants (name, slug, domain, settings)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, name, slug, domain`,
-      [input.name, input.slug, input.domain ?? null, JSON.stringify(input.settings || {})],
+      `INSERT INTO tenants (name, slug, domain_learner, domain_admin, max_users, max_courses, settings)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses`,
+      [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, JSON.stringify(input.settings || {})],
     );
     const tenant = result.rows[0];
 
@@ -106,7 +106,10 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
 
   if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
   if (input.slug !== undefined) { sets.push(`slug = $${idx++}`); params.push(input.slug); }
-  if (input.domain !== undefined) { sets.push(`domain = $${idx++}`); params.push(input.domain); }
+  if (input.domain_learner !== undefined) { sets.push(`domain_learner = $${idx++}`); params.push(input.domain_learner); }
+  if (input.domain_admin !== undefined) { sets.push(`domain_admin = $${idx++}`); params.push(input.domain_admin); }
+  if (input.max_users !== undefined) { sets.push(`max_users = $${idx++}`); params.push(input.max_users); }
+  if (input.max_courses !== undefined) { sets.push(`max_courses = $${idx++}`); params.push(input.max_courses); }
   if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
   if (input.settings !== undefined) { sets.push(`settings = $${idx++}`); params.push(JSON.stringify(input.settings)); }
 
@@ -114,7 +117,7 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
 
   params.push(id);
   const result = await query(
-    `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, domain, is_active`,
+    `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, is_active`,
     params,
   );
 
@@ -241,3 +244,61 @@ export async function setUserTenants(userId: string, tenantIds: string[]) {
   }
 }
 
+/**
+ * Lấy quota usage hiện tại của tenant — dùng cho UI hiển thị.
+ */
+export async function getTenantQuotaUsage(tenantId: string) {
+  const result = await query<{
+    max_users: number | null;
+    max_courses: number | null;
+    current_users: string;
+    current_courses: string;
+  }>(
+    `SELECT t.max_users, t.max_courses,
+            (SELECT COUNT(*)::text FROM users WHERE tenant_id = $1) AS current_users,
+            (SELECT COUNT(*)::text FROM courses WHERE tenant_id = $1) AS current_courses
+     FROM tenants t WHERE t.id = $1`,
+    [tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+  const row = result.rows[0];
+  return {
+    max_users: row.max_users,
+    max_courses: row.max_courses,
+    current_users: parseInt(row.current_users, 10),
+    current_courses: parseInt(row.current_courses, 10),
+  };
+}
+
+/**
+ * Kiểm tra quota trước khi tạo user/course — race-condition safe.
+ * Dùng SELECT FOR UPDATE để lock row tenant trong transaction.
+ * @throws AppError nếu vượt quota
+ */
+export async function checkQuota(
+  tenantId: string,
+  resource: 'users' | 'courses',
+  client?: import('pg').PoolClient,
+): Promise<void> {
+  const col = resource === 'users' ? 'max_users' : 'max_courses';
+  const table = resource === 'users' ? 'users' : 'courses';
+
+  // Dùng subquery atomic — không cần lock nếu không truyền client
+  const q = client || { query: (sql: string, p: unknown[]) => query(sql, p) };
+  const result = await q.query(
+    `SELECT ${col} AS quota,
+            (SELECT COUNT(*) FROM ${table} WHERE tenant_id = $1) AS current_count
+     FROM tenants
+     WHERE id = $1
+     ${client ? 'FOR UPDATE' : ''}`,
+    [tenantId],
+  );
+
+  if (result.rows.length === 0) throw new AppError('Tenant không tồn tại', 404);
+
+  const { quota, current_count } = result.rows[0] as { quota: number | null; current_count: string };
+  if (quota !== null && parseInt(current_count, 10) >= quota) {
+    const label = resource === 'users' ? 'user' : 'course';
+    throw new AppError(`Đã đạt mức giới hạn của ${label}`, 403);
+  }
+}

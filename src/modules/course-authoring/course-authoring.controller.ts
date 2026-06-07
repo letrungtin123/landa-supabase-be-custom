@@ -200,6 +200,10 @@ export async function createCourse(req: Request, res: Response) {
   const safeRun = run || 'default';
   const courseId = `course-v1:${safeOrg}+${safeNumber}+${safeRun}`;
 
+  // ── Kiểm tra quota course cho tenant ──
+  const { checkQuota } = await import('../tenants/tenants.service.js');
+  await checkQuota(tenantId, 'courses');
+
   // Insert into courses table
   const { query: dbQuery } = await import('../../config/database.js');
   await dbQuery(

@@ -88,6 +88,14 @@ export async function listSimpleController(req: Request, res: Response, next: Ne
   } catch (err) { next(err); }
 }
 
+/** GET /api/tenants/:id/quota — Quota usage hiện tại (superadmin only) */
+export async function getQuotaController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const usage = await tenantsService.getTenantQuotaUsage(req.params.id);
+    sendSuccess(res, usage);
+  } catch (err) { next(err); }
+}
+
 /** GET /api/tenants/user-tenants/:userId — Tenants mà user được quản lý */
 export async function getUserTenantsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {

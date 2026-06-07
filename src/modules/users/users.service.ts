@@ -121,11 +121,17 @@ export async function getUserById(userId: string) {
 }
 
 /**
- * Tạo user mới — hash password + kiểm tra unique.
+ * Tạo user mới — hash password + kiểm tra unique + kiểm tra quota.
  */
 export async function createUser(input: CreateUserInput, callerTenantId: string | null) {
   // Determine tenant: superadmin có thể chỉ định, user khác dùng tenant mình
   const tenantId = input.tenant_id || callerTenantId;
+
+  // ── Kiểm tra quota user cho tenant ──
+  if (tenantId) {
+    const { checkQuota } = await import('../tenants/tenants.service.js');
+    await checkQuota(tenantId, 'users');
+  }
 
   // Kiểm tra username/email unique (global — không phân theo tenant)
   const existing = await query(

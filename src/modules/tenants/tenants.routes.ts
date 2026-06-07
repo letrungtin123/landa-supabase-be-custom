@@ -13,6 +13,7 @@ import {
   deleteController,
   getModulesController,
   updateModulesController,
+  getQuotaController,
   listSimpleController,
   getUserTenantsController,
   setUserTenantsController,
@@ -34,6 +35,7 @@ router.put('/:id', authorize('superadmin'), updateController);
 router.delete('/:id', authorize('superadmin'), deleteController);
 router.get('/:id/modules', authorize('superadmin'), getModulesController);
 router.put('/:id/modules', authorize('superadmin'), updateModulesController);
+router.get('/:id/quota', authorize('superadmin'), getQuotaController);
 
 // ── User-Tenants — superadmin only ──
 router.get('/user-tenants/:userId', authorize('superadmin'), getUserTenantsController);

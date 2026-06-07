@@ -28,6 +28,10 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
 }
 
 export async function createCourse(tenantId: string, input: { id: string; display_name: string; org?: string; visible_to_staff_only?: boolean; image_url?: string; start_date?: string; end_date?: string }) {
+  // ── Kiểm tra quota course cho tenant ──
+  const { checkQuota } = await import('../tenants/tenants.service.js');
+  await checkQuota(tenantId, 'courses');
+
   const result = await query(
     `INSERT INTO courses (id, tenant_id, display_name, org, visible_to_staff_only, image_url, start_date, end_date)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
