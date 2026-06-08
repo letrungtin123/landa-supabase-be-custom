@@ -2,11 +2,14 @@
 // Supabase Storage — Upload / Delete / Public URL helpers
 // ═══════════════════════════════════════════════════════════════
 // Tất cả file uploads đi qua utility này.
+// Download helper dùng cho worker (download temp file).
 // Bucket: 'landa-storage' (public)
 // Path pattern: {tenant_id}/{category}/{...}
 
 import { createClient } from '@supabase/supabase-js';
 import { env } from './env.js';
+import fs from 'fs/promises';
+import path from 'path';
 
 // ── Supabase admin client (service_role — bypass RLS) ──
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
@@ -167,7 +170,7 @@ export function buildFileName(originalName: string): string {
  */
 export function buildStoragePath(
   tenantId: string,
-  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding',
+  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding' | 'kb-documents' | 'kb-files' | 'kb-faqs' | 'kb-articles' | 'prompt-mascots',
   fileName: string,
   subFolder?: string,
 ): string {
@@ -175,6 +178,35 @@ export function buildStoragePath(
   if (subFolder) parts.push(subFolder);
   parts.push(fileName);
   return parts.join('/');
+}
+
+/**
+ * Download a file from Supabase Storage to a local temp path.
+ * Used by RabbitMQ workers to get files for Gemini upload.
+ * @returns Absolute path to the temp file.
+ */
+export async function downloadToTempFile(
+  storagePath: string,
+  tempDir: string,
+): Promise<string> {
+  await ensureBucket();
+
+  // Ensure temp dir exists
+  await fs.mkdir(tempDir, { recursive: true });
+
+  const { data, error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .download(storagePath);
+
+  if (error || !data) {
+    throw new Error(`[Storage] Download failed (${storagePath}): ${error?.message || 'No data'}`);
+  }
+
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const fileName = storagePath.split('/').pop() || `tmp_${Date.now()}`;
+  const tempPath = path.resolve(tempDir, `${Date.now()}_${fileName}`);
+  await fs.writeFile(tempPath, buffer);
+  return tempPath;
 }
 
 /**

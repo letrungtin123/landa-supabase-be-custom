@@ -68,6 +68,12 @@ export const env = {
   SUPABASE_URL: required('SUPABASE_URL'),
   SUPABASE_SERVICE_KEY: required('SUPABASE_SERVICE_KEY'),
 
+  // RabbitMQ (mandatory — crash if missing)
+  RABBITMQ_URL: required('RABBITMQ_URL'),
+
+  // Gemini temp directory (optional — default ./tmp/gemini)
+  GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
+
   /** Kiểm tra môi trường production */
   get isProduction(): boolean {
     return env.NODE_ENV === 'production';

@@ -28,6 +28,8 @@ import notificationsRoutes from './modules/notifications/notifications.routes.js
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
 import brandingRoutes from './modules/branding/branding.routes.js';
+import aiChatbotRoutes from './modules/ai-chatbot/ai-chatbot.routes.js';
+import promptTemplatesRoutes from './modules/prompt-templates/prompt-templates.routes.js';
 import path from 'path';
 
 const app = express();
@@ -116,6 +118,8 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/course-authoring', courseAuthoringRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/learner', learnerRoutes);
+app.use('/api/ai-chatbot', aiChatbotRoutes);
+app.use('/api/prompt-templates', promptTemplatesRoutes);
 
 // ── 404 Handler ──
 app.use(function notFoundHandler(_req, res) {
