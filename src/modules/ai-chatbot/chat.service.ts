@@ -62,6 +62,203 @@ async function getCachedStoreName(kbId: string): Promise<string | null> {
   return name;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Course Context — Structure injection + Function Calling
+// Optimized: single-query outline build, 5-min LRU cache,
+// HTML strip, truncation, lazy content fetch via Gemini tool
+// ═══════════════════════════════════════════════════════════════
+
+interface CourseOutlineEntry {
+  id: string;
+  display_name: string;
+  block_type: string;
+  parent_id: string | null;
+  sort_order: number;
+}
+
+interface CourseOutlineCache {
+  outline: string;         // formatted text for system prompt
+  courseName: string;
+  lessonIds: Set<string>;  // valid sequential IDs for validation
+  ts: number;
+}
+
+const courseOutlineCache = new Map<string, CourseOutlineCache>();
+const COURSE_CACHE_TTL = 5 * 60_000; // 5 minutes
+const MAX_LESSON_CONTENT_CHARS = 6000; // truncate lesson content
+
+// Cleanup course cache every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of courseOutlineCache) {
+    if (now - val.ts > COURSE_CACHE_TTL * 2) courseOutlineCache.delete(key);
+  }
+}, 10 * 60_000);
+
+/** Strip HTML tags → plain text, collapse whitespace */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Build course outline for system prompt injection.
+ * Single indexed query → cached 5 minutes.
+ * Only fetches structural blocks (course/chapter/sequential) — O(1) per message after cache.
+ */
+async function getCachedCourseOutline(courseId: string): Promise<CourseOutlineCache | null> {
+  const cached = courseOutlineCache.get(courseId);
+  if (cached && Date.now() - cached.ts < COURSE_CACHE_TTL) return cached;
+
+  // Single query: only structural block types, indexed by course_id + sort_order
+  const result = await query<CourseOutlineEntry>(
+    `SELECT id, display_name, block_type, parent_id, sort_order
+     FROM course_blocks
+     WHERE course_id = $1
+       AND block_type IN ('course', 'chapter', 'sequential')
+       AND is_published = true
+     ORDER BY sort_order`,
+    [courseId],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) return null;
+
+  const rows = result.rows;
+  const courseBlock = rows.find(r => r.block_type === 'course');
+  const courseName = courseBlock?.display_name || 'Khóa học';
+
+  // Build parent→children map
+  const childrenOf = new Map<string, CourseOutlineEntry[]>();
+  for (const r of rows) {
+    if (!r.parent_id) continue;
+    const arr = childrenOf.get(r.parent_id) || [];
+    arr.push(r);
+    childrenOf.set(r.parent_id, arr);
+  }
+
+  // Format outline
+  const lessonIds = new Set<string>();
+  let outline = `=== KHÓA HỌC: ${courseName} ===\n\n`;
+
+  const chapters = rows.filter(r => r.block_type === 'chapter');
+  chapters.forEach((ch, ci) => {
+    outline += `Phần ${ci + 1}: ${ch.display_name}\n`;
+    const sequentials = childrenOf.get(ch.id) || [];
+    sequentials.forEach((seq, si) => {
+      outline += `  - Bài ${ci + 1}.${si + 1}: ${seq.display_name} [lesson_id: ${seq.id}]\n`;
+      lessonIds.add(seq.id);
+    });
+  });
+
+  outline += '\n===';
+
+  const entry: CourseOutlineCache = { outline, courseName, lessonIds, ts: Date.now() };
+  courseOutlineCache.set(courseId, entry);
+  return entry;
+}
+
+/**
+ * Fetch content of a specific lesson (sequential → verticals → leaf blocks).
+ * Strips HTML, truncates to MAX_LESSON_CONTENT_CHARS.
+ * Not cached — only called when Gemini requests via function calling.
+ */
+async function fetchLessonContent(courseId: string, lessonId: string): Promise<string> {
+  // CTE: get all descendant blocks of this sequential
+  const result = await query<{ display_name: string; block_type: string; data: any }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id, display_name, block_type, published_data AS data, sort_order
+       FROM course_blocks
+       WHERE id = $1 AND course_id = $2 AND is_published = true
+       UNION ALL
+       SELECT cb.id, cb.display_name, cb.block_type, cb.published_data AS data, cb.sort_order
+       FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.is_published = true
+     )
+     SELECT display_name, block_type, data
+     FROM descendants
+     WHERE block_type NOT IN ('sequential', 'vertical')
+     ORDER BY sort_order`,
+    [lessonId, courseId],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) {
+    return 'Bài học này chưa có nội dung.';
+  }
+
+  let content = '';
+  for (const row of result.rows) {
+    const label = row.display_name || '';
+    let text = '';
+
+    if (row.block_type === 'html' && row.data) {
+      // HTML block: data can be string or { data: string }
+      const raw = typeof row.data === 'string' ? row.data
+        : (row.data as any)?.data || (row.data as any)?.html || JSON.stringify(row.data);
+      text = stripHtml(raw);
+    } else if (row.block_type === 'video') {
+      text = `[Video: ${label}]`;
+    } else if (row.block_type === 'problem') {
+      text = `[Bài tập: ${label}]`;
+    } else {
+      text = `[${row.block_type}: ${label}]`;
+    }
+
+    if (text) {
+      if (label && !text.startsWith('[')) content += `\n### ${label}\n`;
+      content += text + '\n';
+    }
+
+    // Early exit if already long enough
+    if (content.length > MAX_LESSON_CONTENT_CHARS) break;
+  }
+
+  // Truncate
+  if (content.length > MAX_LESSON_CONTENT_CHARS) {
+    content = content.slice(0, MAX_LESSON_CONTENT_CHARS) + '\n... (nội dung đã được rút gọn)';
+  }
+
+  return content.trim() || 'Bài học này chưa có nội dung.';
+}
+
+/** Gemini function declarations for course context — two functions force reliable routing */
+const COURSE_TOOLS = {
+  functionDeclarations: [
+    {
+      name: 'get_lesson_content',
+      description: 'Lấy nội dung chi tiết của một bài học cụ thể trong khóa học hiện tại. GỌI FUNCTION NÀY khi người dùng hỏi về nội dung, phần, bài, chủ đề trong khóa học.',
+      parameters: {
+        type: 'OBJECT' as const,
+        properties: {
+          lesson_id: {
+            type: 'STRING' as const,
+            description: 'ID của bài học (lesson_id trong cấu trúc khóa học)',
+          },
+        },
+        required: ['lesson_id'],
+      },
+    },
+    {
+      name: 'respond_directly',
+      description: 'Trả lời trực tiếp KHÔNG cần nội dung khóa học. Chỉ dùng khi câu hỏi HOÀN TOÀN không liên quan đến khóa học hiện tại.',
+      parameters: {
+        type: 'OBJECT' as const,
+        properties: {},
+      },
+    },
+  ],
+};
+
 // ── Types ──
 export interface ChatConversation {
   id: string;
@@ -411,6 +608,7 @@ export async function sendMessageStream(
   userId: string,
   tenantId: string,
   userContent: string,
+  courseId: string | undefined,
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (err: Error) => void,
@@ -454,47 +652,123 @@ export async function sendMessageStream(
     // 5. Build Gemini config with correct fileSearch tool format
     const aiClient = await getGeminiClient(ctx.tenantId);
 
-    // Build tools — use cached store name
-    const tools: any[] = [];
+    // Build fileSearch tools — separate from function calling (Gemini doesn't allow combining)
+    const fileSearchTools: any[] = [];
     if (ctx.botKbId) {
       const storeName = await getCachedStoreName(ctx.botKbId);
       if (storeName) {
-        tools.push({
+        fileSearchTools.push({
           fileSearch: {
-            fileSearchStoreNames: [storeName],  // CORRECT format for @google/genai
+            fileSearchStoreNames: [storeName],
           },
         });
       }
     }
 
+    // 5b. Course context — inject outline + function calling tool
+    let enrichedPrompt = ctx.systemPrompt;
+    let hasCourseContext = false;
+    if (courseId && typeof courseId === 'string' && courseId.length > 0) {
+      try {
+        const courseOutline = await getCachedCourseOutline(courseId);
+        console.log(`[Chat] courseId=${courseId}, outline=${courseOutline ? 'found' : 'null'}, lessons=${courseOutline?.lessonIds.size || 0}`);
+        if (courseOutline) {
+          hasCourseContext = true;
+          enrichedPrompt += `\n\n${courseOutline.outline}\n\nQUAN TRỌNG: Người dùng HIỆN TẠI đang xem khóa học "${courseOutline.courseName}". Khi người dùng hỏi về "phần", "bài", hoặc nội dung học, hãy LUÔN dùng tool get_lesson_content để lấy nội dung chi tiết bài học TRƯỚC KHI trả lời. Bỏ qua mọi ngữ cảnh khóa học khác trong lịch sử hội thoại — chỉ dùng khóa học hiện tại ở trên. Nếu câu hỏi không liên quan đến khóa học, trả lời bình thường.`;
+        }
+      } catch (err) {
+        console.error('[Chat] Course outline error (ignored):', (err as Error).message);
+      }
+    }
+
     // 6. Stream Gemini response with retry on 503
+    //    Gemini constraint: fileSearch + functionDeclarations CANNOT be in the same request.
+    //    Strategy when course context is active:
+    //      Step 1: non-streaming call with ONLY functionDeclarations → check if function call
+    //      Step 2a: if function call → fetch lesson content → streaming call with function result (no tools)
+    //      Step 2b: if no function call → streaming call with fileSearch tools (KB fallback)
+    //    Without course context: direct streaming with fileSearch (original flow).
     let fullResponse = '';
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
       try {
         if (attempt > 0) {
-          // Parse retry delay from Gemini 429 response if available
           const suggestedDelay = parseRetryDelay(lastError);
           const delay = suggestedDelay || (GEMINI_RETRY_DELAY_MS * attempt);
           console.log(`[Chat] Retry attempt ${attempt}/${GEMINI_MAX_RETRIES} for ${conversationId}, waiting ${Math.round(delay / 1000)}s`);
           await sleep(delay);
         }
 
-        const response = await aiClient.models.generateContentStream({
-          model: GEMINI_MODEL,
-          contents: history,
-          config: {
-            systemInstruction: ctx.systemPrompt,
-            ...(tools.length > 0 ? { tools } : {}),
-          },
-        });
+        if (hasCourseContext) {
+          // ── Two-step flow: forced function calling (mode=ANY) ──
+          // Gemini MUST choose: get_lesson_content OR respond_directly
+          const firstResponse = await aiClient.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: history,
+            config: {
+              systemInstruction: enrichedPrompt,
+              tools: [COURSE_TOOLS] as any,
+              toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
+            },
+          });
 
-        for await (const chunk of response) {
-          const text = chunk.text ?? '';
-          if (text) {
-            fullResponse += text;
-            onChunk(text);
+          const fnCall = firstResponse.functionCalls?.[0];
+          console.log(`[Chat] Function chosen: ${fnCall?.name || 'none'}, args: ${JSON.stringify(fnCall?.args || {})}`);
+
+          if (fnCall?.name === 'get_lesson_content' && fnCall.args?.lesson_id) {
+            // Gemini identified a course-related question → fetch lesson content
+            const lessonContent = await fetchLessonContent(courseId!, fnCall.args.lesson_id as string);
+            console.log(`[Chat] Fetched lesson content: ${lessonContent.length} chars`);
+
+            // Step 2: streaming with function result (no tools needed)
+            const secondResponse = await aiClient.models.generateContentStream({
+              model: GEMINI_MODEL,
+              contents: [
+                ...history,
+                { role: 'model', parts: [{ functionCall: fnCall }] },
+                { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
+              ],
+              config: { systemInstruction: enrichedPrompt },
+            });
+
+            for await (const chunk of secondResponse) {
+              const text = chunk.text ?? '';
+              if (text) { fullResponse += text; onChunk(text); }
+            }
+          } else {
+            // respond_directly OR no function call → not about course content
+            // Stream with fileSearch KB (if available)
+            const fallbackConfig: any = {
+              systemInstruction: enrichedPrompt,
+              ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
+            };
+            const fallbackResponse = await aiClient.models.generateContentStream({
+              model: GEMINI_MODEL,
+              contents: history,
+              config: fallbackConfig,
+            });
+
+            for await (const chunk of fallbackResponse) {
+              const text = chunk.text ?? '';
+              if (text) { fullResponse += text; onChunk(text); }
+            }
+          }
+        } else {
+          // ── Original flow: direct streaming with fileSearch (no course context) ──
+          const config: any = {
+            systemInstruction: enrichedPrompt,
+            ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
+          };
+          const response = await aiClient.models.generateContentStream({
+            model: GEMINI_MODEL,
+            contents: history,
+            config,
+          });
+
+          for await (const chunk of response) {
+            const text = chunk.text ?? '';
+            if (text) { fullResponse += text; onChunk(text); }
           }
         }
 

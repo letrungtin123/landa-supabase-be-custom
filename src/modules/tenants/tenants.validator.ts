@@ -4,10 +4,10 @@
 
 import { z } from 'zod';
 
-/** Sanitize domain: chỉ 1 hostname duy nhất (không http://, port, dấu phẩy) */
+/** Sanitize domain: full URL với protocol (http:// hoặc https://), bỏ trailing slash */
 const domainField = z.string().max(255)
-  .transform(s => s.trim().toLowerCase())
-  .pipe(z.string().regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/, 'Chỉ nhập hostname. Ví dụ: lms.nesso.com.vn'))
+  .transform(s => s.trim().replace(/\/+$/, ''))
+  .pipe(z.string().regex(/^https?:\/\/[a-z0-9]([a-z0-9.:@-]*[a-z0-9])?$/i, 'Nhập đầy đủ URL. Ví dụ: https://lms.nesso.com.vn'))
   .nullable().optional();
 
 export const createTenantSchema = z.object({

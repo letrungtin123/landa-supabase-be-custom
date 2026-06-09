@@ -9,6 +9,12 @@ import * as chatService from './chat.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_TARGETS = ['admin', 'learner'];
+
+function resolveTarget(req: Request): string {
+  const t = (req.query.target as string) || 'admin';
+  return VALID_TARGETS.includes(t) ? t : 'admin';
+}
 
 // ── Bot Assignments ──
 
@@ -56,8 +62,9 @@ export async function unassignBot(req: Request, res: Response): Promise<void> {
 
 export async function getActiveBot(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
+  const target = resolveTarget(req);
   try {
-    const bot = await chatService.getActiveBot(tenantId, 'admin');
+    const bot = await chatService.getActiveBot(tenantId, target);
     sendSuccess(res, bot);
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -69,7 +76,8 @@ export async function listConversations(req: Request, res: Response): Promise<vo
   const tenantId = req.user!.tenantId!;
 
   try {
-    const activeBot = await chatService.getActiveBot(tenantId, 'admin');
+    const target = resolveTarget(req);
+    const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendSuccess(res, []); return; }
 
     const conversations = await chatService.listConversations(userId, activeBot.bot_id, tenantId);
@@ -87,7 +95,8 @@ export async function createConversation(req: Request, res: Response): Promise<v
   }
 
   try {
-    const activeBot = await chatService.getActiveBot(tenantId, 'admin');
+    const target = resolveTarget(req);
+    const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendError(res, 'Chưa có bot nào được kích hoạt', 400); return; }
 
     const conversation = await chatService.createConversation(userId, tenantId, activeBot.bot_id, persona_id);
@@ -138,7 +147,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content } = req.body ?? {};
+  const { content, courseId } = req.body ?? {};
 
   if (!UUID_REGEX.test(conversationId)) {
     sendError(res, 'ID không hợp lệ', 400); return;
@@ -171,6 +180,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     userId,
     tenantId,
     content,
+    courseId || undefined,
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });
     },
