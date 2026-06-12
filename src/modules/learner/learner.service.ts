@@ -879,6 +879,17 @@ export async function getMyBadges(userId: string) {
   return result.rows;
 }
 
+export async function getActiveBadges(tenantId: string) {
+  const result = await query<any>(
+    `SELECT b.id
+     FROM badge_definitions b
+     LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
+     WHERE COALESCE(tbs.is_active, true) = true`,
+    [tenantId]
+  );
+  return result.rows.map(r => r.id);
+}
+
 export async function saveBadge(userId: string, badgeId: string) {
   await query(
     `INSERT INTO user_badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,

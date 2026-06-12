@@ -217,6 +217,20 @@ export async function listBadges(req: Request, res: Response, next: NextFunction
   }
 }
 
+/** GET /api/learner/badges/active */
+export async function getActiveBadges(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+
+    const result = await learnerService.getActiveBadges(tenantId);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 /** POST /api/learner/badges */
 export async function saveBadge(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {

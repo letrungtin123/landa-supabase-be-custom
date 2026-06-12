@@ -49,6 +49,7 @@ router.get('/progress/:courseId', ctrl.getProgress);
 
 // ── Badges ──
 router.get('/badges', ctrl.listBadges);
+router.get('/badges/active', ctrl.getActiveBadges);
 router.post('/badges', ctrl.saveBadge);
 router.patch('/badges', ctrl.updateBadge);
 
