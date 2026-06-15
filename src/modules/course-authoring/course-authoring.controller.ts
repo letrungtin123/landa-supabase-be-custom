@@ -8,6 +8,78 @@ import * as svc from './course-authoring.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
+function extractYoutubeId(input: unknown): string {
+  const value = typeof input === 'string' ? input.trim() : '';
+  if (!value) return '';
+  if (/^[a-zA-Z0-9_-]{11}$/.test(value)) return value;
+
+  const patterns = [
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?[^#]*v=([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match) return match[1];
+  }
+  return '';
+}
+
+function isSafeCourseAssetPath(src: unknown): src is string {
+  if (typeof src !== 'string') return false;
+  const value = src.trim();
+  if (!value || value.length > 1000) return false;
+  const lower = value.toLowerCase();
+  if (
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('//') ||
+    lower.startsWith('data:') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('javascript:')
+  ) return false;
+  if (!value.includes('/courses/')) return false;
+  return !/[<>"'`\\]/.test(value);
+}
+
+function sanitizeProblemMedia(raw: any) {
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  const youtubeId = extractYoutubeId(raw.youtube_id || raw.youtube_url || raw.video_url);
+  const images = Array.isArray(raw.images)
+    ? raw.images
+        .map((img: any) => ({
+          src: typeof img?.src === 'string' ? img.src.trim() : '',
+          alt: typeof img?.alt === 'string' ? img.alt.replace(/[<>]/g, '').slice(0, 200) : '',
+        }))
+        .filter((img: any) => isSafeCourseAssetPath(img.src))
+        .slice(0, 20)
+    : [];
+
+  if (!youtubeId && images.length === 0) return undefined;
+
+  return {
+    ...(youtubeId ? {
+      youtube_id: youtubeId,
+      youtube_url: `https://www.youtube.com/watch?v=${youtubeId}`,
+    } : {}),
+    images,
+  };
+}
+
+function sanitizeMetadata(metadata: any) {
+  if (!metadata || typeof metadata !== 'object') return undefined;
+  const next = { ...metadata };
+  if ('problem_media' in next) {
+    const media = sanitizeProblemMedia(next.problem_media);
+    if (media) next.problem_media = media;
+    else delete next.problem_media;
+  }
+  return next;
+}
+
 /** GET /api/course-authoring/outline/:courseId */
 export async function getOutline(req: Request, res: Response) {
   try {
@@ -94,7 +166,7 @@ export async function updateBlock(req: Request, res: Response) {
     const result = await svc.updateBlock(req.params.blockId, {
       display_name: resolvedName,
       data,
-      metadata: metadata ? { ...metadata } : undefined,
+      metadata: sanitizeMetadata(metadata),
     });
     sendSuccess(res, result);
   } catch (err: any) {

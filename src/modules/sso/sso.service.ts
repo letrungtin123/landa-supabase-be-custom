@@ -35,6 +35,10 @@ const DEFAULT_SCOPES: Record<SsoProvider, string[]> = {
   microsoft365: ['openid', 'email', 'profile'],
 };
 
+function hasInputField(input: UpdateSsoConfigInput, field: keyof UpdateSsoConfigInput): boolean {
+  return Object.prototype.hasOwnProperty.call(input, field);
+}
+
 function normalizeDomain(domain: string): string {
   return domain
     .trim()
@@ -166,12 +170,12 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
       tenantId,
       provider,
       input.is_enabled ?? current?.is_enabled ?? false,
-      input.client_id ?? current?.client_id ?? null,
+      hasInputField(input, 'client_id') ? input.client_id : current?.client_id ?? null,
       encryptedSecret,
-      input.issuer_url ?? current?.issuer_url ?? null,
-      input.authorization_url ?? current?.authorization_url ?? null,
-      input.token_url ?? current?.token_url ?? null,
-      input.userinfo_url ?? current?.userinfo_url ?? null,
+      hasInputField(input, 'issuer_url') ? input.issuer_url : current?.issuer_url ?? null,
+      hasInputField(input, 'authorization_url') ? input.authorization_url : current?.authorization_url ?? null,
+      hasInputField(input, 'token_url') ? input.token_url : current?.token_url ?? null,
+      hasInputField(input, 'userinfo_url') ? input.userinfo_url : current?.userinfo_url ?? null,
       scopes,
       JSON.stringify(extraConfig),
     ],
