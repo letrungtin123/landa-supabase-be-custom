@@ -31,6 +31,7 @@ import brandingRoutes from './modules/branding/branding.routes.js';
 import aiChatbotRoutes from './modules/ai-chatbot/ai-chatbot.routes.js';
 import promptTemplatesRoutes from './modules/prompt-templates/prompt-templates.routes.js';
 import badgesRoutes from './modules/badges/badges.routes.js';
+import ssoRoutes from './modules/sso/sso.routes.js';
 import path from 'path';
 
 const app = express();
@@ -122,6 +123,7 @@ app.use('/api/learner', learnerRoutes);
 app.use('/api/ai-chatbot', aiChatbotRoutes);
 app.use('/api/prompt-templates', promptTemplatesRoutes);
 app.use('/api/badges', badgesRoutes);
+app.use('/api/sso', ssoRoutes);
 
 // ── 404 Handler ──
 app.use(function notFoundHandler(_req, res) {

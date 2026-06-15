@@ -244,6 +244,68 @@ export async function logout(refreshToken: string): Promise<void> {
 /**
  * Lấy thông tin user hiện tại + permissions.
  */
+export async function issueSessionForUserId(userId: string) {
+  const userResult = await query(
+    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
+            u.role, u.is_active, u.tenant_id,
+            t.name AS tenant_name, t.is_active AS tenant_active
+     FROM users u
+     LEFT JOIN tenants t ON t.id = u.tenant_id
+     WHERE u.id = $1`,
+    [userId],
+  );
+
+  if (userResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  const user = userResult.rows[0];
+  if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
+  if (user.role !== 'superadmin' && user.tenant_id && !user.tenant_active) {
+    throw new AppError('Tổ chức đã bị vô hiệu hóa', 403);
+  }
+
+  const accessToken = signAccessToken({
+    sub: user.id,
+    tid: user.tenant_id,
+    role: user.role,
+    username: user.username,
+  });
+
+  const refreshToken = uuidv4();
+  const refreshHash = hashToken(refreshToken);
+  const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
+
+  await query(
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
+    [user.id, refreshHash, refreshExpiresAt],
+  );
+  await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+
+  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
+  const tenantModules = await resolveTenantModules(user.tenant_id);
+  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
+    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
+    : [];
+
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    user: {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      full_name: user.full_name,
+      phone: user.phone,
+      avatar_url: user.avatar_url,
+      role: user.role,
+      tenant_id: user.tenant_id,
+      tenant_name: user.tenant_name,
+    },
+    permissions,
+    tenant_modules: tenantModules,
+    managed_tenants: managedTenants,
+  };
+}
+
 export async function getMe(userId: string) {
   const result = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,

@@ -71,6 +71,9 @@ export const env = {
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
 
+  // SSO config encryption (optional until SSO secrets are configured)
+  SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',
+
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 
