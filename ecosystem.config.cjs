@@ -2,13 +2,14 @@ module.exports = {
   apps: [
     {
       name: "landa-refactor-backend",
-      cwd: "D:\\LANDA-PROD-NEW-REFACTOR\\landa-backend",
-      script: "dist/index.js",
+      cwd: __dirname,
+      script: "./dist/index.js",
       interpreter: "node",
-      node_args: "-r dotenv/config",
       env: {
-        NODE_ENV: "production",
-        DOTENV_CONFIG_PATH: ".env.production"
+        NODE_ENV: "production"
+      },
+      env_production: {
+        NODE_ENV: "production"
       }
     }
   ]
