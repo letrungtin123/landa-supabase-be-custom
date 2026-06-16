@@ -19,7 +19,7 @@ export async function loginController(req: Request, res: Response, next: NextFun
       return;
     }
 
-    const result = await authService.login(parsed.data.username, parsed.data.password);
+    const result = await authService.login(parsed.data.username, parsed.data.password, parsed.data.client_app);
 
     sendSuccess(res, result, 'Đăng nhập thành công');
   } catch (err) {

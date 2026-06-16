@@ -31,6 +31,7 @@ export const exchangeSsoCodeSchema = z.object({
   code: z.string().min(8).max(8000),
   redirect_uri: z.string().url(),
   code_verifier: z.string().min(32).max(256).optional(),
+  client_app: z.enum(['admin', 'learner']).optional(),
 });
 
 export type UpdateSsoConfigInput = z.infer<typeof updateSsoConfigSchema>;

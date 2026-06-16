@@ -23,6 +23,11 @@ interface ProviderProfile {
   name?: string;
 }
 
+interface ResolvedSsoUser {
+  userId: string;
+  role: string;
+}
+
 const PROVIDER_LABELS: Record<SsoProvider, string> = {
   google: 'Google',
   keycloak: 'Keycloak',
@@ -46,6 +51,14 @@ function normalizeDomain(domain: string): string {
     .replace(/^https?:\/\//, '')
     .replace(/\/.*$/, '')
     .replace(/:\d+$/, '');
+}
+
+function normalizeUrlHost(value: string): string {
+  try {
+    return normalizeDomain(new URL(value).hostname);
+  } catch {
+    return normalizeDomain(value);
+  }
 }
 
 function compactConfig(row?: SsoConfigRow | null) {
@@ -310,7 +323,7 @@ async function createLearnerFromProfile(
   provider: SsoProvider,
   profile: ProviderProfile,
   autoActivate: boolean,
-): Promise<string> {
+): Promise<ResolvedSsoUser> {
   const { checkQuota } = await import('../tenants/tenants.service.js');
   await checkQuota(tenantId, 'users');
 
@@ -339,12 +352,12 @@ async function createLearnerFromProfile(
     throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
   }
 
-  return userId;
+  return { userId, role: 'learner' };
 }
 
-async function resolveUserForProfile(tenantId: string, provider: SsoProvider, profile: ProviderProfile, config: SsoConfigRow): Promise<string> {
-  const identity = await query<{ user_id: string; is_active: boolean }>(
-    `SELECT i.user_id, u.is_active
+async function resolveUserForProfile(tenantId: string, provider: SsoProvider, profile: ProviderProfile, config: SsoConfigRow): Promise<ResolvedSsoUser> {
+  const identity = await query<{ user_id: string; role: string; is_active: boolean }>(
+    `SELECT i.user_id, u.role, u.is_active
      FROM sso_user_identities i
      JOIN users u ON u.id = i.user_id
      WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_subject = $3
@@ -355,7 +368,7 @@ async function resolveUserForProfile(tenantId: string, provider: SsoProvider, pr
     if (!identity.rows[0].is_active) {
       throw new AppError('Tài khoản SSO đang chờ duyệt hoặc đã bị vô hiệu hóa', 403);
     }
-    return identity.rows[0].user_id;
+    return { userId: identity.rows[0].user_id, role: identity.rows[0].role };
   }
 
   const user = await query<{ id: string; tenant_id: string | null; role: string; is_active: boolean }>(
@@ -386,12 +399,34 @@ async function resolveUserForProfile(tenantId: string, provider: SsoProvider, pr
      DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email, updated_at = now()`,
     [tenantId, userId, provider, profile.sub, profile.email],
   );
-  return userId;
+  return { userId, role: existingUser.role };
+}
+
+async function inferSsoClientApp(tenantId: string, redirectUri: string): Promise<'admin' | 'learner' | null> {
+  const redirectHost = normalizeUrlHost(redirectUri);
+  if (!redirectHost) return null;
+
+  const tenant = await query<{ domain_admin: string | null; domain_learner: string | null }>(
+    'SELECT domain_admin, domain_learner FROM tenants WHERE id = $1 LIMIT 1',
+    [tenantId],
+  );
+  if (tenant.rowCount === 0) return null;
+
+  const row = tenant.rows[0];
+  if (row.domain_admin && normalizeUrlHost(row.domain_admin) === redirectHost) return 'admin';
+  if (row.domain_learner && normalizeUrlHost(row.domain_learner) === redirectHost) return 'learner';
+  return null;
 }
 
 export async function exchangeSsoCode(provider: SsoProvider, input: ExchangeSsoCodeInput) {
   const config = await getEnabledConfig(input.tenant_id, provider);
   const profile = await exchangeCodeForProfile(config, input);
-  const userId = await resolveUserForProfile(input.tenant_id, provider, profile, config);
-  return issueSessionForUserId(userId);
+  const user = await resolveUserForProfile(input.tenant_id, provider, profile, config);
+  const clientApp = input.client_app ?? await inferSsoClientApp(input.tenant_id, input.redirect_uri);
+
+  if (clientApp === 'admin' && user.role === 'learner') {
+    throw new AppError('Tài khoản learner chỉ được truy cập trang học viên', 403);
+  }
+
+  return issueSessionForUserId(user.userId);
 }

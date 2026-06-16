@@ -21,7 +21,7 @@ function hashToken(token: string): string {
  * Đăng nhập — verify password, tạo token pair.
  * Trả về access_token, refresh_token, user info, permissions.
  */
-export async function login(username: string, password: string) {
+export async function login(username: string, password: string, clientApp?: 'admin' | 'learner') {
   // Tìm user theo username hoặc email (1 query duy nhất)
   const userResult = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
@@ -50,6 +50,10 @@ export async function login(username: string, password: string) {
   const valid = await comparePassword(password, user.password_hash);
   if (!valid) {
     throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+  }
+
+  if (clientApp === 'admin' && user.role === 'learner') {
+    throw new AppError('Tài khoản learner chỉ được truy cập trang học viên', 403);
   }
 
   // learner: phải có tenant_id hợp lệ + tenant active
