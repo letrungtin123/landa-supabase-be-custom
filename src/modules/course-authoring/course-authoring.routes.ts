@@ -42,6 +42,7 @@ router.post('/blocks/:blockId/handler/studio_submit', checkPermission('courses',
 // Assets
 router.get('/assets/:courseId', checkPermission('courses', 'can_view'), ctrl.getAssets);
 router.post('/assets/:courseId', checkPermission('courses', 'can_edit'), upload.single('file'), ctrl.uploadAsset);
+router.post('/assets/:courseId/delete-by-path', checkPermission('courses', 'can_edit'), ctrl.deleteAssetByPath);
 router.delete('/assets/:courseId/:assetId', checkPermission('courses', 'can_delete'), ctrl.deleteAsset);
 
 export default router;

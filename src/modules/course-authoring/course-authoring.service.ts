@@ -509,6 +509,22 @@ export async function deleteAsset(assetId: string): Promise<{ storage_path: stri
   return result.rows[0] ?? null;
 }
 
+export async function deleteAssetByStoragePath(
+  courseId: string,
+  tenantId: string,
+  storagePath: string,
+): Promise<{ storage_path: string }[]> {
+  const result = await query<{ storage_path: string }>(
+    `DELETE FROM course_assets
+     WHERE course_id = $1
+       AND tenant_id = $2
+       AND (storage_path = $3 OR url = $3)
+     RETURNING storage_path`,
+    [courseId, tenantId, storagePath],
+  );
+  return result.rows;
+}
+
 // ── Course Creation with Root Block ──
 
 export async function initializeCourseStructure(

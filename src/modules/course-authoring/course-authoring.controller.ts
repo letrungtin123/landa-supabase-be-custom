@@ -69,6 +69,28 @@ function sanitizeProblemMedia(raw: any) {
   };
 }
 
+function sanitizeHtmlMedia(raw: any) {
+  if (!raw || typeof raw !== 'object') return undefined;
+
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const images = Array.isArray(raw.images)
+    ? raw.images
+        .map((img: any) => {
+          const src = typeof img?.src === 'string' ? img.src.trim() : '';
+          return {
+            src,
+            alt: typeof img?.alt === 'string' ? img.alt.replace(/[<>]/g, '').slice(0, 200) : '',
+            ...(typeof img?.asset_id === 'string' && uuidRegex.test(img.asset_id) ? { asset_id: img.asset_id } : {}),
+          };
+        })
+        .filter((img: any) => isSafeCourseAssetPath(img.src))
+        .slice(0, 50)
+    : [];
+
+  if (images.length === 0) return undefined;
+  return { images };
+}
+
 function sanitizeMetadata(metadata: any) {
   if (!metadata || typeof metadata !== 'object') return undefined;
   const next = { ...metadata };
@@ -76,6 +98,11 @@ function sanitizeMetadata(metadata: any) {
     const media = sanitizeProblemMedia(next.problem_media);
     if (media) next.problem_media = media;
     else delete next.problem_media;
+  }
+  if ('html_media' in next) {
+    const media = sanitizeHtmlMedia(next.html_media);
+    if (media) next.html_media = media;
+    else delete next.html_media;
   }
   return next;
 }
@@ -257,6 +284,31 @@ export async function deleteAsset(req: Request, res: Response) {
   }
 
   sendSuccess(res, { success: true });
+}
+
+/** POST /api/course-authoring/assets/:courseId/delete-by-path */
+export async function deleteAssetByPath(req: Request, res: Response) {
+  const { courseId } = req.params;
+  const tenantId = req.user!.tenantId!;
+  const storagePath = typeof req.body?.storage_path === 'string'
+    ? req.body.storage_path.trim()
+    : typeof req.body?.storagePath === 'string'
+      ? req.body.storagePath.trim()
+      : '';
+
+  if (!isSafeCourseAssetPath(storagePath)) {
+    return sendError(res, 'Invalid storage path', 400);
+  }
+
+  const deleted = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
+  await Promise.allSettled(
+    deleted
+      .map((row) => row.storage_path)
+      .filter(Boolean)
+      .map((path) => deleteFile(path)),
+  );
+
+  sendSuccess(res, { success: true, deleted: deleted.length });
 }
 
 /** POST /api/course-authoring/courses — Create course + root block */
