@@ -5,6 +5,7 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
+import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
@@ -204,7 +205,9 @@ export async function updateBlock(req: Request, res: Response) {
 /** DELETE /api/course-authoring/blocks/:blockId */
 export async function deleteBlock(req: Request, res: Response) {
   try {
-    await svc.deleteBlock(req.params.blockId);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) return sendError(res, 'tenant_id is required', 400);
+    await requestBlockDeletion(req.params.blockId, tenantId, req.user!.id);
     sendSuccess(res, { success: true });
   } catch (err: any) {
     sendError(res, err.message, 404);

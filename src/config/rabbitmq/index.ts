@@ -10,4 +10,5 @@ export { consume } from './consumer.js';
 export const QUEUES = {
   GEMINI_UPLOAD: process.env.GEMINI_UPLOAD_QUEUE || 'LANDA_GEMINI_UPLOAD',
   GEMINI_DELETE: process.env.GEMINI_DELETE_QUEUE || 'LANDA_GEMINI_DELETE',
+  COURSE_DELETE: process.env.COURSE_DELETE_QUEUE || 'LANDA_COURSE_DELETE',
 } as const;

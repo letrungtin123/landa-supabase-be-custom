@@ -22,7 +22,7 @@ export async function getMyVisibleCourses(
   const { search, page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
   const sqlParams: unknown[] = [tenantId];
-  let where = 'WHERE c.tenant_id = $1';
+  let where = 'WHERE c.tenant_id = $1 AND c.deleted_at IS NULL';
 
   // learner: chỉ thấy courses assign qua team → category → course
   // Path: team_members → team_course_categories → course_category_courses
@@ -117,7 +117,7 @@ export async function getCourseDetail(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
             c.visible_to_staff_only, c.created_at
      FROM courses c
-     WHERE c.id = $1 AND c.tenant_id = $2`,
+     WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
     [courseId, tenantId],
   );
 
@@ -166,6 +166,12 @@ export async function getCourseBlocks(
   userId: string,
   role = 'learner',
 ) {
+  const courseCheck = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
+    [courseId],
+  );
+  if (courseCheck.rowCount === 0) throw new AppError('KhÃ³a há»c khÃ´ng tá»“n táº¡i', 404);
+
   // Lấy enrollment_id (nếu có) để join block_completions
   const enrollResult = await query<{ id: string }>(
     `SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1`,
@@ -186,22 +192,52 @@ export async function getCourseBlocks(
   let params: unknown[];
 
   if (enrollmentId) {
-    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+    sql = `WITH RECURSIVE active_tree AS (
+             SELECT b.id, b.parent_id, b.block_type, b.display_name,
+                    b.published_data, b.published_metadata, b.metadata,
+                    b.sort_order, b.is_published
+             FROM course_blocks b
+             WHERE b.course_id = $1
+               AND b.parent_id IS NULL
+               AND b.deleted_at IS NULL ${publishFilter}
+             UNION ALL
+             SELECT child.id, child.parent_id, child.block_type, child.display_name,
+                    child.published_data, child.published_metadata, child.metadata,
+                    child.sort_order, child.is_published
+             FROM course_blocks child
+             JOIN active_tree parent ON parent.id = child.parent_id
+             WHERE child.deleted_at IS NULL AND child.is_published = true
+           )
+           SELECT b.id, b.parent_id, b.block_type, b.display_name,
                   ${dataCol} AS data, ${metaCol} AS metadata,
                   b.sort_order, b.is_published,
                   CASE WHEN bc.id IS NOT NULL THEN true ELSE false END AS completed
-           FROM course_blocks b
+           FROM active_tree b
            LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $2
-           WHERE b.course_id = $1 ${publishFilter}
            ORDER BY b.sort_order`;
     params = [courseId, enrollmentId];
   } else {
-    sql = `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+    sql = `WITH RECURSIVE active_tree AS (
+             SELECT b.id, b.parent_id, b.block_type, b.display_name,
+                    b.published_data, b.published_metadata, b.metadata,
+                    b.sort_order, b.is_published
+             FROM course_blocks b
+             WHERE b.course_id = $1
+               AND b.parent_id IS NULL
+               AND b.deleted_at IS NULL ${publishFilter}
+             UNION ALL
+             SELECT child.id, child.parent_id, child.block_type, child.display_name,
+                    child.published_data, child.published_metadata, child.metadata,
+                    child.sort_order, child.is_published
+             FROM course_blocks child
+             JOIN active_tree parent ON parent.id = child.parent_id
+             WHERE child.deleted_at IS NULL AND child.is_published = true
+           )
+           SELECT b.id, b.parent_id, b.block_type, b.display_name,
                   ${dataCol} AS data, ${metaCol} AS metadata,
                   b.sort_order, b.is_published,
                   false AS completed
-           FROM course_blocks b
-           WHERE b.course_id = $1 ${publishFilter}
+           FROM active_tree b
            ORDER BY b.sort_order`;
     params = [courseId];
   }
@@ -233,11 +269,24 @@ export async function getBlockDetail(blockId: string, role = 'learner') {
   const metaCol = 'COALESCE(b.published_metadata, b.metadata)';
 
   const result = await query<any>(
-    `SELECT b.id, b.parent_id, b.block_type, b.display_name,
+    `WITH RECURSIVE ancestors AS (
+       SELECT id, parent_id, deleted_at
+       FROM course_blocks
+       WHERE id = $1
+       UNION ALL
+       SELECT parent.id, parent.parent_id, parent.deleted_at
+       FROM course_blocks parent
+       JOIN ancestors a ON parent.id = a.parent_id
+     )
+     SELECT b.id, b.parent_id, b.block_type, b.display_name,
             ${dataCol} AS data, ${metaCol} AS metadata,
             b.sort_order, b.is_published
      FROM course_blocks b
-     WHERE b.id = $1`,
+     JOIN courses c ON c.id = b.course_id
+     WHERE b.id = $1
+       AND b.deleted_at IS NULL
+       AND c.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
     [blockId],
   );
 
@@ -257,11 +306,26 @@ export async function submitBlockAnswer(
 ) {
   // Lấy block data — luôn dùng published data để grading (tránh learner exploit draft)
   const blockResult = await query<any>(
-    `SELECT b.id, b.block_type,
+    `WITH RECURSIVE ancestors AS (
+       SELECT id, parent_id, deleted_at
+       FROM course_blocks
+       WHERE id = $1
+       UNION ALL
+       SELECT parent.id, parent.parent_id, parent.deleted_at
+       FROM course_blocks parent
+       JOIN ancestors a ON parent.id = a.parent_id
+     )
+     SELECT b.id, b.block_type,
             COALESCE(b.published_data, b.data) AS data,
             COALESCE(b.published_metadata, b.metadata) AS metadata,
             b.course_id
-     FROM course_blocks b WHERE b.id = $1 AND b.is_published = true`,
+     FROM course_blocks b
+     JOIN courses c ON c.id = b.course_id
+     WHERE b.id = $1
+       AND b.is_published = true
+       AND b.deleted_at IS NULL
+       AND c.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
     [blockId],
   );
 
@@ -528,7 +592,9 @@ export async function getCourseFiles(courseId: string, role = 'learner') {
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, created_at
      FROM course_assets
-     WHERE course_id = $1 ${lockedFilter}
+     WHERE course_id = $1
+       AND EXISTS (SELECT 1 FROM courses c WHERE c.id = course_assets.course_id AND c.deleted_at IS NULL)
+       ${lockedFilter}
      ORDER BY created_at DESC`,
     [courseId],
   );
@@ -724,7 +790,7 @@ export async function getMyEnrollments(userId: string, tenantId: string) {
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true
+     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true AND c.deleted_at IS NULL
      ORDER BY e.enrolled_at DESC`,
     [userId, tenantId],
   );
@@ -739,7 +805,7 @@ export async function getMyEnrollments(userId: string, tenantId: string) {
 export async function selfEnroll(userId: string, courseId: string, tenantId: string) {
   // Kiểm tra course tồn tại trong tenant
   const course = await query<any>(
-    'SELECT id FROM courses WHERE id = $1 AND tenant_id = $2',
+    'SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
     [courseId, tenantId],
   );
   if (course.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
@@ -789,7 +855,14 @@ export async function markBlocksComplete(
 
   // Lấy enrollment
   const enrollment = await query<{ id: string }>(
-    `SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2 AND is_active = true LIMIT 1`,
+    `SELECT e.id
+     FROM enrollments e
+     JOIN courses c ON c.id = e.course_id
+     WHERE e.user_id = $1
+       AND e.course_id = $2
+       AND e.is_active = true
+       AND c.deleted_at IS NULL
+     LIMIT 1`,
     [userId, courseId],
   );
 
@@ -799,17 +872,49 @@ export async function markBlocksComplete(
 
   const enrollmentId = enrollment.rows[0].id;
 
+  const activeBlocks = await query<{ id: string }>(
+    `WITH RECURSIVE ancestors AS (
+       SELECT id AS root_id, id, parent_id, deleted_at
+       FROM course_blocks
+       WHERE id = ANY($2::uuid[])
+       UNION ALL
+       SELECT a.root_id, parent.id, parent.parent_id, parent.deleted_at
+       FROM course_blocks parent
+       JOIN ancestors a ON parent.id = a.parent_id
+     )
+     SELECT b.id
+     FROM course_blocks b
+     WHERE b.course_id = $1
+       AND b.id = ANY($2::uuid[])
+       AND b.is_published = true
+       AND b.deleted_at IS NULL
+       AND b.block_type NOT IN ('course','chapter','sequential','vertical')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM ancestors a
+         WHERE a.root_id = b.id
+           AND a.deleted_at IS NOT NULL
+       )`,
+    [courseId, blockIds],
+  );
+  const activeBlockIds = activeBlocks.rows.map((row) => row.id);
+
+  if (activeBlockIds.length === 0) {
+    await recalculateProgress(enrollmentId, courseId);
+    return { marked: 0 };
+  }
+
   // Batch insert completions (ON CONFLICT skip)
-  const values = blockIds.map((_, i) => `($1, $${i + 2})`).join(', ');
+  const values = activeBlockIds.map((_, i) => `($1, $${i + 2})`).join(', ');
   await query(
     `INSERT INTO block_completions (enrollment_id, block_id) VALUES ${values} ON CONFLICT DO NOTHING`,
-    [enrollmentId, ...blockIds],
+    [enrollmentId, ...activeBlockIds],
   );
 
   // Tính lại progress: completed_leaves / total_leaves
   await recalculateProgress(enrollmentId, courseId);
 
-  return { marked: blockIds.length };
+  return { marked: activeBlockIds.length };
 }
 
 /**
@@ -818,12 +923,28 @@ export async function markBlocksComplete(
  */
 async function recalculateProgress(enrollmentId: string, courseId: string) {
   const result = await query<{ total: string; completed: string }>(
-    `SELECT
+    `WITH RECURSIVE active_tree AS (
+       SELECT b.id, b.parent_id, b.block_type
+       FROM course_blocks b
+       JOIN courses c ON c.id = b.course_id
+       WHERE b.course_id = $2
+         AND b.parent_id IS NULL
+         AND b.is_published = true
+         AND b.deleted_at IS NULL
+         AND c.deleted_at IS NULL
+       UNION ALL
+       SELECT child.id, child.parent_id, child.block_type
+       FROM course_blocks child
+       JOIN active_tree parent ON parent.id = child.parent_id
+       WHERE child.is_published = true
+         AND child.deleted_at IS NULL
+     )
+     SELECT
        COUNT(*) FILTER (WHERE b.block_type NOT IN ('course','chapter','sequential','vertical')) AS total,
        COUNT(*) FILTER (WHERE b.block_type NOT IN ('course','chapter','sequential','vertical') AND bc.id IS NOT NULL) AS completed
-     FROM course_blocks b
+     FROM active_tree b
      LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $1
-     WHERE b.course_id = $2 AND b.is_published = true`,
+     `,
     [enrollmentId, courseId],
   );
 
@@ -850,7 +971,9 @@ export async function getMyProgress(userId: string, courseId: string) {
     `SELECT cp.progress, cp.is_completed, cp.completed_at, cp.last_activity_at
      FROM course_progress cp
      JOIN enrollments e ON e.id = cp.enrollment_id
+     JOIN courses c ON c.id = e.course_id
      WHERE e.user_id = $1 AND e.course_id = $2 AND e.is_active = true
+       AND c.deleted_at IS NULL
      LIMIT 1`,
     [userId, courseId],
   );

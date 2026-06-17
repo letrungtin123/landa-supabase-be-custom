@@ -70,18 +70,33 @@ export async function getCourseOutline(
 ): Promise<CourseOutlineResponse> {
   // Verify course belongs to tenant
   const courseCheck = await query<{ id: string; display_name: string }>(
-    `SELECT id, display_name FROM courses WHERE id = $1 AND tenant_id = $2`,
+    `SELECT id, display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
     [courseId, tenantId],
   );
   if (courseCheck.rowCount === 0) throw new Error('Course not found');
 
   // Get all blocks for this course in one query (avoid N+1)
   const blocksResult = await query<BlockInfo>(
-    `SELECT id, course_id, parent_id, block_type, display_name,
+    `WITH RECURSIVE active_tree AS (
+       SELECT id, course_id, parent_id, block_type, display_name,
+              data, metadata, sort_order, is_published, has_draft_changes,
+              created_at, updated_at
+       FROM course_blocks
+       WHERE course_id = $1
+         AND parent_id IS NULL
+         AND deleted_at IS NULL
+       UNION ALL
+       SELECT child.id, child.course_id, child.parent_id, child.block_type, child.display_name,
+              child.data, child.metadata, child.sort_order, child.is_published, child.has_draft_changes,
+              child.created_at, child.updated_at
+       FROM course_blocks child
+       JOIN active_tree parent ON parent.id = child.parent_id
+       WHERE child.deleted_at IS NULL
+     )
+     SELECT id, course_id, parent_id, block_type, display_name,
             data, metadata, sort_order, is_published, has_draft_changes,
             created_at, updated_at
-     FROM course_blocks
-     WHERE course_id = $1
+     FROM active_tree
      ORDER BY sort_order ASC, created_at ASC`,
     [courseId],
   );
@@ -142,10 +157,21 @@ export async function createBlock(
   data?: any,
   metadata?: any,
 ): Promise<{ id: string }> {
+  const courseCheck = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
+    [courseId],
+  );
+  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+
+  if (parentId) {
+    const parent = await getBlockInfo(parentId);
+    if (parent.course_id !== courseId) throw new AppError('Parent block not found', 404);
+  }
+
   // Get next sort_order
   const maxResult = await query<{ max_order: number }>(
     `SELECT COALESCE(MAX(sort_order), -1) + 1 AS max_order
-     FROM course_blocks WHERE course_id = $1 AND ${parentId ? 'parent_id = $2' : 'parent_id IS NULL'}`,
+     FROM course_blocks WHERE course_id = $1 AND deleted_at IS NULL AND ${parentId ? 'parent_id = $2' : 'parent_id IS NULL'}`,
     parentId ? [courseId, parentId] : [courseId],
   );
   const sortOrder = maxResult.rows[0]?.max_order ?? 0;
@@ -186,10 +212,24 @@ function getDefaultName(blockType: string): string {
 
 export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
   const result = await query<BlockInfo>(
-    `SELECT id, course_id, parent_id, block_type, display_name,
-            data, metadata, sort_order, is_published, has_draft_changes,
-            created_at, updated_at
-     FROM course_blocks WHERE id = $1`,
+    `WITH RECURSIVE ancestors AS (
+       SELECT id, parent_id, deleted_at
+       FROM course_blocks
+       WHERE id = $1
+       UNION ALL
+       SELECT parent.id, parent.parent_id, parent.deleted_at
+       FROM course_blocks parent
+       JOIN ancestors a ON parent.id = a.parent_id
+     )
+     SELECT b.id, b.course_id, b.parent_id, b.block_type, b.display_name,
+            b.data, b.metadata, b.sort_order, b.is_published, b.has_draft_changes,
+            b.created_at, b.updated_at
+     FROM course_blocks b
+     JOIN courses c ON c.id = b.course_id
+     WHERE b.id = $1
+       AND b.deleted_at IS NULL
+       AND c.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
     [blockId],
   );
   if (result.rowCount === 0) throw new Error('Block not found');
@@ -205,6 +245,8 @@ export async function updateBlock(
     is_published?: boolean;
   },
 ): Promise<BlockInfo> {
+  await getBlockInfo(blockId);
+
   const setClauses: string[] = ['updated_at = now()'];
   const params: any[] = [blockId];
   let paramIdx = 2;
@@ -232,7 +274,7 @@ export async function updateBlock(
   }
 
   const result = await query<BlockInfo>(
-    `UPDATE course_blocks SET ${setClauses.join(', ')} WHERE id = $1
+    `UPDATE course_blocks SET ${setClauses.join(', ')} WHERE id = $1 AND deleted_at IS NULL
      RETURNING id, course_id, parent_id, block_type, display_name,
                data, metadata, sort_order, is_published, has_draft_changes,
                created_at, updated_at`,
@@ -259,14 +301,14 @@ export async function updateBlock(
 async function markAncestorsDirty(blockId: string): Promise<void> {
   await query(
     `WITH RECURSIVE ancestors AS (
-       SELECT parent_id FROM course_blocks WHERE id = $1 AND parent_id IS NOT NULL
+       SELECT parent_id FROM course_blocks WHERE id = $1 AND parent_id IS NOT NULL AND deleted_at IS NULL
        UNION ALL
        SELECT cb.parent_id FROM course_blocks cb
        JOIN ancestors a ON cb.id = a.parent_id
-       WHERE cb.parent_id IS NOT NULL
+       WHERE cb.parent_id IS NOT NULL AND cb.deleted_at IS NULL
      )
      UPDATE course_blocks SET has_draft_changes = true, updated_at = now()
-     WHERE id IN (SELECT parent_id FROM ancestors)`,
+     WHERE id IN (SELECT parent_id FROM ancestors) AND deleted_at IS NULL`,
     [blockId],
   );
 }
@@ -276,14 +318,17 @@ export async function renameBlock(blockId: string, displayName: string): Promise
 }
 
 export async function publishBlock(blockId: string): Promise<BlockInfo> {
+  await getBlockInfo(blockId);
+
   // Cascade: publish block + tất cả children (recursive) trong 1 query
   // Copy data → published_data, metadata → published_metadata (giống edX draft/published branches)
   await query(
     `WITH RECURSIVE descendants AS (
-       SELECT id FROM course_blocks WHERE id = $1
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
        UNION ALL
        SELECT cb.id FROM course_blocks cb
        JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
      )
      UPDATE course_blocks
      SET is_published = true,
@@ -291,7 +336,7 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
          published_data = data,
          published_metadata = metadata,
          updated_at = now()
-     WHERE id IN (SELECT id FROM descendants)`,
+     WHERE id IN (SELECT id FROM descendants) AND deleted_at IS NULL`,
     [blockId],
   );
 
@@ -299,12 +344,8 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
 }
 
 export async function deleteBlock(blockId: string): Promise<void> {
-  // CASCADE will delete children automatically
-  const result = await query(
-    `DELETE FROM course_blocks WHERE id = $1`,
-    [blockId],
-  );
-  if ((result.rowCount ?? 0) === 0) throw new Error('Block not found');
+  void blockId;
+  throw new AppError('Use course deletion queue for block delete', 400);
 }
 
 export async function reorderChildren(
@@ -312,6 +353,7 @@ export async function reorderChildren(
   childIds: string[],
 ): Promise<void> {
   if (childIds.length === 0) return;
+  await getBlockInfo(parentId);
 
   // Validate UUID format — chống SQL injection
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -331,7 +373,7 @@ export async function reorderChildren(
        sort_order = v.new_order,
        updated_at = now()
      FROM (VALUES ${valuesList}) AS v(block_id, new_order)
-     WHERE cb.id = v.block_id AND cb.parent_id = $1`,
+     WHERE cb.id = v.block_id AND cb.parent_id = $1 AND cb.deleted_at IS NULL`,
     params,
   );
 }
@@ -339,11 +381,13 @@ export async function reorderChildren(
 // ── Unit Children ──
 
 export async function getUnitChildren(unitId: string): Promise<{ children: UnitChild[] }> {
+  await getBlockInfo(unitId);
+
   const result = await query<UnitChild>(
     `SELECT id, id AS block_id, display_name, block_type,
             has_draft_changes AS has_changes, is_published AS published
      FROM course_blocks
-     WHERE parent_id = $1
+     WHERE parent_id = $1 AND deleted_at IS NULL
      ORDER BY sort_order ASC, created_at ASC`,
     [unitId],
   );
@@ -443,7 +487,11 @@ export async function getCourseAssets(
   textSearch = '',
 ): Promise<{ start: number; end: number; page: number; pageSize: number; totalCount: number; assets: AssetRecord[] }> {
   const offset = page * pageSize;
-  const conditions: string[] = ['ca.course_id = $1', 'ca.tenant_id = $2'];
+  const conditions: string[] = [
+    'ca.course_id = $1',
+    'ca.tenant_id = $2',
+    'EXISTS (SELECT 1 FROM courses c WHERE c.id = ca.course_id AND c.deleted_at IS NULL)',
+  ];
   const params: any[] = [courseId, tenantId];
   let paramIdx = 3;
 

@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { AppError } from '../../middleware/error-handler.js';
 
 // ── Types ──
 
@@ -39,6 +40,13 @@ export async function enrollUser(
   courseId: string,
   tenantId: string,
 ): Promise<{ enrollment_id: string; already_enrolled: boolean }> {
+  // Guard: course must exist and not be soft-deleted
+  const courseCheck = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
+    [courseId],
+  );
+  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+
   // Check if already enrolled
   const existing = await query<{ id: string }>(
     `SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2`,
@@ -76,6 +84,13 @@ export async function bulkEnroll(
   tenantId: string,
 ): Promise<{ enrolled: number; skipped: number }> {
   if (userIds.length === 0) return { enrolled: 0, skipped: 0 };
+
+  // Guard: course must exist and not be soft-deleted
+  const courseCheck = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
+    [courseId],
+  );
+  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
 
   // Batch insert using unnest, skip existing
   const result = await query<{ id: string }>(
@@ -198,7 +213,7 @@ export async function getUserEnrollments(
   const countResult = await query<{ count: string }>(
     `SELECT COUNT(*) AS count
      FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
+     JOIN courses c ON c.id = e.course_id AND c.deleted_at IS NULL
      WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}`,
     params.slice(0, search ? 5 : 4).filter((_, i) => i < 2 || i === 4),
   );
@@ -210,7 +225,7 @@ export async function getUserEnrollments(
             cp.completed_at, cp.last_activity_at,
             c.display_name AS course_name, c.image_url AS course_image
      FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
+     JOIN courses c ON c.id = e.course_id AND c.deleted_at IS NULL
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}
      ORDER BY e.enrolled_at DESC
@@ -239,6 +254,7 @@ export async function getCourseEnrollments(
     'e.course_id = $1',
     'e.tenant_id = $2',
     'e.is_active = true',
+    'c.deleted_at IS NULL',
   ];
   const params: any[] = [courseId, tenantId];
   let paramIdx = 3;
@@ -264,6 +280,7 @@ export async function getCourseEnrollments(
   const countResult = await query<{ count: string }>(
     `SELECT COUNT(*) AS count
      FROM enrollments e
+     JOIN courses c ON c.id = e.course_id
      JOIN users u ON u.id = e.user_id
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      WHERE ${whereClause}`,
@@ -279,6 +296,7 @@ export async function getCourseEnrollments(
             cp.completed_at, cp.last_activity_at,
             u.username, u.email, u.full_name, u.avatar_url
      FROM enrollments e
+     JOIN courses c ON c.id = e.course_id
      JOIN users u ON u.id = e.user_id
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      WHERE ${whereClause}

@@ -1,13 +1,9 @@
-// ═══════════════════════════════════════════════════════════════
-// Courses Controller
-// ═══════════════════════════════════════════════════════════════
-
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './courses.service.js';
+import { requestCourseDeletion } from '../course-deletion/course-deletion.service.js';
 import { createCourseSchema, updateCourseSchema, bulkActionSchema } from './courses.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
-import { deleteFile } from '../../config/storage.js';
 
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -19,12 +15,12 @@ export async function listController(req: Request, res: Response, next: NextFunc
 export async function createController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     const parsed = createCourseSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const course = await svc.createCourse(tenantId, req.body);
     auditFromReq(req, 'CREATE', 'course', course.id, course.display_name);
-    sendSuccess(res, course, 'Tạo course thành công', 201);
+    sendSuccess(res, course, 'Course created', 201);
   } catch (err) { next(err); }
 }
 
@@ -56,14 +52,14 @@ export async function updateModalConfigController(req: Request, res: Response, n
   try {
     await svc.upsertCourseModalConfig(req.params.id, req.body);
     auditFromReq(req, 'UPDATE', 'course_modal_config', req.params.id);
-    sendSuccess(res, null, 'Cập nhật thành công');
+    sendSuccess(res, null, 'Updated');
   } catch (err) { next(err); }
 }
 
 export async function getSectionModalController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const sectionId = req.query.section_id as string;
-    if (!sectionId) { sendError(res, 'section_id là bắt buộc', 400); return; }
+    if (!sectionId) { sendError(res, 'section_id is required', 400); return; }
     sendSuccess(res, await svc.getSectionModalConfig(req.params.id, sectionId));
   } catch (err) { next(err); }
 }
@@ -72,24 +68,17 @@ export async function updateSectionModalController(req: Request, res: Response, 
   try {
     await svc.upsertSectionModalConfig(req.params.id, req.body);
     auditFromReq(req, 'UPDATE', 'section_modal_config', req.params.id);
-    sendSuccess(res, null, 'Cập nhật thành công');
+    sendSuccess(res, null, 'Updated');
   } catch (err) { next(err); }
 }
 
-/** DELETE /api/courses/:id — Hard delete course + cascade */
 export async function hardDeleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
 
-    const { filePaths } = await svc.hardDeleteCourse(req.params.id, tenantId);
-
-    // Async cleanup Storage files — không block response
-    if (filePaths.length > 0) {
-      Promise.allSettled(filePaths.map(p => deleteFile(p))).catch(() => {});
-    }
-
-    auditFromReq(req, 'DELETE', 'course', req.params.id, undefined, `Hard delete + ${filePaths.length} files`);
-    sendSuccess(res, null, 'Xóa course thành công');
+    const result = await requestCourseDeletion(req.params.id, tenantId, req.user!.id);
+    auditFromReq(req, 'DELETE', 'course', req.params.id, undefined, `Delete requested: ${result.jobId}`);
+    sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }

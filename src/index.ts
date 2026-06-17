@@ -6,6 +6,7 @@ import { query } from './config/database.js';
 import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
+import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import fs from 'fs/promises';
 
 /**
@@ -28,11 +29,13 @@ async function initRabbitMQ(): Promise<void> {
     // Assert queues (creates if not exists)
     await assertQueue(QUEUES.GEMINI_UPLOAD);
     await assertQueue(QUEUES.GEMINI_DELETE);
-    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}`);
+    await assertQueue(QUEUES.COURSE_DELETE);
+    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.COURSE_DELETE}`);
 
     // Start consumers (workers)
     await startUploadWorker();
     await startDeleteWorker();
+    await startCourseDeletionWorker();
     console.log('[RabbitMQ] All workers started');
   } catch (err: any) {
     console.error(`[RabbitMQ] FATAL: ${err.message}`);
@@ -117,4 +120,3 @@ async function gracefulShutdown(signal: string) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-

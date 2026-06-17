@@ -10,7 +10,7 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
   const params: unknown[] = [];
-  const conditions: string[] = [];
+  const conditions: string[] = ['c.deleted_at IS NULL'];
 
   if (tenantId) { params.push(tenantId); conditions.push(`c.tenant_id = $${params.length}`); }
   if (search) { params.push(`%${search}%`); conditions.push(`c.display_name ILIKE $${params.length}`); }
@@ -49,14 +49,17 @@ export async function updateCourse(courseId: string, input: { display_name?: str
   if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
   if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
   params.push(courseId);
-  const result = await query(`UPDATE courses SET ${sets.join(', ')} WHERE id = $${idx} RETURNING *`, params);
+  const result = await query(`UPDATE courses SET ${sets.join(', ')} WHERE id = $${idx} AND deleted_at IS NULL RETURNING *`, params);
   if (result.rowCount === 0) throw new AppError('Course không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function bulkCourseAction(ids: string[], action: string) {
   const staffOnly = action === 'staff_only';
-  const r = await query('UPDATE courses SET visible_to_staff_only = $1, updated_at = NOW() WHERE id = ANY($2)', [staffOnly, ids]);
+  const r = await query(
+    'UPDATE courses SET visible_to_staff_only = $1, updated_at = NOW() WHERE id = ANY($2) AND deleted_at IS NULL',
+    [staffOnly, ids],
+  );
   return { updated: r.rowCount || 0 };
 }
 
@@ -65,6 +68,10 @@ export async function bulkCourseAction(ids: string[], action: string) {
  * Trả về danh sách storage_path để caller cleanup files.
  */
 export async function hardDeleteCourse(courseId: string, tenantId: string) {
+  void courseId;
+  void tenantId;
+  throw new AppError('Direct hard delete is disabled. Use course deletion jobs.', 400);
+
   // 1. Verify course tồn tại + thuộc tenant (tenant isolation)
   const courseCheck = await query<{ id: string; image_url: string | null }>(
     'SELECT id, image_url FROM courses WHERE id = $1 AND tenant_id = $2',
@@ -80,8 +87,8 @@ export async function hardDeleteCourse(courseId: string, tenantId: string) {
   const filePaths = assetsResult.rows.map(r => r.storage_path);
 
   // Cover image
-  const coverUrl = courseCheck.rows[0].image_url;
-  if (coverUrl) filePaths.push(coverUrl);
+  const coverUrl = courseCheck.rows[0].image_url || '';
+  if (coverUrl.length > 0) filePaths.push(coverUrl);
 
   // 3. DELETE — CASCADE tự xóa: course_blocks, block_completions,
   //    course_assets, enrollments, course_progress, team_courses,
