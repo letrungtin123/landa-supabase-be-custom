@@ -511,7 +511,7 @@ export async function getCourseAssets(
   params.push(pageSize, offset);
   const result = await query<any>(
     `SELECT ca.id, ca.course_id, ca.display_name, ca.content_type,
-            ca.file_size, ca.url, ca.thumbnail_url, ca.is_locked,
+            ca.file_size, ca.url, ca.thumbnail_url, ca.is_locked, ca.is_reference,
             ca.created_at AS date_added
      FROM course_assets ca
      WHERE ${whereClause}
@@ -585,5 +585,19 @@ export async function initializeCourseStructure(
      VALUES ($1, 'course', $2, true, false)
      ON CONFLICT DO NOTHING`,
     [courseId, displayName],
+  );
+}
+
+export async function updateCourseAssetReference(
+  courseId: string,
+  assetIds: string[],
+  isReference: boolean,
+  tenantId: string,
+): Promise<void> {
+  if (!assetIds.length) return;
+  await query(
+    `UPDATE course_assets SET is_reference = $3
+     WHERE course_id = $1 AND tenant_id = $4 AND id = ANY($2)`,
+    [courseId, assetIds, isReference, tenantId],
   );
 }

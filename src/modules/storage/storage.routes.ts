@@ -94,10 +94,12 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
-    // Nếu là file download (không phải image/video) → thêm Content-Disposition
-    if (!contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/')) {
+    // Nếu là file download (không phải image/video) hoặc có param ?download=1 → thêm Content-Disposition
+    const forceDownload = req.query.download === '1';
+    if (forceDownload || (!contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/'))) {
       const filename = storagePath.split('/').pop() || 'file';
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
+      const dispositionType = forceDownload ? 'attachment' : 'inline';
+      res.setHeader('Content-Disposition', `${dispositionType}; filename="${encodeURIComponent(filename)}"`);
     }
 
     // Convert Blob → Buffer → send

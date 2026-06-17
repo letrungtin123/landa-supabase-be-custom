@@ -590,10 +590,11 @@ function gradeSortable(block: any, userOrder: number[]) {
 export async function getCourseFiles(courseId: string, role = 'learner') {
   const lockedFilter = role === 'learner' ? 'AND is_locked = false' : '';
   const result = await query<any>(
-    `SELECT id, display_name, content_type, file_size, url, is_locked, created_at
+    `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
      FROM course_assets
      WHERE course_id = $1
        AND EXISTS (SELECT 1 FROM courses c WHERE c.id = course_assets.course_id AND c.deleted_at IS NULL)
+       AND is_reference = true
        ${lockedFilter}
      ORDER BY created_at DESC`,
     [courseId],

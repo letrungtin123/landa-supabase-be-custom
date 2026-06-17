@@ -350,3 +350,17 @@ export async function createCourse(req: Request, res: Response) {
     run: safeRun,
   }, undefined, 201);
 }
+
+export async function updateAssetReference(req: Request, res: Response) {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) return sendError(res, 'tenant_id is required', 400);
+    const { assetIds, is_reference } = req.body;
+    if (!Array.isArray(assetIds)) return sendError(res, 'assetIds must be an array', 400);
+    
+    await svc.updateCourseAssetReference(req.params.courseId, assetIds, Boolean(is_reference), tenantId);
+    sendSuccess(res, { success: true });
+  } catch (err: any) {
+    sendError(res, err.message, 400);
+  }
+}
