@@ -9,6 +9,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { blacklistUser } from '../../middleware/authenticate.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
+import { isLearnerRole } from '../../types/index.js';
 
 /**
  * Danh sách users — phân trang, search, filter role.
@@ -34,11 +35,17 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
     conditions.push(`(u.username ILIKE $${params.length} OR u.email ILIKE $${params.length} OR u.full_name ILIKE $${params.length})`);
   }
 
-  // Filter role
+  // Filter role (supports comma-separated: 'learner,learner_plus')
   const roleFilter = queryParams.role as string;
   if (roleFilter && roleFilter !== 'all') {
-    params.push(roleFilter);
-    conditions.push(`u.role = $${params.length}`);
+    if (roleFilter.includes(',')) {
+      const roles = roleFilter.split(',').map(r => r.trim()).filter(Boolean);
+      params.push(roles);
+      conditions.push(`u.role = ANY($${params.length}::user_role[])`);
+    } else {
+      params.push(roleFilter);
+      conditions.push(`u.role = $${params.length}`);
+    }
   }
 
   // Filter is_active (server-side)
@@ -195,12 +202,12 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
-  // If role changed FROM learner → remove from teams + permission groups
-  if (input.role === 'learner' && oldRole && oldRole !== 'learner') {
+  // If role changed FROM learner/learner_plus → non-learner: remove from teams + permission groups
+  if (isLearnerRole(input.role!) && oldRole && !isLearnerRole(oldRole)) {
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
     await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
-  } else if (oldRole === 'learner' && input.role !== 'learner') {
-    // From learner → other role: remove from teams
+  } else if (oldRole && isLearnerRole(oldRole) && !isLearnerRole(input.role!)) {
+    // From learner/learner_plus → staff/superuser: remove from teams
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
   }
 
@@ -248,7 +255,7 @@ export async function hardDeleteUser(
   }
 
   // Guard 3: role hierarchy
-  const ROLE_LEVEL: Record<string, number> = { learner: 0, staff: 1, superuser: 2, superadmin: 3 };
+  const ROLE_LEVEL: Record<string, number> = { learner: 0, learner_plus: 0, staff: 1, superuser: 2, superadmin: 3 };
   const callerLevel = ROLE_LEVEL[callerRole] ?? 0;
   const targetLevel = ROLE_LEVEL[target.role] ?? 0;
 

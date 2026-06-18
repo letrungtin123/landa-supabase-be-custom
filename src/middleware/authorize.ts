@@ -14,6 +14,12 @@ import type { UserRole, PermissionAction } from '../types/index.js';
  * → chỉ cho phép staff trở lên.
  */
 export function authorize(...allowedRoles: UserRole[]) {
+  // learner_plus có cùng quyền truy cập route như staff
+  // (scope dữ liệu riêng xử lý ở controller/service, vd: report summary)
+  const effectiveRoles = allowedRoles.includes('staff' as UserRole) && !allowedRoles.includes('learner_plus' as UserRole)
+    ? [...allowedRoles, 'learner_plus' as UserRole]
+    : allowedRoles;
+
   return function authorizeMiddleware(req: Request, res: Response, next: NextFunction): void {
     if (!req.user) {
       sendError(res, 'Chưa xác thực', 401);
@@ -26,7 +32,7 @@ export function authorize(...allowedRoles: UserRole[]) {
       return;
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
+    if (!effectiveRoles.includes(req.user.role)) {
       sendError(res, 'Không có quyền truy cập', 403);
       return;
     }

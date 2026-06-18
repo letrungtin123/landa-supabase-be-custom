@@ -3,7 +3,12 @@
 // ═══════════════════════════════════════════════════════════════
 
 /** Các role hợp lệ trong hệ thống */
-export type UserRole = 'learner' | 'staff' | 'superuser' | 'superadmin';
+export type UserRole = 'learner' | 'learner_plus' | 'staff' | 'superuser' | 'superadmin';
+
+/** Check if role is a learner-type role (learner hoặc learner_plus) */
+export function isLearnerRole(role: string | undefined | null): boolean {
+  return role === 'learner' || role === 'learner_plus';
+}
 
 /** Actions phân quyền trên mỗi module */
 export type PermissionAction = 'can_view' | 'can_add' | 'can_edit' | 'can_delete';

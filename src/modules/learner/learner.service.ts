@@ -5,6 +5,7 @@
 
 import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { isLearnerRole } from '../../types/index.js';
 
 // ── Courses ──
 
@@ -27,7 +28,7 @@ export async function getMyVisibleCourses(
   // learner: chỉ thấy courses assign qua team → category → course
   // Path: team_members → team_course_categories → course_category_courses
   // Fallback: team_courses (direct assignment, backward compat)
-  if (role === 'learner') {
+  if (isLearnerRole(role)) {
     // Learner không thấy courses bị ẩn (visible_to_staff_only = true)
     where += ' AND c.visible_to_staff_only = false';
     sqlParams.push(userId);
@@ -126,12 +127,12 @@ export async function getCourseDetail(
   const course = result.rows[0];
 
   // Learner không được xem course bị ẩn (visible_to_staff_only)
-  if (role === 'learner' && course.visible_to_staff_only) {
+  if (isLearnerRole(role) && course.visible_to_staff_only) {
     throw new AppError('Khóa học không tồn tại', 404);
   }
 
   // learner: kiểm tra quyền truy cập qua team → category → course
-  if (role === 'learner') {
+  if (isLearnerRole(role)) {
     const access = await query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM (
         SELECT 1 FROM team_course_categories tcc
@@ -588,7 +589,7 @@ function gradeSortable(block: any, userOrder: number[]) {
  * Learner chỉ thấy file chưa bị khóa (is_locked = false).
  */
 export async function getCourseFiles(courseId: string, role = 'learner') {
-  const lockedFilter = role === 'learner' ? 'AND is_locked = false' : '';
+  const lockedFilter = isLearnerRole(role) ? 'AND is_locked = false' : '';
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
      FROM course_assets
@@ -632,7 +633,7 @@ export async function getMyLibraryCategories(
   let sql: string;
   let params: unknown[];
 
-  if (role === 'learner') {
+  if (isLearnerRole(role)) {
     sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
                   COUNT(d.id) FILTER (WHERE d.is_visible = true) AS count
            FROM document_categories dc
@@ -693,7 +694,7 @@ export async function getMyLibraryDocuments(
   const conditions: string[] = ['d.tenant_id = $1'];
 
   // Learner: chỉ thấy docs visible + restrict to team categories
-  if (role === 'learner') {
+  if (isLearnerRole(role)) {
     conditions.push('d.is_visible = true');
     sqlParams.push(userId);
     conditions.push(`d.category_id IN (

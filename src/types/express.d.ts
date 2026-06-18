@@ -8,7 +8,7 @@
 export interface AuthUser {
   id: string;
   tenantId: string | null;
-  role: 'learner' | 'staff' | 'superuser' | 'superadmin';
+  role: 'learner' | 'learner_plus' | 'staff' | 'superuser' | 'superadmin';
   username: string;
 }
 

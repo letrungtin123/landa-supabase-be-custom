@@ -428,5 +428,16 @@ export async function exchangeSsoCode(provider: SsoProvider, input: ExchangeSsoC
     throw new AppError('Tài khoản learner chỉ được truy cập trang học viên', 403);
   }
 
+  // learner_plus login admin via SSO: phải có ít nhất 1 permission group
+  if (clientApp === 'admin' && user.role === 'learner_plus') {
+    const pgCheck = await query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
+      [user.userId],
+    );
+    if (parseInt(pgCheck.rows[0].count) === 0) {
+      throw new AppError('Tài khoản chưa được gán nhóm quyền để truy cập trang quản trị', 403);
+    }
+  }
+
   return issueSessionForUserId(user.userId);
 }

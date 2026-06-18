@@ -21,6 +21,10 @@ router.get('/learner-detail', checkPermission('report_summary', 'can_view'), ctr
 router.get('/user-badges', checkPermission('report_summary', 'can_view'), ctrl.getUserBadges);
 router.get('/user-study-time', checkPermission('report_summary', 'can_view'), ctrl.getUserStudyTime);
 
+// Group/subgroup filter cho report (dùng quyền report_summary, không cần quyền groups)
+router.get('/groups', checkPermission('report_summary', 'can_view'), ctrl.getReportGroups);
+router.get('/groups/:groupId/subgroups', checkPermission('report_summary', 'can_view'), ctrl.getReportSubGroups);
+
 // Admin-only: manually refresh materialized view
 router.post('/refresh', checkPermission('report_summary', 'can_edit'), ctrl.refreshSummary);
 

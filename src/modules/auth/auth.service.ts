@@ -11,6 +11,7 @@ import { comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { PermissionsMap } from '../../types/index.js';
+import { isLearnerRole } from '../../types/index.js';
 
 /** Hash refresh token bằng SHA-256 trước khi lưu DB */
 function hashToken(token: string): string {
@@ -56,8 +57,19 @@ export async function login(username: string, password: string, clientApp?: 'adm
     throw new AppError('Tài khoản learner chỉ được truy cập trang học viên', 403);
   }
 
-  // learner: phải có tenant_id hợp lệ + tenant active
-  if (user.role === 'learner') {
+  // learner_plus login admin: phải có ít nhất 1 permission group
+  if (clientApp === 'admin' && user.role === 'learner_plus') {
+    const pgCheck = await query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
+      [user.id],
+    );
+    if (parseInt(pgCheck.rows[0].count) === 0) {
+      throw new AppError('Tài khoản chưa được gán nhóm quyền để truy cập trang quản trị', 403);
+    }
+  }
+
+  // learner/learner_plus: phải có tenant_id hợp lệ + tenant active
+  if (isLearnerRole(user.role)) {
     if (!user.tenant_id) {
       throw new AppError('Tài khoản chưa được gán vào tổ chức', 403);
     }
@@ -122,6 +134,11 @@ export async function login(username: string, password: string, clientApp?: 'adm
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
 
+  // learner_plus: lấy danh sách org groups mà user thuộc về
+  const memberGroups = user.role === 'learner_plus'
+    ? await resolveMemberGroups(user.id)
+    : [];
+
   return {
     access_token: accessToken,
     refresh_token: refreshToken,
@@ -140,6 +157,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    member_groups: memberGroups,
   };
 }
 
@@ -215,6 +233,9 @@ export async function refresh(refreshToken: string) {
   const managedTenants = (row.role === 'superuser' || row.role === 'superadmin')
     ? await resolveManagedTenants(row.user_id, row.tenant_id, row.role)
     : [];
+  const memberGroups = row.role === 'learner_plus'
+    ? await resolveMemberGroups(row.user_id)
+    : [];
 
   return {
     access_token: newAccessToken,
@@ -234,6 +255,7 @@ export async function refresh(refreshToken: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    member_groups: memberGroups,
   };
 }
 
@@ -288,6 +310,9 @@ export async function issueSessionForUserId(userId: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const memberGroups = user.role === 'learner_plus'
+    ? await resolveMemberGroups(user.id)
+    : [];
 
   return {
     access_token: accessToken,
@@ -307,6 +332,7 @@ export async function issueSessionForUserId(userId: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    member_groups: memberGroups,
   };
 }
 
@@ -332,6 +358,9 @@ export async function getMe(userId: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const memberGroups = user.role === 'learner_plus'
+    ? await resolveMemberGroups(user.id)
+    : [];
 
   return {
     user: {
@@ -354,6 +383,7 @@ export async function getMe(userId: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    member_groups: memberGroups,
   };
 }
 
@@ -453,6 +483,24 @@ async function resolveManagedTenants(
   }
 
   return [];
+}
+
+/**
+ * Resolve org groups mà user thuộc về (thông qua team_members → teams → sub_groups → org_groups).
+ * Dùng cho learner_plus để giới hạn scope xem báo cáo.
+ */
+async function resolveMemberGroups(userId: string): Promise<{ id: string; name: string }[]> {
+  const result = await query<{ id: string; name: string }>(
+    `SELECT DISTINCT og.id, og.name
+     FROM team_members tm
+     JOIN teams t ON t.id = tm.team_id
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE tm.user_id = $1
+     ORDER BY og.name`,
+    [userId],
+  );
+  return result.rows;
 }
 
 /**

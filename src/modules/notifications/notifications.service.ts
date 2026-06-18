@@ -68,7 +68,7 @@ export async function sendCourseNotification(
        WHERE e.course_id = $2
          AND e.tenant_id = $3
          AND e.is_active = true
-         AND u.role = 'learner'
+         AND u.role IN ('learner', 'learner_plus')
          AND u.is_active = true
          AND EXISTS (
            SELECT 1 FROM team_members tm

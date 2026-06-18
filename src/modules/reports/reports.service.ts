@@ -149,7 +149,7 @@ export async function getReportSummary(
        COUNT(DISTINCT u.id) AS total,
        COUNT(DISTINCT CASE WHEN u.last_login_at >= $${uParamIdx} AND u.last_login_at <= $${uParamIdx + 1} THEN u.id END) AS active
      FROM users u ${ugf.joins}
-     WHERE u.tenant_id = $1 AND u.is_active = true AND u.role = 'learner'
+     WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
        AND u.created_at <= $${uParamIdx + 2}
        ${uConds.length ? 'AND ' + uConds.join(' AND ') : ''}`,
     [tenantId, ...ugf.params, startDate, endDate, endDate],
@@ -163,7 +163,7 @@ export async function getReportSummary(
        COALESCE(AVG(cp.progress), 0) AS avg_progress,
        COUNT(DISTINCT CASE WHEN e.enrolled_at >= $${eParamIdx} AND e.enrolled_at <= $${eParamIdx + 1} THEN e.id END) AS month_enrollments
      FROM enrollments e
-     JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
+     JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      ${egf.joins}
      WHERE e.tenant_id = $1 AND e.is_active = true AND e.enrolled_at <= $${eParamIdx + 2}
@@ -367,7 +367,7 @@ async function batchMetricByMonth(
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
          LEFT JOIN users u ON u.tenant_id = $1
-           AND u.is_active = true AND u.role = 'learner'
+           AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
            AND u.created_at <= (make_date($${idx}, gs.m::INT, 1) + INTERVAL '1 month' - INTERVAL '1 second')
            ${ugf.joins ? ugf.joins.replace(/\bu\b/g, 'u') : ''}
            ${conds.length ? 'AND ' + conds.join(' AND ') : ''}
@@ -385,7 +385,7 @@ async function batchMetricByMonth(
         `SELECT EXTRACT(MONTH FROM u.last_login_at)::INT AS m,
                 COUNT(DISTINCT u.id) AS cnt
          FROM users u ${ugf.joins}
-         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role = 'learner'
+         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
            AND u.last_login_at >= $${idx} AND u.last_login_at <= $${idx + 1}
            ${conds.length ? 'AND ' + conds.join(' AND ') : ''}
          GROUP BY EXTRACT(MONTH FROM u.last_login_at)`,
@@ -404,7 +404,7 @@ async function batchMetricByMonth(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COALESCE(AVG(cp.progress), 0) AS avg_p
          FROM enrollments e
-         JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
+         JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
          LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
          ${egf.joins}
          WHERE e.tenant_id = $1 AND e.is_active = true
@@ -455,7 +455,7 @@ async function batchMetricByMonthTeam(
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
          LEFT JOIN users u ON u.tenant_id = $1
-           AND u.is_active = true AND u.role = 'learner'
+           AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
            AND u.created_at <= (make_date($2, gs.m::INT, 1) + INTERVAL '1 month' - INTERVAL '1 second')
          LEFT JOIN team_members tm ON tm.user_id = u.id AND tm.team_id = $3
          WHERE (u.id IS NULL OR tm.user_id IS NOT NULL)
@@ -471,7 +471,7 @@ async function batchMetricByMonthTeam(
                 COUNT(DISTINCT u.id) AS cnt
          FROM users u
          JOIN team_members tm ON tm.user_id = u.id
-         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role = 'learner'
+         WHERE u.tenant_id = $1 AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
            AND tm.team_id = $2
            AND u.last_login_at >= $3 AND u.last_login_at <= $4
          GROUP BY EXTRACT(MONTH FROM u.last_login_at)`,
@@ -486,7 +486,7 @@ async function batchMetricByMonthTeam(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COALESCE(AVG(cp.progress), 0) AS avg_p
          FROM enrollments e
-         JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
+         JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
          LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
          JOIN team_members tm ON tm.user_id = e.user_id
          WHERE e.tenant_id = $1 AND e.is_active = true AND tm.team_id = $2
@@ -559,7 +559,7 @@ export async function getReportTopCourses(
             COUNT(*) OVER() AS full_count
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id
-     JOIN users eu ON eu.id = e.user_id AND eu.role = 'learner'
+     JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
      ${gf.joins}
      WHERE ${whereClause}
      GROUP BY e.course_id, c.display_name
@@ -594,7 +594,7 @@ export async function getReportLearners(
   status?: 'all' | 'not_started' | 'learning' | 'completed',
 ): Promise<{ count: number; total_pages: number; current_page: number; results: ReportLearner[] }> {
   const offset = (page - 1) * pageSize;
-  const conditions: string[] = ["u.tenant_id = $1", "u.is_active = true", "u.role = 'learner'"];
+  const conditions: string[] = ["u.tenant_id = $1", "u.is_active = true", "u.role IN ('learner', 'learner_plus')"];
   const params: any[] = [tenantId];
   let paramIdx = 2;
 
