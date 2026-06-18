@@ -45,6 +45,7 @@ router.post('/enroll', ctrl.enroll);
 router.post('/complete-blocks', ctrl.completeBlocks);
 
 // ── Progress ──
+router.get('/progress-batch', ctrl.getBatchProgress);
 router.get('/progress/:courseId', ctrl.getProgress);
 
 // ── Badges ──

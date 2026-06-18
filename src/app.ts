@@ -105,6 +105,16 @@ app.use('/api/storage', storageRoutes);
 app.use('/api/branding', brandingRoutes);
 
 app.use('/api', apiLimiter);                     // general rate limit
+
+// Study session — rate limit riêng (tránh spam từ FE study time tracker)
+const studySessionLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,  // 1 phút
+  max: 30,                    // 30 requests/phút — FE gửi max 7 entries khi đóng tab
+  message: { success: false, message: 'Quá nhiều request study session' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/enrollments/study-session', studySessionLimiter);
 app.use('/api/tenants', tenantsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/modules', modulesRoutes);

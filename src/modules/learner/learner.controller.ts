@@ -206,6 +206,27 @@ export async function getProgress(req: Request, res: Response, next: NextFunctio
   }
 }
 
+/** GET /api/learner/progress-batch?courseIds=id1,id2,id3 */
+export async function getBatchProgress(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+
+    const raw = req.query.courseIds as string | undefined;
+    if (!raw) { sendError(res, 'Thiếu courseIds', 400); return; }
+
+    const courseIds = raw.split(',').map(id => id.trim()).filter(Boolean);
+    if (courseIds.length === 0) { sendSuccess(res, { progress: {} }); return; }
+    if (courseIds.length > 50) { sendError(res, 'Tối đa 50 courses', 400); return; }
+
+    const result = await learnerService.getBatchProgress(req.user.id, tenantId, courseIds);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 /** GET /api/learner/badges */
 export async function listBadges(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {

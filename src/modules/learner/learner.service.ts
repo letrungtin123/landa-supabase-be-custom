@@ -298,9 +298,7 @@ export async function getCourseBlocks(
   const blocks = result.rows;
   const root = blocks.find((b: any) => b.block_type === 'course') ?? null;
 
-  console.log(`[getCourseBlocks] courseId=${courseId} role=${role} blocks=${blocks.length} root=${root?.id}`);
-  const leafBlocks = blocks.filter((b: any) => !['course','chapter','sequential','vertical'].includes(b.block_type));
-  console.log(`[getCourseBlocks] leaf blocks: ${leafBlocks.map((b: any) => `${b.block_type}(${b.display_name})`).join(', ')}`);
+
 
   return {
     root_id: root?.id ?? null,
@@ -403,7 +401,7 @@ function gradeProblem(block: any, userAnswers: Record<string, string | string[]>
   const data = typeof block.data === 'string' ? block.data : '';
   if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', correctness: {} };
 
-  console.log('[gradeProblem] userAnswers:', JSON.stringify(userAnswers));
+
 
   // ── 1. multiplechoiceresponse (single-select radio) ──
   if (data.includes('<multiplechoiceresponse') || (data.includes('<choicegroup') && !data.includes('<checkboxgroup'))) {
@@ -1039,6 +1037,53 @@ export async function getMyProgress(userId: string, courseId: string) {
     ...row,
     progress: parseFloat(row.progress) || 0, // pg numeric → JS number
   };
+}
+
+/**
+ * Lấy progress cho nhiều courses cùng lúc — 1 query duy nhất.
+ * Giảm N API calls → 1 call cho FE batch progress.
+ */
+export async function getBatchProgress(
+  userId: string,
+  tenantId: string,
+  courseIds: string[],
+) {
+  if (courseIds.length === 0) return { progress: {} };
+
+  const result = await query<{
+    course_id: string;
+    progress: string;
+    is_completed: boolean;
+    completed_at: string | null;
+  }>(
+    `SELECT e.course_id,
+            COALESCE(cp.progress, 0) AS progress,
+            COALESCE(cp.is_completed, false) AS is_completed,
+            cp.completed_at
+     FROM enrollments e
+     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
+     WHERE e.user_id = $1
+       AND e.tenant_id = $2
+       AND e.course_id = ANY($3)
+       AND e.is_active = true`,
+    [userId, tenantId, courseIds],
+  );
+
+  const progress: Record<string, {
+    progress: number;
+    is_completed: boolean;
+    completed_at: string | null;
+  }> = {};
+
+  for (const row of result.rows) {
+    progress[row.course_id] = {
+      progress: parseFloat(row.progress) || 0,
+      is_completed: row.is_completed,
+      completed_at: row.completed_at,
+    };
+  }
+
+  return { progress };
 }
 
 // ── Badges ──
