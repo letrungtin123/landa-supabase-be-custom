@@ -334,9 +334,9 @@ export async function createCourse(req: Request, res: Response) {
   // Insert into courses table
   const { query: dbQuery } = await import('../../config/database.js');
   await dbQuery(
-    `INSERT INTO courses (id, tenant_id, display_name, org, start_date)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [courseId, tenantId, display_name, safeOrg, start || '2020-01-01'],
+    `INSERT INTO courses (id, tenant_id, display_name, org, start_date, created_by, mentor_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+    [courseId, tenantId, display_name, safeOrg, start || '2020-01-01', req.user!.id],
   );
 
   // Initialize course structure with root block

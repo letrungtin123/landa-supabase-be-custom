@@ -6,6 +6,31 @@ import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 
+interface CourseMentor {
+  id: string;
+  username: string;
+  full_name: string | null;
+  email: string;
+  phone: string | null;
+  avatar: string | null;
+  role: string;
+  bio: string | null;
+}
+
+function mapMentor(row: any): CourseMentor | null {
+  if (!row?.mentor_id) return null;
+  return {
+    id: row.mentor_id,
+    username: row.mentor_username,
+    full_name: row.mentor_full_name,
+    email: row.mentor_email,
+    phone: row.mentor_phone,
+    avatar: row.mentor_avatar,
+    role: row.mentor_role,
+    bio: row.mentor_bio,
+  };
+}
+
 export async function listCourses(tenantId: string | null, queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
@@ -21,22 +46,44 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   const [countR, dataR] = await Promise.all([
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses c ${where}`, params),
-    query(`SELECT c.* FROM courses c ${where} ORDER BY c.updated_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`, [...params, pageSize, offset]),
+    query(
+      `SELECT c.*,
+              mentor.id AS mentor_id,
+              mentor.username AS mentor_username,
+              mentor.full_name AS mentor_full_name,
+              mentor.email AS mentor_email,
+              mentor.phone AS mentor_phone,
+              mentor.avatar_url AS mentor_avatar,
+              mentor.role AS mentor_role,
+              mentor.bio AS mentor_bio
+       FROM courses c
+       LEFT JOIN users mentor ON mentor.id = c.mentor_id
+       ${where}
+       ORDER BY c.updated_at DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
+    ),
   ]);
   const total = parseInt(countR.rows[0].count, 10);
-  return { data: dataR.rows, total, page, pageSize, totalPages: calcTotalPages(total, pageSize) };
+  return {
+    data: dataR.rows.map((row: any) => ({ ...row, mentor: mapMentor(row) })),
+    total,
+    page,
+    pageSize,
+    totalPages: calcTotalPages(total, pageSize),
+  };
 }
 
-export async function createCourse(tenantId: string, input: { id: string; display_name: string; org?: string; visible_to_staff_only?: boolean; image_url?: string; start_date?: string; end_date?: string }) {
+export async function createCourse(tenantId: string, createdBy: string, input: { id: string; display_name: string; org?: string; visible_to_staff_only?: boolean; image_url?: string; start_date?: string; end_date?: string }) {
   // ── Kiểm tra quota course cho tenant ──
   const { checkQuota } = await import('../tenants/tenants.service.js');
   await checkQuota(tenantId, 'courses');
 
   const result = await query(
-    `INSERT INTO courses (id, tenant_id, display_name, org, visible_to_staff_only, image_url, start_date, end_date)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO courses (id, tenant_id, display_name, org, visible_to_staff_only, image_url, start_date, end_date, created_by, mentor_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
      RETURNING *`,
-    [input.id, tenantId, input.display_name, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null],
+    [input.id, tenantId, input.display_name, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
   );
   return result.rows[0];
 }
@@ -61,6 +108,104 @@ export async function bulkCourseAction(ids: string[], action: string) {
     [staffOnly, ids],
   );
   return { updated: r.rowCount || 0 };
+}
+
+export async function getCourseMentor(courseId: string, tenantId: string): Promise<CourseMentor | null> {
+  const result = await query<any>(
+    `SELECT mentor.id AS mentor_id,
+            mentor.username AS mentor_username,
+            mentor.full_name AS mentor_full_name,
+            mentor.email AS mentor_email,
+            mentor.phone AS mentor_phone,
+            mentor.avatar_url AS mentor_avatar,
+            mentor.role AS mentor_role,
+            mentor.bio AS mentor_bio
+     FROM courses c
+     LEFT JOIN users mentor ON mentor.id = c.mentor_id
+     WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+  return mapMentor(result.rows[0]);
+}
+
+export async function listMentorCandidates(
+  courseId: string,
+  tenantId: string,
+  queryParams: Record<string, unknown>,
+) {
+  const courseResult = await query(
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (courseResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+
+  const { page, pageSize, search } = parsePagination(queryParams);
+  const offset = calcOffset(page, pageSize);
+  const params: unknown[] = [tenantId];
+  const conditions = ['u.tenant_id = $1', "u.role = 'staff'", 'u.is_active = true'];
+
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    conditions.push(`(
+      lower(COALESCE(u.full_name, '')) LIKE $${params.length}
+      OR lower(u.email) LIKE $${params.length}
+      OR lower(u.username) LIKE $${params.length}
+    )`);
+  }
+
+  const result = await query<any>(
+    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url AS avatar,
+            u.role, u.bio, COUNT(*) OVER() AS full_count
+     FROM users u
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username), u.id
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, pageSize, offset],
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
+  return {
+    data: result.rows.map(({ full_count, ...row }: any) => row),
+    total,
+    page,
+    pageSize,
+    totalPages: calcTotalPages(total, pageSize),
+  };
+}
+
+export async function updateCourseMentor(courseId: string, tenantId: string, mentorId: string | null): Promise<CourseMentor | null> {
+  if (mentorId === null) {
+    const updateResult = await query(
+      `UPDATE courses
+       SET mentor_id = NULL, updated_at = NOW()
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+      [courseId, tenantId],
+    );
+    if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+    return null;
+  }
+
+  const mentorResult = await query<CourseMentor>(
+    `SELECT id, username, full_name, email, phone, avatar_url AS avatar, role, bio
+     FROM users
+     WHERE id = $1
+       AND tenant_id = $2
+       AND role = 'staff'
+       AND is_active = true`,
+    [mentorId, tenantId],
+  );
+  if (mentorResult.rowCount === 0) throw new AppError('Mentor khong hop le', 400);
+
+  const updateResult = await query(
+    `UPDATE courses
+     SET mentor_id = $3, updated_at = NOW()
+     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId, mentorId],
+  );
+  if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+
+  return mentorResult.rows[0];
 }
 
 /**

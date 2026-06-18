@@ -116,8 +116,16 @@ export async function getCourseDetail(
 ) {
   const result = await query<any>(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, c.created_at
+            c.visible_to_staff_only, c.created_at,
+            mentor.id AS mentor_id,
+            mentor.full_name AS mentor_full_name,
+            mentor.email AS mentor_email,
+            mentor.phone AS mentor_phone,
+            mentor.avatar_url AS mentor_avatar,
+            mentor.bio AS mentor_bio,
+            mentor.role AS mentor_role
      FROM courses c
+     LEFT JOIN users mentor ON mentor.id = c.mentor_id
      WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
     [courseId, tenantId],
   );
@@ -151,7 +159,33 @@ export async function getCourseDetail(
     }
   }
 
-  return result.rows[0];
+  const {
+    mentor_id,
+    mentor_full_name,
+    mentor_email,
+    mentor_phone,
+    mentor_avatar,
+    mentor_bio,
+    mentor_role,
+    ...coursePayload
+  } = result.rows[0];
+
+  return {
+    ...coursePayload,
+    mentors: mentor_id ? [{
+      id: mentor_id,
+      full_name: mentor_full_name,
+      name: mentor_full_name || mentor_email,
+      email: mentor_email,
+      phone: mentor_phone,
+      phone_number: mentor_phone,
+      avatar: mentor_avatar,
+      profile_image_url: mentor_avatar,
+      bio: mentor_bio,
+      role: mentor_role || 'staff',
+      company: '',
+    }] : [],
+  };
 }
 
 // ── Course Blocks (cấu trúc nội dung) ──

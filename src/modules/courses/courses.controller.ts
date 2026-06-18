@@ -18,7 +18,7 @@ export async function createController(req: Request, res: Response, next: NextFu
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     const parsed = createCourseSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    const course = await svc.createCourse(tenantId, req.body);
+    const course = await svc.createCourse(tenantId, req.user!.id, req.body);
     auditFromReq(req, 'CREATE', 'course', course.id, course.display_name);
     sendSuccess(res, course, 'Course created', 201);
   } catch (err) { next(err); }
@@ -40,6 +40,47 @@ export async function bulkActionController(req: Request, res: Response, next: Ne
     const result = await svc.bulkCourseAction(ids, action);
     auditFromReq(req, 'UPDATE', 'course', '', '', `Bulk ${action}: ${result.updated}`);
     sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+function canManageCourseMentor(role: string): boolean {
+  return role === 'superuser' || role === 'superadmin';
+}
+
+export async function getMentorController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    const mentor = await svc.getCourseMentor(req.params.id, tenantId);
+    sendSuccess(res, { mentor });
+  } catch (err) { next(err); }
+}
+
+export async function listMentorCandidatesController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+    const result = await svc.listMentorCandidates(req.params.id, tenantId, req.query as Record<string, unknown>);
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+export async function updateMentorController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+    const rawMentorId = req.body?.mentor_id;
+    const mentorId = rawMentorId === null
+      ? null
+      : typeof rawMentorId === 'string'
+        ? rawMentorId.trim() || null
+        : undefined;
+    if (mentorId === undefined) { sendError(res, 'mentor_id is required', 400); return; }
+    const mentor = await svc.updateCourseMentor(req.params.id, tenantId, mentorId);
+    auditFromReq(req, 'UPDATE', 'course', req.params.id, undefined, mentor ? `Update mentor: ${mentor.id}` : 'Remove mentor');
+    sendSuccess(res, { mentor });
   } catch (err) { next(err); }
 }
 
