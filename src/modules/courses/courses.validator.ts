@@ -28,6 +28,23 @@ export const bulkActionSchema = z.object({
   action: z.enum(['activate', 'deactivate', 'delete']),
 });
 
+export const mentorSectionSchema = z.object({
+  description: z.string().max(2000, 'description tối đa 2000 ký tự').nullable().optional(),
+});
+
+export const mentorSectionLogoModeSchema = z.enum(['light', 'dark']);
+
+export const MENTOR_SECTION_LOGO_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/svg+xml',
+  'image/gif',
+] as const;
+
+export const MENTOR_SECTION_LOGO_MAX_SIZE = 5 * 1024 * 1024;
+
 export type CreateCourseInput = z.infer<typeof createCourseSchema>;
 export type UpdateCourseInput = z.infer<typeof updateCourseSchema>;
 export type BulkActionInput = z.infer<typeof bulkActionSchema>;
+export type MentorSectionInput = z.infer<typeof mentorSectionSchema>;

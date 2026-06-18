@@ -5,6 +5,7 @@
 import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 
 interface CourseMentor {
   id: string;
@@ -15,6 +16,16 @@ interface CourseMentor {
   avatar: string | null;
   role: string;
   bio: string | null;
+}
+
+type MentorSectionLogoMode = 'light' | 'dark';
+
+interface CourseMentorSection {
+  course_id: string;
+  description: string | null;
+  logo_light: string | null;
+  logo_dark: string | null;
+  updated_at: string | null;
 }
 
 function mapMentor(row: any): CourseMentor | null {
@@ -29,6 +40,25 @@ function mapMentor(row: any): CourseMentor | null {
     role: row.mentor_role,
     bio: row.mentor_bio,
   };
+}
+
+function mapMentorSection(row: any): CourseMentorSection | null {
+  if (!row) return null;
+  return {
+    course_id: row.course_id,
+    description: row.description ?? null,
+    logo_light: row.logo_light_path ?? null,
+    logo_dark: row.logo_dark_path ?? null,
+    updated_at: row.updated_at ?? null,
+  };
+}
+
+async function ensureCourseInTenant(courseId: string, tenantId: string): Promise<void> {
+  const result = await query(
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
 }
 
 export async function listCourses(tenantId: string | null, queryParams: Record<string, unknown>) {
@@ -206,6 +236,122 @@ export async function updateCourseMentor(courseId: string, tenantId: string, men
   if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
 
   return mentorResult.rows[0];
+}
+
+export async function getCourseMentorSection(courseId: string, tenantId: string): Promise<CourseMentorSection | null> {
+  await ensureCourseInTenant(courseId, tenantId);
+  const result = await query<any>(
+    `SELECT course_id, description, logo_light_path, logo_dark_path, updated_at
+     FROM course_mentor_sections
+     WHERE course_id = $1 AND tenant_id = $2`,
+    [courseId, tenantId],
+  );
+  return mapMentorSection(result.rows[0]);
+}
+
+export async function upsertCourseMentorSection(
+  courseId: string,
+  tenantId: string,
+  userId: string,
+  input: { description?: string | null },
+): Promise<CourseMentorSection> {
+  await ensureCourseInTenant(courseId, tenantId);
+  const description = typeof input.description === 'string'
+    ? input.description.trim() || null
+    : null;
+
+  const result = await query<any>(
+    `INSERT INTO course_mentor_sections (tenant_id, course_id, description, updated_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tenant_id, course_id)
+     DO UPDATE SET
+       description = EXCLUDED.description,
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()
+     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+    [tenantId, courseId, description, userId],
+  );
+
+  return mapMentorSection(result.rows[0])!;
+}
+
+export async function uploadCourseMentorSectionLogo(
+  courseId: string,
+  tenantId: string,
+  userId: string,
+  mode: MentorSectionLogoMode,
+  file: Express.Multer.File,
+): Promise<CourseMentorSection> {
+  await ensureCourseInTenant(courseId, tenantId);
+
+  const current = await query<any>(
+    `SELECT logo_light_path, logo_dark_path
+     FROM course_mentor_sections
+     WHERE course_id = $1 AND tenant_id = $2`,
+    [courseId, tenantId],
+  );
+  const oldPath = mode === 'light'
+    ? current.rows[0]?.logo_light_path
+    : current.rows[0]?.logo_dark_path;
+
+  const safeOriginalName = fixMulterFilename(file.originalname);
+  const fileName = buildFileName(`${mode}_${safeOriginalName}`);
+  const storagePath = buildStoragePath(tenantId, 'courses', fileName, `${courseId}/mentor-section`);
+
+  await uploadFile(storagePath, file.buffer, file.mimetype, true);
+
+  const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
+  const result = await query<any>(
+    `INSERT INTO course_mentor_sections (tenant_id, course_id, ${logoColumn}, updated_by)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (tenant_id, course_id)
+     DO UPDATE SET
+       ${logoColumn} = EXCLUDED.${logoColumn},
+       updated_by = EXCLUDED.updated_by,
+       updated_at = NOW()
+     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+    [tenantId, courseId, storagePath, userId],
+  );
+
+  if (oldPath && oldPath !== storagePath) {
+    await deleteFile(oldPath).catch(() => {});
+  }
+
+  return mapMentorSection(result.rows[0])!;
+}
+
+export async function deleteCourseMentorSectionLogo(
+  courseId: string,
+  tenantId: string,
+  userId: string,
+  mode: MentorSectionLogoMode,
+): Promise<CourseMentorSection | null> {
+  await ensureCourseInTenant(courseId, tenantId);
+
+  const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
+  const current = await query<any>(
+    `SELECT ${logoColumn} AS logo_path
+     FROM course_mentor_sections
+     WHERE course_id = $1 AND tenant_id = $2`,
+    [courseId, tenantId],
+  );
+
+  if (current.rowCount === 0) return null;
+  const oldPath = current.rows[0]?.logo_path;
+
+  const result = await query<any>(
+    `UPDATE course_mentor_sections
+     SET ${logoColumn} = NULL, updated_by = $3, updated_at = NOW()
+     WHERE course_id = $1 AND tenant_id = $2
+     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+    [courseId, tenantId, userId],
+  );
+
+  if (oldPath) {
+    await deleteFile(oldPath).catch(() => {});
+  }
+
+  return mapMentorSection(result.rows[0]);
 }
 
 /**

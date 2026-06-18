@@ -1,7 +1,15 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './courses.service.js';
 import { requestCourseDeletion } from '../course-deletion/course-deletion.service.js';
-import { createCourseSchema, updateCourseSchema, bulkActionSchema } from './courses.validator.js';
+import {
+  createCourseSchema,
+  updateCourseSchema,
+  bulkActionSchema,
+  mentorSectionSchema,
+  mentorSectionLogoModeSchema,
+  MENTOR_SECTION_LOGO_MIME_TYPES,
+  MENTOR_SECTION_LOGO_MAX_SIZE,
+} from './courses.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 
@@ -81,6 +89,67 @@ export async function updateMentorController(req: Request, res: Response, next: 
     const mentor = await svc.updateCourseMentor(req.params.id, tenantId, mentorId);
     auditFromReq(req, 'UPDATE', 'course', req.params.id, undefined, mentor ? `Update mentor: ${mentor.id}` : 'Remove mentor');
     sendSuccess(res, { mentor });
+  } catch (err) { next(err); }
+}
+
+export async function getMentorSectionController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+    const section = await svc.getCourseMentorSection(req.params.id, tenantId);
+    sendSuccess(res, { mentor_section: section });
+  } catch (err) { next(err); }
+}
+
+export async function updateMentorSectionController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+    const parsed = mentorSectionSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+    const section = await svc.upsertCourseMentorSection(req.params.id, tenantId, req.user!.id, parsed.data);
+    auditFromReq(req, 'UPDATE', 'course_mentor_section', req.params.id, undefined, 'Update mentor section');
+    sendSuccess(res, { mentor_section: section });
+  } catch (err) { next(err); }
+}
+
+export async function uploadMentorSectionLogoController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+
+    const modeParsed = mentorSectionLogoModeSchema.safeParse(req.body?.mode);
+    if (!modeParsed.success) { sendError(res, 'mode must be light or dark', 400); return; }
+
+    const file = req.file;
+    if (!file) { sendError(res, 'No file uploaded', 400); return; }
+    if (file.size > MENTOR_SECTION_LOGO_MAX_SIZE) { sendError(res, 'File qua lon. Toi da 5MB', 400); return; }
+    if (!MENTOR_SECTION_LOGO_MIME_TYPES.includes(file.mimetype as any)) {
+      sendError(res, 'Dinh dang file khong ho tro', 400);
+      return;
+    }
+
+    const section = await svc.uploadCourseMentorSectionLogo(req.params.id, tenantId, req.user!.id, modeParsed.data, file);
+    auditFromReq(req, 'UPDATE', 'course_mentor_section', req.params.id, undefined, `Upload ${modeParsed.data} logo`);
+    sendSuccess(res, { mentor_section: section }, 'Upload thanh cong');
+  } catch (err) { next(err); }
+}
+
+export async function deleteMentorSectionLogoController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+
+    const modeParsed = mentorSectionLogoModeSchema.safeParse(req.params.mode);
+    if (!modeParsed.success) { sendError(res, 'mode must be light or dark', 400); return; }
+
+    const section = await svc.deleteCourseMentorSectionLogo(req.params.id, tenantId, req.user!.id, modeParsed.data);
+    auditFromReq(req, 'UPDATE', 'course_mentor_section', req.params.id, undefined, `Delete ${modeParsed.data} logo`);
+    sendSuccess(res, { mentor_section: section });
   } catch (err) { next(err); }
 }
 

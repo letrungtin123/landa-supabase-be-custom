@@ -123,9 +123,13 @@ export async function getCourseDetail(
             mentor.phone AS mentor_phone,
             mentor.avatar_url AS mentor_avatar,
             mentor.bio AS mentor_bio,
-            mentor.role AS mentor_role
+            mentor.role AS mentor_role,
+            cms.description AS mentor_section_description,
+            cms.logo_light_path AS mentor_section_logo_light,
+            cms.logo_dark_path AS mentor_section_logo_dark
      FROM courses c
      LEFT JOIN users mentor ON mentor.id = c.mentor_id
+     LEFT JOIN course_mentor_sections cms ON cms.course_id = c.id AND cms.tenant_id = c.tenant_id
      WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
     [courseId, tenantId],
   );
@@ -167,11 +171,23 @@ export async function getCourseDetail(
     mentor_avatar,
     mentor_bio,
     mentor_role,
+    mentor_section_description,
+    mentor_section_logo_light,
+    mentor_section_logo_dark,
     ...coursePayload
   } = result.rows[0];
 
+  const mentorSection = mentor_section_description || mentor_section_logo_light || mentor_section_logo_dark
+    ? {
+        description: mentor_section_description || null,
+        logo_light: mentor_section_logo_light || null,
+        logo_dark: mentor_section_logo_dark || null,
+      }
+    : null;
+
   return {
     ...coursePayload,
+    mentor_section: mentorSection,
     mentors: mentor_id ? [{
       id: mentor_id,
       full_name: mentor_full_name,
