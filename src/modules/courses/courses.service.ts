@@ -104,25 +104,26 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
   };
 }
 
-export async function createCourse(tenantId: string, createdBy: string, input: { id: string; display_name: string; org?: string; visible_to_staff_only?: boolean; image_url?: string; start_date?: string; end_date?: string }) {
+export async function createCourse(tenantId: string, createdBy: string, input: { id: string; display_name: string; description: string; org?: string; visible_to_staff_only?: boolean; image_url?: string; start_date?: string | null; end_date?: string | null }) {
   // ── Kiểm tra quota course cho tenant ──
   const { checkQuota } = await import('../tenants/tenants.service.js');
   await checkQuota(tenantId, 'courses');
 
   const result = await query(
-    `INSERT INTO courses (id, tenant_id, display_name, org, visible_to_staff_only, image_url, start_date, end_date, created_by, mentor_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+    `INSERT INTO courses (id, tenant_id, display_name, description, org, visible_to_staff_only, image_url, start_date, end_date, created_by, mentor_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
      RETURNING *`,
-    [input.id, tenantId, input.display_name, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
+    [input.id, tenantId, input.display_name, input.description, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
   );
   return result.rows[0];
 }
 
-export async function updateCourse(courseId: string, input: { display_name?: string; visible_to_staff_only?: boolean; image_url?: string }) {
+export async function updateCourse(courseId: string, input: { display_name?: string; description?: string; visible_to_staff_only?: boolean; image_url?: string }) {
   const sets: string[] = ['updated_at = NOW()'];
   const params: unknown[] = [];
   let idx = 1;
   if (input.display_name !== undefined) { sets.push(`display_name = $${idx++}`); params.push(input.display_name); }
+  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
   if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
   if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
   params.push(courseId);

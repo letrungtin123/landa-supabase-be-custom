@@ -26,7 +26,7 @@ export async function createController(req: Request, res: Response, next: NextFu
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     const parsed = createCourseSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    const course = await svc.createCourse(tenantId, req.user!.id, req.body);
+    const course = await svc.createCourse(tenantId, req.user!.id, parsed.data);
     auditFromReq(req, 'CREATE', 'course', course.id, course.display_name);
     sendSuccess(res, course, 'Course created', 201);
   } catch (err) { next(err); }
@@ -34,7 +34,9 @@ export async function createController(req: Request, res: Response, next: NextFu
 
 export async function updateController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const course = await svc.updateCourse(req.params.id, req.body);
+    const parsed = updateCourseSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+    const course = await svc.updateCourse(req.params.id, parsed.data);
     auditFromReq(req, 'UPDATE', 'course', course.id, course.display_name);
     sendSuccess(res, course);
   } catch (err) { next(err); }

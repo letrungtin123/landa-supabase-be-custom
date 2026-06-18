@@ -316,10 +316,15 @@ export async function deleteAssetByPath(req: Request, res: Response) {
 
 /** POST /api/course-authoring/courses — Create course + root block */
 export async function createCourse(req: Request, res: Response) {
-  const { display_name, org, number: courseNumber, run, start } = req.body;
+  const { display_name, description, org, number: courseNumber, run, start } = req.body;
   const tenantId = req.user!.tenantId!;
+  const safeDisplayName = typeof display_name === 'string' ? display_name.trim() : '';
+  const safeDescription = typeof description === 'string' ? description.trim() : '';
 
-  if (!display_name) return sendError(res, 'display_name is required', 400);
+  if (!safeDisplayName) return sendError(res, 'display_name is required', 400);
+  if (!safeDescription) return sendError(res, 'description is required', 400);
+  if (safeDisplayName.length > 500) return sendError(res, 'display_name max 500 chars', 400);
+  if (safeDescription.length > 5000) return sendError(res, 'description max 5000 chars', 400);
 
   // Generate course ID: course-v1:{org}+{number}+{run}
   const safeOrg = org || 'LANDA';
@@ -334,17 +339,18 @@ export async function createCourse(req: Request, res: Response) {
   // Insert into courses table
   const { query: dbQuery } = await import('../../config/database.js');
   await dbQuery(
-    `INSERT INTO courses (id, tenant_id, display_name, org, start_date, created_by, mentor_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-    [courseId, tenantId, display_name, safeOrg, start || '2020-01-01', req.user!.id],
+    `INSERT INTO courses (id, tenant_id, display_name, description, org, start_date, created_by, mentor_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+    [courseId, tenantId, safeDisplayName, safeDescription, safeOrg, start || '2020-01-01', req.user!.id],
   );
 
   // Initialize course structure with root block
-  await svc.initializeCourseStructure(courseId, display_name);
+  await svc.initializeCourseStructure(courseId, safeDisplayName);
 
   sendSuccess(res, {
     id: courseId,
-    display_name,
+    display_name: safeDisplayName,
+    description: safeDescription,
     org: safeOrg,
     number: safeNumber,
     run: safeRun,

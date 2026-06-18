@@ -4,18 +4,29 @@
 
 import { z } from 'zod';
 
+const requiredTrimmedString = (message: string, max: number) =>
+  z.string().trim().min(1, message).max(max);
+
 /** Schema tạo course */
 export const createCourseSchema = z.object({
-  display_name: z.string().min(1, 'display_name là bắt buộc').max(500),
-  description: z.string().max(5000).optional(),
+  id: requiredTrimmedString('id is required', 255),
+  display_name: requiredTrimmedString('display_name is required', 500),
+  description: requiredTrimmedString('description is required', 5000),
+  org: z.string().trim().max(255).optional(),
+  visible_to_staff_only: z.boolean().optional(),
+  image_url: z.string().max(1000).optional(),
+  start_date: z.string().nullable().optional(),
+  end_date: z.string().nullable().optional(),
   is_active: z.boolean().optional(),
   cover_url: z.string().max(1000).optional(),
 });
 
 /** Schema cập nhật course */
 export const updateCourseSchema = z.object({
-  display_name: z.string().min(1).max(500).optional(),
-  description: z.string().max(5000).optional(),
+  display_name: requiredTrimmedString('display_name is required', 500).optional(),
+  description: requiredTrimmedString('description is required', 5000).optional(),
+  visible_to_staff_only: z.boolean().optional(),
+  image_url: z.string().max(1000).optional(),
   is_active: z.boolean().optional(),
   cover_url: z.string().max(1000).optional(),
   start_date: z.string().optional(),
