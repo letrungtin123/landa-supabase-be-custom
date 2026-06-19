@@ -20,6 +20,18 @@ export async function listController(req: Request, res: Response, next: NextFunc
   } catch (err) { next(err); }
 }
 
+export async function exportMarkdownController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+
+    const result = await svc.exportCourseMarkdown(req.params.id, tenantId);
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.status(200).send(result.markdown);
+  } catch (err) { next(err); }
+}
+
 export async function createController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;

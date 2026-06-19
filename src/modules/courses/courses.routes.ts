@@ -4,7 +4,7 @@ import { authenticate } from '../../middleware/authenticate.js';
 import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import {
-  listController, createController, updateController, bulkActionController,
+  listController, exportMarkdownController, createController, updateController, bulkActionController,
   getMentorController, listMentorCandidatesController, updateMentorController,
   getMentorSectionController, updateMentorSectionController,
   uploadMentorSectionLogoController, deleteMentorSectionLogoController,
@@ -22,6 +22,7 @@ const upload = multer({
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));
 
 router.get('/', checkPermission('courses', 'can_view'), listController);
+router.get('/:id/export-markdown', checkPermission('courses', 'can_view'), exportMarkdownController);
 router.post('/', checkPermission('courses', 'can_add'), createController);
 router.patch('/:id', checkPermission('courses', 'can_edit'), updateController);
 router.post('/bulk', checkPermission('courses', 'can_edit'), bulkActionController);

@@ -53,12 +53,14 @@ export async function tenantContext(req: Request, res: Response, next: NextFunct
   // ── Superadmin: inject tenant từ header hoặc fallback ──
   if (req.user.role === 'superadmin') {
     const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
+    const tokenTenantId = req.user.tenantId;
+    const selectedTenantId = headerTenantId || tokenTenantId;
 
-    if (headerTenantId) {
-      const status = await getTenantStatus(headerTenantId);
+    if (selectedTenantId) {
+      const status = await getTenantStatus(selectedTenantId);
       if (status === null) { sendError(res, 'Tenant không tồn tại', 404); return; }
       if (!status) { sendError(res, 'Tenant đã bị vô hiệu hóa', 403); return; }
-      req.user.tenantId = headerTenantId;
+      req.user.tenantId = selectedTenantId;
     } else {
       // Fallback: lấy tenant đầu tiên (active) — không cache vì hiếm khi gọi
       const fallback = await query<{ id: string }>(

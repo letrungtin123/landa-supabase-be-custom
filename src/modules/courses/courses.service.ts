@@ -6,6 +6,12 @@ import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import {
+  buildCourseMarkdown,
+  markdownFilename,
+  type CourseMarkdownBlock,
+  type CourseMarkdownCourse,
+} from './course-markdown-exporter.js';
 
 interface CourseMentor {
   id: string;
@@ -101,6 +107,48 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
     page,
     pageSize,
     totalPages: calcTotalPages(total, pageSize),
+  };
+}
+
+export async function exportCourseMarkdown(courseId: string, tenantId: string) {
+  const courseResult = await query<CourseMarkdownCourse>(
+    `SELECT id, display_name, description, org, start_date, end_date, created_at, updated_at
+     FROM courses
+     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (courseResult.rowCount === 0) throw new AppError('Course not found', 404);
+
+  const blocksResult = await query<CourseMarkdownBlock>(
+    `WITH RECURSIVE active_tree AS (
+       SELECT id, parent_id, block_type::text AS block_type, display_name,
+              published_data AS data,
+              COALESCE(published_metadata, metadata, '{}'::jsonb) AS metadata,
+              sort_order, created_at
+       FROM course_blocks
+       WHERE course_id = $1
+         AND parent_id IS NULL
+         AND deleted_at IS NULL
+         AND is_published = true
+       UNION ALL
+       SELECT child.id, child.parent_id, child.block_type::text AS block_type, child.display_name,
+              child.published_data AS data,
+              COALESCE(child.published_metadata, child.metadata, '{}'::jsonb) AS metadata,
+              child.sort_order, child.created_at
+       FROM course_blocks child
+       JOIN active_tree parent ON parent.id = child.parent_id
+       WHERE child.deleted_at IS NULL
+         AND child.is_published = true
+     )
+     SELECT id, parent_id, block_type, display_name, data, metadata, sort_order, created_at
+     FROM active_tree
+     ORDER BY COALESCE(sort_order, 0), created_at, id`,
+    [courseId],
+  );
+
+  return {
+    filename: markdownFilename(courseId),
+    markdown: buildCourseMarkdown(courseResult.rows[0], blocksResult.rows),
   };
 }
 
