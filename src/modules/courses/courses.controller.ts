@@ -20,12 +20,28 @@ export async function listController(req: Request, res: Response, next: NextFunc
   } catch (err) { next(err); }
 }
 
+function getRawQueryParam(req: Request, key: string): string {
+  const queryIndex = req.originalUrl.indexOf('?');
+  if (queryIndex < 0) return '';
+
+  const rawQuery = req.originalUrl.slice(queryIndex + 1);
+  for (const part of rawQuery.split('&')) {
+    const [rawKey, ...rawValueParts] = part.split('=');
+    if (decodeURIComponent(rawKey || '') !== key) continue;
+    return decodeURIComponent(rawValueParts.join('=') || '').trim();
+  }
+  return '';
+}
+
 export async function exportMarkdownController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
 
-    const result = await svc.exportCourseMarkdown(req.params.id, tenantId);
+    const courseId = getRawQueryParam(req, 'id') || req.params.id.trim();
+    if (!courseId) { sendError(res, 'course id is required', 400); return; }
+
+    const result = await svc.exportCourseMarkdown(courseId, tenantId);
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
     res.status(200).send(result.markdown);
