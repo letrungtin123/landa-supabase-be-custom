@@ -22,7 +22,7 @@ function hashToken(token: string): string {
  * Đăng nhập — verify password, tạo token pair.
  * Trả về access_token, refresh_token, user info, permissions.
  */
-export async function login(username: string, password: string, clientApp?: 'admin' | 'learner') {
+export async function login(username: string, password: string, clientApp?: 'admin' | 'learner', origin?: string) {
   // Tìm user theo username hoặc email (1 query duy nhất)
   const userResult = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
@@ -51,6 +51,16 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const valid = await comparePassword(password, user.password_hash);
   if (!valid) {
     throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+  }
+
+  // ── Kiểm tra user có thuộc tenant của domain đang login không ──
+  // Chỉ superadmin mới được login ở bất kỳ domain nào.
+  // Các role khác phải login đúng domain của tenant mình.
+  if (origin && user.role !== 'superadmin') {
+    const tenantFromDomain = await resolveTenantByOrigin(origin);
+    if (tenantFromDomain && tenantFromDomain.id !== user.tenant_id) {
+      throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+    }
   }
 
   if (clientApp === 'admin' && user.role === 'learner') {
@@ -501,6 +511,45 @@ async function resolveMemberGroups(userId: string): Promise<{ id: string; name: 
     [userId],
   );
   return result.rows;
+}
+
+/**
+ * Resolve tenant từ origin (window.location.origin).
+ * So sánh origin với domain_learner / domain_admin trong bảng tenants.
+ * Trả null nếu origin không match tenant nào (ví dụ: localhost dev mode).
+ */
+const originTenantCache = new Map<string, { id: string; expires: number } | null>();
+const ORIGIN_CACHE_TTL = 60_000; // 60s
+
+async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | null> {
+  // Normalize: bỏ trailing slash
+  const normalizedOrigin = origin.replace(/\/+$/, '');
+
+  const cached = originTenantCache.get(normalizedOrigin);
+  if (cached !== undefined && (cached === null || cached.expires > Date.now())) {
+    return cached;
+  }
+
+  // So sánh trực tiếp origin với domain_learner / domain_admin
+  // Domain trong DB có thể có hoặc không có trailing slash, protocol khác nhau
+  const result = await query<{ id: string }>(
+    `SELECT id FROM tenants
+     WHERE (
+       REPLACE(REPLACE(domain_learner, '/', ''), ' ', '') = REPLACE(REPLACE($1, '/', ''), ' ', '')
+       OR REPLACE(REPLACE(domain_admin, '/', ''), ' ', '') = REPLACE(REPLACE($1, '/', ''), ' ', '')
+     ) AND is_active = true
+     LIMIT 1`,
+    [normalizedOrigin],
+  );
+
+  if (result.rowCount === 0) {
+    originTenantCache.set(normalizedOrigin, null);
+    return null;
+  }
+
+  const tenant = { id: result.rows[0].id, expires: Date.now() + ORIGIN_CACHE_TTL };
+  originTenantCache.set(normalizedOrigin, tenant);
+  return tenant;
 }
 
 /**

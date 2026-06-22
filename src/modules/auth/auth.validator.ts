@@ -9,6 +9,7 @@ export const loginSchema = z.object({
   username: z.string().min(1, 'Username không được để trống'),
   password: z.string().min(1, 'Password không được để trống'),
   client_app: z.enum(['admin', 'learner']).optional(),
+  origin: z.string().optional(),
 });
 
 /** Schema refresh token */

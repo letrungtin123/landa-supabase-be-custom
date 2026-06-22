@@ -213,6 +213,7 @@ export interface BotPersona {
   template_prompt: string;
   template_avatar_url: string | null;
   template_fullbody_url: string | null;
+  is_lesson_author_persona?: boolean;
 }
 
 /**
@@ -246,12 +247,17 @@ export async function listBotPersonas(botId: string, tenantId: string): Promise<
             spt.description AS template_description,
             spt.prompt AS template_prompt,
             spt.avatar_url AS template_avatar_url,
-            spt.fullbody_url AS template_fullbody_url
+            spt.fullbody_url AS template_fullbody_url,
+            (tpa.persona_id IS NOT NULL) AS is_lesson_author_persona
      FROM bot_personas bp
      JOIN system_prompt_templates spt ON spt.id = bp.template_id
+     LEFT JOIN tenant_persona_assignments tpa
+       ON tpa.tenant_id = $2
+      AND tpa.target = 'lesson_author'
+      AND tpa.persona_id = bp.id
      WHERE bp.bot_id = $1
      ORDER BY bp.sort_order ASC, bp.created_at ASC`,
-    [botId],
+    [botId, tenantId],
   );
   return result.rows;
 }

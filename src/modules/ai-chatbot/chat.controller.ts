@@ -9,11 +9,14 @@ import * as chatService from './chat.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VALID_TARGETS = ['admin', 'learner'];
+function resolveTarget(req: Request): chatService.ChatTarget {
+  const raw = (req.query.target as string) || (req.body?.target as string) || 'admin';
+  return chatService.isChatTarget(raw) ? raw : 'admin';
+}
 
-function resolveTarget(req: Request): string {
-  const t = (req.query.target as string) || 'admin';
-  return VALID_TARGETS.includes(t) ? t : 'admin';
+function resolveCourseId(req: Request): string | undefined {
+  const raw = (req.query.courseId as string) || (req.body?.courseId as string);
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
 }
 
 // ── Bot Assignments ──
@@ -30,8 +33,8 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const { target, bot_id } = req.body ?? {};
 
-  if (!target || !['admin', 'learner'].includes(target)) {
-    sendError(res, 'target phải là "admin" hoặc "learner"', 400); return;
+  if (!target || typeof target !== 'string' || !chatService.isChatTarget(target)) {
+    sendError(res, 'target phải là "admin", "learner" hoặc "lesson_author"', 400); return;
   }
   if (!bot_id || typeof bot_id !== 'string' || !UUID_REGEX.test(bot_id)) {
     sendError(res, 'bot_id không hợp lệ', 400); return;
@@ -47,7 +50,7 @@ export async function unassignBot(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const { target } = req.params;
 
-  if (!['admin', 'learner'].includes(target)) {
+  if (!chatService.isChatTarget(target)) {
     sendError(res, 'target không hợp lệ', 400); return;
   }
 
@@ -59,6 +62,78 @@ export async function unassignBot(req: Request, res: Response): Promise<void> {
 }
 
 // ── Active Bot for Chat ──
+
+export async function getLessonAuthorSettings(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const settings = await chatService.getLessonAuthorSettings(tenantId);
+    sendSuccess(res, settings);
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function assignLessonAuthorKb(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const { kb_id } = req.body ?? {};
+
+  if (!kb_id || typeof kb_id !== 'string' || !UUID_REGEX.test(kb_id)) {
+    sendError(res, 'kb_id không hợp lệ', 400); return;
+  }
+
+  try {
+    await chatService.assignLessonAuthorKb(tenantId, kb_id);
+    sendSuccess(res, { message: 'Đã gán KB chuyên gia bài học' });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function unassignLessonAuthorKb(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const deleted = await chatService.unassignLessonAuthorKb(tenantId);
+    if (!deleted) { sendError(res, 'Chưa có KB active', 404); return; }
+    sendSuccess(res, { message: 'Đã bỏ gán KB chuyên gia bài học' });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function assignLessonAuthorPersona(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const { bot_id, persona_id } = req.body ?? {};
+
+  if (!bot_id || typeof bot_id !== 'string' || !UUID_REGEX.test(bot_id)) {
+    sendError(res, 'bot_id không hợp lệ', 400); return;
+  }
+  if (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id)) {
+    sendError(res, 'persona_id không hợp lệ', 400); return;
+  }
+
+  try {
+    await chatService.assignLessonAuthorPersona(tenantId, bot_id, persona_id);
+    sendSuccess(res, { message: 'Đã gán mascot chuyên gia bài học' });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function unassignLessonAuthorPersona(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const deleted = await chatService.unassignLessonAuthorPersona(tenantId);
+    if (!deleted) { sendError(res, 'Chưa có mascot active', 404); return; }
+    sendSuccess(res, { message: 'Đã bỏ gán mascot chuyên gia bài học' });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function applyLessonAuthorJob(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const userId = req.user!.id;
+  const { jobId } = req.params;
+
+  if (!UUID_REGEX.test(jobId)) {
+    sendError(res, 'jobId không hợp lệ', 400); return;
+  }
+
+  try {
+    const result = await chatService.applyLessonAuthorJob(jobId, userId, tenantId);
+    sendSuccess(res, result);
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
 
 export async function getActiveBot(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
@@ -77,10 +152,11 @@ export async function listConversations(req: Request, res: Response): Promise<vo
 
   try {
     const target = resolveTarget(req);
+    const courseId = resolveCourseId(req);
     const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendSuccess(res, []); return; }
 
-    const conversations = await chatService.listConversations(userId, activeBot.bot_id, tenantId);
+    const conversations = await chatService.listConversations(userId, activeBot.bot_id, tenantId, target, courseId);
     sendSuccess(res, conversations);
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -96,10 +172,11 @@ export async function createConversation(req: Request, res: Response): Promise<v
 
   try {
     const target = resolveTarget(req);
+    const courseId = resolveCourseId(req);
     const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendError(res, 'Chưa có bot nào được kích hoạt', 400); return; }
 
-    const conversation = await chatService.createConversation(userId, tenantId, activeBot.bot_id, persona_id);
+    const conversation = await chatService.createConversation(userId, tenantId, activeBot.bot_id, persona_id, target, courseId);
     sendSuccess(res, conversation);
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -147,7 +224,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content, courseId } = req.body ?? {};
+  const { content, mode, outline_mentions } = req.body ?? {};
+  const target = resolveTarget(req);
+  const courseId = resolveCourseId(req);
 
   if (!UUID_REGEX.test(conversationId)) {
     sendError(res, 'ID không hợp lệ', 400); return;
@@ -180,7 +259,18 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     userId,
     tenantId,
     content,
-    courseId || undefined,
+    {
+      target,
+      courseId,
+      mode: mode === 'draft_lesson'
+        ? 'draft_lesson'
+        : mode === 'chat'
+          ? 'chat'
+          : target === 'lesson_author'
+            ? 'auto'
+            : 'chat',
+      outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
+    },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });
     },
@@ -195,6 +285,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
         writeSSE({ type: 'error', message: err.message });
         res.end();
       }
+    },
+    (event) => {
+      if (!clientDisconnected) writeSSE(event);
     },
   );
 }

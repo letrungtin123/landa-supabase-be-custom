@@ -4,8 +4,10 @@
 // Structure: course → chapter → sequential → vertical → components
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+
+type DbClient = Awaited<ReturnType<typeof getClient>>;
 
 // ── Types ──
 
@@ -60,6 +62,45 @@ export interface AssetRecord {
   thumbnail_url: string | null;
   is_locked: boolean;
   date_added: string;
+}
+
+export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram';
+
+export interface LessonAuthorComponentProposal {
+  type: LessonAuthorComponentType;
+  title: string;
+  data: unknown;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LessonAuthorUnitProposal {
+  title: string;
+  html?: string;
+  components?: LessonAuthorComponentProposal[];
+}
+
+export interface LessonAuthorLessonProposal {
+  title: string;
+  units: LessonAuthorUnitProposal[];
+}
+
+export interface LessonAuthorChapterProposal {
+  title: string;
+  lessons: LessonAuthorLessonProposal[];
+}
+
+export interface LessonAuthorProposal {
+  summary: string;
+  chapters: LessonAuthorChapterProposal[];
+}
+
+export interface ApplyLessonAuthorProposalInput {
+  courseId: string;
+  tenantId: string;
+  requestedBy: string;
+  proposal: LessonAuthorProposal;
+  jobId?: string;
+  kbId?: string | null;
 }
 
 // ── Course Outline (recursive tree) ──
@@ -574,6 +615,372 @@ export async function deleteAssetByStoragePath(
 }
 
 // ── Course Creation with Root Block ──
+
+async function getNextChildSortOrder(
+  client: DbClient,
+  courseId: string,
+  parentId: string | null,
+): Promise<number> {
+  const result = parentId
+    ? await client.query<{ next_order: number }>(
+        `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
+         FROM course_blocks
+         WHERE course_id = $1 AND parent_id = $2 AND deleted_at IS NULL`,
+        [courseId, parentId],
+      )
+    : await client.query<{ next_order: number }>(
+        `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
+         FROM course_blocks
+         WHERE course_id = $1 AND parent_id IS NULL AND deleted_at IS NULL`,
+        [courseId],
+      );
+
+  return result.rows[0]?.next_order ?? 0;
+}
+
+async function insertGeneratedBlock(
+  client: DbClient,
+  courseId: string,
+  parentId: string | null,
+  blockType: string,
+  displayName: string,
+  data: unknown,
+  metadata: Record<string, unknown>,
+): Promise<string> {
+  const sortOrder = await getNextChildSortOrder(client, courseId, parentId);
+  const result = await client.query<{ id: string }>(
+    `INSERT INTO course_blocks (
+       course_id, parent_id, block_type, display_name,
+       data, metadata, sort_order, is_published, has_draft_changes
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, false, true)
+     RETURNING id`,
+    [
+      courseId,
+      parentId,
+      blockType,
+      displayName,
+      JSON.stringify(data),
+      metadata,
+      sortOrder,
+    ],
+  );
+  return result.rows[0].id;
+}
+
+function normalizeGeneratedTitle(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function findExistingChildBlock(
+  client: DbClient,
+  courseId: string,
+  parentId: string,
+  blockType: string,
+  displayName: string,
+): Promise<string | null> {
+  const normalized = normalizeGeneratedTitle(displayName);
+  if (!normalized) return null;
+
+  const result = await client.query<{ id: string; display_name: string }>(
+    `SELECT id, display_name
+     FROM course_blocks
+     WHERE course_id = $1
+       AND parent_id = $2
+       AND block_type = $3
+       AND deleted_at IS NULL
+     ORDER BY sort_order ASC, created_at ASC`,
+    [courseId, parentId, blockType],
+  );
+
+  const existing = result.rows.find(row => normalizeGeneratedTitle(row.display_name) === normalized);
+  return existing?.id ?? null;
+}
+
+async function getOrCreateGeneratedBlock(
+  client: DbClient,
+  courseId: string,
+  parentId: string,
+  blockType: string,
+  displayName: string,
+  data: unknown,
+  metadata: Record<string, unknown>,
+): Promise<{ id: string; created: boolean }> {
+  const existingId = await findExistingChildBlock(client, courseId, parentId, blockType, displayName);
+  if (existingId) return { id: existingId, created: false };
+
+  const id = await insertGeneratedBlock(client, courseId, parentId, blockType, displayName, data, metadata);
+  return { id, created: true };
+}
+
+function clampTitle(value: string, fallback: string): string {
+  const title = typeof value === 'string' ? value.trim() : '';
+  return (title || fallback).slice(0, 250);
+}
+
+function getLessonAuthorComponents(unit: LessonAuthorUnitProposal): LessonAuthorComponentProposal[] {
+  if (Array.isArray(unit.components) && unit.components.length > 0) return unit.components;
+  if (typeof unit.html === 'string' && unit.html.trim()) {
+    return [{
+      type: 'html',
+      title: unit.title,
+      data: unit.html,
+    }];
+  }
+  return [];
+}
+
+function buildGeneratedComponentBlock(
+  component: LessonAuthorComponentProposal,
+  unitTitle: string,
+  baseMetadata: Record<string, unknown>,
+  componentIndex: number,
+): {
+  blockType: LessonAuthorComponentType;
+  displayName: string;
+  data: unknown;
+  metadata: Record<string, unknown>;
+} {
+  const displayName = clampTitle(component.title, `${unitTitle} component ${componentIndex + 1}`);
+  return {
+    blockType: component.type,
+    displayName,
+    data: component.data,
+    metadata: {
+      ...(component.metadata ?? {}),
+      ...baseMetadata,
+      ai_component_index: componentIndex,
+      source: 'lesson_author_proposal',
+    },
+  };
+}
+
+function logLessonAuthorApply(stage: string, details: Record<string, unknown> = {}): void {
+  console.log(`[LessonAuthorApply] ${stage}`, details);
+}
+
+function getProposalApplyMetrics(proposal: LessonAuthorProposal): Record<string, unknown> {
+  let lessons = 0;
+  let units = 0;
+  let components = 0;
+  const componentTypes = new Set<string>();
+
+  proposal.chapters.forEach(chapter => {
+    lessons += chapter.lessons.length;
+    chapter.lessons.forEach(lesson => {
+      units += lesson.units.length;
+      lesson.units.forEach(unit => {
+        const unitComponents = getLessonAuthorComponents(unit);
+        components += unitComponents.length;
+        unitComponents.forEach(component => componentTypes.add(component.type));
+      });
+    });
+  });
+
+  return {
+    chapters: proposal.chapters.length,
+    lessons,
+    units,
+    components,
+    component_types: Array.from(componentTypes),
+  };
+}
+
+export async function applyLessonAuthorProposalToCourse(
+  input: ApplyLessonAuthorProposalInput,
+): Promise<{ created_block_ids: string[] }> {
+  const client = await getClient();
+
+  try {
+    logLessonAuthorApply('start', {
+      course_id: input.courseId,
+      tenant_id: input.tenantId,
+      job_id: input.jobId ?? null,
+      kb_id: input.kbId ?? null,
+      ...getProposalApplyMetrics(input.proposal),
+    });
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`course:${input.tenantId}:${input.courseId}`]);
+    logLessonAuthorApply('transaction_locked', {
+      course_id: input.courseId,
+      tenant_id: input.tenantId,
+      job_id: input.jobId ?? null,
+    });
+
+    const courseResult = await client.query<{ id: string; display_name: string }>(
+      `SELECT id, display_name
+       FROM courses
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+       FOR UPDATE`,
+      [input.courseId, input.tenantId],
+    );
+    if (courseResult.rowCount === 0) throw new AppError('Course not found', 404);
+
+    let rootResult = await client.query<{ id: string }>(
+      `SELECT id
+       FROM course_blocks
+       WHERE course_id = $1
+         AND parent_id IS NULL
+         AND block_type = 'course'
+         AND deleted_at IS NULL
+       ORDER BY created_at ASC
+       LIMIT 1
+       FOR UPDATE`,
+      [input.courseId],
+    );
+
+    let createdRoot = false;
+    if (rootResult.rowCount === 0) {
+      createdRoot = true;
+      rootResult = await client.query<{ id: string }>(
+        `INSERT INTO course_blocks (
+           course_id, block_type, display_name, is_published, has_draft_changes
+         )
+         VALUES ($1, 'course', $2, true, true)
+         RETURNING id`,
+        [input.courseId, courseResult.rows[0].display_name],
+      );
+    }
+
+    const rootId = rootResult.rows[0].id;
+    logLessonAuthorApply('root_ready', {
+      course_id: input.courseId,
+      root_id: rootId,
+      created_root: createdRoot,
+    });
+    const createdBlockIds: string[] = [];
+    const baseMetadata = {
+      generated_by: 'lesson_author_ai',
+      job_id: input.jobId ?? null,
+      kb_id: input.kbId ?? null,
+      requested_by: input.requestedBy,
+      generated_at: new Date().toISOString(),
+    };
+
+    for (const [chapterIndex, chapter] of input.proposal.chapters.entries()) {
+      const chapterTitle = clampTitle(chapter.title, `Generated chapter ${chapterIndex + 1}`);
+      const chapterBlock = await getOrCreateGeneratedBlock(
+        client,
+        input.courseId,
+        rootId,
+        'chapter',
+        chapterTitle,
+        {},
+        { ...baseMetadata, ai_index: chapterIndex },
+      );
+      if (chapterBlock.created) createdBlockIds.push(chapterBlock.id);
+      logLessonAuthorApply('chapter_ready', {
+        job_id: input.jobId ?? null,
+        title: chapterTitle,
+        id: chapterBlock.id,
+        created: chapterBlock.created,
+      });
+
+      for (const [lessonIndex, lesson] of chapter.lessons.entries()) {
+        const lessonTitle = clampTitle(lesson.title, `Generated lesson ${lessonIndex + 1}`);
+        const sequentialBlock = await getOrCreateGeneratedBlock(
+          client,
+          input.courseId,
+          chapterBlock.id,
+          'sequential',
+          lessonTitle,
+          {},
+          { ...baseMetadata, ai_index: lessonIndex },
+        );
+        if (sequentialBlock.created) createdBlockIds.push(sequentialBlock.id);
+        logLessonAuthorApply('lesson_ready', {
+          job_id: input.jobId ?? null,
+          chapter_id: chapterBlock.id,
+          title: lessonTitle,
+          id: sequentialBlock.id,
+          created: sequentialBlock.created,
+        });
+
+        for (const [unitIndex, unit] of lesson.units.entries()) {
+          const unitTitle = clampTitle(unit.title, `Generated unit ${unitIndex + 1}`);
+          const verticalBlock = await getOrCreateGeneratedBlock(
+            client,
+            input.courseId,
+            sequentialBlock.id,
+            'vertical',
+            unitTitle,
+            {},
+            { ...baseMetadata, ai_index: unitIndex },
+          );
+          if (verticalBlock.created) createdBlockIds.push(verticalBlock.id);
+          logLessonAuthorApply('unit_ready', {
+            job_id: input.jobId ?? null,
+            lesson_id: sequentialBlock.id,
+            title: unitTitle,
+            id: verticalBlock.id,
+            created: verticalBlock.created,
+          });
+
+          for (const [componentIndex, component] of getLessonAuthorComponents(unit).entries()) {
+            const generatedComponent = buildGeneratedComponentBlock(
+              component,
+              unitTitle,
+              { ...baseMetadata, ai_index: unitIndex },
+              componentIndex,
+            );
+            const componentBlock = await getOrCreateGeneratedBlock(
+              client,
+              input.courseId,
+              verticalBlock.id,
+              generatedComponent.blockType,
+              generatedComponent.displayName,
+              generatedComponent.data,
+              generatedComponent.metadata,
+            );
+            if (componentBlock.created) createdBlockIds.push(componentBlock.id);
+            logLessonAuthorApply('component_ready', {
+              job_id: input.jobId ?? null,
+              unit_id: verticalBlock.id,
+              type: generatedComponent.blockType,
+              title: generatedComponent.displayName,
+              id: componentBlock.id,
+              created: componentBlock.created,
+            });
+          }
+        }
+      }
+    }
+
+    await client.query(
+      `UPDATE course_blocks
+       SET has_draft_changes = true, updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [rootId],
+    );
+
+    await client.query('COMMIT');
+    logLessonAuthorApply('commit_done', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+      created_count: createdBlockIds.length,
+      created_block_ids: createdBlockIds,
+    });
+    return { created_block_ids: createdBlockIds };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    logLessonAuthorApply('rollback_done', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 export async function initializeCourseStructure(
   courseId: string,

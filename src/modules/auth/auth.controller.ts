@@ -19,7 +19,10 @@ export async function loginController(req: Request, res: Response, next: NextFun
       return;
     }
 
-    const result = await authService.login(parsed.data.username, parsed.data.password, parsed.data.client_app);
+    // Lấy origin từ body (FE gửi) hoặc fallback từ Origin header
+    const origin = parsed.data.origin || (req.headers.origin as string | undefined);
+
+    const result = await authService.login(parsed.data.username, parsed.data.password, parsed.data.client_app, origin);
 
     sendSuccess(res, result, 'Đăng nhập thành công');
   } catch (err) {

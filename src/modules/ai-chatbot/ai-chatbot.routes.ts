@@ -52,6 +52,13 @@ router.put('/bots/assignments', checkPermission('ai_chatbot', 'can_edit'), chatC
 router.delete('/bots/assignments/:target', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.unassignBot);
 
 // ── Bot CRUD ──
+router.get('/lesson-author/settings', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getLessonAuthorSettings);
+router.put('/lesson-author/kb-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.assignLessonAuthorKb);
+router.delete('/lesson-author/kb-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.unassignLessonAuthorKb);
+router.put('/lesson-author/persona-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.assignLessonAuthorPersona);
+router.delete('/lesson-author/persona-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.unassignLessonAuthorPersona);
+router.post('/lesson-author/jobs/:jobId/apply', checkPermission('courses', 'can_edit'), chatCtrl.applyLessonAuthorJob);
+
 router.get('/bots', checkPermission('ai_chatbot', 'can_view'), botCtrl.listBots);
 router.get('/bots/:id', checkPermission('ai_chatbot', 'can_view'), botCtrl.getBot);
 router.post('/bots', checkPermission('ai_chatbot', 'can_add'), botCtrl.createBot);
