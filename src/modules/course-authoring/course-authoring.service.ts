@@ -103,6 +103,11 @@ export interface ApplyLessonAuthorProposalInput {
   kbId?: string | null;
 }
 
+export interface ApplyLessonAuthorProposalResult {
+  created_block_ids: string[];
+  updated_block_ids: string[];
+}
+
 // ── Course Outline (recursive tree) ──
 
 export async function getCourseOutline(
@@ -705,6 +710,52 @@ async function findExistingChildBlock(
   return existing?.id ?? null;
 }
 
+async function markAncestorsDirtyWithClient(client: DbClient, blockId: string): Promise<void> {
+  await client.query(
+    `WITH RECURSIVE ancestors AS (
+       SELECT parent_id
+       FROM course_blocks
+       WHERE id = $1 AND parent_id IS NOT NULL AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.parent_id
+       FROM course_blocks cb
+       JOIN ancestors a ON cb.id = a.parent_id
+       WHERE cb.parent_id IS NOT NULL AND cb.deleted_at IS NULL
+     )
+     UPDATE course_blocks
+     SET has_draft_changes = true, updated_at = now()
+     WHERE id IN (SELECT parent_id FROM ancestors) AND deleted_at IS NULL`,
+    [blockId],
+  );
+}
+
+async function updateGeneratedBlockContent(
+  client: DbClient,
+  blockId: string,
+  courseId: string,
+  parentId: string,
+  blockType: string,
+  data: unknown,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const result = await client.query<{ id: string }>(
+    `UPDATE course_blocks
+     SET data = $5,
+         metadata = COALESCE(metadata, '{}'::jsonb) || $6::jsonb,
+         has_draft_changes = true,
+         updated_at = now()
+     WHERE id = $1
+       AND course_id = $2
+       AND parent_id = $3
+       AND block_type = $4
+       AND deleted_at IS NULL
+     RETURNING id`,
+    [blockId, courseId, parentId, blockType, JSON.stringify(data), JSON.stringify(metadata)],
+  );
+  if (result.rowCount === 0) throw new Error('Existing generated block not found for update');
+  await markAncestorsDirtyWithClient(client, blockId);
+}
+
 async function getOrCreateGeneratedBlock(
   client: DbClient,
   courseId: string,
@@ -713,12 +764,19 @@ async function getOrCreateGeneratedBlock(
   displayName: string,
   data: unknown,
   metadata: Record<string, unknown>,
-): Promise<{ id: string; created: boolean }> {
+  options: { updateExisting?: boolean } = {},
+): Promise<{ id: string; created: boolean; updated: boolean }> {
   const existingId = await findExistingChildBlock(client, courseId, parentId, blockType, displayName);
-  if (existingId) return { id: existingId, created: false };
+  if (existingId) {
+    if (options.updateExisting) {
+      await updateGeneratedBlockContent(client, existingId, courseId, parentId, blockType, data, metadata);
+      return { id: existingId, created: false, updated: true };
+    }
+    return { id: existingId, created: false, updated: false };
+  }
 
   const id = await insertGeneratedBlock(client, courseId, parentId, blockType, displayName, data, metadata);
-  return { id, created: true };
+  return { id, created: true, updated: false };
 }
 
 function clampTitle(value: string, fallback: string): string {
@@ -796,7 +854,7 @@ function getProposalApplyMetrics(proposal: LessonAuthorProposal): Record<string,
 
 export async function applyLessonAuthorProposalToCourse(
   input: ApplyLessonAuthorProposalInput,
-): Promise<{ created_block_ids: string[] }> {
+): Promise<ApplyLessonAuthorProposalResult> {
   const client = await getClient();
 
   try {
@@ -857,6 +915,7 @@ export async function applyLessonAuthorProposalToCourse(
       created_root: createdRoot,
     });
     const createdBlockIds: string[] = [];
+    const updatedBlockIds: string[] = [];
     const baseMetadata = {
       generated_by: 'lesson_author_ai',
       job_id: input.jobId ?? null,
@@ -939,8 +998,10 @@ export async function applyLessonAuthorProposalToCourse(
               generatedComponent.displayName,
               generatedComponent.data,
               generatedComponent.metadata,
+              { updateExisting: true },
             );
             if (componentBlock.created) createdBlockIds.push(componentBlock.id);
+            if (componentBlock.updated) updatedBlockIds.push(componentBlock.id);
             logLessonAuthorApply('component_ready', {
               job_id: input.jobId ?? null,
               unit_id: verticalBlock.id,
@@ -948,6 +1009,7 @@ export async function applyLessonAuthorProposalToCourse(
               title: generatedComponent.displayName,
               id: componentBlock.id,
               created: componentBlock.created,
+              updated: componentBlock.updated,
             });
           }
         }
@@ -967,8 +1029,10 @@ export async function applyLessonAuthorProposalToCourse(
       job_id: input.jobId ?? null,
       created_count: createdBlockIds.length,
       created_block_ids: createdBlockIds,
+      updated_count: updatedBlockIds.length,
+      updated_block_ids: updatedBlockIds,
     });
-    return { created_block_ids: createdBlockIds };
+    return { created_block_ids: createdBlockIds, updated_block_ids: updatedBlockIds };
   } catch (err) {
     await client.query('ROLLBACK');
     logLessonAuthorApply('rollback_done', {

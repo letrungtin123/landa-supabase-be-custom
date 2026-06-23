@@ -41,3 +41,47 @@ export async function updateTenantBadges(req: Request, res: Response, next: Next
     next(err);
   }
 }
+
+/** POST /api/badges/tenants/:tenantId/:badgeId/card-image */
+export async function uploadCardImage(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (req.user?.role !== 'superadmin') {
+      sendError(res, 'Không có quyền truy cập', 403);
+      return;
+    }
+
+    const { tenantId, badgeId } = req.params;
+    const file = req.file;
+
+    if (!tenantId) { sendError(res, 'Thiếu tenantId', 400); return; }
+    if (!badgeId) { sendError(res, 'Thiếu badgeId', 400); return; }
+    if (!file) { sendError(res, 'Chưa upload file ảnh', 400); return; }
+
+    const result = await badgesService.uploadBadgeCardImage(tenantId, badgeId, file);
+    sendSuccess(res, result, 'Upload ảnh card thành công');
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/badges/tenants/:tenantId/:badgeId/icon-image */
+export async function uploadIconImage(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (req.user?.role !== 'superadmin') {
+      sendError(res, 'Không có quyền truy cập', 403);
+      return;
+    }
+
+    const { tenantId, badgeId } = req.params;
+    const file = req.file;
+
+    if (!tenantId) { sendError(res, 'Thiếu tenantId', 400); return; }
+    if (!badgeId) { sendError(res, 'Thiếu badgeId', 400); return; }
+    if (!file) { sendError(res, 'Chưa upload file ảnh', 400); return; }
+
+    const result = await badgesService.uploadBadgeIconImage(tenantId, badgeId, file);
+    sendSuccess(res, result, 'Upload ảnh icon thành công');
+  } catch (err) {
+    next(err);
+  }
+}

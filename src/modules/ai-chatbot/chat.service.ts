@@ -331,6 +331,14 @@ export interface PaginatedMessages {
   next_cursor: string | null; // created_at of the oldest message returned
 }
 
+interface LessonAuthorMessageJobRow {
+  id: string;
+  status: string;
+  proposal: LessonAuthorProposal;
+  error_reason: string | null;
+  created_block_ids: string[] | null;
+}
+
 interface BotAssignment {
   id: string;
   tenant_id: string;
@@ -650,6 +658,54 @@ export async function deleteConversation(conversationId: string, userId: string,
 // Messages — Cursor-based pagination (load newest first)
 // ═══════════════════════════════════════════════════════════════
 
+async function hydrateLessonAuthorProposalMessages(
+  messages: ChatMessage[],
+  conversationId: string,
+  tenantId: string,
+): Promise<ChatMessage[]> {
+  const jobIds = Array.from(new Set(messages
+    .map((message) => {
+      const metadata = message.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+      const jobId = (metadata as Record<string, unknown>).lesson_author_job_id;
+      const kind = (metadata as Record<string, unknown>).kind;
+      return kind === 'lesson_author_proposal' && typeof jobId === 'string' && isValidUUID(jobId) ? jobId : null;
+    })
+    .filter((jobId): jobId is string => Boolean(jobId))));
+
+  if (jobIds.length === 0) return messages;
+
+  const result = await query<LessonAuthorMessageJobRow>(
+    `SELECT id::text, status, proposal, error_reason, created_block_ids
+     FROM lesson_author_jobs
+     WHERE conversation_id = $1
+       AND tenant_id = $2
+       AND id = ANY($3::uuid[])`,
+    [conversationId, tenantId, jobIds],
+  );
+  const jobsById = new Map(result.rows.map(job => [job.id, job]));
+
+  return messages.map((message) => {
+    const metadata = message.metadata && typeof message.metadata === 'object'
+      ? { ...message.metadata }
+      : {};
+    const jobId = metadata.lesson_author_job_id;
+    if (typeof jobId !== 'string') return message;
+    const job = jobsById.get(jobId);
+    if (!job) return message;
+
+    return {
+      ...message,
+      metadata: {
+        ...metadata,
+        lesson_author_job_status: job.status,
+        lesson_author_proposal: job.proposal,
+        lesson_author_error_reason: job.error_reason,
+        lesson_author_created_block_ids: job.created_block_ids ?? [],
+      },
+    };
+  });
+}
+
 export async function getConversationMessages(
   conversationId: string, userId: string, tenantId: string, cursor?: string,
 ): Promise<PaginatedMessages> {
@@ -693,6 +749,7 @@ export async function getConversationMessages(
 
   // Reverse to chronological order for FE
   messages.reverse();
+  messages = await hydrateLessonAuthorProposalMessages(messages, conversationId, tenantId);
 
   return {
     messages,
@@ -851,6 +908,9 @@ export interface LessonAuthorOutlineMention {
   block_type: string;
   display_name: string;
   path: string;
+  unit_id?: string | null;
+  ancestor_ids?: string[];
+  ancestor_types?: string[];
 }
 
 export type ChatStreamSideEvent =
@@ -862,6 +922,18 @@ interface DraftCourseOutline {
   hasStructure: boolean;
   chapterCount: number;
   outline: string;
+}
+
+interface MentionContextRow {
+  id: string;
+  parent_id: string | null;
+  root_id: string;
+  block_type: string;
+  display_name: string;
+  sort_order: number;
+  depth: number;
+  data: unknown;
+  metadata: unknown;
 }
 
 interface LessonAuthorJobRow {
@@ -881,7 +953,9 @@ export interface AppliedLessonAuthorJob {
   job_id: string;
   course_id: string;
   created_block_ids: string[];
+  updated_block_ids: string[];
   created_count: number;
+  updated_count: number;
 }
 
 async function getDraftCourseOutlineForPrompt(courseId: string, tenantId: string): Promise<DraftCourseOutline> {
@@ -946,12 +1020,48 @@ function normalizeOutlineMentionInput(value: unknown): LessonAuthorOutlineMentio
     : {};
   const blockId = typeof record.block_id === 'string' ? record.block_id.trim() : '';
   if (!isValidUUID(blockId)) return null;
+  const unitId = typeof record.unit_id === 'string' && isValidUUID(record.unit_id.trim())
+    ? record.unit_id.trim()
+    : null;
+  const ancestorIds = Array.isArray(record.ancestor_ids)
+    ? record.ancestor_ids.filter((id): id is string => typeof id === 'string' && isValidUUID(id.trim())).map(id => id.trim()).slice(0, 12)
+    : [];
+  const ancestorTypes = Array.isArray(record.ancestor_types)
+    ? record.ancestor_types.filter((type): type is string => typeof type === 'string').map(type => type.slice(0, 50)).slice(0, 12)
+    : [];
   return {
     block_id: blockId,
     block_type: typeof record.block_type === 'string' ? record.block_type.slice(0, 50) : '',
     display_name: typeof record.display_name === 'string' ? record.display_name.slice(0, 180) : '',
     path: typeof record.path === 'string' ? record.path.slice(0, 600) : '',
+    unit_id: unitId,
+    ancestor_ids: ancestorIds,
+    ancestor_types: ancestorTypes,
   };
+}
+
+function foldVietnameseText(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd');
+}
+
+function hasLessonAuthorDraftAction(userPrompt: string): boolean {
+  const text = foldVietnameseText(userPrompt);
+  return /(^|\b)(sua|chinh sua|cap nhat|bo sung|them|mo rong|viet lai|viet them|lam lai|lam di|tu lam|len plan|lap plan|de xuat|toi uu|cai thien|dai ti|dai hon|ngan gon|ro hon|draft|proposal|update|edit|improve|expand)(\b|$)/i.test(text);
+}
+
+function shouldCarryForwardLessonAuthorTarget(userPrompt: string): boolean {
+  const text = foldVietnameseText(userPrompt);
+  const hasLocalReference = /(^|\b)(phan nay|noi dung nay|cai nay|muc nay|bai nay|unit nay|component nay|chuong nay|doan nay|no nay|target nay)(\b|$)/i.test(text);
+  return hasLocalReference || hasLessonAuthorDraftAction(userPrompt);
+}
+
+function isSingleHtmlComponentRequest(userPrompt: string): boolean {
+  const text = foldVietnameseText(userPrompt);
+  return /\bcomponent\b/i.test(text) && /\bhtml\b/i.test(text) && /(^|\b)(1|mot|them|tao|viet|bo sung)(\b|$)/i.test(text);
 }
 
 async function validateLessonAuthorOutlineMentions(
@@ -987,8 +1097,33 @@ async function validateLessonAuthorOutlineMentions(
       block_type: row.block_type,
       display_name: row.display_name || mention.display_name,
       path: mention.path || row.display_name,
+      unit_id: mention.unit_id,
+      ancestor_ids: mention.ancestor_ids,
+      ancestor_types: mention.ancestor_types,
     };
   });
+}
+
+async function getLatestConversationOutlineMentions(
+  ctx: ConversationContext,
+): Promise<LessonAuthorOutlineMention[]> {
+  if (ctx.target !== LESSON_AUTHOR_TARGET || !ctx.courseId) return [];
+
+  const result = await query<{ outline_mentions: unknown }>(
+    `SELECT metadata -> 'outline_mentions' AS outline_mentions
+     FROM chat_messages
+     WHERE conversation_id = $1
+       AND role = 'user'
+       AND metadata ? 'outline_mentions'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [ctx.conversationId],
+  );
+  const rawMentions = result.rows[0]?.outline_mentions;
+  return validateLessonAuthorOutlineMentions(
+    ctx,
+    Array.isArray(rawMentions) ? rawMentions : [],
+  );
 }
 
 function formatOutlineMentionsForPrompt(mentions: LessonAuthorOutlineMention[]): string {
@@ -1000,6 +1135,203 @@ function formatOutlineMentionsForPrompt(mentions: LessonAuthorOutlineMention[]):
       `   path: ${mention.path || mention.display_name}`,
     ].join('\n'))
     .join('\n');
+}
+
+function stringifyBlockExcerpt(data: unknown, metadata: unknown): string {
+  const dataText = typeof data === 'string'
+    ? data
+    : data && typeof data === 'object'
+      ? JSON.stringify(data)
+      : '';
+  const metadataText = metadata && typeof metadata === 'object' ? JSON.stringify(metadata) : '';
+  const raw = dataText || metadataText;
+  if (!raw) return '';
+  return stripHtml(raw)
+    .replace(/[{}[\]"]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 260);
+}
+
+async function getOutlineMentionContextRows(
+  ctx: ConversationContext,
+  mentions: LessonAuthorOutlineMention[],
+): Promise<MentionContextRow[]> {
+  if (!ctx.courseId || mentions.length === 0) return [];
+  const ids = mentions.map(mention => mention.block_id).filter(isValidUUID);
+  if (ids.length === 0) return [];
+
+  const result = await query<MentionContextRow>(
+    `WITH RECURSIVE selected(id, ord) AS (
+       SELECT * FROM unnest($3::uuid[]) WITH ORDINALITY
+     ), tree AS (
+       SELECT cb.id::text,
+              cb.parent_id::text,
+              cb.id::text AS root_id,
+              cb.block_type,
+              cb.display_name,
+              cb.sort_order,
+              0 AS depth,
+              COALESCE(cb.data, cb.published_data) AS data,
+              COALESCE(cb.metadata, cb.published_metadata) AS metadata,
+              selected.ord
+       FROM course_blocks cb
+       JOIN courses c ON c.id = cb.course_id
+       JOIN selected ON selected.id = cb.id
+       WHERE cb.course_id = $1
+         AND c.tenant_id = $2
+         AND cb.deleted_at IS NULL
+       UNION ALL
+       SELECT child.id::text,
+              child.parent_id::text,
+              tree.root_id,
+              child.block_type,
+              child.display_name,
+              child.sort_order,
+              tree.depth + 1 AS depth,
+              COALESCE(child.data, child.published_data) AS data,
+              COALESCE(child.metadata, child.published_metadata) AS metadata,
+              tree.ord
+       FROM course_blocks child
+       JOIN tree ON tree.id = child.parent_id::text
+       WHERE child.course_id = $1
+         AND child.deleted_at IS NULL
+         AND tree.depth < 5
+     )
+     SELECT id, parent_id, root_id, block_type, display_name, sort_order, depth, data, metadata
+     FROM tree
+     ORDER BY ord, depth, sort_order ASC`,
+    [ctx.courseId, ctx.tenantId, ids],
+  );
+
+  return result.rows;
+}
+
+function formatMentionContextRowsForPrompt(rows: MentionContextRow[]): string {
+  if (rows.length === 0) return '';
+
+  const lines = ['Current @mention subtree/context from the database:'];
+  let currentRoot = '';
+  for (const row of rows.slice(0, 120)) {
+    if (row.root_id !== currentRoot) {
+      currentRoot = row.root_id;
+      lines.push('');
+    }
+    const indent = '  '.repeat(Math.min(row.depth, 5));
+    const excerpt = stringifyBlockExcerpt(row.data, row.metadata);
+    lines.push(`${indent}- ${row.display_name || '(No title)'} [${row.block_type}] id=${row.id}${excerpt ? ` | excerpt: ${excerpt}` : ''}`);
+  }
+  if (rows.length > 120) {
+    lines.push(`... ${rows.length - 120} more blocks omitted from this mention context.`);
+  }
+
+  return lines.join('\n');
+}
+
+function splitMentionPath(mention: LessonAuthorOutlineMention): string[] {
+  const raw = mention.path || mention.display_name;
+  return raw.split('/').map(part => part.trim()).filter(Boolean);
+}
+
+function firstVerticalTitleForMention(
+  mention: LessonAuthorOutlineMention,
+  contextRows: MentionContextRow[],
+): string | null {
+  if (mention.block_type === 'vertical') return mention.display_name || null;
+  const directRows = contextRows.filter(row => row.root_id === mention.block_id);
+  const vertical = directRows.find(row => row.block_type === 'vertical');
+  return vertical?.display_name || null;
+}
+
+function buildTargetLockedProposalInstruction(
+  userPrompt: string,
+  mentions: LessonAuthorOutlineMention[],
+  contextRows: MentionContextRow[],
+): string {
+  if (mentions.length === 0) return '';
+
+  const lines = [
+    'TARGET-LOCKED OUTPUT RULES:',
+    '- The selected @mention target is authoritative. Ignore older targets from chat history and do not output unrelated course branches.',
+    '- Return only the minimum chapter -> lesson -> unit chain needed for the selected target. Use exact existing titles from the selected path/subtree so apply reuses existing blocks.',
+    '- Do not include any chapter, lesson, unit, or component whose title is outside the selected @mention path/subtree.',
+    '- When adding new content to an existing unit, include only the new component(s) in unit.components. Do not copy existing components from the target context into the proposal.',
+  ];
+
+  if (isSingleHtmlComponentRequest(userPrompt)) {
+    lines.push('- The admin asked for one HTML component. Output exactly one new component with type "html" and do not add quiz, FAQ, sortable, crossword, diagram, or extra units.');
+  }
+
+  mentions.slice(0, 5).forEach((mention, index) => {
+    const pathParts = splitMentionPath(mention);
+    const chapterTitle = mention.block_type === 'chapter' ? mention.display_name : pathParts[0] || '';
+    const lessonTitle = mention.block_type === 'sequential' ? mention.display_name : pathParts[1] || '';
+    const unitTitle = firstVerticalTitleForMention(mention, contextRows) || pathParts[2] || '';
+
+    lines.push(`${index + 1}. Selected target: "${mention.display_name}" [${mention.block_type}] path="${mention.path || mention.display_name}" id=${mention.block_id}`);
+    if (chapterTitle) lines.push(`   - Use chapter.title exactly: "${chapterTitle}".`);
+    if (mention.block_type === 'chapter') {
+      lines.push('   - Create or improve content only inside this selected chapter.');
+      return;
+    }
+    if (lessonTitle) lines.push(`   - Use lesson.title exactly: "${lessonTitle}".`);
+    if (mention.block_type === 'sequential') {
+      if (unitTitle) {
+        lines.push(`   - For adding a component, put it under existing unit.title exactly: "${unitTitle}".`);
+      } else {
+        lines.push('   - For adding a component, create exactly one relevant unit under this selected lesson because no existing unit was found in the target context.');
+      }
+      return;
+    }
+    if (unitTitle) lines.push(`   - Use unit.title exactly: "${unitTitle}".`);
+    if (mention.block_type === 'vertical') {
+      lines.push('   - Add or update components only inside this selected unit.');
+      return;
+    }
+    if (pathParts.length >= 4) {
+      lines.push(`   - The selected component is "${mention.display_name}". If adding a sibling component, keep it in the same unit. If editing, keep this exact component title.`);
+    }
+  });
+
+  return lines.join('\n');
+}
+
+async function getOutlineMentionContextForPrompt(
+  ctx: ConversationContext,
+  mentions: LessonAuthorOutlineMention[],
+): Promise<string> {
+  const rows = await getOutlineMentionContextRows(ctx, mentions);
+  return formatMentionContextRowsForPrompt(rows);
+}
+
+function buildCurrentTurnText(
+  userPrompt: string,
+  mentions: LessonAuthorOutlineMention[],
+  mentionContext: string,
+): string {
+  if (mentions.length === 0) return userPrompt;
+  return [
+    'CURRENT USER TURN - HIGHEST PRIORITY',
+    'The admin selected these @mention targets for THIS message. They override any older @mentions or older target references in the chat history.',
+    formatOutlineMentionsForPrompt(mentions),
+    mentionContext,
+    'Answer or act ONLY for the current @mention target unless the admin explicitly asks to compare with older targets.',
+    `Admin message:\n${userPrompt}`,
+  ].filter(Boolean).join('\n\n');
+}
+
+function replaceLatestUserTurn(
+  history: { role: string; parts: { text: string }[] }[],
+  currentTurnText: string,
+): { role: string; parts: { text: string }[] }[] {
+  const next = history.map(item => ({ ...item, parts: item.parts.map(part => ({ ...part })) }));
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    if (next[index].role === 'user') {
+      next[index] = { role: 'user', parts: [{ text: currentTurnText }] };
+      return next;
+    }
+  }
+  return [...next, { role: 'user', parts: [{ text: currentTurnText }] }];
 }
 
 function extractJsonObject(text: string): unknown {
@@ -1495,7 +1827,17 @@ function formatLessonAuthorFailurePreview(err: any, jobId?: string): string {
 }
 
 function formatProposalPreview(proposal: LessonAuthorProposal, jobId: string): string {
-  let text = `${proposal.summary}\n\nProposal ID: ${jobId}\n\n`;
+  const pendingSummary = proposal.summary
+    .replace(/^đã tạo/i, 'Đề xuất tạo')
+    .replace(/^da tao/i, 'Đề xuất tạo')
+    .replace(/^đã cập nhật/i, 'Đề xuất cập nhật')
+    .replace(/^da cap nhat/i, 'Đề xuất cập nhật');
+  let text = [
+    'Mình đã chuẩn bị bản đề xuất. Chưa có block nào được ghi vào outline trước khi admin bấm Áp dụng.',
+    `Tóm tắt đề xuất: ${pendingSummary}`,
+    `Mã đề xuất: ${jobId}`,
+    '',
+  ].join('\n\n');
   proposal.chapters.forEach((chapter, chapterIndex) => {
     text += `${chapterIndex + 1}. ${chapter.title}\n`;
     chapter.lessons.forEach((lesson, lessonIndex) => {
@@ -1510,7 +1852,7 @@ function formatProposalPreview(proposal: LessonAuthorProposal, jobId: string): s
       });
     });
   });
-  text += '\nKiểm tra outline để xác nhận, sau đó bấm Áp dụng. Khi apply, backend sẽ reuse chapter/lesson/unit đã tồn tại và chỉ tạo phần con thiếu.';
+  text += '\nKiểm tra bản đề xuất để xác nhận, sau đó bấm Áp dụng. Chỉ sau khi bấm Áp dụng, backend mới ghi thay đổi vào outline và refresh cây bài học.';
   return text;
 }
 
@@ -1621,6 +1963,8 @@ async function generateLessonAuthorProposal(
   userPrompt: string,
   kbId: string,
   outlineMentions: LessonAuthorOutlineMention[] = [],
+  mentionContext = '',
+  targetScopeInstruction = '',
 ): Promise<LessonAuthorProposal> {
   logLessonAuthorFlow('proposal_generate_start', {
     conversation_id: ctx.conversationId,
@@ -1629,6 +1973,7 @@ async function generateLessonAuthorProposal(
     kb_id: kbId,
     prompt_chars: userPrompt.length,
     outline_mentions: outlineMentions.length,
+    target_scope_chars: targetScopeInstruction.length,
   });
 
   const storeName = await getCachedStoreName(kbId);
@@ -1660,13 +2005,15 @@ async function generateLessonAuthorProposal(
       ? 'The course already has structure. Propose ONLY missing or clearly requested new chapters/lessons/units. Do not repeat existing chapter, lesson, or unit titles from the current outline.'
       : 'The course has no chapters yet. Build an initial structure from the course name, course description, admin request, and active KB.',
     outlineMentions.length > 0
-      ? `Admin selected exact outline targets with @mentions:\n${formatOutlineMentionsForPrompt(outlineMentions)}\nUse these IDs as the authoritative target scope. If the admin asks to edit, expand, add components, or improve content, produce proposal content ONLY for the selected target path unless the admin explicitly asks for a broader course change. Preserve the selected target title when returning the matching chapter/lesson/unit so the apply step updates that area instead of creating duplicates.`
+      ? `Admin selected exact outline targets with @mentions:\n${formatOutlineMentionsForPrompt(outlineMentions)}\n${mentionContext}\nUse these IDs and the database subtree/context as the authoritative target scope. If the admin asks to edit, expand, add components, or improve content, produce proposal content ONLY for the selected target path unless the admin explicitly asks for a broader course change. Preserve the selected target title when returning the matching chapter/lesson/unit so the apply step updates that area instead of creating duplicates.`
       : 'Admin did not select an exact @mention target. Infer the target from the request and current course outline. If the request is ambiguous, answer with a clarification instead of generating unrelated structure.',
+    targetScopeInstruction,
     'If the admin asks for a specific next chapter number, create only that new chapter and place it after the existing chapters. Example: if the course already has 3 chapters and the admin asks for chapter 4, return exactly one new chapter for chapter 4.',
     'Return JSON only with this schema:',
     '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select","question":"string","choices":[{"text":"string","correct":true}],"explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
     `Limits: max ${MAX_PROPOSAL_CHAPTERS} chapters, ${MAX_PROPOSAL_LESSONS} lessons total, ${MAX_PROPOSAL_UNITS} units total, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
     'Use the active KB as the source of truth. Do not invent facts that are not supported by the KB.',
+    'The summary must describe a pending proposal only. Do not say content was created, applied, inserted, or updated in the database/outline before admin approval.',
     'Each unit must contain 1-3 components. Usually start with one html component for explanation, then add one interactive component when it improves learning.',
     'Choose component types by pedagogy: html for explanation, problem for checks, la_sortable for ordered processes, la_faq for definitions/misconceptions, la_crossword only for vocabulary terms, la_diagram for concept maps, workflows, hierarchies, relationships, or cause-effect structures. Do not force every type.',
     'For la_diagram, output simple nodes and edges only. Use 2-12 nodes. Edge source/target may be zero-based node indexes or exact node labels.',
@@ -1847,6 +2194,8 @@ export async function applyLessonAuthorJob(
       course_id: job.course_id,
       created_count: applied.created_block_ids.length,
       created_block_ids: applied.created_block_ids,
+      updated_count: applied.updated_block_ids.length,
+      updated_block_ids: applied.updated_block_ids,
     });
 
     await query(
@@ -1862,7 +2211,9 @@ export async function applyLessonAuthorJob(
       job_id: job.id,
       course_id: job.course_id,
       created_block_ids: applied.created_block_ids,
+      updated_block_ids: applied.updated_block_ids,
       created_count: applied.created_block_ids.length,
+      updated_count: applied.updated_block_ids.length,
     };
   } catch (err: any) {
     logLessonAuthorFlow('apply_job_failed', {
@@ -1944,13 +2295,28 @@ export async function sendMessageStream(
       throw new Error('Conversation course mismatch');
     }
     const courseId = options.courseId ?? ctx.courseId ?? undefined;
-    const outlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
+    const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
+    const carriedOutlineMentions = requestedOutlineMentions.length === 0 && shouldCarryForwardLessonAuthorTarget(trimmed)
+      ? await getLatestConversationOutlineMentions(ctx)
+      : [];
+    const outlineMentions = requestedOutlineMentions.length > 0 ? requestedOutlineMentions : carriedOutlineMentions;
+    const outlineMentionSource = requestedOutlineMentions.length > 0
+      ? 'current'
+      : outlineMentions.length > 0
+        ? 'carried_forward'
+        : 'none';
+    const mentionContextRows = await getOutlineMentionContextRows(ctx, outlineMentions);
+    const mentionContext = formatMentionContextRowsForPrompt(mentionContextRows);
+    const targetScopeInstruction = buildTargetLockedProposalInstruction(trimmed, outlineMentions, mentionContextRows);
     logLessonAuthorFlow('stream_outline_mentions_validated', {
       conversation_id: conversationId,
       target: ctx.target,
       requested_count: options.outlineMentions?.length ?? 0,
       valid_count: outlineMentions.length,
       mention_ids: outlineMentions.map(mention => mention.block_id),
+      mention_source: outlineMentionSource,
+      mention_context_chars: mentionContext.length,
+      target_scope_chars: targetScopeInstruction.length,
     });
 
     // 2. Mark rate limit AFTER validation passes
@@ -1963,7 +2329,7 @@ export async function sendMessageStream(
       [
         conversationId,
         trimmed,
-        outlineMentions.length > 0 ? { outline_mentions: outlineMentions } : {},
+        outlineMentions.length > 0 ? { outline_mentions: outlineMentions, outline_mentions_source: outlineMentionSource } : {},
       ],
     );
     await query(
@@ -1976,17 +2342,23 @@ export async function sendMessageStream(
       course_id: courseId ?? null,
     });
 
+    const targetedDraftAction = ctx.target === LESSON_AUTHOR_TARGET
+      && outlineMentions.length > 0
+      && hasLessonAuthorDraftAction(trimmed);
     const lessonAuthorIntent: LessonAuthorIntent =
       ctx.target === LESSON_AUTHOR_TARGET
         ? (options.mode === 'draft_lesson' || options.mode === 'chat'
           ? options.mode
-          : await classifyLessonAuthorIntent(ctx, trimmed))
+          : targetedDraftAction
+            ? 'draft_lesson'
+            : await classifyLessonAuthorIntent(ctx, trimmed))
         : 'chat';
     logLessonAuthorFlow('stream_intent_resolved', {
       conversation_id: conversationId,
       target: ctx.target,
       intent: lessonAuthorIntent,
       requested_mode: options.mode ?? 'auto',
+      targeted_draft_action: targetedDraftAction,
     });
 
     if (ctx.target === LESSON_AUTHOR_TARGET && lessonAuthorIntent === 'draft_lesson') {
@@ -2001,7 +2373,7 @@ export async function sendMessageStream(
       });
       try {
         if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
-        proposal = await generateLessonAuthorProposal(ctx, trimmed, ctx.botKbId, outlineMentions);
+        proposal = await generateLessonAuthorProposal(ctx, trimmed, ctx.botKbId, outlineMentions, mentionContext, targetScopeInstruction);
         jobId = await createLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId, proposal);
         assistantText = formatProposalPreview(proposal, jobId);
         logLessonAuthorFlow('draft_branch_proposal_ready', {
@@ -2066,12 +2438,15 @@ export async function sendMessageStream(
     }
 
     // 4. Load history (includes the just-saved user message)
-    const history = await loadHistory(conversationId);
+    const currentTurnText = buildCurrentTurnText(trimmed, outlineMentions, mentionContext);
+    const history = replaceLatestUserTurn(await loadHistory(conversationId), currentTurnText);
     logLessonAuthorFlow('chat_branch_enter', {
       conversation_id: conversationId,
       target: ctx.target,
       course_id: courseId ?? null,
       history_messages: history.length,
+      current_mentions: outlineMentions.length,
+      mention_context_chars: mentionContext.length,
     });
 
     // 5. Build Gemini config with correct fileSearch tool format
@@ -2126,7 +2501,7 @@ export async function sendMessageStream(
       }
     }
     if (ctx.target === LESSON_AUTHOR_TARGET && outlineMentions.length > 0) {
-      enrichedPrompt += `\n\nADMIN SELECTED OUTLINE TARGETS:\n${formatOutlineMentionsForPrompt(outlineMentions)}\nTreat these @mentions as the exact course outline scope for the current admin message. If the admin is only chatting or asking a question, answer naturally using this scope. If the admin asks to create or edit lesson content, do not modify unrelated outline nodes.`;
+      enrichedPrompt += `\n\nADMIN SELECTED OUTLINE TARGETS FOR THE CURRENT TURN:\n${formatOutlineMentionsForPrompt(outlineMentions)}\n${mentionContext}\nThese current @mentions override older @mentions and older answers in the chat history. If the current target conflicts with prior conversation context, follow the current target. If the admin is only chatting or asking a question, answer naturally using this current target scope. If the admin asks to create or edit lesson content, do not modify unrelated outline nodes.`;
     }
 
     // 6. Stream Gemini response with retry on 503

@@ -1101,14 +1101,17 @@ export async function getMyBadges(userId: string) {
 
 export async function getActiveBadges(tenantId: string) {
   const result = await query<any>(
-    `SELECT b.id
+    `SELECT b.id, b.name, b.description, b.image_key,
+            tbs.card_image_url, tbs.icon_image_url
      FROM badge_definitions b
      LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
-     WHERE COALESCE(tbs.is_active, true) = true`,
+     WHERE COALESCE(tbs.is_active, true) = true
+     ORDER BY b.sort_order, b.id`,
     [tenantId]
   );
-  return result.rows.map(r => r.id);
+  return result.rows;
 }
+
 
 export async function saveBadge(userId: string, badgeId: string) {
   await query(
