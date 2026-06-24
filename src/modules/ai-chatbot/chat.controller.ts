@@ -224,7 +224,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content, mode, outline_mentions } = req.body ?? {};
+  const { content, mode, outline_mentions, source_documents } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
 
@@ -270,6 +270,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
             ? 'auto'
             : 'chat',
       outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
+      sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
     },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });

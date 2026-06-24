@@ -493,9 +493,14 @@ function gradeCheckbox(data: string, userAnswers: Record<string, string | string
 
 /** 3. Dropdown (optionresponse) */
 function gradeDropdown(data: string, userAnswers: Record<string, string | string[]>) {
-  // Parse correct answer from <optioninput correct="..."/>
   const correctMatch = data.match(/<optioninput[^>]*\scorrect="([^"]+)"/i);
-  const correctAnswer = correctMatch ? correctMatch[1] : '';
+  let correctAnswer = correctMatch ? correctMatch[1] : '';
+
+  if (!correctAnswer) {
+    const optionMatches = [...data.matchAll(/<option\s+[^>]*correct="(true|false)"[^>]*>([\s\S]*?)<\/option>/gi)];
+    const correctOption = optionMatches.find(m => m[1].toLowerCase() === 'true');
+    correctAnswer = correctOption ? correctOption[2].replace(/<[^>]+>/g, '').trim() : '';
+  }
 
   if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
 

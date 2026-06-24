@@ -10,6 +10,7 @@ import {
   applyLessonAuthorProposalToCourse,
   type LessonAuthorChapterProposal,
   type LessonAuthorComponentProposal,
+  type LessonAuthorComponentType,
   type LessonAuthorLessonProposal,
   type LessonAuthorProposal,
   type LessonAuthorUnitProposal,
@@ -27,13 +28,15 @@ const GEMINI_MAX_RETRIES = 3;
 const GEMINI_RETRY_DELAY_MS = 5_000;       // base delay, actual may be longer for 429
 const CHAT_TARGETS = ['admin', 'learner', 'lesson_author'] as const;
 const LESSON_AUTHOR_TARGET = 'lesson_author' as const;
-const MAX_PROPOSAL_CHAPTERS = 5;
+const MAX_PROPOSAL_CHAPTERS = 1;
 const MAX_PROPOSAL_LESSONS = 30;
 const MAX_PROPOSAL_UNITS = 80;
 const MAX_PROPOSAL_COMPONENTS = 160;
 const MAX_COMPONENTS_PER_UNIT = 4;
 const MAX_UNIT_HTML_CHARS = 6000;
 const MIN_UNIT_HTML_TEXT_CHARS = 180;
+const MAX_SOURCE_DOCUMENTS = 5;
+const MAX_SOURCE_DOCUMENT_EXCERPT_CHARS = 2400;
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -331,12 +334,31 @@ export interface PaginatedMessages {
   next_cursor: string | null; // created_at of the oldest message returned
 }
 
+export interface LessonAuthorSourceDocumentInput {
+  document_id?: string;
+  id?: string;
+  kb_id?: string;
+  name?: string;
+}
+
+export interface LessonAuthorSourceDocument {
+  document_id: string;
+  kb_id: string;
+  name: string;
+  type: string;
+  status: string;
+  source_info: Record<string, unknown> | null;
+  gemini_path: string;
+  content_excerpt: string | null;
+}
+
 interface LessonAuthorMessageJobRow {
   id: string;
   status: string;
   proposal: LessonAuthorProposal;
   error_reason: string | null;
   created_block_ids: string[] | null;
+  source_documents: LessonAuthorSourceDocument[] | null;
 }
 
 interface BotAssignment {
@@ -675,7 +697,7 @@ async function hydrateLessonAuthorProposalMessages(
   if (jobIds.length === 0) return messages;
 
   const result = await query<LessonAuthorMessageJobRow>(
-    `SELECT id::text, status, proposal, error_reason, created_block_ids
+    `SELECT id::text, status, proposal, error_reason, created_block_ids, source_documents
      FROM lesson_author_jobs
      WHERE conversation_id = $1
        AND tenant_id = $2
@@ -698,9 +720,10 @@ async function hydrateLessonAuthorProposalMessages(
       metadata: {
         ...metadata,
         lesson_author_job_status: job.status,
-        lesson_author_proposal: job.proposal,
+        lesson_author_proposal: toLessonAuthorDisplayProposal(job.proposal),
         lesson_author_error_reason: job.error_reason,
         lesson_author_created_block_ids: job.created_block_ids ?? [],
+        lesson_author_source_documents: job.source_documents ?? [],
       },
     };
   });
@@ -901,6 +924,7 @@ export interface ChatStreamOptions {
   courseId?: string;
   mode?: 'chat' | 'draft_lesson' | 'auto';
   outlineMentions?: LessonAuthorOutlineMention[];
+  sourceDocuments?: LessonAuthorSourceDocumentInput[];
 }
 
 export interface LessonAuthorOutlineMention {
@@ -947,6 +971,7 @@ interface LessonAuthorJobRow {
   prompt: string;
   proposal: LessonAuthorProposal;
   status: string;
+  created_at: string;
 }
 
 export interface AppliedLessonAuthorJob {
@@ -1050,12 +1075,12 @@ function foldVietnameseText(value: string): string {
 
 function hasLessonAuthorDraftAction(userPrompt: string): boolean {
   const text = foldVietnameseText(userPrompt);
-  return /(^|\b)(sua|chinh sua|cap nhat|bo sung|them|mo rong|viet lai|viet them|lam lai|lam di|tu lam|len plan|lap plan|de xuat|toi uu|cai thien|dai ti|dai hon|ngan gon|ro hon|draft|proposal|update|edit|improve|expand)(\b|$)/i.test(text);
+  return /(^|\b)(sua|chinh sua|cap nhat|bo sung|them|add|insert|create|generate|build|tao|soan|viet|mo rong|viet lai|viet them|lam lai|lam di|lam luon|tu lam|len plan|lap plan|de xuat|toi uu|cai thien|dai ti|dai hon|ngan gon|ro hon|draft|proposal|update|edit|improve|expand)(\b|$)/i.test(text);
 }
 
 function shouldCarryForwardLessonAuthorTarget(userPrompt: string): boolean {
   const text = foldVietnameseText(userPrompt);
-  const hasLocalReference = /(^|\b)(phan nay|noi dung nay|cai nay|muc nay|bai nay|unit nay|component nay|chuong nay|doan nay|no nay|target nay)(\b|$)/i.test(text);
+  const hasLocalReference = /(^|\b)(phan nay|noi dung nay|cai nay|muc nay|bai nay|unit nay|component nay|diagram nay|so do nay|chuong nay|doan nay|no nay|target nay)(\b|$)/i.test(text);
   return hasLocalReference || hasLessonAuthorDraftAction(userPrompt);
 }
 
@@ -1124,6 +1149,166 @@ async function getLatestConversationOutlineMentions(
     ctx,
     Array.isArray(rawMentions) ? rawMentions : [],
   );
+}
+
+function shouldCarryForwardLessonAuthorSourceDocuments(userPrompt: string): boolean {
+  const text = foldVietnameseText(userPrompt);
+  return /(^|\b)(file nay|file do|file da co san|file vua chon|file tren|pdf nay|pdf do|tai lieu nay|tai lieu do|tai lieu da co san|tai lieu tren|dua tren file|dua vao file|dua tren tai lieu|dua vao tai lieu|noi dung file|noi dung tai lieu)(\b|$)/i.test(text);
+}
+
+async function getLatestConversationSourceDocuments(
+  ctx: ConversationContext,
+): Promise<LessonAuthorSourceDocument[]> {
+  if (ctx.target !== LESSON_AUTHOR_TARGET || !ctx.botKbId) return [];
+
+  const result = await query<{ source_documents: unknown }>(
+    `SELECT metadata -> 'source_documents' AS source_documents
+     FROM chat_messages
+     WHERE conversation_id = $1
+       AND role = 'user'
+       AND metadata ? 'source_documents'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [ctx.conversationId],
+  );
+  const rawDocuments = result.rows[0]?.source_documents;
+  return validateLessonAuthorSourceDocuments(
+    ctx,
+    ctx.botKbId,
+    Array.isArray(rawDocuments) ? rawDocuments : [],
+  );
+}
+
+function normalizeSourceDocumentIds(inputs: LessonAuthorSourceDocumentInput[] = []): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const input of inputs) {
+    const raw = typeof input?.document_id === 'string'
+      ? input.document_id
+      : typeof input?.id === 'string'
+        ? input.id
+        : '';
+    const id = raw.trim();
+    if (!isValidUUID(id) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= MAX_SOURCE_DOCUMENTS) break;
+  }
+  return ids;
+}
+
+function getSourceInfoSummary(sourceInfo: Record<string, unknown> | null): string {
+  if (!sourceInfo) return '';
+  const parts: string[] = [];
+  const extension = typeof sourceInfo.extension === 'string' ? sourceInfo.extension : '';
+  const mimeType = typeof sourceInfo.mime_type === 'string' ? sourceInfo.mime_type : '';
+  const size = typeof sourceInfo.size === 'number' ? sourceInfo.size : null;
+  if (extension) parts.push(`extension=${extension}`);
+  if (mimeType) parts.push(`mime_type=${mimeType}`);
+  if (size && Number.isFinite(size)) parts.push(`size=${size}`);
+  return parts.join(', ');
+}
+
+function toSourceDocumentMetadata(doc: LessonAuthorSourceDocument): Omit<LessonAuthorSourceDocument, 'content_excerpt' | 'gemini_path'> {
+  return {
+    document_id: doc.document_id,
+    kb_id: doc.kb_id,
+    name: doc.name,
+    type: doc.type,
+    status: doc.status,
+    source_info: doc.source_info,
+  };
+}
+
+async function validateLessonAuthorSourceDocuments(
+  ctx: ConversationContext,
+  kbId: string | null,
+  inputs: LessonAuthorSourceDocumentInput[] = [],
+): Promise<LessonAuthorSourceDocument[]> {
+  const ids = normalizeSourceDocumentIds(inputs);
+  if (ids.length === 0) return [];
+  if (ctx.target !== LESSON_AUTHOR_TARGET) {
+    throw new Error('Chỉ có Chuyên gia bài học mới được chọn file nguồn.');
+  }
+  if (!kbId) {
+    throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học.');
+  }
+
+  const result = await query<{
+    document_id: string;
+    kb_id: string;
+    name: string;
+    type: string;
+    status: string;
+    source_info: Record<string, unknown> | null;
+    content: string | null;
+    gemini_path: string | null;
+  }>(
+    `SELECT d.id::text AS document_id,
+            d.kb_id::text AS kb_id,
+            d.name,
+            d.type,
+            d.status,
+            d.source_info,
+            d.content,
+            m.gemini_path
+     FROM kb_documents d
+     LEFT JOIN kb_doc_gemini_mapping m ON m.document_id = d.id
+     WHERE d.tenant_id = $1
+       AND d.kb_id = $2
+       AND d.type = 'file'
+       AND d.id = ANY($3::uuid[])
+     ORDER BY array_position($3::uuid[], d.id)`,
+    [ctx.tenantId, kbId, ids],
+  );
+
+  const foundIds = new Set(result.rows.map(row => row.document_id));
+  const missingIds = ids.filter(id => !foundIds.has(id));
+  if (missingIds.length > 0) {
+    throw new Error('Một số file nguồn không tồn tại, không thuộc KB active, hoặc không thuộc tenant hiện tại.');
+  }
+
+  return result.rows.map((row) => {
+    if (row.status !== 'learned') {
+      throw new Error(`File "${row.name}" chưa học xong. Vui lòng chờ trạng thái Đã học rồi thử lại.`);
+    }
+    if (!row.gemini_path) {
+      throw new Error(`File "${row.name}" chưa có mapping Gemini File Search. Vui lòng retry tài liệu này trong KB.`);
+    }
+    const contentText = row.content ? stripHtml(row.content).replace(/\s+/g, ' ').trim() : '';
+    return {
+      document_id: row.document_id,
+      kb_id: row.kb_id,
+      name: row.name,
+      type: row.type,
+      status: row.status,
+      source_info: row.source_info,
+      gemini_path: row.gemini_path,
+      content_excerpt: contentText ? contentText.slice(0, MAX_SOURCE_DOCUMENT_EXCERPT_CHARS) : null,
+    };
+  });
+}
+
+function formatSourceDocumentsForPrompt(docs: LessonAuthorSourceDocument[]): string {
+  if (docs.length === 0) return '';
+  const lines = [
+    'ADMIN SELECTED KB SOURCE FILES FOR THE CURRENT TURN:',
+    'These selected files are the primary evidence for this request. Older selected files in chat history are stale unless selected again in the current turn.',
+    'When using Gemini File Search, narrow retrieval to these exact file names/display names and do not rely on other KB files unless the selected files are insufficient.',
+    'If the selected files do not contain enough information to create or edit the requested lesson content, say what is missing instead of inventing facts.',
+  ];
+
+  docs.forEach((doc, index) => {
+    const sourceInfo = getSourceInfoSummary(doc.source_info);
+    lines.push(`${index + 1}. ${doc.name}`);
+    lines.push(`   document_id: ${doc.document_id}`);
+    lines.push(`   kb_id: ${doc.kb_id}`);
+    lines.push(`   gemini_path: ${doc.gemini_path}`);
+    if (sourceInfo) lines.push(`   source_info: ${sourceInfo}`);
+    if (doc.content_excerpt) lines.push(`   local_excerpt: ${doc.content_excerpt}`);
+  });
+
+  return lines.join('\n');
 }
 
 function formatOutlineMentionsForPrompt(mentions: LessonAuthorOutlineMention[]): string {
@@ -1253,6 +1438,7 @@ function buildTargetLockedProposalInstruction(
   const lines = [
     'TARGET-LOCKED OUTPUT RULES:',
     '- The selected @mention target is authoritative. Ignore older targets from chat history and do not output unrelated course branches.',
+    '- Hard scope limit: output at most one top-level section/chapter. If multiple @mentions point to multiple sections, use only the first selected section and ignore the rest for this proposal.',
     '- Return only the minimum chapter -> lesson -> unit chain needed for the selected target. Use exact existing titles from the selected path/subtree so apply reuses existing blocks.',
     '- Do not include any chapter, lesson, unit, or component whose title is outside the selected @mention path/subtree.',
     '- When adding new content to an existing unit, include only the new component(s) in unit.components. Do not copy existing components from the target context into the proposal.',
@@ -1262,7 +1448,7 @@ function buildTargetLockedProposalInstruction(
     lines.push('- The admin asked for one HTML component. Output exactly one new component with type "html" and do not add quiz, FAQ, sortable, crossword, diagram, or extra units.');
   }
 
-  mentions.slice(0, 5).forEach((mention, index) => {
+  mentions.slice(0, 1).forEach((mention, index) => {
     const pathParts = splitMentionPath(mention);
     const chapterTitle = mention.block_type === 'chapter' ? mention.display_name : pathParts[0] || '';
     const lessonTitle = mention.block_type === 'sequential' ? mention.display_name : pathParts[1] || '';
@@ -1308,14 +1494,24 @@ function buildCurrentTurnText(
   userPrompt: string,
   mentions: LessonAuthorOutlineMention[],
   mentionContext: string,
+  sourceDocuments: LessonAuthorSourceDocument[] = [],
 ): string {
-  if (mentions.length === 0) return userPrompt;
+  const sourceDocumentContext = formatSourceDocumentsForPrompt(sourceDocuments);
+  if (mentions.length === 0 && !sourceDocumentContext) return userPrompt;
   return [
     'CURRENT USER TURN - HIGHEST PRIORITY',
-    'The admin selected these @mention targets for THIS message. They override any older @mentions or older target references in the chat history.',
-    formatOutlineMentionsForPrompt(mentions),
-    mentionContext,
-    'Answer or act ONLY for the current @mention target unless the admin explicitly asks to compare with older targets.',
+    mentions.length > 0
+      ? 'The admin selected these @mention targets for THIS message. They override any older @mentions or older target references in the chat history.'
+      : '',
+    mentions.length > 0 ? formatOutlineMentionsForPrompt(mentions) : '',
+    mentions.length > 0 ? mentionContext : '',
+    sourceDocumentContext,
+    mentions.length > 0
+      ? 'Answer or act ONLY for the current @mention target unless the admin explicitly asks to compare with older targets.'
+      : '',
+    sourceDocuments.length > 0
+      ? 'Use the selected KB source files above as the primary evidence for this turn. They override older selected files in the chat history.'
+      : '',
     `Admin message:\n${userPrompt}`,
   ].filter(Boolean).join('\n\n');
 }
@@ -1354,6 +1550,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function readString(value: unknown, fallback: string, maxLength: number): string {
   const raw = typeof value === 'string' ? value.trim() : '';
+  return (raw || fallback).slice(0, maxLength);
+}
+
+function readScalarString(value: unknown, fallback: string, maxLength: number): string {
+  let raw = '';
+  if (typeof value === 'string') raw = value.trim();
+  else if (typeof value === 'number' && Number.isFinite(value)) raw = String(value);
+  else if (typeof value === 'boolean') raw = String(value);
   return (raw || fallback).slice(0, maxLength);
 }
 
@@ -1402,17 +1606,90 @@ function normalizeComponentTitle(value: unknown, fallback: string): string {
   return readString(value, fallback, 180);
 }
 
-function normalizeProblemChoices(rawChoices: unknown[], singleChoice: boolean): Array<{ text: string; correct: boolean }> {
+type NormalizedProblemSubtype = 'multiple_choice' | 'multiple_select' | 'dropdown' | 'numerical' | 'short_text';
+
+function normalizeProblemSubtype(value: unknown): NormalizedProblemSubtype {
+  const type = readScalarString(value, 'multiple_choice', 60)
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+
+  if (['multiple_select', 'multi_select', 'checkbox', 'checkboxes', 'choiceresponse'].includes(type)) {
+    return 'multiple_select';
+  }
+  if (['dropdown', 'option', 'select', 'option_response', 'optionresponse'].includes(type)) {
+    return 'dropdown';
+  }
+  if (['numerical', 'numeric', 'number', 'numerical_response', 'numericalresponse'].includes(type)) {
+    return 'numerical';
+  }
+  if (['short_text', 'short_answer', 'text', 'string', 'string_response', 'stringresponse', 'free_text'].includes(type)) {
+    return 'short_text';
+  }
+  return 'multiple_choice';
+}
+
+function normalizeComparableText(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeScalarList(value: unknown, maxLength: number): string[] {
+  const rawValues = Array.isArray(value) ? value : [value];
+  const values = rawValues
+    .map(item => {
+      const itemRecord = asRecord(item);
+      return readScalarString(
+        itemRecord.answer ?? itemRecord.text ?? itemRecord.label ?? itemRecord.value ?? item,
+        '',
+        maxLength,
+      );
+    })
+    .filter(Boolean);
+  return Array.from(new Set(values));
+}
+
+function getProblemAnswers(component: Record<string, unknown>, maxLength = 500): string[] {
+  const answerSources = [
+    component.answers,
+    component.correct_answers,
+    component.correctAnswers,
+    component.answer,
+    component.correct_answer,
+    component.correctAnswer,
+    component.expected_answer,
+    component.expectedAnswer,
+    component.value,
+  ];
+
+  for (const source of answerSources) {
+    const answers = normalizeScalarList(source, maxLength);
+    if (answers.length > 0) return answers;
+  }
+  return [];
+}
+
+function normalizeProblemChoices(
+  rawChoices: unknown[],
+  singleChoice: boolean,
+  answers: string[] = [],
+): Array<{ text: string; correct: boolean }> {
+  const answerSet = new Set(answers.map(normalizeComparableText));
   const choices = rawChoices
     .map((choiceValue, index) => {
-      if (typeof choiceValue === 'string') {
-        return { text: readString(choiceValue, '', 500), correct: index === 0 };
+      if (typeof choiceValue === 'string' || typeof choiceValue === 'number') {
+        const text = readScalarString(choiceValue, '', 500);
+        return {
+          text,
+          correct: answerSet.size > 0 ? answerSet.has(normalizeComparableText(text)) : index === 0,
+        };
       }
       const choice = asRecord(choiceValue);
       const correctValue = choice.correct ?? choice.is_correct ?? choice.answer;
+      const text = readScalarString(choice.text ?? choice.label ?? choice.value ?? choice.answer, '', 500);
       return {
-        text: readString(choice.text ?? choice.label ?? choice.value, '', 500),
-        correct: correctValue === true || String(correctValue).toLowerCase() === 'true',
+        text,
+        correct: correctValue === true
+          || String(correctValue).toLowerCase() === 'true'
+          || (answerSet.size > 0 && answerSet.has(normalizeComparableText(text))),
       };
     })
     .filter(choice => choice.text)
@@ -1431,15 +1708,19 @@ function normalizeProblemChoices(rawChoices: unknown[], singleChoice: boolean): 
   return choices;
 }
 
+function buildProblemSolutionXml(explanation: string): string {
+  return explanation
+    ? `\n  <solution><div class="detailed-solution"><p>${escapeXml(explanation)}</p></div></solution>`
+    : '';
+}
+
 function buildChoiceProblemXml(
-  problemType: string,
+  problemType: 'multiple_choice' | 'multiple_select',
   question: string,
   choices: Array<{ text: string; correct: boolean }>,
   explanation: string,
 ): string {
-  const solution = explanation
-    ? `\n  <solution><div class="detailed-solution"><p>${escapeXml(explanation)}</p></div></solution>`
-    : '';
+  const solution = buildProblemSolutionXml(explanation);
 
   if (problemType === 'multiple_select') {
     const choicesXml = choices
@@ -1472,20 +1753,143 @@ function buildChoiceProblemXml(
   ].join('\n');
 }
 
+function normalizeDropdownChoices(component: Record<string, unknown>): Array<{ text: string; correct: boolean }> {
+  const rawOptions = Array.isArray(component.options)
+    ? component.options
+    : Array.isArray(component.choices)
+      ? component.choices
+      : [];
+  const answers = getProblemAnswers(component);
+  const answerSet = new Set(answers.map(normalizeComparableText));
+  const choices = rawOptions
+    .map((optionValue, index) => {
+      if (typeof optionValue === 'string' || typeof optionValue === 'number') {
+        const text = readScalarString(optionValue, '', 500);
+        return {
+          text,
+          correct: answerSet.size > 0 ? answerSet.has(normalizeComparableText(text)) : index === 0,
+        };
+      }
+
+      const option = asRecord(optionValue);
+      const text = readScalarString(option.text ?? option.label ?? option.value ?? option.answer, '', 500);
+      const correctValue = option.correct ?? option.is_correct;
+      return {
+        text,
+        correct: correctValue === true
+          || String(correctValue).toLowerCase() === 'true'
+          || (answerSet.size > 0 && answerSet.has(normalizeComparableText(text))),
+      };
+    })
+    .filter(choice => choice.text)
+    .slice(0, 8);
+
+  if (answerSet.size > 0 && choices.every(choice => !choice.correct)) {
+    const answer = answers[0];
+    const existingIndex = choices.findIndex(choice => normalizeComparableText(choice.text) === normalizeComparableText(answer));
+    if (existingIndex >= 0) choices[existingIndex].correct = true;
+    else choices.unshift({ text: answer, correct: true });
+  }
+
+  if (choices.length < 2) {
+    throw new Error('Dropdown problem component requires at least 2 options');
+  }
+
+  const correctIndex = choices.findIndex(choice => choice.correct);
+  const safeCorrectIndex = correctIndex >= 0 ? correctIndex : 0;
+  return choices.map((choice, index) => ({ ...choice, correct: index === safeCorrectIndex }));
+}
+
+function buildDropdownProblemXml(
+  question: string,
+  choices: Array<{ text: string; correct: boolean }>,
+  explanation: string,
+): string {
+  const optionsXml = choices
+    .map(choice => `      <option correct="${choice.correct ? 'true' : 'false'}">${escapeXml(choice.text)}</option>`)
+    .join('\n');
+  return [
+    '<problem>',
+    '  <optionresponse>',
+    `    <label>${escapeXml(question)}</label>`,
+    '    <optioninput>',
+    optionsXml,
+    '    </optioninput>',
+    `  </optionresponse>${buildProblemSolutionXml(explanation)}`,
+    '</problem>',
+  ].join('\n');
+}
+
+function buildNumericalProblemXml(question: string, answers: string[], tolerance: string, explanation: string): string {
+  const primaryAnswer = answers[0];
+  const additionalAnswers = answers
+    .slice(1, 5)
+    .map(answer => `    <additional_answer answer="${escapeXml(answer)}" />`)
+    .join('\n');
+  const toleranceXml = tolerance
+    ? `    <responseparam type="tolerance" default="${escapeXml(tolerance)}" />\n`
+    : '';
+
+  return [
+    '<problem>',
+    `  <numericalresponse answer="${escapeXml(primaryAnswer)}">`,
+    `    <label>${escapeXml(question)}</label>`,
+    additionalAnswers,
+    `${toleranceXml}    <formulaequationinput />`,
+    `  </numericalresponse>${buildProblemSolutionXml(explanation)}`,
+    '</problem>',
+  ].filter(line => line !== '').join('\n');
+}
+
+function buildStringProblemXml(question: string, answers: string[], caseSensitive: boolean, explanation: string): string {
+  const primaryAnswer = answers[0];
+  const additionalAnswers = answers
+    .slice(1, 5)
+    .map(answer => `    <additional_answer answer="${escapeXml(answer)}" />`)
+    .join('\n');
+
+  return [
+    '<problem>',
+    `  <stringresponse answer="${escapeXml(primaryAnswer)}" type="${caseSensitive ? 'cs' : 'ci'}">`,
+    `    <label>${escapeXml(question)}</label>`,
+    additionalAnswers,
+    '    <textline size="30" />',
+    `  </stringresponse>${buildProblemSolutionXml(explanation)}`,
+    '</problem>',
+  ].filter(line => line !== '').join('\n');
+}
+
 function normalizeProblemComponent(component: Record<string, unknown>, fallbackTitle: string): LessonAuthorComponentProposal {
-  const problemType = readString(component.problem_type ?? component.subtype, 'multiple_choice', 40).toLowerCase();
-  const supportedType = problemType === 'multiple_select' ? 'multiple_select' : 'multiple_choice';
+  const problemType = normalizeProblemSubtype(component.problem_type ?? component.subtype ?? component.response_type);
   const question = readString(component.question ?? component.prompt ?? component.label, '', 1000);
   if (!question) throw new Error('Problem component requires a question');
 
-  const rawChoices = Array.isArray(component.choices) ? component.choices : [];
-  const choices = normalizeProblemChoices(rawChoices, supportedType !== 'multiple_select');
   const explanation = readString(component.explanation ?? component.solution, '', 1500);
+  let data: string;
+
+  if (problemType === 'numerical') {
+    const answers = getProblemAnswers(component, 120);
+    if (answers.length === 0) throw new Error('Numerical problem component requires an answer');
+    const tolerance = readScalarString(component.tolerance ?? component.error_margin ?? component.margin, '0', 40);
+    data = buildNumericalProblemXml(question, answers, tolerance, explanation);
+  } else if (problemType === 'short_text') {
+    const answers = getProblemAnswers(component);
+    if (answers.length === 0) throw new Error('String problem component requires an answer');
+    const caseSensitive = component.case_sensitive === true
+      || String(component.case_sensitive ?? component.caseSensitive ?? '').toLowerCase() === 'true';
+    data = buildStringProblemXml(question, answers, caseSensitive, explanation);
+  } else if (problemType === 'dropdown') {
+    data = buildDropdownProblemXml(question, normalizeDropdownChoices(component), explanation);
+  } else {
+    const rawChoices = Array.isArray(component.choices) ? component.choices : [];
+    const choices = normalizeProblemChoices(rawChoices, problemType !== 'multiple_select', getProblemAnswers(component));
+    data = buildChoiceProblemXml(problemType, question, choices, explanation);
+  }
 
   return {
     type: 'problem',
     title: normalizeComponentTitle(component.title, fallbackTitle),
-    data: buildChoiceProblemXml(supportedType, question, choices, explanation),
+    data,
     metadata: { weight: 1 },
   };
 }
@@ -1591,9 +1995,138 @@ function normalizeDiagramShape(value: unknown): 'rectangle' | 'rounded' | 'ellip
   return 'rounded';
 }
 
+const DIAGRAM_NODE_STYLES = [
+  { bgColor: '#EEF2FF', textColor: '#3730A3', icon: '🎯' },
+  { bgColor: '#E0F2FE', textColor: '#075985', icon: '💡' },
+  { bgColor: '#DCFCE7', textColor: '#166534', icon: '✅' },
+  { bgColor: '#FEF3C7', textColor: '#92400E', icon: '⚙️' },
+  { bgColor: '#FCE7F3', textColor: '#9D174D', icon: '📊' },
+  { bgColor: '#EDE9FE', textColor: '#5B21B6', icon: '🧩' },
+  { bgColor: '#CCFBF1', textColor: '#115E59', icon: '🔍' },
+  { bgColor: '#FFE4E6', textColor: '#9F1239', icon: '🚀' },
+];
+
 function normalizeDiagramNodeColor(index: number): string {
-  const palette = ['#DBEAFE', '#DCFCE7', '#FEF3C7', '#FCE7F3', '#EDE9FE', '#CCFBF1'];
-  return palette[index % palette.length];
+  return DIAGRAM_NODE_STYLES[index % DIAGRAM_NODE_STYLES.length].bgColor;
+}
+
+function normalizeDiagramTextColor(index: number): string {
+  return DIAGRAM_NODE_STYLES[index % DIAGRAM_NODE_STYLES.length].textColor;
+}
+
+function labelAlreadyHasIcon(label: string): boolean {
+  const firstChar = Array.from(label.trim())[0] ?? '';
+  const codePoint = firstChar.codePointAt(0) ?? 0;
+  return codePoint >= 0x2190 && codePoint <= 0x1FAFF;
+}
+
+function chooseDiagramNodeIcon(label: string, index: number): string {
+  const folded = foldVietnameseText(label);
+  if (/(^|\b)(muc tieu|goal|objective|outcome|ket qua)(\b|$)/i.test(folded)) return '🎯';
+  if (/(^|\b)(khai niem|concept|dinh nghia|definition|y tuong|idea|ly thuyet)(\b|$)/i.test(folded)) return '💡';
+  if (/(^|\b)(quy trinh|process|flow|workflow|buoc|step|giai doan|stage)(\b|$)/i.test(folded)) return '⚙️';
+  if (/(^|\b)(du lieu|data|chi so|metric|kpi|bao cao|report|so lieu)(\b|$)/i.test(folded)) return '📊';
+  if (/(^|\b)(nguoi hoc|learner|khach hang|customer|user|team|nhom|doi ngu)(\b|$)/i.test(folded)) return '👥';
+  if (/(^|\b)(rui ro|risk|loi|error|van de|problem|thach thuc|challenge)(\b|$)/i.test(folded)) return '⚠️';
+  if (/(^|\b)(giai phap|solution|ket luan|conclusion|thanh cong|success|hoan thanh)(\b|$)/i.test(folded)) return '✅';
+  if (/(^|\b)(cong cu|tool|he thong|system|api|nen tang|platform|ky thuat)(\b|$)/i.test(folded)) return '🛠️';
+  return DIAGRAM_NODE_STYLES[index % DIAGRAM_NODE_STYLES.length].icon;
+}
+
+function formatDiagramNodeLabel(label: string, index: number): string {
+  const cleanLabel = label.replace(/\s+/g, ' ').trim();
+  if (!cleanLabel || labelAlreadyHasIcon(cleanLabel)) return cleanLabel.slice(0, 120);
+  return `${chooseDiagramNodeIcon(cleanLabel, index)} ${cleanLabel}`.slice(0, 140);
+}
+
+function getDiagramEdgeHandles(
+  sourcePosition: { x: number; y: number },
+  targetPosition: { x: number; y: number },
+): { sourceHandle: 'top' | 'right' | 'bottom' | 'left'; targetHandle: 'top' | 'right' | 'bottom' | 'left' } {
+  const dx = targetPosition.x - sourcePosition.x;
+  const dy = targetPosition.y - sourcePosition.y;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0
+      ? { sourceHandle: 'right', targetHandle: 'left' }
+      : { sourceHandle: 'left', targetHandle: 'right' };
+  }
+  return dy >= 0
+    ? { sourceHandle: 'bottom', targetHandle: 'top' }
+    : { sourceHandle: 'top', targetHandle: 'bottom' };
+}
+
+function layoutDiagramNodes<T extends { id: string; position: { x: number; y: number } }>(
+  nodes: T[],
+  edges: Array<{ source: string; target: string }>,
+): T[] {
+  if (nodes.length === 0) return nodes;
+
+  const xSpacing = 260;
+  const ySpacing = 150;
+  const left = 80;
+  const top = 70;
+
+  if (edges.length > 0) {
+    const incoming = new Map(nodes.map(node => [node.id, 0]));
+    const outgoing = new Map<string, string[]>();
+    for (const edge of edges) {
+      outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
+      incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
+    }
+
+    const roots = nodes.filter(node => (incoming.get(node.id) ?? 0) === 0);
+    const queue = roots.length > 0 ? roots.map(node => node.id) : [nodes[0].id];
+    const levelById = new Map<string, number>();
+    queue.forEach(id => levelById.set(id, 0));
+
+    for (let index = 0; index < queue.length; index += 1) {
+      const id = queue[index];
+      const nextLevel = (levelById.get(id) ?? 0) + 1;
+      for (const target of outgoing.get(id) ?? []) {
+        if ((levelById.get(target) ?? Number.POSITIVE_INFINITY) > nextLevel) {
+          levelById.set(target, nextLevel);
+          queue.push(target);
+        }
+      }
+    }
+
+    nodes.forEach((node, index) => {
+      if (!levelById.has(node.id)) levelById.set(node.id, Math.floor(index / 3));
+    });
+
+    const rows = new Map<number, T[]>();
+    nodes.forEach((node) => {
+      const level = levelById.get(node.id) ?? 0;
+      rows.set(level, [...(rows.get(level) ?? []), node]);
+    });
+    const widestRow = Math.max(...Array.from(rows.values()).map(row => row.length));
+    const canvasWidth = Math.max(1, widestRow - 1) * xSpacing;
+
+    for (const [level, row] of rows.entries()) {
+      const rowWidth = Math.max(1, row.length - 1) * xSpacing;
+      const rowOffset = (canvasWidth - rowWidth) / 2;
+      row.forEach((node, index) => {
+        node.position = {
+          x: left + rowOffset + index * xSpacing,
+          y: top + level * ySpacing,
+        };
+      });
+    }
+    return nodes;
+  }
+
+  const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(nodes.length))));
+  nodes.forEach((node, index) => {
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    const rowCount = Math.min(cols, nodes.length - row * cols);
+    const rowOffset = ((cols - rowCount) * xSpacing) / 2;
+    node.position = {
+      x: left + rowOffset + col * xSpacing,
+      y: top + row * ySpacing,
+    };
+  });
+  return nodes;
 }
 
 function resolveDiagramNodeRef(value: unknown, nodes: Array<{ id: string; label: string }>): string | null {
@@ -1625,19 +2158,17 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
 
       const id = `node_${index + 1}`;
       nodeRefs.push({ id, label });
+      const bgColor = readString(node.bgColor ?? node.bg_color, normalizeDiagramNodeColor(index), 24);
       return {
         id,
         type: 'customShape',
-        position: {
-          x: 80 + (index % 4) * 220,
-          y: 80 + Math.floor(index / 4) * 140,
-        },
+        position: { x: 80, y: 70 },
         data: {
-          label,
-          shape: normalizeDiagramShape(node.shape),
-          bgColor: readString(node.bgColor ?? node.bg_color, normalizeDiagramNodeColor(index), 24),
-          textColor: readString(node.textColor ?? node.text_color, '#0F172A', 24),
-          tooltip: readString(node.tooltip ?? node.description, '', 500),
+          label: formatDiagramNodeLabel(label, index),
+          shape: normalizeDiagramShape(node.shape ?? (index === 0 ? 'ellipse' : 'rounded')),
+          bgColor,
+          textColor: readString(node.textColor ?? node.text_color, normalizeDiagramTextColor(index), 24),
+          tooltip: readString(node.tooltip ?? node.description ?? node.summary, label, 500),
           target_diagram_id: '',
         },
       };
@@ -1647,7 +2178,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
 
   if (nodes.length < 2) throw new Error('Diagram component requires at least 2 nodes');
 
-  const availableNodeRefs = nodes.map(node => ({ id: node.id, label: node.data.label }));
+  const availableNodeRefs = nodeRefs;
   const rawEdges = Array.isArray(component.edges) ? component.edges : [];
   const explicitEdges = rawEdges
     .map((edgeValue, index) => {
@@ -1659,32 +2190,46 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
         id: `edge_${index + 1}`,
         source,
         target,
-        sourceHandle: 'right',
-        targetHandle: 'left',
+        sourceHandle: 'right' as const,
+        targetHandle: 'left' as const,
         type: 'deletable',
         label: readString(edge.label, '', 120) || undefined,
+        style: { stroke: '#64748B', strokeWidth: 2 },
+        markerEnd: { type: 'arrowclosed', color: '#64748B' },
       };
     })
     .filter((edge): edge is NonNullable<typeof edge> => Boolean(edge))
     .slice(0, 16);
 
-  const edges = explicitEdges.length > 0
+  const initialEdges = explicitEdges.length > 0
     ? explicitEdges
     : nodes.slice(1).map((node, index) => ({
       id: `edge_${index + 1}`,
       source: nodes[index].id,
       target: node.id,
-      sourceHandle: 'right',
-      targetHandle: 'left',
+      sourceHandle: 'right' as const,
+      targetHandle: 'left' as const,
       type: 'deletable',
+      style: { stroke: '#64748B', strokeWidth: 2 },
+      markerEnd: { type: 'arrowclosed', color: '#64748B' },
     }));
+  const positionedNodes = layoutDiagramNodes(nodes, initialEdges);
+  const nodeById = new Map(positionedNodes.map(node => [node.id, node]));
+  const edges = initialEdges.map(edge => {
+    const source = nodeById.get(edge.source);
+    const target = nodeById.get(edge.target);
+    const handles = source && target
+      ? getDiagramEdgeHandles(source.position, target.position)
+      : { sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle };
+    return { ...edge, ...handles };
+  });
 
   const diagramId = 'root';
   const diagramData = {
     diagrams: [{
       id: diagramId,
       name: readString(component.name ?? component.title, 'Main Diagram', 120),
-      nodes,
+      nodes: positionedNodes,
       edges,
     }],
     start_diagram_id: diagramId,
@@ -1744,12 +2289,73 @@ function normalizeLessonAuthorUnitComponents(unit: Record<string, unknown>, unit
   throw new Error(`Unit "${unitTitle}" must contain at least one valid component`);
 }
 
+// ── Convert system prompt's `changes`-based format to `chapters`-based format ──
+// System prompt (34fe8e8a) returns: {changes: [{action, block_type, display_name, content:{...nested...}}]}
+// Backend normalize expects: {chapters: [{title, lessons:[{title, units:[{title, components:[...]}]}]}]}
+function convertChangesToChapters(changes: unknown[]): unknown[] {
+  const chapters: unknown[] = [];
+
+  for (const changeValue of changes) {
+    const change = asRecord(changeValue);
+    const blockType = readString(change.block_type, '', 50);
+    const displayName = readString(change.display_name ?? change.title, '', 180);
+    const content = asRecord(change.content);
+
+    if (blockType === 'chapter') {
+      // Chapter-level change → extract nested lessons from content
+      const rawLessons = Array.isArray(content.lessons) ? content.lessons : [];
+      const lessons = rawLessons.map((lessonValue: unknown) => {
+        const lesson = asRecord(lessonValue);
+        const lessonName = readString(lesson.display_name ?? lesson.title, '', 180);
+        const lessonContent = asRecord(lesson.content ?? lesson);
+        const rawUnits = Array.isArray(lessonContent.units) ? lessonContent.units : [];
+        const units = rawUnits.map((unitValue: unknown) => {
+          const unit = asRecord(unitValue);
+          const unitName = readString(unit.display_name ?? unit.title, '', 180);
+          const unitContent = asRecord(unit.content ?? unit);
+          // Components can be in unit.content.components, unit.components, or unit.content directly
+          const rawComponents = Array.isArray(unitContent.components)
+            ? unitContent.components
+            : Array.isArray(unit.components)
+              ? unit.components
+              : [];
+          return {
+            title: unitName,
+            components: rawComponents.map((compValue: unknown) => {
+              const comp = asRecord(compValue);
+              const compContent = asRecord(comp.content ?? comp);
+              return {
+                type: readString(comp.type ?? comp.block_type, 'html', 40),
+                title: readString(comp.display_name ?? comp.title, '', 180),
+                // Spread content fields (html, items, words, nodes, edges, etc.)
+                ...compContent,
+              };
+            }),
+          };
+        });
+        return { title: lessonName, units };
+      });
+      chapters.push({ title: displayName, lessons });
+    }
+  }
+
+  return chapters;
+}
+
 function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal {
   const raw = asRecord(rawValue);
-  const rawChapters = Array.isArray(raw.chapters) ? raw.chapters : [];
+
+  // ── Convert system prompt's `changes` format to `chapters` format ──
+  // System prompt (34fe8e8a) teaches Gemini to return: {changes: [{action, block_type, display_name, content:{lessons:[...]}}]}
+  // But this function expects: {chapters: [{title, lessons:[{title, units:[{title, components:[...]}]}]}]}
+  let rawChapters = Array.isArray(raw.chapters) ? raw.chapters : [];
+  if (rawChapters.length === 0 && Array.isArray(raw.changes)) {
+    rawChapters = convertChangesToChapters(raw.changes);
+  }
+
   if (rawChapters.length === 0) throw new Error('AI proposal must contain at least one chapter');
   if (rawChapters.length > MAX_PROPOSAL_CHAPTERS) {
-    throw new Error(`AI proposal exceeds ${MAX_PROPOSAL_CHAPTERS} chapters`);
+    throw new Error(`AI proposal vượt quá giới hạn ${MAX_PROPOSAL_CHAPTERS} section/chapter. Chỉ được tạo nội dung đầy đủ trong một section cho mỗi lần approve.`);
   }
 
   let lessonCount = 0;
@@ -1809,6 +2415,117 @@ function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal 
   };
 }
 
+function getRequestedComponentTypes(userPrompt: string): LessonAuthorComponentType[] {
+  const folded = foldVietnameseText(userPrompt);
+  const types: LessonAuthorComponentType[] = [];
+  const add = (type: LessonAuthorComponentType) => {
+    if (!types.includes(type)) types.push(type);
+  };
+
+  const asksSortable = /(^|\b)(sortable|sap xep|ordering|sequence|thu tu)(\b|$)/i.test(folded);
+  if (/(^|\b)(diagram|flowchart|mindmap|so do|bieu do)(\b|$)/i.test(folded)) add('la_diagram');
+  if (/(^|\b)(faq|hoi dap|cau hoi thuong gap)(\b|$)/i.test(folded)) add('la_faq');
+  if (/(^|\b)(crossword|do vui o chu|tu dien|vocabulary)(\b|$)/i.test(folded)
+    || (/(^|\b)o chu(\b|$)/i.test(folded) && !asksSortable)) add('la_crossword');
+  if (asksSortable) add('la_sortable');
+  if (/(^|\b)(quiz|problem|cau hoi|kiem tra|multiple choice|trac nghiem|dropdown|optionresponse|numerical|numericalresponse|dien so|stringresponse|short answer|short_text|dien van ban)(\b|$)/i.test(folded)) add('problem');
+  if (/(^|\b)(html|text|van ban|ly thuyet|noi dung doc)(\b|$)/i.test(folded)) add('html');
+  return types;
+}
+
+function isAdditiveComponentOnlyRequest(userPrompt: string, outlineMentions: LessonAuthorOutlineMention[]): boolean {
+  if (outlineMentions.length === 0) return false;
+  const folded = foldVietnameseText(userPrompt);
+  const hasAddVerb = /(^|\b)(tao|them|add|insert|create|generate|build|bo sung|viet|soan)(\b|$)/i.test(folded);
+  const hasReplaceVerb = /(^|\b)(xoa|remove|delete|thay the|replace|sua|chinh sua|cap nhat|update|edit|viet lai|lam lai)(\b|$)/i.test(folded);
+  const hasComponentScope = /(^|\b)(component|block|unit nay|phan nay|muc nay|diagram|so do|bieu do|faq|crossword|sortable|quiz|problem|dropdown|optionresponse|numerical|numericalresponse|dien so|stringresponse|short answer|short_text|dien van ban|html)(\b|$)/i.test(folded);
+  return hasAddVerb && !hasReplaceVerb && hasComponentScope && getRequestedComponentTypes(userPrompt).length > 0;
+}
+
+function requestedComponentLimit(userPrompt: string): number | null {
+  const folded = foldVietnameseText(userPrompt);
+  return /(^|\b)(1|mot|one|single)(\b|$)/i.test(folded) ? 1 : null;
+}
+
+function componentTypeLabel(type: string): string {
+  if (type === 'html') return 'Nội dung lý thuyết';
+  if (type === 'problem') return 'Câu hỏi kiểm tra';
+  if (type === 'la_faq') return 'Hỏi đáp';
+  if (type === 'la_sortable') return 'sắp xếp ô chữ';
+  if (type === 'la_crossword') return 'Đố vui ô chữ';
+  if (type === 'la_diagram') return 'Sơ đồ trực quan';
+  return type;
+}
+
+function formatComponentTypeLabels(types: Iterable<string>): string {
+  const labels = Array.from(types)
+    .map(type => componentTypeLabel(type))
+    .filter(Boolean);
+  return Array.from(new Set(labels)).join(', ');
+}
+
+function humanizeLessonAuthorPlanText(value: string): string {
+  return value
+    .replace(/\bla_diagram\b/g, componentTypeLabel('la_diagram'))
+    .replace(/\bla_faq\b/g, componentTypeLabel('la_faq'))
+    .replace(/\bla_sortable\b/g, componentTypeLabel('la_sortable'))
+    .replace(/\bla_crossword\b/g, componentTypeLabel('la_crossword'))
+    .replace(/\bproblem\b/g, componentTypeLabel('problem'))
+    .replace(/\bhtml\b/g, componentTypeLabel('html'));
+}
+
+function toLessonAuthorDisplayProposal(proposal: LessonAuthorProposal): LessonAuthorProposal {
+  return {
+    ...proposal,
+    summary: humanizeLessonAuthorPlanText(proposal.summary),
+  };
+}
+
+function constrainAdditiveComponentProposal(
+  proposal: LessonAuthorProposal,
+  userPrompt: string,
+  outlineMentions: LessonAuthorOutlineMention[],
+): LessonAuthorProposal {
+  if (!isAdditiveComponentOnlyRequest(userPrompt, outlineMentions)) return proposal;
+
+  const requestedTypes = new Set(getRequestedComponentTypes(userPrompt));
+  let remaining = requestedComponentLimit(userPrompt) ?? Number.POSITIVE_INFINITY;
+  let keptCount = 0;
+
+  const chapters: LessonAuthorChapterProposal[] = proposal.chapters
+    .map((chapter): LessonAuthorChapterProposal => ({
+      ...chapter,
+      lessons: chapter.lessons
+        .map((lesson): LessonAuthorLessonProposal => ({
+          ...lesson,
+          units: lesson.units
+            .map((unit): LessonAuthorUnitProposal => {
+              const components = (unit.components ?? []).filter(component => {
+                if (!requestedTypes.has(component.type) || remaining <= 0) return false;
+                remaining -= 1;
+                keptCount += 1;
+                return true;
+              });
+              return { ...unit, components };
+            })
+            .filter(unit => (unit.components ?? []).length > 0),
+        }))
+        .filter(lesson => lesson.units.length > 0),
+    }))
+    .filter(chapter => chapter.lessons.length > 0);
+
+  if (keptCount === 0 || chapters.length === 0) {
+    throw new Error(`AI proposal did not include requested component type: ${Array.from(requestedTypes).map(componentTypeLabel).join(', ')}`);
+  }
+
+  const labels = Array.from(requestedTypes).map(componentTypeLabel).join(', ');
+  const target = outlineMentions[0]?.display_name || 'target đã chọn';
+  return {
+    summary: `Đề xuất thêm ${keptCount} component ${labels} vào "${target}". Không thay thế, xoá, hoặc ghi đè component hiện có.`,
+    chapters,
+  };
+}
+
 function sanitizeInternalErrorReason(err: any): string {
   const msg = err?.message || err?.toString?.() || 'Unknown lesson author error';
   return String(msg)
@@ -1826,34 +2543,354 @@ function formatLessonAuthorFailurePreview(err: any, jobId?: string): string {
   ].filter(Boolean).join('\n\n');
 }
 
+const MAX_PLAN_PREVIEW_CHARS = 14000;
+const MAX_DETAILED_PLAN_UNITS = 18;
+
+function clipPreviewText(value: unknown, maxLength: number): string {
+  const raw = typeof value === 'string' ? value : String(value ?? '');
+  const text = raw.replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function previewPlainText(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '';
+  return clipPreviewText(stripHtml(decodeXmlEntities(value)), maxLength);
+}
+
+function parseJsonish(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function getComponentPayload(component: LessonAuthorComponentProposal, key: string): unknown {
+  const metadata = asRecord(component.metadata);
+  if (key in metadata) return parseJsonish(metadata[key]);
+
+  const dataRecord = asRecord(component.data);
+  if (key in dataRecord) return parseJsonish(dataRecord[key]);
+  return null;
+}
+
+function xmlTagText(xml: string, tagName: string): string {
+  const match = xml.match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+  return match ? previewPlainText(match[1], 500) : '';
+}
+
+function xmlAttribute(xml: string, tagName: string, attrName: string): string {
+  const match = xml.match(new RegExp(`<${tagName}\\b[^>]*\\s${attrName}="([^"]*)"`, 'i'));
+  return match ? decodeXmlEntities(match[1]).trim() : '';
+}
+
+function formatCorrectOptionsFromXml(xml: string, tagName: 'choice' | 'option'): string {
+  const matches = [...xml.matchAll(new RegExp(`<${tagName}\\b[^>]*correct="(true|false)"[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi'))];
+  if (matches.length === 0) return '';
+
+  const preview = matches.slice(0, 5).map((match, index) => {
+    const text = previewPlainText(match[2], 90);
+    const correct = match[1].toLowerCase() === 'true' ? 'đúng' : 'sai';
+    return `${index + 1}. ${text} (${correct})`;
+  });
+  if (matches.length > preview.length) preview.push(`... và ${matches.length - preview.length} lựa chọn khác`);
+  return preview.join('; ');
+}
+
+function problemTypeLabelFromXml(xml: string): string {
+  if (/<multiplechoiceresponse\b/i.test(xml)) return 'Trắc nghiệm 1 đáp án';
+  if (/<choiceresponse\b/i.test(xml)) return 'Trắc nghiệm nhiều đáp án';
+  if (/<optionresponse\b/i.test(xml)) return 'Danh sách thả xuống';
+  if (/<numericalresponse\b/i.test(xml)) return 'Điền số';
+  if (/<stringresponse\b/i.test(xml)) return 'Điền văn bản';
+  return 'Câu hỏi kiểm tra';
+}
+
+function formatProblemComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const xml = typeof component.data === 'string' ? component.data : '';
+  if (!xml) return ['Cấu hình câu hỏi đã được tạo trong component.'];
+
+  const lines = [`Dạng: ${problemTypeLabelFromXml(xml)}`];
+  const question = xmlTagText(xml, 'label');
+  if (question) lines.push(`Câu hỏi: ${clipPreviewText(question, 220)}`);
+
+  if (/<multiplechoiceresponse\b|<choiceresponse\b/i.test(xml)) {
+    const choices = formatCorrectOptionsFromXml(xml, 'choice');
+    if (choices) lines.push(`Lựa chọn: ${choices}`);
+  } else if (/<optionresponse\b/i.test(xml)) {
+    const options = formatCorrectOptionsFromXml(xml, 'option');
+    const correctAttr = xmlAttribute(xml, 'optioninput', 'correct');
+    if (options) lines.push(`Tuỳ chọn: ${options}`);
+    else if (correctAttr) lines.push(`Đáp án đúng: ${correctAttr}`);
+  } else if (/<numericalresponse\b/i.test(xml)) {
+    const answer = xmlAttribute(xml, 'numericalresponse', 'answer');
+    const tolerance = xmlAttribute(xml, 'responseparam', 'default');
+    if (answer) lines.push(`Đáp án: ${answer}${tolerance ? `, sai số: ${tolerance}` : ''}`);
+  } else if (/<stringresponse\b/i.test(xml)) {
+    const answer = xmlAttribute(xml, 'stringresponse', 'answer');
+    const mode = xmlAttribute(xml, 'stringresponse', 'type') === 'cs' ? 'phân biệt hoa/thường' : 'không phân biệt hoa/thường';
+    if (answer) lines.push(`Đáp án: ${answer} (${mode})`);
+  }
+
+  const solution = xmlTagText(xml, 'solution');
+  if (solution) lines.push(`Giải thích: ${clipPreviewText(solution, 220)}`);
+  return lines;
+}
+
+function formatFaqComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const faqData = asRecord(getComponentPayload(component, 'faq_data'));
+  const items = Array.isArray(faqData.items) ? faqData.items.map(asRecord) : [];
+  if (items.length === 0) return ['Danh sách hỏi đáp đã được tạo.'];
+
+  const questions = items.slice(0, 3).map((item, index) => {
+    const question = readString(item.question, `Câu hỏi ${index + 1}`, 180);
+    const answer = previewPlainText(readString(item.answer, '', 500), 140);
+    return `${index + 1}. ${question}${answer ? ` -> ${answer}` : ''}`;
+  });
+  if (items.length > questions.length) questions.push(`... và ${items.length - questions.length} câu hỏi khác`);
+  return [`Nội dung FAQ: ${questions.join(' | ')}`];
+}
+
+function formatSortableComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const data = asRecord(component.data);
+  const sortableData = asRecord(getComponentPayload(component, 'sortable_data'));
+  const items = Array.isArray(sortableData.items) ? sortableData.items.map(asRecord) : [];
+  const question = readString(asRecord(component.metadata).question_text ?? data.question_text, '', 300);
+  const orderedItems = items
+    .map((item, index) => `${index + 1}. ${readString(item.text ?? item.label ?? item.title, '', 120)}`)
+    .filter(item => !item.endsWith('. '))
+    .slice(0, 6);
+
+  const lines: string[] = [];
+  if (question) lines.push(`Yêu cầu: ${question}`);
+  if (orderedItems.length > 0) lines.push(`Thứ tự đúng: ${orderedItems.join(' -> ')}${items.length > orderedItems.length ? ` -> ... (${items.length} mục)` : ''}`);
+  return lines.length > 0 ? lines : ['Bài sắp xếp đã có danh sách đáp án đúng.'];
+}
+
+function formatCrosswordComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const crosswordData = asRecord(getComponentPayload(component, 'crossword_data'));
+  const words = Array.isArray(crosswordData.words) ? crosswordData.words.map(asRecord) : [];
+  if (words.length === 0) return ['Đố vui ô chữ đã có bộ từ khoá và gợi ý.'];
+
+  const preview = words.slice(0, 5).map((word, index) => {
+    const answer = readString(word.answer, `Từ ${index + 1}`, 80);
+    const clue = readString(word.clue ?? word.hint, '', 140);
+    return `${answer}${clue ? ` (${clue})` : ''}`;
+  });
+  if (words.length > preview.length) preview.push(`... và ${words.length - preview.length} từ khác`);
+  return [`Từ khoá: ${preview.join('; ')}`];
+}
+
+function formatDiagramComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const diagramData = asRecord(getComponentPayload(component, 'diagram_data'));
+  const diagrams = Array.isArray(diagramData.diagrams) ? diagramData.diagrams.map(asRecord) : [];
+  const diagram = diagrams[0] ?? {};
+  const nodes = Array.isArray(diagram.nodes) ? diagram.nodes.map(asRecord) : [];
+  const edges = Array.isArray(diagram.edges) ? diagram.edges.map(asRecord) : [];
+  const nodeLabels = nodes
+    .map(node => readString(asRecord(node.data).label ?? node.label, '', 120))
+    .filter(Boolean)
+    .slice(0, 8);
+
+  const lines: string[] = [];
+  if (nodeLabels.length > 0) lines.push(`Nút chính: ${nodeLabels.join(', ')}${nodes.length > nodeLabels.length ? `, ... (${nodes.length} nút)` : ''}`);
+  lines.push(`Liên kết: ${edges.length} cạnh quan hệ`);
+  return lines;
+}
+
+function formatHtmlComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  const dataRecord = asRecord(component.data);
+  const html = typeof component.data === 'string'
+    ? component.data
+    : readString(dataRecord.html ?? dataRecord.content, '', MAX_UNIT_HTML_CHARS);
+  const preview = previewPlainText(html, 320);
+  return preview ? [`Nội dung chính: ${preview}`] : ['Nội dung lý thuyết đã được soạn trong component.'];
+}
+
+function formatComponentDetails(component: LessonAuthorComponentProposal): string[] {
+  switch (component.type) {
+    case 'html':
+      return formatHtmlComponentDetails(component);
+    case 'problem':
+      return formatProblemComponentDetails(component);
+    case 'la_faq':
+      return formatFaqComponentDetails(component);
+    case 'la_sortable':
+      return formatSortableComponentDetails(component);
+    case 'la_crossword':
+      return formatCrosswordComponentDetails(component);
+    case 'la_diagram':
+      return formatDiagramComponentDetails(component);
+    default:
+      return [];
+  }
+}
+
+function getProposalMetrics(proposal: LessonAuthorProposal): { lessons: number; units: number; components: number } {
+  let lessons = 0;
+  let units = 0;
+  let components = 0;
+  for (const chapter of proposal.chapters) {
+    lessons += chapter.lessons.length;
+    for (const lesson of chapter.lessons) {
+      units += lesson.units.length;
+      for (const unit of lesson.units) components += (unit.components ?? []).length;
+    }
+  }
+  return { lessons, units, components };
+}
+
 function formatProposalPreview(proposal: LessonAuthorProposal, jobId: string): string {
-  const pendingSummary = proposal.summary
+  const pendingSummary = humanizeLessonAuthorPlanText(proposal.summary)
     .replace(/^đã tạo/i, 'Đề xuất tạo')
     .replace(/^da tao/i, 'Đề xuất tạo')
     .replace(/^đã cập nhật/i, 'Đề xuất cập nhật')
     .replace(/^da cap nhat/i, 'Đề xuất cập nhật');
-  let text = [
-    'Mình đã chuẩn bị bản đề xuất. Chưa có block nào được ghi vào outline trước khi admin bấm Áp dụng.',
-    `Tóm tắt đề xuất: ${pendingSummary}`,
+  const metrics = getProposalMetrics(proposal);
+  const lines: string[] = [
+    'Mình đã chuẩn bị bản đề xuất chi tiết. Chưa có block nào được ghi vào outline trước khi admin bấm Áp dụng.',
+    '',
+    `Tóm tắt: ${pendingSummary}`,
+    `Phạm vi: ${proposal.chapters.length} chương, ${metrics.lessons} bài, ${metrics.units} unit, ${metrics.components} component.`,
     `Mã đề xuất: ${jobId}`,
     '',
-  ].join('\n\n');
+    'Chi tiết plan:',
+  ];
+  let detailedUnitCount = 0;
+  let clipped = false;
+  let currentChars = lines.join('\n').length;
+
+  const pushLine = (line = ''): boolean => {
+    if (clipped) return false;
+    const nextLength = currentChars + line.length + 1;
+    if (nextLength > MAX_PLAN_PREVIEW_CHARS) {
+      clipped = true;
+      return false;
+    }
+    lines.push(line);
+    currentChars = nextLength;
+    return true;
+  };
+
   proposal.chapters.forEach((chapter, chapterIndex) => {
-    text += `${chapterIndex + 1}. ${chapter.title}\n`;
+    pushLine('');
+    pushLine(`${chapterIndex + 1}. Chương: ${chapter.title}`);
     chapter.lessons.forEach((lesson, lessonIndex) => {
       const componentTypes = new Set(
         lesson.units.flatMap(unit => (unit.components ?? []).map(component => component.type)),
       );
-      const typeText = componentTypes.size > 0 ? `; ${Array.from(componentTypes).join(', ')}` : '';
-      text += `   ${chapterIndex + 1}.${lessonIndex + 1}. ${lesson.title} (${lesson.units.length} unit${typeText})\n`;
-      lesson.units.forEach(unit => {
-        const unitTypes = (unit.components ?? []).map(component => component.type).join(', ') || 'html';
-        text += `      - ${unit.title}: ${unitTypes}\n`;
+      const typeText = formatComponentTypeLabels(componentTypes) || componentTypeLabel('html');
+      pushLine(`   ${chapterIndex + 1}.${lessonIndex + 1}. Bài: ${lesson.title}`);
+      pushLine(`      Mục tiêu nội dung: ${lesson.units.length} unit; loại nội dung: ${typeText}.`);
+      lesson.units.forEach((unit, unitIndex) => {
+        const components = unit.components ?? [];
+        const unitTypes = formatComponentTypeLabels(components.map(component => component.type)) || componentTypeLabel('html');
+        const shouldShowDetails = detailedUnitCount < MAX_DETAILED_PLAN_UNITS;
+        pushLine(`      ${chapterIndex + 1}.${lessonIndex + 1}.${unitIndex + 1}. Unit: ${unit.title}`);
+        pushLine(`         Components: ${unitTypes}.`);
+
+        if (!shouldShowDetails) {
+          pushLine('         Chi tiết component đã được rút gọn trong preview để tránh quá dài.');
+          return;
+        }
+
+        detailedUnitCount += 1;
+        components.forEach((component, componentIndex) => {
+          pushLine(`         - ${componentIndex + 1}. ${component.title || componentTypeLabel(component.type)} (${componentTypeLabel(component.type)})`);
+          for (const detail of formatComponentDetails(component)) {
+            pushLine(`           + ${detail}`);
+          }
+        });
       });
     });
   });
-  text += '\nKiểm tra bản đề xuất để xác nhận, sau đó bấm Áp dụng. Chỉ sau khi bấm Áp dụng, backend mới ghi thay đổi vào outline và refresh cây bài học.';
-  return text;
+
+  if (clipped || metrics.units > MAX_DETAILED_PLAN_UNITS) {
+    lines.push('');
+    lines.push(`Preview đã rút gọn chi tiết sau ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} unit đầu để widget không quá nặng. Proposal đầy đủ vẫn được lưu trong job và sẽ được áp dụng đầy đủ nếu admin bấm Áp dụng.`);
+  }
+
+  lines.push('');
+  lines.push('Kiểm tra bản đề xuất để xác nhận, sau đó bấm Áp dụng. Chỉ sau khi bấm Áp dụng, backend mới ghi thay đổi vào outline và refresh cây bài học.');
+  return lines.join('\n');
+}
+
+function looksLikeLessonAuthorProposalJsonResponse(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const hasJsonFence = /```json/i.test(trimmed);
+  const hasProposalShape = /"chapters"\s*:/.test(trimmed) || /"changes"\s*:/.test(trimmed);
+  const hasCourseTreeShape = /"lessons"\s*:/.test(trimmed) || /"units"\s*:/.test(trimmed) || /"components"\s*:/.test(trimmed);
+  const mentionsProposal = /proposal|de xuat|đề xuất/i.test(foldVietnameseText(trimmed));
+  return (hasJsonFence && (hasProposalShape || hasCourseTreeShape || mentionsProposal))
+    || (hasProposalShape && hasCourseTreeShape);
+}
+
+async function convertLessonAuthorChatJsonToProposalMessage(
+  ctx: ConversationContext,
+  userId: string,
+  prompt: string,
+  rawResponse: string,
+  sourceDocuments: LessonAuthorSourceDocument[],
+): Promise<{
+  content: string;
+  metadata: Record<string, unknown>;
+  proposal?: LessonAuthorProposal;
+  jobId: string;
+} | null> {
+  if (ctx.target !== LESSON_AUTHOR_TARGET || !looksLikeLessonAuthorProposalJsonResponse(rawResponse)) return null;
+
+  try {
+    if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
+    const proposal = normalizeLessonAuthorProposal(extractJsonObject(rawResponse));
+    const jobId = await createLessonAuthorJob(ctx, userId, prompt, ctx.botKbId, proposal, sourceDocuments);
+    logLessonAuthorFlow('chat_json_intercepted_as_proposal', {
+      conversation_id: ctx.conversationId,
+      job_id: jobId,
+      response_chars: rawResponse.length,
+      ...getLessonAuthorProposalMetrics(proposal),
+    });
+    return {
+      content: formatProposalPreview(proposal, jobId),
+      metadata: {
+        kind: 'lesson_author_proposal',
+        lesson_author_job_id: jobId,
+        ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
+      },
+      proposal: toLessonAuthorDisplayProposal(proposal),
+      jobId,
+    };
+  } catch (err) {
+    const errorReason = sanitizeInternalErrorReason(err);
+    const jobId = await createFailedLessonAuthorJob(ctx, userId, prompt, ctx.botKbId ?? null, errorReason, sourceDocuments);
+    logLessonAuthorFlow('chat_json_intercept_failed', {
+      conversation_id: ctx.conversationId,
+      job_id: jobId,
+      response_chars: rawResponse.length,
+      error: errorReason,
+    });
+    return {
+      content: formatLessonAuthorFailurePreview(err, jobId),
+      metadata: {
+        kind: 'lesson_author_generation_failed',
+        lesson_author_job_id: jobId,
+        ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
+      },
+      jobId,
+    };
+  }
 }
 
 function getLessonAuthorProposalMetrics(proposal: LessonAuthorProposal): Record<string, unknown> {
@@ -1885,78 +2922,98 @@ function getLessonAuthorProposalMetrics(proposal: LessonAuthorProposal): Record<
 
 type LessonAuthorIntent = 'chat' | 'draft_lesson';
 
-function getLessonAuthorIntentByHeuristic(userPrompt: string): LessonAuthorIntent | null {
-  const text = userPrompt.toLowerCase();
-  const hasDraftVerb = /(tao|tạo|soan|soạn|len plan|lên plan|len outline|lên outline|xay|xây|them|thêm|bo sung|bổ sung|de xuat|đề xuất|chinh sua|chỉnh sửa|sua|sửa|cap nhat|cập nhật|toi uu|tối ưu|cai thien|cải thiện|da dang|đa dạng|generate|create|build|draft|proposal|update|edit|improve|diversify)/i.test(text);
-  const hasCourseObject = /(bai hoc|bài học|lesson|unit|chapter|chuong|chương|outline|cau truc|cấu trúc|course|khoa hoc|khóa học|noi dung|nội dung)/i.test(text);
-  const hasChatIntent = /(la gi|là gì|giai thich|giải thích|hoi|hỏi|tom tat|tóm tắt|da co gi|đã có gì|hien tai|hiện tại|kiem tra|kiểm tra|review|phan tich|phân tích|doc|đọc|cho biet|cho biết)/i.test(text);
+// ── Scoring-based intent classifier ──
+// Mỗi signal có weight. Tổng > 0 → draft_lesson, ≤ 0 → chat
+// KHÔNG gọi Gemini — zero extra API call
 
-  if (hasChatIntent && !hasDraftVerb) return 'chat';
-  if (!hasDraftVerb) return 'chat';
-  if (hasDraftVerb && hasCourseObject) return 'draft_lesson';
-  return null;
+interface IntentSignal {
+  name: string;
+  weight: number;
+  matched: boolean;
 }
 
-async function classifyLessonAuthorIntent(ctx: ConversationContext, userPrompt: string): Promise<LessonAuthorIntent> {
-  const heuristic = getLessonAuthorIntentByHeuristic(userPrompt);
-  if (heuristic) {
-    logLessonAuthorFlow('intent_heuristic_resolved', {
-      conversation_id: ctx.conversationId,
-      course_id: ctx.courseId,
-      intent: heuristic,
-      prompt_chars: userPrompt.length,
-    });
-    return heuristic;
-  }
-
-  try {
-    logLessonAuthorFlow('intent_ai_classifier_start', {
-      conversation_id: ctx.conversationId,
-      course_id: ctx.courseId,
-      prompt_chars: userPrompt.length,
-    });
-    const aiClient = await getGeminiClient(ctx.tenantId);
-    const course = ctx.courseId
-      ? await getDraftCourseOutlineForPrompt(ctx.courseId, ctx.tenantId).catch(() => null)
-      : null;
-
-    const response = await aiClient.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [{
-        role: 'user',
-        parts: [{
-          text: [
-            `Admin message:\n${userPrompt}`,
-            course ? `Current course:\n${course.outline}` : 'Current course: unavailable',
-            'Classify the admin intent.',
-            'Return exactly one token:',
-            '- draft_lesson: admin clearly asks to create, add, update, generate, or draft course outline/lessons/units.',
-            '- chat: admin is asking, discussing, checking, explaining, reviewing, or giving natural-language context without a clear request to create/update structure.',
-          ].join('\n\n'),
-        }],
-      }],
-      config: {
-        systemInstruction: 'You are a strict intent classifier for a lesson authoring chatbot. Prefer chat unless the admin clearly asks to create or modify course structure.',
-      },
-    });
-
-    const intent = (response.text ?? '').toLowerCase().includes('draft_lesson') ? 'draft_lesson' : 'chat';
-    logLessonAuthorFlow('intent_ai_classifier_done', {
-      conversation_id: ctx.conversationId,
-      course_id: ctx.courseId,
-      intent,
-      raw_response: (response.text ?? '').slice(0, 80),
-    });
-    return intent;
-  } catch (err) {
-    logLessonAuthorFlow('intent_ai_classifier_failed', {
-      conversation_id: ctx.conversationId,
-      course_id: ctx.courseId,
-      error: (err as Error).message,
-    });
-    return 'chat';
-  }
+interface IntentClassificationResult {
+  intent: LessonAuthorIntent;
+  signals: IntentSignal[];
+  score: number;
 }
+
+function classifyLessonAuthorIntentV2(
+  userPrompt: string,
+  outlineMentions: LessonAuthorOutlineMention[],
+  mode: 'chat' | 'draft_lesson' | 'auto',
+): IntentClassificationResult {
+  // FE forced mode → trả ngay
+  if (mode === 'draft_lesson') return { intent: 'draft_lesson', signals: [], score: 100 };
+  if (mode === 'chat') return { intent: 'chat', signals: [], score: -100 };
+
+  const folded = foldVietnameseText(userPrompt);
+  const signals: IntentSignal[] = [];
+
+  // ══ POSITIVE signals → draft ══
+
+  // +3: Strong create/write verb
+  const strongDraft = /(^|\b)(tao|soan|viet|thiet ke|xay dung|chia|generate|create|build|design|draft|de xuat|len plan|lap plan)(\b|$)/i.test(folded);
+  signals.push({ name: 'strong_draft_verb', weight: 3, matched: strongDraft });
+
+  // +2: Moderate edit verb
+  const moderateDraft = /(^|\b)(sua|chinh sua|cap nhat|bo sung|them|goi y|phan chia|add|insert|update|edit|improve|toi uu|cai thien|viet lai|lam lai|mo rong|dai ti|dai hon|ngan gon)(\b|$)/i.test(folded);
+  signals.push({ name: 'moderate_draft_verb', weight: 2, matched: moderateDraft });
+
+  // +2: Course structure object
+  const courseObj = /(^|\b)(bai hoc|noi dung bai hoc|lesson|unit|module|chapter|chuong|outline|cau truc|ly thuyet|bai tap|danh gia|muc tieu hoc tap|component|block|sequential|vertical)(\b|$)/i.test(folded);
+  signals.push({ name: 'course_object', weight: 2, matched: courseObj });
+
+  // +2: Component type keyword (specific types only, NOT generic words like "lý thuyết")
+  const compType = /(^|\b)(quiz|problem|cau hoi trac nghiem|trac nghiem|diagram|so do|faq|hoi dap|crossword|o chu|sortable|sap xep|html|text|video|infographic|audio|media)(\b|$)/i.test(folded);
+  signals.push({ name: 'component_type', weight: 2, matched: compType });
+
+  // +3: Instructional design / course planning language
+  const instructionalDesign = /(^|\b)(instructional design|phuong phap instructional design|thiet ke hoc tap|thiet ke noi dung|cau truc bai hoc|learning objective|muc tieu hoc tap|module hoc|hoc lieu)(\b|$)/i.test(folded);
+  signals.push({ name: 'instructional_design', weight: 3, matched: instructionalDesign });
+
+  // +3: @mention present → rất mạnh
+  signals.push({ name: 'has_outline_mention', weight: 3, matched: outlineMentions.length > 0 });
+
+  // +1: Imperative (lam di, ok, cứ thế...)
+  const imperative = /(^|\b)(lam di|lam luon|cu the|tao di|them di|sua di|bat dau|go ahead|do it|proceed)(\b|$)/i.test(folded);
+  signals.push({ name: 'imperative_tone', weight: 1, matched: imperative });
+
+  // ══ NEGATIVE signals → chat ══
+
+  // -3: Question/explain intent
+  const chatIntent = /(^|\b)(la gi|giai thich|tom tat|hoi|cho biet|phan tich|doc|so sanh|tai sao|vi sao|nhu the nao|the nao|review|explain|summarize|what is|how|why)(\b|$)/i.test(folded);
+  signals.push({ name: 'strong_chat_intent', weight: -3, matched: chatIntent });
+
+  // -3: Question form (? or question starters) — rất mạnh, câu hỏi gần như chắc chắn là chat
+  const question = /\?$|^(ban co the|lieu|hay|co nen|nen|co phai|theo ban|ban thay|ban nghi)/i.test(folded);
+  signals.push({ name: 'question_form', weight: -3, matched: question });
+
+  // -3: Evaluation/assessment questions ("đã ok chưa", "đủ chưa", "đánh giá")
+  const evalQuestion = /(^|\b)(da ok|da du|day du|da on|ok chua|du chua|on chua|danh gia|nhan xet|tot chua|duoc chua|hop ly|da xong)(\b|$)/i.test(folded);
+  signals.push({ name: 'evaluation_question', weight: -3, matched: evalQuestion });
+
+  // -2: Read/check verbs
+  const readVerb = /(^|\b)(kiem tra|xem|da co gi|hien tai|dang co|list|show|check|status)(\b|$)/i.test(folded);
+  signals.push({ name: 'read_verb', weight: -2, matched: readVerb });
+
+  // -2: Short ambiguous message (< 15 chars, no draft verbs) — likely conversational
+  const isShortAmbiguous = userPrompt.trim().length < 15 && !strongDraft && !moderateDraft;
+  signals.push({ name: 'short_ambiguous', weight: -2, matched: isShortAmbiguous });
+
+  // -99: DELETE INTENT → HARD BLOCK, luôn vào chat
+  const deleteIntent = /(^|\b)(xoa|delete|remove|bo di|go bo|huy|cancel|loai bo)(\b|$)/i.test(folded);
+  signals.push({ name: 'delete_intent', weight: -99, matched: deleteIntent });
+
+  const score = signals.filter(s => s.matched).reduce((sum, s) => sum + s.weight, 0);
+
+  return {
+    intent: score > 0 ? 'draft_lesson' : 'chat',
+    signals,
+    score,
+  };
+}
+
 
 async function generateLessonAuthorProposal(
   ctx: ConversationContext,
@@ -1965,7 +3022,9 @@ async function generateLessonAuthorProposal(
   outlineMentions: LessonAuthorOutlineMention[] = [],
   mentionContext = '',
   targetScopeInstruction = '',
+  sourceDocuments: LessonAuthorSourceDocument[] = [],
 ): Promise<LessonAuthorProposal> {
+  const sourceDocumentContext = formatSourceDocumentsForPrompt(sourceDocuments);
   logLessonAuthorFlow('proposal_generate_start', {
     conversation_id: ctx.conversationId,
     course_id: ctx.courseId,
@@ -1973,6 +3032,7 @@ async function generateLessonAuthorProposal(
     kb_id: kbId,
     prompt_chars: userPrompt.length,
     outline_mentions: outlineMentions.length,
+    source_documents: sourceDocuments.length,
     target_scope_chars: targetScopeInstruction.length,
   });
 
@@ -1997,29 +3057,33 @@ async function generateLessonAuthorProposal(
     outline_chars: course.outline.length,
   });
   const aiClient = await getGeminiClient(ctx.tenantId);
+  const scopedOutlineMentions = outlineMentions.slice(0, 1);
   const basePrompt = [
     `Admin request:\n${userPrompt}`,
+    sourceDocumentContext,
     `Current course context:\n${course.outline}`,
     `Current chapter count: ${course.chapterCount}.`,
+    'HARD SCOPE LIMIT: One proposal may contain content for exactly ONE top-level section/chapter only. Never generate full detailed content for the entire course, all sections, or multiple chapters in one proposal. If the admin asks for the whole course, choose only the selected/explicit/next/first suitable section and state in summary that other sections must be handled in separate requests.',
     course.hasStructure
-      ? 'The course already has structure. Propose ONLY missing or clearly requested new chapters/lessons/units. Do not repeat existing chapter, lesson, or unit titles from the current outline.'
-      : 'The course has no chapters yet. Build an initial structure from the course name, course description, admin request, and active KB.',
-    outlineMentions.length > 0
-      ? `Admin selected exact outline targets with @mentions:\n${formatOutlineMentionsForPrompt(outlineMentions)}\n${mentionContext}\nUse these IDs and the database subtree/context as the authoritative target scope. If the admin asks to edit, expand, add components, or improve content, produce proposal content ONLY for the selected target path unless the admin explicitly asks for a broader course change. Preserve the selected target title when returning the matching chapter/lesson/unit so the apply step updates that area instead of creating duplicates.`
+      ? 'The course already has structure. Propose ONLY missing or clearly requested new lessons/units inside one section/chapter. Do not repeat existing chapter, lesson, or unit titles from the current outline.'
+      : 'The course has no chapters yet. Build only the first initial section/chapter from the course name, course description, admin request, and active KB.',
+    scopedOutlineMentions.length > 0
+      ? `Admin selected exact outline target with @mention:\n${formatOutlineMentionsForPrompt(scopedOutlineMentions)}\n${mentionContext}\nUse this ID and the database subtree/context as the authoritative target scope. If the admin asks to edit, expand, add components, or improve content, produce proposal content ONLY for the selected target path unless the admin explicitly asks for a broader change within the same section. Preserve the selected target title when returning the matching chapter/lesson/unit so the apply step updates that area instead of creating duplicates.`
       : 'Admin did not select an exact @mention target. Infer the target from the request and current course outline. If the request is ambiguous, answer with a clarification instead of generating unrelated structure.',
     targetScopeInstruction,
     'If the admin asks for a specific next chapter number, create only that new chapter and place it after the existing chapters. Example: if the course already has 3 chapters and the admin asks for chapter 4, return exactly one new chapter for chapter 4.',
     'Return JSON only with this schema:',
-    '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select","question":"string","choices":[{"text":"string","correct":true}],"explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
-    `Limits: max ${MAX_PROPOSAL_CHAPTERS} chapters, ${MAX_PROPOSAL_LESSONS} lessons total, ${MAX_PROPOSAL_UNITS} units total, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
+    '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select|dropdown|numerical|short_text","question":"string","choices":[{"text":"string","correct":true}],"options":["string"],"answer":"string|number","tolerance":"5%","explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
+    `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons total inside that section, ${MAX_PROPOSAL_UNITS} units total inside that section, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
     'Use the active KB as the source of truth. Do not invent facts that are not supported by the KB.',
     'The summary must describe a pending proposal only. Do not say content was created, applied, inserted, or updated in the database/outline before admin approval.',
     'Each unit must contain 1-3 components. Usually start with one html component for explanation, then add one interactive component when it improves learning.',
     'Choose component types by pedagogy: html for explanation, problem for checks, la_sortable for ordered processes, la_faq for definitions/misconceptions, la_crossword only for vocabulary terms, la_diagram for concept maps, workflows, hierarchies, relationships, or cause-effect structures. Do not force every type.',
-    'For la_diagram, output simple nodes and edges only. Use 2-12 nodes. Edge source/target may be zero-based node indexes or exact node labels.',
+    'For la_diagram, output 4-8 meaningful nodes with short labels, useful tooltip/description text, and clear edges with relationship labels when helpful. Edge source/target may be zero-based node indexes or exact node labels. Do not include icons in labels; backend will add consistent label icons automatically.',
     'Do not output video, pdf, image, or unsupported component types.',
     'Each html component must be real lesson content, not an empty shell: include a short objective, explanation, and key points. Prefer 500-1200 Vietnamese words when the KB supports it.',
-    'Problem choices must include at least 2 options and at least 1 correct answer. FAQ needs at least 2 items. Sortable needs at least 3 ordered items. Crossword needs at least 3 short terms.',
+    'Problem components may use exactly one of 5 problem_type values: multiple_choice, multiple_select, dropdown, numerical, short_text. For multiple_choice/multiple_select provide choices with correct flags. For dropdown provide options and answer, or choices with one correct flag. For numerical provide answer and optional tolerance such as "5%" or "0.01". For short_text provide answer and optional answers for accepted alternatives.',
+    'Problem choices/dropdown options must include at least 2 options and at least 1 correct answer. FAQ needs at least 2 items. Sortable needs at least 3 ordered items. Crossword needs at least 3 short terms.',
     'HTML must be clean and suitable for an LMS html block. Use h3, p, ul, ol, strong, em only. Do not include script/style/iframe/object/embed tags.',
   ].join('\n\n');
 
@@ -2055,8 +3119,37 @@ async function generateLessonAuthorProposal(
       attempt: attempt + 1,
       response_chars: lastResponseText.length,
     });
+
+    // ── DEBUG: log raw LLM response for troubleshooting ──
+    logLessonAuthorFlow('proposal_gemini_raw_response_debug', {
+      conversation_id: ctx.conversationId,
+      attempt: attempt + 1,
+      response_first_2000: lastResponseText.slice(0, 2000),
+      response_last_500: lastResponseText.slice(-500),
+    });
+
     try {
-      const proposal = normalizeLessonAuthorProposal(extractJsonObject(lastResponseText));
+      const extractedJson = extractJsonObject(lastResponseText);
+      const extractedRecord = asRecord(extractedJson);
+
+      // ── DEBUG: log parsed JSON structure ──
+      logLessonAuthorFlow('proposal_parsed_json_debug', {
+        conversation_id: ctx.conversationId,
+        attempt: attempt + 1,
+        parsed_type: typeof extractedJson,
+        is_array: Array.isArray(extractedJson),
+        top_keys: Object.keys(extractedRecord).slice(0, 20),
+        has_chapters: 'chapters' in extractedRecord,
+        chapters_type: typeof extractedRecord.chapters,
+        chapters_is_array: Array.isArray(extractedRecord.chapters),
+        chapters_length: Array.isArray(extractedRecord.chapters) ? extractedRecord.chapters.length : -1,
+      });
+
+      const proposal = constrainAdditiveComponentProposal(
+        normalizeLessonAuthorProposal(extractedJson),
+        userPrompt,
+        scopedOutlineMentions,
+      );
       logLessonAuthorFlow('proposal_validation_ok', {
         conversation_id: ctx.conversationId,
         attempt: attempt + 1,
@@ -2077,13 +3170,342 @@ async function generateLessonAuthorProposal(
   throw lastValidationError || new Error('AI proposal validation failed');
 }
 
+// ── Staged proposal generation for large scopes ──
+
+const STAGED_THRESHOLD_UNITS = 3;         // If > 3 units → use staged
+const MAX_UNITS_PER_CONTENT_BATCH = 3;    // Batch 3 units/call to balance API calls vs quality
+
+async function generateProposalSkeleton(
+  ctx: ConversationContext,
+  userPrompt: string,
+  kbId: string,
+  course: { courseName: string; courseDescription: string; hasStructure: boolean; chapterCount: number; outline: string },
+  outlineMentions: LessonAuthorOutlineMention[],
+  mentionContext: string,
+  targetScopeInstruction: string,
+  sourceDocuments: LessonAuthorSourceDocument[],
+): Promise<LessonAuthorProposal> {
+  const aiClient = await getGeminiClient(ctx.tenantId);
+  const storeName = await getCachedStoreName(kbId);
+  if (!storeName) throw new Error('KB active chưa có Gemini File Search store.');
+
+  const scopedOutlineMentions = outlineMentions.slice(0, 1);
+  const skeletonPrompt = [
+    `Admin request:\n${userPrompt}`,
+    formatSourceDocumentsForPrompt(sourceDocuments),
+    `Current course:\n${course.outline}`,
+    `Current chapter count: ${course.chapterCount}.`,
+    'HARD SCOPE LIMIT: Return a skeleton for exactly ONE top-level section/chapter only. Never plan full course content or multiple sections in one proposal. If the admin asked for the whole course, pick only the selected/explicit/next/first suitable section and mention the one-section limit in summary.',
+    course.hasStructure
+      ? 'The course already has structure. Propose ONLY missing or clearly requested lessons/units inside one section/chapter.'
+      : 'The course has no chapters yet. Build only the first initial section/chapter.',
+    scopedOutlineMentions.length > 0
+      ? `Admin selected outline target:\n${formatOutlineMentionsForPrompt(scopedOutlineMentions)}\n${mentionContext}`
+      : '',
+    targetScopeInstruction,
+    'STAGE 1 — SKELETON ONLY.',
+    'Return JSON with chapter, lesson, unit titles and component TYPES only.',
+    'Do NOT generate actual html content, quiz questions, FAQ items, or diagram data yet.',
+    'For each component, set: type, title. Leave html/data/items/words/nodes/edges empty or omitted.',
+    '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html|problem|la_faq|la_sortable|la_crossword|la_diagram","title":"string"}]}]}]}]}',
+    `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons inside that section, ${MAX_PROPOSAL_UNITS} units inside that section, ${MAX_COMPONENTS_PER_UNIT} components/unit.`,
+    'Use KB as source of truth. Design structure following Instructional Design principles.',
+    'Do not output video, pdf, image, or unsupported component types.',
+  ].filter(Boolean).join('\n\n');
+
+  logLessonAuthorFlow('staged_skeleton_start', {
+    conversation_id: ctx.conversationId,
+    course_id: ctx.courseId,
+    prompt_chars: skeletonPrompt.length,
+  });
+
+  const response = await aiClient.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: [{ role: 'user', parts: [{ text: skeletonPrompt }] }],
+    config: {
+      systemInstruction: `${ctx.systemPrompt}\n\nYou are creating a structural outline ONLY. No content yet.`,
+      tools: [{ fileSearch: { fileSearchStoreNames: [storeName] } }],
+    } as any,
+  });
+
+  const rawText = response.text ?? '';
+  logLessonAuthorFlow('staged_skeleton_response', {
+    conversation_id: ctx.conversationId,
+    response_chars: rawText.length,
+  });
+
+  return extractJsonObject(rawText) as LessonAuthorProposal;
+}
+
+interface UnitBatchItem {
+  chapterTitle: string;
+  lessonTitle: string;
+  unitTitle: string;
+  componentTypes: string[];
+}
+
+async function generateUnitContentBatch(
+  ctx: ConversationContext,
+  kbId: string,
+  batch: UnitBatchItem[],
+  courseName: string,
+  sourceDocuments: LessonAuthorSourceDocument[],
+): Promise<LessonAuthorUnitProposal[]> {
+  const aiClient = await getGeminiClient(ctx.tenantId);
+  const storeName = await getCachedStoreName(kbId);
+  if (!storeName) throw new Error('KB store not found');
+
+  const unitDescriptions = batch.map((item, i) =>
+    `${i + 1}. Chapter: "${item.chapterTitle}" > Lesson: "${item.lessonTitle}" > Unit: "${item.unitTitle}" → components: [${item.componentTypes.join(', ')}]`,
+  ).join('\n');
+
+  const contentPrompt = [
+    'STAGE 2 — GENERATE FULL CONTENT for these units:',
+    unitDescriptions,
+    formatSourceDocumentsForPrompt(sourceDocuments),
+    `Course: ${courseName}`,
+    'For each unit, generate COMPLETE component content:',
+    '- html: real lesson content, 500-1200 Vietnamese words, with h3/p/ul/ol/strong/em. Include learning objective, explanation, key points, examples.',
+    '- problem: choose one problem_type from "multiple_choice", "multiple_select", "dropdown", "numerical", "short_text". For multiple_choice/multiple_select provide choices with correct flags. For dropdown provide options and answer, or choices with one correct flag. For numerical provide answer and optional tolerance. For short_text provide answer and optional accepted answers.',
+    '- la_faq: provide items array with 2+ Q&A items.',
+    '- la_sortable: provide question_text and items array with 3+ ordered items.',
+    '- la_crossword: provide words array with 3+ terms, each having answer, clue, hint.',
+    '- la_diagram: provide 4-8 meaningful nodes with short labels, tooltip/description, and clear edges with relationship labels when useful. Do not include icons in labels; backend will add label icons.',
+    'Return JSON array of units: [{"title":"exact unit title","components":[{"type":"html","title":"string","html":"full html content"}, ...]}]',
+    'Use KB as source of truth. Do not invent facts not supported by KB.',
+    'HTML must be clean. Use h3, p, ul, ol, strong, em only. No script/style/iframe.',
+    'Each html component must be real lesson content with objective, explanation, key points — not empty shells.',
+  ].filter(Boolean).join('\n\n');
+
+  logLessonAuthorFlow('staged_content_batch_start', {
+    conversation_id: ctx.conversationId,
+    batch_size: batch.length,
+    unit_titles: batch.map(b => b.unitTitle),
+    prompt_chars: contentPrompt.length,
+  });
+
+  const response = await aiClient.models.generateContent({
+    model: GEMINI_MODEL,
+    contents: [{ role: 'user', parts: [{ text: contentPrompt }] }],
+    config: {
+      systemInstruction: `${ctx.systemPrompt}\n\nYou are generating detailed lesson content for specific units. Follow Instructional Design best practices. Return JSON array only.`,
+      tools: [{ fileSearch: { fileSearchStoreNames: [storeName] } }],
+    } as any,
+  });
+
+  const rawText = response.text ?? '';
+  logLessonAuthorFlow('staged_content_batch_response', {
+    conversation_id: ctx.conversationId,
+    batch_size: batch.length,
+    response_chars: rawText.length,
+  });
+
+  const parsed = extractJsonObject(rawText);
+  return Array.isArray(parsed) ? parsed as LessonAuthorUnitProposal[] : [parsed as LessonAuthorUnitProposal];
+}
+
+async function generateLessonAuthorProposalV2(
+  ctx: ConversationContext,
+  userPrompt: string,
+  kbId: string,
+  outlineMentions: LessonAuthorOutlineMention[],
+  mentionContext: string,
+  targetScopeInstruction: string,
+  sourceDocuments: LessonAuthorSourceDocument[],
+  onProgress?: (stage: string, detail: string) => void,
+): Promise<LessonAuthorProposal> {
+  if (!ctx.courseId) throw new Error('courseId is required for lesson author');
+  const course = await getDraftCourseOutlineForPrompt(ctx.courseId, ctx.tenantId);
+
+  // Decide between single-shot and staged generation
+  // Staged: only when @mention targets chapter-level blocks (large scope, many units expected)
+  // Single-shot: no @mention (let Gemini decide scope), or @mention on lesson/unit (small scope)
+  const isLargeScope = outlineMentions.length > 0
+    && outlineMentions.some(m => m.block_type === 'chapter');
+
+  if (!isLargeScope) {
+    logLessonAuthorFlow('proposal_mode', { mode: 'single_shot', conversation_id: ctx.conversationId, reason: outlineMentions.length === 0 ? 'no_mention' : 'small_scope' });
+    onProgress?.('generating', 'Đang tạo nội dung...');
+    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments);
+  }
+
+  // Stage 1: Generate skeleton
+  logLessonAuthorFlow('proposal_mode', { mode: 'staged', conversation_id: ctx.conversationId });
+  onProgress?.('skeleton', 'Đang lên cấu trúc bài học...');
+
+  let skeleton: LessonAuthorProposal | null = null;
+  try {
+    skeleton = await generateProposalSkeleton(
+      ctx, userPrompt, kbId, course,
+      outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments,
+    );
+  } catch (err) {
+    logLessonAuthorFlow('staged_skeleton_failed', {
+      conversation_id: ctx.conversationId,
+      error: (err as Error).message,
+    });
+  }
+
+  // Parse skeleton to collect all units
+  const allUnits: UnitBatchItem[] = [];
+  if (skeleton) {
+    const rawSkeleton = asRecord(skeleton);
+    const allRawChaptersForSkeleton = Array.isArray(rawSkeleton.chapters) ? rawSkeleton.chapters : [];
+    const rawChaptersForSkeleton = allRawChaptersForSkeleton.slice(0, MAX_PROPOSAL_CHAPTERS);
+    if (allRawChaptersForSkeleton.length > MAX_PROPOSAL_CHAPTERS) {
+      (skeleton as any).chapters = rawChaptersForSkeleton;
+      logLessonAuthorFlow('staged_skeleton_scope_truncated', {
+        conversation_id: ctx.conversationId,
+        original_chapters: allRawChaptersForSkeleton.length,
+        kept_chapters: rawChaptersForSkeleton.length,
+      });
+    }
+
+    logLessonAuthorFlow('staged_skeleton_parsed', {
+      conversation_id: ctx.conversationId,
+      skeleton_type: typeof skeleton,
+      skeleton_keys: Object.keys(rawSkeleton),
+      chapters_count: rawChaptersForSkeleton.length,
+      raw_chapters_type: typeof rawSkeleton.chapters,
+      is_array: Array.isArray(rawSkeleton.chapters),
+    });
+
+    for (const chapterValue of rawChaptersForSkeleton) {
+      const chapter = asRecord(chapterValue);
+      const chapterTitle = readString(chapter.title, '', 180);
+      const rawLessons = Array.isArray(chapter.lessons) ? chapter.lessons : [];
+      for (const lessonValue of rawLessons) {
+        const lesson = asRecord(lessonValue);
+        const lessonTitle = readString(lesson.title, '', 180);
+        const rawUnits = Array.isArray(lesson.units) ? lesson.units : [];
+        for (const unitValue of rawUnits) {
+          const unit = asRecord(unitValue);
+          const unitTitle = readString(unit.title, '', 180);
+          const rawComponents = Array.isArray(unit.components) ? unit.components : [];
+          const componentTypes = rawComponents
+            .map(c => readString(asRecord(c).type, 'html', 40))
+            .filter(Boolean);
+          allUnits.push({
+            chapterTitle,
+            lessonTitle,
+            unitTitle,
+            componentTypes: componentTypes.length > 0 ? componentTypes : ['html'],
+          });
+        }
+      }
+    }
+  }
+
+  logLessonAuthorFlow('staged_skeleton_done', {
+    conversation_id: ctx.conversationId,
+    total_units: allUnits.length,
+    skeleton_available: skeleton !== null,
+  });
+
+  // If skeleton failed to parse or has too few units, fallback to single-shot
+  if (allUnits.length <= STAGED_THRESHOLD_UNITS) {
+    logLessonAuthorFlow('staged_fallback_single_shot', {
+      conversation_id: ctx.conversationId,
+      total_units: allUnits.length,
+      reason: allUnits.length === 0 ? 'skeleton_parse_empty' : 'below_threshold',
+    });
+    onProgress?.('generating', 'Đang tạo nội dung...');
+    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments);
+  }
+
+  // Stage 2: Generate content per batch
+  const contentMap = new Map<string, LessonAuthorUnitProposal>();
+  const batches: UnitBatchItem[][] = [];
+  for (let i = 0; i < allUnits.length; i += MAX_UNITS_PER_CONTENT_BATCH) {
+    batches.push(allUnits.slice(i, i + MAX_UNITS_PER_CONTENT_BATCH));
+  }
+
+  for (const [batchIndex, batch] of batches.entries()) {
+    const progress = `${batchIndex + 1}/${batches.length}`;
+    const unitNames = batch.map(b => b.unitTitle).join(', ');
+    onProgress?.('content', `Đang soạn nội dung (${progress}): ${unitNames}`);
+
+    try {
+      const generated = await generateUnitContentBatch(
+        ctx, kbId, batch, course.courseName, sourceDocuments,
+      );
+
+      for (let i = 0; i < batch.length && i < generated.length; i++) {
+        const unitKey = `${batch[i].chapterTitle}|${batch[i].lessonTitle}|${batch[i].unitTitle}`;
+        contentMap.set(unitKey, generated[i]);
+      }
+
+      logLessonAuthorFlow('staged_content_batch_done', {
+        conversation_id: ctx.conversationId,
+        batch: batchIndex + 1,
+        total_batches: batches.length,
+        generated_units: generated.length,
+      });
+    } catch (err) {
+      logLessonAuthorFlow('staged_content_batch_failed', {
+        conversation_id: ctx.conversationId,
+        batch: batchIndex + 1,
+        error: (err as Error).message,
+      });
+      // Continue with remaining batches — partial success is better than full failure
+    }
+  }
+
+  // Assemble: merge content into skeleton
+  onProgress?.('validating', 'Đang kiểm tra proposal...');
+
+  const assembled: LessonAuthorProposal = {
+    summary: readString((skeleton as any).summary, 'Generated lesson plan', 1000),
+    chapters: (Array.isArray((skeleton as any)?.chapters) ? (skeleton as any).chapters : []).map((chapterValue: unknown) => {
+      const chapter = asRecord(chapterValue);
+      const chapterTitle = readString(chapter.title, '', 180);
+      const rawLessons = Array.isArray(chapter.lessons) ? chapter.lessons : [];
+      return {
+        title: chapterTitle,
+        lessons: rawLessons.map(lessonValue => {
+          const lesson = asRecord(lessonValue);
+          const lessonTitle = readString(lesson.title, '', 180);
+          const rawUnits = Array.isArray(lesson.units) ? lesson.units : [];
+          return {
+            title: lessonTitle,
+            units: rawUnits.map(unitValue => {
+              const unit = asRecord(unitValue);
+              const unitTitle = readString(unit.title, '', 180);
+              const unitKey = `${chapterTitle}|${lessonTitle}|${unitTitle}`;
+              const contentUnit = contentMap.get(unitKey);
+              if (contentUnit) {
+                return {
+                  title: unitTitle,
+                  components: Array.isArray(contentUnit.components) ? contentUnit.components as any : undefined,
+                  html: contentUnit.html,
+                } as LessonAuthorUnitProposal;
+              }
+              // Fallback: skeleton unit without generated content
+              return { title: unitTitle, components: unit.components as any, html: (unit as any).html } as LessonAuthorUnitProposal;
+            }),
+          };
+        }),
+      };
+    }),
+  };
+
+  // Normalize + validate
+  return constrainAdditiveComponentProposal(
+    normalizeLessonAuthorProposal(assembled),
+    userPrompt,
+    outlineMentions.slice(0, 1),
+  );
+}
+
 function createLessonAuthorRequestHash(
   ctx: ConversationContext,
   kbId: string | null,
   prompt: string,
+  sourceDocuments: LessonAuthorSourceDocument[] = [],
 ): string {
+  const sourceKey = sourceDocuments.map(doc => doc.document_id).sort().join(',');
   return createHash('sha256')
-    .update([ctx.tenantId, ctx.courseId, ctx.botId, kbId ?? '', prompt.trim()].join('|'))
+    .update([ctx.tenantId, ctx.courseId, ctx.botId, kbId ?? '', sourceKey, prompt.trim()].join('|'))
     .digest('hex');
 }
 
@@ -2093,24 +3515,38 @@ async function createLessonAuthorJob(
   prompt: string,
   kbId: string,
   proposal: LessonAuthorProposal,
+  sourceDocuments: LessonAuthorSourceDocument[] = [],
 ): Promise<string> {
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
-  const requestHash = createLessonAuthorRequestHash(ctx, kbId, prompt);
+  const requestHash = createLessonAuthorRequestHash(ctx, kbId, prompt, sourceDocuments);
+  const sourceDocumentMetadata = sourceDocuments.map(toSourceDocumentMetadata);
 
   const result = await query<{ id: string }>(
     `INSERT INTO lesson_author_jobs (
        tenant_id, course_id, conversation_id, bot_id, kb_id,
-       requested_by, request_hash, prompt, proposal, status
+       requested_by, request_hash, prompt, proposal, status, source_documents
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'proposed')
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'proposed', $10::jsonb)
      RETURNING id`,
-    [ctx.tenantId, ctx.courseId, ctx.conversationId, ctx.botId, kbId, userId, requestHash, prompt, proposal],
+    [
+      ctx.tenantId,
+      ctx.courseId,
+      ctx.conversationId,
+      ctx.botId,
+      kbId,
+      userId,
+      requestHash,
+      prompt,
+      proposal,
+      JSON.stringify(sourceDocumentMetadata),
+    ],
   );
   logLessonAuthorFlow('proposal_job_created', {
     conversation_id: ctx.conversationId,
     course_id: ctx.courseId,
     job_id: result.rows[0].id,
     request_hash: requestHash,
+    source_documents: sourceDocuments.length,
     ...getLessonAuthorProposalMetrics(proposal),
   });
   return result.rows[0].id;
@@ -2122,24 +3558,38 @@ async function createFailedLessonAuthorJob(
   prompt: string,
   kbId: string | null,
   errorReason: string,
+  sourceDocuments: LessonAuthorSourceDocument[] = [],
 ): Promise<string> {
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
-  const requestHash = createLessonAuthorRequestHash(ctx, kbId, prompt);
+  const requestHash = createLessonAuthorRequestHash(ctx, kbId, prompt, sourceDocuments);
+  const sourceDocumentMetadata = sourceDocuments.map(toSourceDocumentMetadata);
 
   const result = await query<{ id: string }>(
     `INSERT INTO lesson_author_jobs (
        tenant_id, course_id, conversation_id, bot_id, kb_id,
-       requested_by, request_hash, prompt, proposal, status, error_reason
+       requested_by, request_hash, prompt, proposal, status, error_reason, source_documents
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, 'failed', $9)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, 'failed', $9, $10::jsonb)
      RETURNING id`,
-    [ctx.tenantId, ctx.courseId, ctx.conversationId, ctx.botId, kbId, userId, requestHash, prompt, errorReason],
+    [
+      ctx.tenantId,
+      ctx.courseId,
+      ctx.conversationId,
+      ctx.botId,
+      kbId,
+      userId,
+      requestHash,
+      prompt,
+      errorReason,
+      JSON.stringify(sourceDocumentMetadata),
+    ],
   );
   logLessonAuthorFlow('proposal_failed_job_created', {
     conversation_id: ctx.conversationId,
     course_id: ctx.courseId,
     job_id: result.rows[0].id,
     request_hash: requestHash,
+    source_documents: sourceDocuments.length,
     error: errorReason,
   });
   return result.rows[0].id;
@@ -2181,6 +3631,32 @@ export async function applyLessonAuthorJob(
     ...getLessonAuthorProposalMetrics(job.proposal),
   });
   try {
+    // ── Staleness check ──
+    const STALENESS_THRESHOLD_MS = 30 * 60_000; // 30 minutes
+    const jobAge = Date.now() - new Date(job.created_at).getTime();
+    if (jobAge > STALENESS_THRESHOLD_MS) {
+      const courseChanged = await query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt FROM course_blocks
+         WHERE course_id = $1 AND deleted_at IS NULL
+           AND updated_at > $2`,
+        [job.course_id, job.created_at],
+      );
+      if (courseChanged.rows[0]?.cnt > 0) {
+        await query(
+          `UPDATE lesson_author_jobs SET status = 'proposed', updated_at = now() WHERE id = $1`,
+          [job.id],
+        );
+        logLessonAuthorFlow('apply_staleness_rejected', {
+          job_id: job.id,
+          course_id: job.course_id,
+          age_minutes: Math.round(jobAge / 60_000),
+        });
+        throw new Error(
+          `Proposal đã tạo ${Math.round(jobAge / 60_000)} phút trước và outline đã thay đổi. Tạo proposal mới để tránh conflict.`
+        );
+      }
+    }
+
     const applied = await applyLessonAuthorProposalToCourse({
       courseId: job.course_id,
       tenantId,
@@ -2202,10 +3678,51 @@ export async function applyLessonAuthorJob(
       `UPDATE lesson_author_jobs
        SET status = 'succeeded',
            created_block_ids = $2::uuid[],
+           updated_block_ids = $3::uuid[],
            updated_at = now()
-       WHERE id = $1 AND tenant_id = $3`,
-      [job.id, applied.created_block_ids, tenantId],
+       WHERE id = $1 AND tenant_id = $4`,
+      [job.id, applied.created_block_ids, applied.updated_block_ids, tenantId],
     );
+
+    const approvalText = [
+      'Đã approve plan thành công và áp dụng vào outline.',
+      `Đã tạo ${applied.created_block_ids.length} block, cập nhật ${applied.updated_block_ids.length} block.`,
+      `Mã đề xuất: ${job.id}`,
+    ].join('\n\n');
+    try {
+      await query(
+        `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+         VALUES ($1, 'assistant', $2, $3)`,
+        [
+          job.conversation_id,
+          approvalText,
+          {
+            kind: 'lesson_author_plan_approved',
+            lesson_author_job_id: job.id,
+            created_block_ids: applied.created_block_ids,
+            updated_block_ids: applied.updated_block_ids,
+            created_count: applied.created_block_ids.length,
+            updated_count: applied.updated_block_ids.length,
+          },
+        ],
+      );
+      await query(
+        `UPDATE chat_conversations SET updated_at = now() WHERE id = $1 AND tenant_id = $2`,
+        [job.conversation_id, tenantId],
+      );
+      logLessonAuthorFlow('apply_approval_message_saved', {
+        job_id: job.id,
+        conversation_id: job.conversation_id,
+        created_count: applied.created_block_ids.length,
+        updated_count: applied.updated_block_ids.length,
+      });
+    } catch (messageErr) {
+      logLessonAuthorFlow('apply_approval_message_failed', {
+        job_id: job.id,
+        conversation_id: job.conversation_id,
+        error: messageErr instanceof Error ? messageErr.message : String(messageErr),
+      });
+    }
 
     return {
       job_id: job.id,
@@ -2296,9 +3813,16 @@ export async function sendMessageStream(
     }
     const courseId = options.courseId ?? ctx.courseId ?? undefined;
     const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
-    const carriedOutlineMentions = requestedOutlineMentions.length === 0 && shouldCarryForwardLessonAuthorTarget(trimmed)
-      ? await getLatestConversationOutlineMentions(ctx)
-      : [];
+    // Pre-classify intent to decide carry-forward (delete intent should never carry forward)
+    const preClassify = ctx.target === LESSON_AUTHOR_TARGET
+      ? classifyLessonAuthorIntentV2(trimmed, requestedOutlineMentions, (options.mode as 'chat' | 'draft_lesson' | 'auto') ?? 'auto')
+      : null;
+    const isDeleteRequest = preClassify?.signals.some(s => s.name === 'delete_intent' && s.matched) ?? false;
+    const carriedOutlineMentions = !isDeleteRequest
+      && requestedOutlineMentions.length === 0
+      && shouldCarryForwardLessonAuthorTarget(trimmed)
+        ? await getLatestConversationOutlineMentions(ctx)
+        : [];
     const outlineMentions = requestedOutlineMentions.length > 0 ? requestedOutlineMentions : carriedOutlineMentions;
     const outlineMentionSource = requestedOutlineMentions.length > 0
       ? 'current'
@@ -2308,6 +3832,17 @@ export async function sendMessageStream(
     const mentionContextRows = await getOutlineMentionContextRows(ctx, outlineMentions);
     const mentionContext = formatMentionContextRowsForPrompt(mentionContextRows);
     const targetScopeInstruction = buildTargetLockedProposalInstruction(trimmed, outlineMentions, mentionContextRows);
+    const requestedSourceDocuments = await validateLessonAuthorSourceDocuments(ctx, ctx.botKbId, options.sourceDocuments ?? []);
+    const carriedSourceDocuments = requestedSourceDocuments.length === 0 && shouldCarryForwardLessonAuthorSourceDocuments(trimmed)
+      ? await getLatestConversationSourceDocuments(ctx)
+      : [];
+    const sourceDocuments = requestedSourceDocuments.length > 0 ? requestedSourceDocuments : carriedSourceDocuments;
+    const sourceDocumentSource = requestedSourceDocuments.length > 0
+      ? 'current'
+      : sourceDocuments.length > 0
+        ? 'carried_forward'
+        : 'none';
+    const sourceDocumentContext = formatSourceDocumentsForPrompt(sourceDocuments);
     logLessonAuthorFlow('stream_outline_mentions_validated', {
       conversation_id: conversationId,
       target: ctx.target,
@@ -2317,6 +3852,15 @@ export async function sendMessageStream(
       mention_source: outlineMentionSource,
       mention_context_chars: mentionContext.length,
       target_scope_chars: targetScopeInstruction.length,
+    });
+    logLessonAuthorFlow('stream_source_documents_validated', {
+      conversation_id: conversationId,
+      target: ctx.target,
+      requested_count: options.sourceDocuments?.length ?? 0,
+      valid_count: sourceDocuments.length,
+      source: sourceDocumentSource,
+      document_ids: sourceDocuments.map(doc => doc.document_id),
+      source_context_chars: sourceDocumentContext.length,
     });
 
     // 2. Mark rate limit AFTER validation passes
@@ -2329,7 +3873,10 @@ export async function sendMessageStream(
       [
         conversationId,
         trimmed,
-        outlineMentions.length > 0 ? { outline_mentions: outlineMentions, outline_mentions_source: outlineMentionSource } : {},
+        {
+          ...(outlineMentions.length > 0 ? { outline_mentions: outlineMentions, outline_mentions_source: outlineMentionSource } : {}),
+          ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata), source_documents_source: sourceDocumentSource } : {}),
+        },
       ],
     );
     await query(
@@ -2339,26 +3886,21 @@ export async function sendMessageStream(
     logLessonAuthorFlow('stream_user_message_saved', {
       conversation_id: conversationId,
       target: ctx.target,
-      course_id: courseId ?? null,
-    });
+        course_id: courseId ?? null,
+        source_documents: sourceDocuments.length,
+      });
 
-    const targetedDraftAction = ctx.target === LESSON_AUTHOR_TARGET
-      && outlineMentions.length > 0
-      && hasLessonAuthorDraftAction(trimmed);
-    const lessonAuthorIntent: LessonAuthorIntent =
-      ctx.target === LESSON_AUTHOR_TARGET
-        ? (options.mode === 'draft_lesson' || options.mode === 'chat'
-          ? options.mode
-          : targetedDraftAction
-            ? 'draft_lesson'
-            : await classifyLessonAuthorIntent(ctx, trimmed))
-        : 'chat';
-    logLessonAuthorFlow('stream_intent_resolved', {
+    // ── Intent classification via deterministic scoring (zero Gemini calls) ──
+    const { intent: lessonAuthorIntent, signals: intentSignals, score: intentScore } = ctx.target === LESSON_AUTHOR_TARGET
+      ? classifyLessonAuthorIntentV2(trimmed, outlineMentions, (options.mode as 'chat' | 'draft_lesson' | 'auto') ?? 'auto')
+      : { intent: 'chat' as LessonAuthorIntent, signals: [] as IntentSignal[], score: -100 };
+    logLessonAuthorFlow('intent_scored', {
       conversation_id: conversationId,
       target: ctx.target,
       intent: lessonAuthorIntent,
+      score: intentScore,
+      matched: intentSignals.filter(s => s.matched).map(s => `${s.name}(${s.weight > 0 ? '+' : ''}${s.weight})`),
       requested_mode: options.mode ?? 'auto',
-      targeted_draft_action: targetedDraftAction,
     });
 
     if (ctx.target === LESSON_AUTHOR_TARGET && lessonAuthorIntent === 'draft_lesson') {
@@ -2372,9 +3914,18 @@ export async function sendMessageStream(
         kb_id: ctx.botKbId,
       });
       try {
+        // Delete guard: NEVER allow draft_lesson when delete intent detected
+        if (isDeleteRequest) {
+          throw new Error('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.');
+        }
         if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
-        proposal = await generateLessonAuthorProposal(ctx, trimmed, ctx.botKbId, outlineMentions, mentionContext, targetScopeInstruction);
-        jobId = await createLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId, proposal);
+        proposal = await generateLessonAuthorProposalV2(
+          ctx, trimmed, ctx.botKbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments,
+          (stage, detail) => {
+            onSideEvent?.({ type: 'progress', stage, detail } as any);
+          },
+        );
+        jobId = await createLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId, proposal, sourceDocuments);
         assistantText = formatProposalPreview(proposal, jobId);
         logLessonAuthorFlow('draft_branch_proposal_ready', {
           conversation_id: conversationId,
@@ -2384,7 +3935,7 @@ export async function sendMessageStream(
         });
       } catch (err: any) {
         const errorReason = sanitizeInternalErrorReason(err);
-        jobId = await createFailedLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId ?? null, errorReason);
+        jobId = await createFailedLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId ?? null, errorReason, sourceDocuments);
         assistantText = formatLessonAuthorFailurePreview(err, jobId);
         logLessonAuthorFlow('draft_branch_proposal_failed', {
           conversation_id: conversationId,
@@ -2395,7 +3946,7 @@ export async function sendMessageStream(
 
       onChunk(assistantText);
       if (proposal && jobId) {
-        onSideEvent?.({ type: 'proposal', job_id: jobId, proposal });
+        onSideEvent?.({ type: 'proposal', job_id: jobId, proposal: toLessonAuthorDisplayProposal(proposal) });
         logLessonAuthorFlow('draft_branch_side_event_sent', {
           conversation_id: conversationId,
           job_id: jobId,
@@ -2411,6 +3962,7 @@ export async function sendMessageStream(
           {
             lesson_author_job_id: jobId,
             kind: proposal ? 'lesson_author_proposal' : 'lesson_author_generation_failed',
+            ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
           },
         ],
       );
@@ -2438,7 +3990,7 @@ export async function sendMessageStream(
     }
 
     // 4. Load history (includes the just-saved user message)
-    const currentTurnText = buildCurrentTurnText(trimmed, outlineMentions, mentionContext);
+    const currentTurnText = buildCurrentTurnText(trimmed, outlineMentions, mentionContext, sourceDocuments);
     const history = replaceLatestUserTurn(await loadHistory(conversationId), currentTurnText);
     logLessonAuthorFlow('chat_branch_enter', {
       conversation_id: conversationId,
@@ -2447,6 +3999,8 @@ export async function sendMessageStream(
       history_messages: history.length,
       current_mentions: outlineMentions.length,
       mention_context_chars: mentionContext.length,
+      source_documents: sourceDocuments.length,
+      source_context_chars: sourceDocumentContext.length,
     });
 
     // 5. Build Gemini config with correct fileSearch tool format
@@ -2475,6 +4029,19 @@ export async function sendMessageStream(
     // 5b. Course context — inject outline + function calling tool
     let enrichedPrompt = ctx.systemPrompt;
     let hasCourseContext = false;
+    if (ctx.target === LESSON_AUTHOR_TARGET) {
+      enrichedPrompt += [
+        '',
+        '',
+        'LESSON AUTHOR DASHBOARD RULES:',
+        '- You are inside the admin course outline widget. You cannot send work to an external team, designer, or separate tool.',
+        '- Never claim that content has been added, created, updated, integrated, sent to a design team, or queued outside this system unless the backend approval flow has actually applied it.',
+        '- If the admin asks to create, add, edit, update, or improve course content, answer in terms of the pending proposal / admin approval workflow. Do not invent a manual handoff process.',
+      ].join('\n');
+      if (sourceDocumentContext) {
+        enrichedPrompt += `\n\n${sourceDocumentContext}\n\nThe selected source files above are for the CURRENT TURN only and override older file selections in chat history.`;
+      }
+    }
     if (courseId && typeof courseId === 'string' && courseId.length > 0) {
       try {
         const includeDraftCourseContext = ctx.target === LESSON_AUTHOR_TARGET;
@@ -2513,6 +4080,12 @@ export async function sendMessageStream(
     //    Without course context: direct streaming with fileSearch (original flow).
     let fullResponse = '';
     let lastError: Error | null = null;
+    const shouldBufferLessonAuthorChat = ctx.target === LESSON_AUTHOR_TARGET;
+    const appendChatChunk = (text: string) => {
+      if (!text) return;
+      fullResponse += text;
+      if (!shouldBufferLessonAuthorChat) onChunk(text);
+    };
 
     for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
       try {
@@ -2583,7 +4156,7 @@ export async function sendMessageStream(
 
             for await (const chunk of secondResponse) {
               const text = chunk.text ?? '';
-              if (text) { fullResponse += text; onChunk(text); }
+              appendChatChunk(text);
             }
           } else {
             // respond_directly OR no function call → not about course content
@@ -2604,7 +4177,7 @@ export async function sendMessageStream(
 
             for await (const chunk of fallbackResponse) {
               const text = chunk.text ?? '';
-              if (text) { fullResponse += text; onChunk(text); }
+              appendChatChunk(text);
             }
           }
         } else {
@@ -2626,7 +4199,7 @@ export async function sendMessageStream(
 
           for await (const chunk of response) {
             const text = chunk.text ?? '';
-            if (text) { fullResponse += text; onChunk(text); }
+            appendChatChunk(text);
           }
         }
 
@@ -2646,16 +4219,38 @@ export async function sendMessageStream(
       throw lastError;
     }
 
+    let assistantContent = fullResponse;
+    let assistantMetadata: Record<string, unknown> = {};
+    if (shouldBufferLessonAuthorChat) {
+      const converted = await convertLessonAuthorChatJsonToProposalMessage(
+        ctx,
+        userId,
+        trimmed,
+        fullResponse,
+        sourceDocuments,
+      );
+      if (converted) {
+        assistantContent = converted.content;
+        assistantMetadata = converted.metadata;
+        if (converted.proposal) {
+          onSideEvent?.({ type: 'proposal', job_id: converted.jobId, proposal: converted.proposal });
+        }
+      }
+      if (assistantContent.trim()) onChunk(assistantContent);
+    }
+
     // 7. Save assistant message (only if we got content)
-    if (fullResponse.trim()) {
+    if (assistantContent.trim()) {
       await query(
-        `INSERT INTO chat_messages (conversation_id, role, content) VALUES ($1, 'assistant', $2)`,
-        [conversationId, fullResponse],
+        `INSERT INTO chat_messages (conversation_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)`,
+        [conversationId, assistantContent, assistantMetadata],
       );
       logLessonAuthorFlow('chat_branch_assistant_message_saved', {
         conversation_id: conversationId,
         target: ctx.target,
-        response_chars: fullResponse.length,
+        response_chars: assistantContent.length,
+        raw_response_chars: fullResponse.length,
+        metadata_kind: assistantMetadata.kind ?? null,
       });
     } else {
       logLessonAuthorFlow('chat_branch_empty_response', {

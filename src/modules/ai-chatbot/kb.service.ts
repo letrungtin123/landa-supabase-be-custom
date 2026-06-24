@@ -11,6 +11,15 @@ import fs from 'fs/promises';
 import path from 'path';
 import { env } from '../../config/env.js';
 
+const LOCAL_SOURCE_CONTENT_EXTENSIONS = new Set(['.txt', '.md', '.csv']);
+const MAX_STORED_SOURCE_CONTENT_CHARS = 200_000;
+
+function extractLocalSourceContent(ext: string, buffer: Buffer): string | null {
+  if (!LOCAL_SOURCE_CONTENT_EXTENSIONS.has(ext)) return null;
+  const text = buffer.toString('utf8').replace(/\u0000/g, '').trim();
+  return text ? text.slice(0, MAX_STORED_SOURCE_CONTENT_CHARS) : null;
+}
+
 // ── Types ──
 export interface Knowledgebase {
   id: string;
@@ -256,12 +265,13 @@ export async function uploadDocument(
     extension: ext,
     mime_type: file.mimetype,
   };
+  const localContent = extractLocalSourceContent(ext, file.buffer);
 
   const insertResult = await query<KbDocument>(
-    `INSERT INTO kb_documents (tenant_id, kb_id, type, name, status, source_info, created_by)
-     VALUES ($1, $2, 'file', $3, 'draft', $4, $5)
+    `INSERT INTO kb_documents (tenant_id, kb_id, type, name, status, source_info, content, created_by)
+     VALUES ($1, $2, 'file', $3, 'draft', $4, $5, $6)
      RETURNING *`,
-    [tenantId, kbId, file.originalname, JSON.stringify(sourceInfo), userId],
+    [tenantId, kbId, file.originalname, JSON.stringify(sourceInfo), localContent, userId],
   );
   const doc = insertResult.rows[0];
 

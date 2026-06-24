@@ -181,6 +181,12 @@ export async function updateBlock(req: Request, res: Response) {
       return sendSuccess(res, result);
     }
 
+    // Handle discard draft (rollback to published version)
+    if (publish === 'discard_changes') {
+      const result = await svc.discardDraft(req.params.blockId);
+      return sendSuccess(res, result);
+    }
+
     // Handle reorder
     if (Array.isArray(children)) {
       await svc.reorderChildren(req.params.blockId, children);

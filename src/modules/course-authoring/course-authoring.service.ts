@@ -247,8 +247,8 @@ function getDefaultName(blockType: string): string {
     video: 'Video',
     html: 'Văn bản',
     problem: 'Câu hỏi',
-    la_crossword: 'Ô chữ',
-    la_sortable: 'Sắp xếp',
+    la_crossword: 'Đố vui ô chữ',
+    la_sortable: 'sắp xếp ô chữ',
     la_diagram: 'Biểu đồ',
     la_faq: 'FAQ',
     la_pdf: 'PDF',
@@ -359,6 +359,64 @@ async function markAncestorsDirty(blockId: string): Promise<void> {
   );
 }
 
+/**
+ * Recalculate has_draft_changes for ancestors after a block's draft is cleared.
+ * Walks upward: for each ancestor, if no children still have has_draft_changes = true,
+ * clears the ancestor's own flag. Stops at the first ancestor that still has dirty children.
+ */
+async function recalculateAncestorDraftFlags(blockId: string): Promise<void> {
+  // Walk up the parent chain iteratively (max depth ~4: component → unit → subsection → section)
+  let currentId = blockId;
+
+  for (let depth = 0; depth < 10; depth++) {
+    // Get parent of current block
+    const parentResult = await query<{ parent_id: string | null }>(
+      `SELECT parent_id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
+      [currentId],
+    );
+    const parentId = parentResult.rows[0]?.parent_id;
+    if (!parentId) break; // reached root
+
+    // Check if parent still has ANY children with has_draft_changes = true
+    const dirtyCheck = await query<{ has_dirty_children: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM course_blocks
+         WHERE parent_id = $1 AND has_draft_changes = true AND deleted_at IS NULL
+       ) AS has_dirty_children`,
+      [parentId],
+    );
+
+    if (dirtyCheck.rows[0]?.has_dirty_children) {
+      // Parent still has dirty children — stop here, no need to go further up
+      break;
+    }
+
+    // No dirty children left — check if the parent block ITSELF has draft changes on its own data
+    // (its own data != published_data). If data === published_data, we can safely clear the flag.
+    const selfCheck = await query<{ self_is_dirty: boolean }>(
+      `SELECT (data IS DISTINCT FROM published_data OR metadata IS DISTINCT FROM published_metadata)
+         AS self_is_dirty
+       FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
+      [parentId],
+    );
+
+    if (selfCheck.rows[0]?.self_is_dirty) {
+      // Parent's own data is still different from published — keep flag, but stop propagating
+      break;
+    }
+
+    // Clear the parent's flag
+    await query(
+      `UPDATE course_blocks SET has_draft_changes = false, updated_at = now()
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [parentId],
+    );
+
+    // Continue up to grandparent
+    currentId = parentId;
+  }
+}
+
 export async function renameBlock(blockId: string, displayName: string): Promise<BlockInfo> {
   return updateBlock(blockId, { display_name: displayName });
 }
@@ -385,6 +443,47 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
      WHERE id IN (SELECT id FROM descendants) AND deleted_at IS NULL`,
     [blockId],
   );
+
+  // Propagate clean state upward: if no siblings/cousins remain dirty, clear ancestor flags
+  await recalculateAncestorDraftFlags(blockId);
+
+  return getBlockInfo(blockId);
+}
+
+/**
+ * Discard draft changes on a single block — revert data to the last published version.
+ * Reverse of publishBlock: copies published_data → data, published_metadata → metadata.
+ * Non-recursive: only reverts the targeted block, not its children.
+ */
+export async function discardDraft(blockId: string): Promise<BlockInfo> {
+  const block = await getBlockInfo(blockId);
+
+  if (!block.has_draft_changes) {
+    throw new AppError('Block has no draft changes to discard', 400);
+  }
+
+  // Check if published_data exists (block must have been published at least once)
+  const pubCheck = await query<{ has_pub: boolean }>(
+    `SELECT published_data IS NOT NULL AS has_pub
+     FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
+    [blockId],
+  );
+  if (!pubCheck.rows[0]?.has_pub) {
+    throw new AppError('Block has never been published — cannot rollback', 400);
+  }
+
+  await query(
+    `UPDATE course_blocks
+     SET data = published_data,
+         metadata = published_metadata,
+         has_draft_changes = false,
+         updated_at = now()
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [blockId],
+  );
+
+  // Propagate clean state upward: if no siblings remain dirty, clear ancestor flags
+  await recalculateAncestorDraftFlags(blockId);
 
   return getBlockInfo(blockId);
 }
