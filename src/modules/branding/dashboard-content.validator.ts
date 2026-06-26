@@ -30,6 +30,19 @@ export const upsertDashboardContentSchema = z.object({
     .max(2, 'Tối đa 2 tips')
     .optional()
     .nullable(),
+  // ── Explore page hero card ──
+  explore_hero_badge: z
+    .string()
+    .max(20, 'Badge Explore tối đa 20 ký tự')
+    .optional()
+    .nullable()
+    .transform((v) => v?.trim() || null),
+  explore_hero_title: z
+    .string()
+    .max(200, 'Tiêu đề Explore tối đa 200 ký tự')
+    .optional()
+    .nullable()
+    .transform((v) => v?.trim() || null),
 });
 
 export type UpsertDashboardContentInput = z.infer<typeof upsertDashboardContentSchema>;
@@ -39,4 +52,6 @@ export interface DashboardContentData {
   hero_badge: string | null;
   hero_title: string | null;
   tips: Array<{ title: string; desc: string }> | null;
+  explore_hero_badge: string | null;
+  explore_hero_title: string | null;
 }

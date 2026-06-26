@@ -15,6 +15,8 @@ interface DashboardContentResponse {
   hero_badge: string | null;
   hero_title: string | null;
   tips: Array<{ title: string; desc: string }> | null;
+  explore_hero_badge: string | null;
+  explore_hero_title: string | null;
 }
 
 // ── Helpers ──
@@ -51,6 +53,8 @@ export async function getDashboardContentByTenantId(tenantId: string): Promise<D
     hero_badge: content?.hero_badge || null,
     hero_title: content?.hero_title || null,
     tips: content?.tips || null,
+    explore_hero_badge: content?.explore_hero_badge || null,
+    explore_hero_title: content?.explore_hero_title || null,
   };
 }
 
@@ -78,6 +82,8 @@ export async function getDashboardContentByDomain(domain: string): Promise<Dashb
     hero_badge: content?.hero_badge || null,
     hero_title: content?.hero_title || null,
     tips: content?.tips || null,
+    explore_hero_badge: content?.explore_hero_badge || null,
+    explore_hero_title: content?.explore_hero_title || null,
   };
 }
 
@@ -99,6 +105,8 @@ export async function upsertDashboardContent(
     hero_badge: input.hero_badge || null,
     hero_title: input.hero_title || null,
     tips: input.tips || null,
+    explore_hero_badge: input.explore_hero_badge || null,
+    explore_hero_title: input.explore_hero_title || null,
   };
 
   await writeDashboardContent(tenantId, data);

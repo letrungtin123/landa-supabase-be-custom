@@ -20,7 +20,7 @@ export async function getByDomainController(req: Request, res: Response, next: N
     const result = await service.getDashboardContentByDomain(domain);
     if (!result) {
       // Domain không match → trả empty (FE sẽ dùng fallback)
-      sendSuccess(res, { tenant_id: null, hero_badge: null, hero_title: null, tips: null });
+      sendSuccess(res, { tenant_id: null, hero_badge: null, hero_title: null, tips: null, explore_hero_badge: null, explore_hero_title: null });
       return;
     }
 
