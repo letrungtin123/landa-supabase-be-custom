@@ -16,7 +16,7 @@ export async function listDocCategories(tenantId: string | null, queryParams: Re
   const conditions: string[] = [];
 
   if (tenantId) { params.push(tenantId); conditions.push(`dc.tenant_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conditions.push(`dc.name ILIKE $${params.length}`); }
+  if (search) { params.push(`%${search}%`); conditions.push(`unaccent(dc.name) ILIKE unaccent($${params.length})`); }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -76,7 +76,7 @@ export async function listDocuments(tenantId: string | null, queryParams: Record
   const conditions: string[] = [];
 
   if (tenantId) { params.push(tenantId); conditions.push(`d.tenant_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conditions.push(`d.title ILIKE $${params.length}`); }
+  if (search) { params.push(`%${search}%`); conditions.push(`unaccent(d.title) ILIKE unaccent($${params.length})`); }
   const catFilter = queryParams.category_id as string;
   if (catFilter) { params.push(catFilter); conditions.push(`d.category_id = $${params.length}`); }
   const extFilter = queryParams.extension as string;

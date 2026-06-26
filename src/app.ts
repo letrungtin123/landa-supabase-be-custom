@@ -28,6 +28,7 @@ import notificationsRoutes from './modules/notifications/notifications.routes.js
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
 import brandingRoutes from './modules/branding/branding.routes.js';
+import dashboardContentRoutes from './modules/branding/dashboard-content.routes.js';
 import aiChatbotRoutes from './modules/ai-chatbot/ai-chatbot.routes.js';
 import promptTemplatesRoutes from './modules/prompt-templates/prompt-templates.routes.js';
 import badgesRoutes from './modules/badges/badges.routes.js';
@@ -103,6 +104,9 @@ app.use('/api/storage', storageRoutes);
 
 // Branding — /by-domain/:domain is public (no auth), rest is protected
 app.use('/api/branding', brandingRoutes);
+
+// Dashboard Content — /by-domain/:domain is public, rest is protected
+app.use('/api/dashboard-content', dashboardContentRoutes);
 
 app.use('/api', apiLimiter);                     // general rate limit
 

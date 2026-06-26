@@ -119,35 +119,47 @@ export async function bulkDocumentActionController(req: Request, res: Response, 
   } catch (err) { next(err); }
 }
 
-/** POST /api/library/documents/upload — Upload file to Supabase Storage + create record */
+/** POST /api/library/documents/upload — Upload multiple files to Supabase Storage + create records */
 export async function uploadDocumentController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    if (!req.file) { sendError(res, 'No file uploaded', 400); return; }
 
-    const file = req.file;
-    const originalName = fixMulterFilename(file.originalname);
-    const fileName = buildFileName(originalName);
-    const storagePath = buildStoragePath(tenantId, 'library', fileName);
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) { sendError(res, 'No files uploaded', 400); return; }
 
-    // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
-    await uploadFile(storagePath, file.buffer, file.mimetype);
+    const results = await Promise.allSettled(
+      files.map(async (file) => {
+        const originalName = fixMulterFilename(file.originalname);
+        const fileName = buildFileName(originalName);
+        const storagePath = buildStoragePath(tenantId, 'library', fileName);
 
-    // Extract extension
-    const ext = originalName.split('.').pop()?.toLowerCase() || '';
+        await uploadFile(storagePath, file.buffer, file.mimetype);
 
-    // Create document record — DB lưu PATH, không lưu full URL
-    const doc = await libService.createDocument(tenantId, {
-      title: req.body.title || originalName,
-      file_url: storagePath,
-      file_size: file.size,
-      extension: ext,
-      category_id: req.body.category_id || null,
-      is_visible: req.body.is_visible !== 'false',
-    }, req.user!.id);
+        const ext = originalName.split('.').pop()?.toLowerCase() || '';
+        const doc = await libService.createDocument(tenantId, {
+          title: req.body.title || originalName,
+          file_url: storagePath,
+          file_size: file.size,
+          extension: ext,
+          category_id: req.body.category_id || null,
+          is_visible: req.body.is_visible !== 'false',
+        }, req.user!.id);
 
-    auditFromReq(req, 'CREATE', 'document', doc.id, doc.title);
-    sendSuccess(res, doc, 'Upload tài liệu thành công', 201);
+        auditFromReq(req, 'CREATE', 'document', doc.id, doc.title);
+        return doc;
+      })
+    );
+
+    const uploaded = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    const docs = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+      .map(r => r.value);
+    const errors = results
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((r, i) => `${files[i]?.originalname}: ${r.reason?.message || 'Unknown error'}`);
+
+    sendSuccess(res, { uploaded, failed, documents: docs, errors }, `Upload ${uploaded}/${files.length} tài liệu thành công`, 201);
   } catch (err) { next(err); }
 }

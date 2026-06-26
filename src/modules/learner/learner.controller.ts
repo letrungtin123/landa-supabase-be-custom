@@ -20,6 +20,7 @@ export async function listCourses(req: Request, res: Response, next: NextFunctio
       req.user.role,
       {
         search: req.query.search as string | undefined,
+        category_id: req.query.category_id as string | undefined,
         page: req.query.page ? parseInt(req.query.page as string) : undefined,
         page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
       },

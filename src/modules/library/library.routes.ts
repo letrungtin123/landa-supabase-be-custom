@@ -33,7 +33,7 @@ router.post('/categories/bulk', checkPermission('library', 'can_delete'), bulkDe
 // Documents
 router.get('/documents', checkPermission('library', 'can_view'), listDocumentsController);
 router.post('/documents', checkPermission('library', 'can_add'), createDocumentController);
-router.post('/documents/upload', checkPermission('library', 'can_add'), upload.single('file'), uploadDocumentController);
+router.post('/documents/upload', checkPermission('library', 'can_add'), upload.array('files', 20), uploadDocumentController);
 router.patch('/documents/:id', checkPermission('library', 'can_edit'), updateDocumentController);
 router.delete('/documents/:id', checkPermission('library', 'can_delete'), deleteDocumentController);
 router.post('/documents/bulk', checkPermission('library', 'can_delete'), bulkDocumentActionController);

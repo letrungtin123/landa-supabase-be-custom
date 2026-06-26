@@ -561,8 +561,11 @@ export async function studioSubmit(
       // FE gửi crossword_data dạng JSON string
       const crosswordRaw = restData.crossword_data;
       const crosswordParsed = typeof crosswordRaw === 'string' ? safeJsonParse(crosswordRaw) : crosswordRaw;
+      const cwMediaPayload: any = {};
+      if (restData.problem_media) cwMediaPayload.problem_media = restData.problem_media;
+      else if ('problem_media' in restData) delete block.metadata?.problem_media;
       updatePayload = {
-        metadata: { ...block.metadata, crossword_data: crosswordParsed || crosswordRaw },
+        metadata: { ...block.metadata, crossword_data: crosswordParsed || crosswordRaw, ...cwMediaPayload },
         data: restData,
       };
       break;
@@ -570,11 +573,15 @@ export async function studioSubmit(
     case 'la_sortable': {
       const sortableRaw = restData.sortable_data;
       const sortableParsed = typeof sortableRaw === 'string' ? safeJsonParse(sortableRaw) : sortableRaw;
+      const soMediaPayload: any = {};
+      if (restData.problem_media) soMediaPayload.problem_media = restData.problem_media;
+      else if ('problem_media' in restData) delete block.metadata?.problem_media;
       updatePayload = {
         metadata: {
           ...block.metadata,
           sortable_data: sortableParsed || sortableRaw,
           question_text: restData.question_text,
+          ...soMediaPayload,
         },
         data: restData,
       };
@@ -614,6 +621,29 @@ export async function studioSubmit(
   }
 
   const updated = await updateBlock(blockId, updatePayload);
+
+  // Auto-sync published_metadata/published_data so learner sees changes immediately
+  // (learner API uses COALESCE(published_metadata, metadata) — if published_metadata exists
+  // but is stale, learner won't see the new data)
+  if (updatePayload.metadata || updatePayload.data) {
+    const syncClauses: string[] = ['updated_at = now()'];
+    const syncParams: any[] = [blockId];
+    let syncIdx = 2;
+    if (updatePayload.metadata) {
+      syncClauses.push(`published_metadata = $${syncIdx++}`);
+      syncParams.push(updatePayload.metadata);
+    }
+    if (updatePayload.data) {
+      syncClauses.push(`published_data = $${syncIdx++}`);
+      syncParams.push(JSON.stringify(updatePayload.data));
+    }
+    syncClauses.push('has_draft_changes = false');
+    await query(
+      `UPDATE course_blocks SET ${syncClauses.join(', ')} WHERE id = $1 AND deleted_at IS NULL`,
+      syncParams,
+    );
+  }
+
   return { success: true, block: updated };
 }
 

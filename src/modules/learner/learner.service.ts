@@ -18,9 +18,9 @@ export async function getMyVisibleCourses(
   userId: string,
   tenantId: string,
   role: string,
-  params: { search?: string; page?: number; page_size?: number },
+  params: { search?: string; category_id?: string; page?: number; page_size?: number },
 ) {
-  const { search, page = 1, page_size = 20 } = params;
+  const { search, category_id, page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
   const sqlParams: unknown[] = [tenantId];
   let where = 'WHERE c.tenant_id = $1 AND c.deleted_at IS NULL';
@@ -46,9 +46,15 @@ export async function getMyVisibleCourses(
     )`;
   }
 
+  // Filter theo category_id
+  if (category_id) {
+    sqlParams.push(category_id);
+    where += ` AND c.id IN (SELECT course_id FROM course_category_courses WHERE category_id = $${sqlParams.length})`;
+  }
+
   if (search) {
     sqlParams.push(`%${search}%`);
-    where += ` AND (c.display_name ILIKE $${sqlParams.length} OR c.org ILIKE $${sqlParams.length})`;
+    where += ` AND (unaccent(c.display_name) ILIKE unaccent($${sqlParams.length}) OR unaccent(c.org) ILIKE unaccent($${sqlParams.length}))`;
   }
 
   sqlParams.push(page_size, offset);
@@ -773,7 +779,7 @@ export async function getMyLibraryDocuments(
   // Search
   if (search) {
     sqlParams.push(`%${search}%`);
-    conditions.push(`d.title ILIKE $${sqlParams.length}`);
+    conditions.push(`unaccent(d.title) ILIKE unaccent($${sqlParams.length})`);
   }
 
   const where = conditions.join(' AND ');

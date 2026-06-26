@@ -238,6 +238,12 @@ export async function getUnitChildren(req: Request, res: Response) {
 /** POST /api/course-authoring/blocks/:blockId/handler/studio_submit */
 export async function studioSubmit(req: Request, res: Response) {
   try {
+    // Sanitize problem_media if present (crossword, sortable, etc.)
+    if (req.body?.problem_media) {
+      const media = sanitizeProblemMedia(req.body.problem_media);
+      if (media) req.body.problem_media = media;
+      else delete req.body.problem_media;
+    }
     const result = await svc.studioSubmit(req.params.blockId, req.body);
     sendSuccess(res, result);
   } catch (err: any) {
