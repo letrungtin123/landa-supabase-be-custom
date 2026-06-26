@@ -12,6 +12,7 @@ import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
+import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 
 /** Hash refresh token bằng SHA-256 trước khi lưu DB */
 function hashToken(token: string): string {
@@ -26,6 +27,22 @@ function hashToken(token: string): string {
  * Nếu revoked trước GRACE_MS → khả năng token theft, nuclear revoke ALL.
  */
 const RACE_CONDITION_GRACE_MS = 10_000; // 10 giây
+
+function resolveRoleLabelTenantId(
+  role: string,
+  primaryTenantId: string | null | undefined,
+  managedTenants: { id: string; name: string }[],
+  selectedTenantId?: string | null,
+): string | null {
+  if (role === 'superadmin' && selectedTenantId && managedTenants.some(t => t.id === selectedTenantId)) {
+    return selectedTenantId;
+  }
+  return primaryTenantId ?? managedTenants[0]?.id ?? null;
+}
+
+export async function getRoleLabelsForTenant(tenantId: string | null | undefined) {
+  return { role_labels: await getTenantRoleLabels(tenantId) };
+}
 
 /**
  * Đăng nhập — verify password, tạo token pair.
@@ -152,6 +169,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
 
   // learner_plus: lấy danh sách org groups mà user thuộc về
   const memberGroups = user.role === 'learner_plus'
@@ -176,6 +194,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    role_labels: roleLabels,
     member_groups: memberGroups,
   };
 }
@@ -183,7 +202,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
 /**
  * Refresh token — rotate: cấp token mới, revoke token cũ.
  */
-export async function refresh(refreshToken: string) {
+export async function refresh(refreshToken: string, selectedTenantId?: string) {
   const tokenHash = hashToken(refreshToken);
 
   // Tìm và validate refresh token (1 query JOIN user)
@@ -265,6 +284,12 @@ export async function refresh(refreshToken: string) {
   const managedTenants = (row.role === 'superuser' || row.role === 'superadmin')
     ? await resolveManagedTenants(row.user_id, row.tenant_id, row.role)
     : [];
+  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(
+    row.role,
+    row.tenant_id,
+    managedTenants,
+    selectedTenantId,
+  ));
   const memberGroups = row.role === 'learner_plus'
     ? await resolveMemberGroups(row.user_id)
     : [];
@@ -287,6 +312,7 @@ export async function refresh(refreshToken: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    role_labels: roleLabels,
     member_groups: memberGroups,
   };
 }
@@ -342,6 +368,7 @@ export async function issueSessionForUserId(userId: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
     : [];
@@ -364,11 +391,12 @@ export async function issueSessionForUserId(userId: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    role_labels: roleLabels,
     member_groups: memberGroups,
   };
 }
 
-export async function getMe(userId: string) {
+export async function getMe(userId: string, selectedTenantId?: string | null) {
   const result = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.tenant_id, u.bio, u.gender, u.country, u.language,
@@ -390,6 +418,12 @@ export async function getMe(userId: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(
+    user.role,
+    user.tenant_id,
+    managedTenants,
+    selectedTenantId,
+  ));
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
     : [];
@@ -415,6 +449,7 @@ export async function getMe(userId: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    role_labels: roleLabels,
     member_groups: memberGroups,
   };
 }
@@ -667,6 +702,7 @@ export async function exchangeOTT(token: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
 
   return {
     access_token: accessToken,
@@ -686,6 +722,7 @@ export async function exchangeOTT(token: string) {
     permissions,
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
+    role_labels: roleLabels,
   };
 }
 

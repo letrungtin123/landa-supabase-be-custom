@@ -4,6 +4,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as tenantsService from './tenants.service.js';
+import * as roleLabelsService from './tenant-role-labels.service.js';
 import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema } from './tenants.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
@@ -81,6 +82,26 @@ export async function updateModulesController(req: Request, res: Response, next:
 }
 
 /** GET /api/tenants/simple — Danh sách nhẹ (id+name) cho dropdown filter */
+export async function getRoleLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const labels = await roleLabelsService.getTenantRoleLabels(req.params.id);
+    sendSuccess(res, { labels });
+  } catch (err) { next(err); }
+}
+
+export async function updateRoleLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const labelsInput = req.body?.labels ?? req.body?.role_labels ?? {};
+    const labels = await roleLabelsService.replaceTenantRoleLabels(
+      req.params.id,
+      labelsInput,
+      req.user?.id ?? null,
+    );
+    auditFromReq(req, 'UPDATE', 'tenant_role_labels', req.params.id, undefined, 'Cap nhat ten hien thi role tenant');
+    sendSuccess(res, { labels }, 'Cap nhat ten role thanh cong');
+  } catch (err) { next(err); }
+}
+
 export async function listSimpleController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenants = await tenantsService.listSimpleTenants(req.user!.id, req.user!.role);
@@ -117,4 +138,3 @@ export async function setUserTenantsController(req: Request, res: Response, next
     sendSuccess(res, result, 'Gán tenants thành công');
   } catch (err) { next(err); }
 }
-

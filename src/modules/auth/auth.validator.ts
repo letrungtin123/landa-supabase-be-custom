@@ -15,6 +15,7 @@ export const loginSchema = z.object({
 /** Schema refresh token */
 export const refreshSchema = z.object({
   refresh_token: z.string().min(1, 'Refresh token không được để trống'),
+  tenant_id: z.string().uuid().optional(),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;

@@ -42,7 +42,7 @@ export async function refreshController(req: Request, res: Response, next: NextF
       return;
     }
 
-    const result = await authService.refresh(parsed.data.refresh_token);
+    const result = await authService.refresh(parsed.data.refresh_token, parsed.data.tenant_id);
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -77,7 +77,25 @@ export async function getMeController(req: Request, res: Response, next: NextFun
       return;
     }
 
-    const result = await authService.getMe(req.user.id);
+    const result = await authService.getMe(req.user.id, req.user.tenantId);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/auth/role-labels
+ * Lay ten hien thi role theo tenant context hien tai.
+ */
+export async function getRoleLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) {
+      sendError(res, 'ChÆ°a xÃ¡c thá»±c', 401);
+      return;
+    }
+
+    const result = await authService.getRoleLabelsForTenant(req.user.tenantId);
     sendSuccess(res, result);
   } catch (err) {
     next(err);
