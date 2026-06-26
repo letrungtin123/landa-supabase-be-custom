@@ -19,6 +19,15 @@ function hashToken(token: string): string {
 }
 
 /**
+ * Grace period cho race condition detection.
+ * Khi FE gửi 2+ refresh requests gần nhau (do visibilitychange, timer, 401 interceptor),
+ * request thứ 2 thấy token đã revoked (bởi request 1).
+ * Nếu revoked trong vòng GRACE_MS → race condition, chỉ reject request đó.
+ * Nếu revoked trước GRACE_MS → khả năng token theft, nuclear revoke ALL.
+ */
+const RACE_CONDITION_GRACE_MS = 10_000; // 10 giây
+
+/**
  * Đăng nhập — verify password, tạo token pair.
  * Trả về access_token, refresh_token, user info, permissions.
  */
@@ -179,7 +188,7 @@ export async function refresh(refreshToken: string) {
 
   // Tìm và validate refresh token (1 query JOIN user)
   const result = await query(
-    `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at,
+    `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at, rt.revoked_at,
             u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id,
             t.name AS tenant_name, t.is_active AS tenant_active
@@ -197,11 +206,24 @@ export async function refresh(refreshToken: string) {
 
   const row = result.rows[0];
 
-  // Kiểm tra token đã bị revoke
+  // ── Kiểm tra token đã bị revoke — Grace period cho race condition ──
   if (row.revoked) {
-    // Có thể token bị đánh cắp → revoke tất cả token của user
-    await query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [row.user_id]);
-    throw new AppError('Refresh token đã bị thu hồi', 401);
+    const revokedAt = row.revoked_at ? new Date(row.revoked_at).getTime() : 0;
+    const elapsed = Date.now() - revokedAt;
+
+    if (!row.revoked_at || elapsed > RACE_CONDITION_GRACE_MS) {
+      // Token bị reuse SAU grace period → khả năng token theft
+      // Nuclear revoke: hủy TẤT CẢ tokens active của user → force re-login
+      await query(
+        'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1 AND revoked = false',
+        [row.user_id],
+      );
+      throw new AppError('Phiên đăng nhập đã bị thu hồi — vui lòng đăng nhập lại', 401);
+    }
+
+    // Token bị reuse TRONG grace period → race condition từ FE
+    // Chỉ reject request này, KHÔNG revoke tokens khác
+    throw new AppError('Refresh token đã được sử dụng', 401);
   }
 
   // Kiểm tra hết hạn
@@ -217,8 +239,8 @@ export async function refresh(refreshToken: string) {
     throw new AppError('Tổ chức đã bị vô hiệu hóa', 403);
   }
 
-  // Revoke token cũ
-  await query('UPDATE refresh_tokens SET revoked = true WHERE id = $1', [row.rt_id]);
+  // Revoke token cũ — ghi timestamp để grace period detection
+  await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE id = $1', [row.rt_id]);
 
   // Tạo token pair mới (rotation)
   const newAccessToken = signAccessToken({
@@ -274,7 +296,7 @@ export async function refresh(refreshToken: string) {
  */
 export async function logout(refreshToken: string): Promise<void> {
   const tokenHash = hashToken(refreshToken);
-  await query('UPDATE refresh_tokens SET revoked = true WHERE token_hash = $1', [tokenHash]);
+  await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE token_hash = $1', [tokenHash]);
 }
 
 /**
@@ -556,8 +578,12 @@ async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | n
  * Dọn refresh tokens hết hạn — chạy định kỳ để giữ bảng gọn.
  */
 export async function cleanupExpiredTokens(): Promise<number> {
+  // Chỉ xóa tokens hết hạn hoặc đã revoked > 1 ngày trước
+  // Giữ recently-revoked tokens để grace period detection hoạt động
   const result = await query(
-    'DELETE FROM refresh_tokens WHERE expires_at < now() OR revoked = true',
+    `DELETE FROM refresh_tokens
+     WHERE expires_at < now()
+        OR (revoked = true AND revoked_at < now() - interval '1 day')`,
   );
   return result.rowCount ?? 0;
 }
