@@ -6,6 +6,7 @@
 
 import { getClient, query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { deleteFile, extractStoragePath } from '../../config/storage.js';
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
 
@@ -62,6 +63,29 @@ export interface AssetRecord {
   thumbnail_url: string | null;
   is_locked: boolean;
   date_added: string;
+}
+
+interface ReferencingBlockRow {
+  id: string;
+  data: any;
+  metadata: any;
+  published_data: any;
+  published_metadata: any;
+}
+
+export interface AssetDeleteResult {
+  asset: any;
+  deleted: boolean;
+  pendingPublishedReferences: boolean;
+  publishedReferenceCount: number;
+  storagePathsToDelete: string[];
+}
+
+export interface DeleteAssetByStoragePathResult {
+  deletedRows: { storage_path: string }[];
+  pendingPublishedReferences: boolean;
+  publishedReferenceCount: number;
+  storagePathsToDelete: string[];
 }
 
 export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram';
@@ -422,7 +446,8 @@ export async function renameBlock(blockId: string, displayName: string): Promise
 }
 
 export async function publishBlock(blockId: string): Promise<BlockInfo> {
-  await getBlockInfo(blockId);
+  const block = await getBlockInfo(blockId);
+  const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   // Cascade: publish block + tất cả children (recursive) trong 1 query
   // Copy data → published_data, metadata → published_metadata (giống edX draft/published branches)
@@ -446,6 +471,7 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
 
   // Propagate clean state upward: if no siblings/cousins remain dirty, clear ancestor flags
   await recalculateAncestorDraftFlags(blockId);
+  await cleanupStoragePathsNoLongerReferenced(block.course_id, previousPublishedPaths);
 
   return getBlockInfo(blockId);
 }
@@ -548,6 +574,7 @@ export async function studioSubmit(
 ): Promise<any> {
   // Get current block
   const block = await getBlockInfo(blockId);
+  const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   // Extract display_name (FE gửi kèm trong submitData)
   const displayName = submitData.display_name;
@@ -642,6 +669,7 @@ export async function studioSubmit(
       `UPDATE course_blocks SET ${syncClauses.join(', ')} WHERE id = $1 AND deleted_at IS NULL`,
       syncParams,
     );
+    await cleanupStoragePathsNoLongerReferenced(block.course_id, previousPublishedPaths);
   }
 
   return { success: true, block: updated };
@@ -724,19 +752,267 @@ export async function createAssetRecord(
   return result.rows[0];
 }
 
-export async function deleteAsset(assetId: string): Promise<{ storage_path: string } | null> {
-  const result = await query<{ storage_path: string }>(
-    `DELETE FROM course_assets WHERE id = $1 RETURNING storage_path`,
-    [assetId],
+const STORAGE_REFERENCE_KEYS = new Set(['video_storage_path', 'video_url', 'url', 'storage_path', 'pdf_url', 'src']);
+const COURSE_STORAGE_PATH_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/courses\/.+\/[^/]+$/i;
+
+function isCourseStoragePath(value: string): boolean {
+  const storagePath = extractStoragePath(value.trim());
+  return !!storagePath && COURSE_STORAGE_PATH_RE.test(storagePath);
+}
+
+function collectCourseStoragePaths(value: any, paths: Set<string>): void {
+  if (value == null) return;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    const storagePath = extractStoragePath(trimmed);
+    if (storagePath && COURSE_STORAGE_PATH_RE.test(storagePath)) {
+      paths.add(storagePath);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectCourseStoragePaths(item, paths);
+    return;
+  }
+
+  if (typeof value === 'object') {
+    for (const nested of Object.values(value)) collectCourseStoragePaths(nested, paths);
+  }
+}
+
+function collectCourseStoragePathsFromValues(...values: any[]): Set<string> {
+  const paths = new Set<string>();
+  for (const value of values) collectCourseStoragePaths(value, paths);
+  return paths;
+}
+
+function valueContainsStoragePath(value: any, storagePath: string): boolean {
+  if (value == null) return false;
+  if (typeof value === 'string') return value.includes(storagePath);
+  try {
+    return JSON.stringify(value).includes(storagePath);
+  } catch {
+    return false;
+  }
+}
+
+function stripStoragePathReference(value: any, storagePath: string): any {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => {
+        if (item === storagePath) return false;
+        if (item && typeof item === 'object') {
+          if (item.url === storagePath || item.video_url === storagePath || item.storage_path === storagePath || item.src === storagePath || item.pdf_url === storagePath || item.video_storage_path === storagePath) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .map((item) => stripStoragePathReference(item, storagePath));
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const next: any = {};
+    for (const [key, nested] of Object.entries(value)) {
+      if (nested === storagePath && STORAGE_REFERENCE_KEYS.has(key)) continue;
+      next[key] = stripStoragePathReference(nested, storagePath);
+    }
+    return next;
+  }
+
+  return value;
+}
+
+async function getBlocksReferencingStoragePath(courseId: string, storagePath: string): Promise<ReferencingBlockRow[]> {
+  const result = await query<ReferencingBlockRow>(
+    `SELECT id, data, metadata, published_data, published_metadata
+       FROM course_blocks
+      WHERE course_id = $1
+        AND deleted_at IS NULL
+        AND (
+          position($2 in COALESCE(data::text, '')) > 0 OR
+          position($2 in COALESCE(metadata::text, '')) > 0 OR
+          position($2 in COALESCE(published_data::text, '')) > 0 OR
+          position($2 in COALESCE(published_metadata::text, '')) > 0
+        )`,
+    [courseId, storagePath],
   );
-  return result.rows[0] ?? null;
+  return result.rows;
+}
+
+function countPublishedReferences(blocks: ReferencingBlockRow[], storagePath: string): number {
+  return blocks.filter((block) =>
+    valueContainsStoragePath(block.published_data, storagePath) ||
+    valueContainsStoragePath(block.published_metadata, storagePath),
+  ).length;
+}
+
+async function cleanupBlockReferences(
+  courseId: string,
+  storagePath: string,
+  options: { includePublished: boolean },
+): Promise<void> {
+  try {
+    const blocks = await getBlocksReferencingStoragePath(courseId, storagePath);
+
+    for (const block of blocks) {
+      const updates: Array<{ column: string; value: any }> = [];
+
+      const newData = block.data ? stripStoragePathReference(block.data, storagePath) : block.data;
+      const newMeta = block.metadata ? stripStoragePathReference(block.metadata, storagePath) : block.metadata;
+      if (JSON.stringify(newData) !== JSON.stringify(block.data)) updates.push({ column: 'data', value: newData });
+      if (JSON.stringify(newMeta) !== JSON.stringify(block.metadata)) updates.push({ column: 'metadata', value: newMeta });
+
+      if (options.includePublished) {
+        const newPubData = block.published_data ? stripStoragePathReference(block.published_data, storagePath) : block.published_data;
+        const newPubMeta = block.published_metadata ? stripStoragePathReference(block.published_metadata, storagePath) : block.published_metadata;
+        if (JSON.stringify(newPubData) !== JSON.stringify(block.published_data)) updates.push({ column: 'published_data', value: newPubData });
+        if (JSON.stringify(newPubMeta) !== JSON.stringify(block.published_metadata)) updates.push({ column: 'published_metadata', value: newPubMeta });
+      }
+
+      if (updates.length === 0) continue;
+
+      const params: any[] = [block.id];
+      const setClauses = updates.map((update, index) => {
+        params.push(JSON.stringify(update.value));
+        return `${update.column} = $${index + 2}::jsonb`;
+      });
+      setClauses.push('updated_at = now()');
+
+      await query(
+        `UPDATE course_blocks SET ${setClauses.join(', ')} WHERE id = $1`,
+        params,
+      );
+    }
+  } catch (err) {
+    console.error('[cleanupBlockReferences] Error:', err);
+  }
+}
+
+async function collectPublishedStoragePathsForSubtree(blockId: string): Promise<Set<string>> {
+  const result = await query<{ published_data: any; published_metadata: any }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT published_data, published_metadata
+     FROM course_blocks
+     WHERE id IN (SELECT id FROM descendants)`,
+    [blockId],
+  );
+
+  const paths = new Set<string>();
+  for (const row of result.rows) {
+    collectCourseStoragePaths(row.published_data, paths);
+    collectCourseStoragePaths(row.published_metadata, paths);
+  }
+  return paths;
+}
+
+async function collectAllStoragePathsForCourse(courseId: string): Promise<Set<string>> {
+  const result = await query<ReferencingBlockRow>(
+    `SELECT id, data, metadata, published_data, published_metadata
+       FROM course_blocks
+      WHERE course_id = $1
+        AND deleted_at IS NULL`,
+    [courseId],
+  );
+
+  const paths = new Set<string>();
+  for (const row of result.rows) {
+    collectCourseStoragePaths(row.data, paths);
+    collectCourseStoragePaths(row.metadata, paths);
+    collectCourseStoragePaths(row.published_data, paths);
+    collectCourseStoragePaths(row.published_metadata, paths);
+  }
+  return paths;
+}
+
+async function deleteCourseAssetsByStoragePaths(courseId: string, storagePaths: string[]): Promise<string[]> {
+  const uniquePaths = Array.from(new Set(storagePaths.filter(isCourseStoragePath)));
+  if (uniquePaths.length === 0) return [];
+
+  const result = await query<{ storage_path: string }>(
+    `DELETE FROM course_assets
+      WHERE course_id = $1
+        AND COALESCE(is_reference, false) = false
+        AND (storage_path = ANY($2::text[]) OR url = ANY($2::text[]))
+      RETURNING storage_path`,
+    [courseId, uniquePaths],
+  );
+
+  const deletedPaths = Array.from(new Set(result.rows.map((row) => row.storage_path).filter(Boolean)));
+  await Promise.allSettled(deletedPaths.map((path) => deleteFile(path)));
+  return deletedPaths;
+}
+
+async function cleanupStoragePathsNoLongerReferenced(courseId: string, previousPublishedPaths: Set<string>): Promise<string[]> {
+  if (previousPublishedPaths.size === 0) return [];
+
+  const currentPaths = await collectAllStoragePathsForCourse(courseId);
+  const removedPaths = Array.from(previousPublishedPaths).filter((path) => !currentPaths.has(path));
+  return deleteCourseAssetsByStoragePaths(courseId, removedPaths);
+}
+
+export async function deleteAsset(assetId: string, courseId: string, tenantId: string): Promise<AssetDeleteResult | null> {
+  const assetResult = await query<any>(
+    `SELECT * FROM course_assets WHERE id = $1 AND course_id = $2 AND tenant_id = $3`,
+    [assetId, courseId, tenantId],
+  );
+  const asset = assetResult.rows[0];
+  if (!asset) return null;
+
+  const referencingBlocks = await getBlocksReferencingStoragePath(asset.course_id, asset.storage_path);
+  const publishedReferenceCount = countPublishedReferences(referencingBlocks, asset.storage_path);
+  await cleanupBlockReferences(asset.course_id, asset.storage_path, { includePublished: publishedReferenceCount === 0 });
+
+  if (publishedReferenceCount > 0) {
+    return {
+      asset,
+      deleted: false,
+      pendingPublishedReferences: true,
+      publishedReferenceCount,
+      storagePathsToDelete: [],
+    };
+  }
+
+  const deleted = await query<any>(
+    `DELETE FROM course_assets WHERE id = $1 AND course_id = $2 AND tenant_id = $3 RETURNING *`,
+    [assetId, courseId, tenantId],
+  );
+
+  return {
+    asset: deleted.rows[0],
+    deleted: true,
+    pendingPublishedReferences: false,
+    publishedReferenceCount: 0,
+    storagePathsToDelete: asset.storage_path ? [asset.storage_path] : [],
+  };
 }
 
 export async function deleteAssetByStoragePath(
   courseId: string,
   tenantId: string,
   storagePath: string,
-): Promise<{ storage_path: string }[]> {
+): Promise<DeleteAssetByStoragePathResult> {
+  const referencingBlocks = await getBlocksReferencingStoragePath(courseId, storagePath);
+  const publishedReferenceCount = countPublishedReferences(referencingBlocks, storagePath);
+  await cleanupBlockReferences(courseId, storagePath, { includePublished: publishedReferenceCount === 0 });
+
+  if (publishedReferenceCount > 0) {
+    return {
+      deletedRows: [],
+      pendingPublishedReferences: true,
+      publishedReferenceCount,
+      storagePathsToDelete: [],
+    };
+  }
+
   const result = await query<{ storage_path: string }>(
     `DELETE FROM course_assets
      WHERE course_id = $1
@@ -745,7 +1021,13 @@ export async function deleteAssetByStoragePath(
      RETURNING storage_path`,
     [courseId, tenantId, storagePath],
   );
-  return result.rows;
+
+  return {
+    deletedRows: result.rows,
+    pendingPublishedReferences: false,
+    publishedReferenceCount: 0,
+    storagePathsToDelete: result.rows.map((row) => row.storage_path).filter(Boolean),
+  };
 }
 
 // ── Course Creation with Root Block ──

@@ -59,13 +59,19 @@ function sanitizeProblemMedia(raw: any) {
         .slice(0, 20)
     : [];
 
-  if (!youtubeId && images.length === 0) return undefined;
+  // Video upload (storage path) — alternative to YouTube
+  const videoStoragePath = typeof raw.video_storage_path === 'string' && isSafeCourseAssetPath(raw.video_storage_path)
+    ? raw.video_storage_path.trim()
+    : undefined;
+
+  if (!youtubeId && images.length === 0 && !videoStoragePath) return undefined;
 
   return {
     ...(youtubeId ? {
       youtube_id: youtubeId,
       youtube_url: `https://www.youtube.com/watch?v=${youtubeId}`,
     } : {}),
+    ...(videoStoragePath ? { video_storage_path: videoStoragePath } : {}),
     images,
   };
 }
@@ -272,6 +278,13 @@ export async function uploadAsset(req: Request, res: Response) {
   if (!req.file) return sendError(res, 'No file uploaded', 400);
 
   const file = req.file;
+
+  // Server-side file size validation (100MB)
+  const MAX_FILE_SIZE = 100 * 1024 * 1024;
+  if (file.size > MAX_FILE_SIZE) {
+    return sendError(res, `File quá lớn (${(file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tối đa 100MB.`, 413);
+  }
+
   const originalName = fixMulterFilename(file.originalname);
   const fileName = buildFileName(originalName);
   const storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
@@ -290,15 +303,19 @@ export async function uploadAsset(req: Request, res: Response) {
 
 /** DELETE /api/course-authoring/assets/:courseId/:assetId */
 export async function deleteAsset(req: Request, res: Response) {
-  const result = await svc.deleteAsset(req.params.assetId);
+  const { courseId, assetId } = req.params;
+  const tenantId = req.user!.tenantId!;
+  const result = await svc.deleteAsset(assetId, courseId, tenantId);
   if (!result) return sendError(res, 'Asset not found', 404);
 
-  // Delete from Supabase Storage
-  if (result.storage_path) {
-    await deleteFile(result.storage_path).catch(() => {});
-  }
+  await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
 
-  sendSuccess(res, { success: true });
+  sendSuccess(res, {
+    success: true,
+    deleted: result.deleted ? 1 : 0,
+    pending_delete: result.pendingPublishedReferences,
+    published_reference_count: result.publishedReferenceCount,
+  });
 }
 
 /** POST /api/course-authoring/assets/:courseId/delete-by-path */
@@ -315,15 +332,15 @@ export async function deleteAssetByPath(req: Request, res: Response) {
     return sendError(res, 'Invalid storage path', 400);
   }
 
-  const deleted = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
-  await Promise.allSettled(
-    deleted
-      .map((row) => row.storage_path)
-      .filter(Boolean)
-      .map((path) => deleteFile(path)),
-  );
+  const result = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
+  await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
 
-  sendSuccess(res, { success: true, deleted: deleted.length });
+  sendSuccess(res, {
+    success: true,
+    deleted: result.deletedRows.length,
+    pending_delete: result.pendingPublishedReferences,
+    published_reference_count: result.publishedReferenceCount,
+  });
 }
 
 /** POST /api/course-authoring/courses — Create course + root block */

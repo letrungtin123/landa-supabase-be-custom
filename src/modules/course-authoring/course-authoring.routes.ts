@@ -12,7 +12,7 @@ import * as ctrl from './course-authoring.controller.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max
 });
 
 // All routes require auth + tenant + courses permission
