@@ -33,6 +33,123 @@ export interface EnrollmentWithCourse extends Enrollment {
   course_image: string | null;
 }
 
+export type StudyTimeGranularity = 'day' | 'month' | 'year';
+
+export interface StudyTimeSeriesOptions {
+  from?: string;
+  to?: string;
+  granularity?: StudyTimeGranularity;
+}
+
+export interface StudyTimeSeriesEntry {
+  date: string;
+  minutes: number;
+}
+
+export interface StudyTimeSeriesResponse {
+  entries: StudyTimeSeriesEntry[];
+  meta: {
+    from: string;
+    to: string;
+    granularity: StudyTimeGranularity;
+    requested_granularity: StudyTimeGranularity;
+    default_weekly: boolean;
+    point_count: number;
+    reduced_granularity: boolean;
+  };
+}
+
+export interface StudyTimeSyncEntry {
+  date: string;
+  minutes: number;
+  course_id?: string | null;
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_DAILY_POINTS = 370;
+const MAX_MONTHLY_POINTS = 240;
+
+function assertIsoDate(value: string, field: string): void {
+  if (!DATE_RE.test(value)) throw new AppError(`${field} must use YYYY-MM-DD`, 400);
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new AppError(`${field} is invalid`, 400);
+  }
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function formatDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function getCurrentVietnamWeek(): { from: string; to: string } {
+  const vnNow = new Date(Date.now() + 7 * 60 * 60 * 1000);
+  const today = new Date(`${vnNow.toISOString().slice(0, 10)}T00:00:00Z`);
+  const day = today.getUTCDay();
+  const mondayOffset = (day + 6) % 7;
+  const monday = addDays(today, -mondayOffset);
+  return { from: formatDate(monday), to: formatDate(addDays(monday, 6)) };
+}
+
+function countDays(from: string, to: string): number {
+  const start = new Date(`${from}T00:00:00Z`).getTime();
+  const end = new Date(`${to}T00:00:00Z`).getTime();
+  return Math.floor((end - start) / DAY_MS) + 1;
+}
+
+function countMonths(from: string, to: string): number {
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  return (end.getUTCFullYear() - start.getUTCFullYear()) * 12
+    + (end.getUTCMonth() - start.getUTCMonth()) + 1;
+}
+
+function normalizeStudyTimeOptions(options: StudyTimeSeriesOptions = {}): StudyTimeSeriesResponse['meta'] {
+  const defaultWeekly = !options.from && !options.to && !options.granularity;
+  const defaultRange = getCurrentVietnamWeek();
+  const from = options.from || defaultRange.from;
+  const to = options.to || options.from || defaultRange.to;
+
+  assertIsoDate(from, 'from');
+  assertIsoDate(to, 'to');
+  if (from > to) throw new AppError('from must be before or equal to to', 400);
+
+  const days = countDays(from, to);
+  const requestedGranularity = options.granularity || (days <= MAX_DAILY_POINTS ? 'day' : days <= 3650 ? 'month' : 'year');
+  let granularity = requestedGranularity;
+
+  if (granularity === 'day' && days > MAX_DAILY_POINTS) {
+    granularity = days <= 3650 ? 'month' : 'year';
+  }
+
+  const months = countMonths(from, to);
+  if (granularity === 'month' && months > MAX_MONTHLY_POINTS) {
+    granularity = 'year';
+  }
+
+  const pointCount = granularity === 'day'
+    ? days
+    : granularity === 'month'
+      ? countMonths(from, to)
+      : new Date(`${to}T00:00:00Z`).getUTCFullYear() - new Date(`${from}T00:00:00Z`).getUTCFullYear() + 1;
+
+  return {
+    from,
+    to,
+    granularity,
+    requested_granularity: requestedGranularity,
+    default_weekly: defaultWeekly,
+    point_count: pointCount,
+    reduced_granularity: granularity !== requestedGranularity,
+  };
+}
+
 // ── Enroll / Unenroll ──
 
 export async function enrollUser(
@@ -170,29 +287,168 @@ export async function recordStudySession(
   );
 }
 
+export async function recordStudySessionEntries(
+  userId: string,
+  tenantId: string,
+  entries: StudyTimeSyncEntry[],
+): Promise<{ synced: number }> {
+  const normalized = entries
+    .filter(entry => entry.minutes > 0)
+    .map(entry => ({
+      study_date: entry.date,
+      minutes: Math.min(1440, Math.max(0, Math.round(entry.minutes))),
+      course_id: entry.course_id || null,
+    }));
+
+  if (normalized.length === 0) return { synced: 0 };
+
+  for (const entry of normalized) assertIsoDate(entry.study_date, 'date');
+
+  const result = await query<{ synced: string }>(
+    `WITH input AS (
+       SELECT x.study_date::DATE AS study_date,
+              GREATEST(0, LEAST(1440, x.minutes))::INT AS duration_minutes,
+              NULLIF(x.course_id, '')::VARCHAR AS course_id
+       FROM jsonb_to_recordset($3::jsonb) AS x(study_date DATE, minutes INT, course_id TEXT)
+       WHERE x.study_date IS NOT NULL AND x.minutes > 0
+     ),
+     normalized AS (
+       SELECT $1::UUID AS user_id,
+              $2::UUID AS tenant_id,
+              course_id,
+              study_date,
+              (study_date::TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh') AS started_at,
+              (study_date::TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                + (duration_minutes || ' minutes')::INTERVAL AS ended_at
+       FROM input
+     ),
+     upserted AS (
+       INSERT INTO study_sessions (user_id, course_id, tenant_id, started_at, ended_at, study_date)
+       SELECT user_id, course_id, tenant_id, started_at, ended_at, study_date
+       FROM normalized
+       ON CONFLICT (user_id, study_date)
+       DO UPDATE SET
+         tenant_id = EXCLUDED.tenant_id,
+         course_id = COALESCE(EXCLUDED.course_id, study_sessions.course_id),
+         started_at = LEAST(study_sessions.started_at, EXCLUDED.started_at),
+         ended_at = GREATEST(COALESCE(study_sessions.ended_at, EXCLUDED.ended_at), EXCLUDED.ended_at)
+       RETURNING 1
+     )
+     SELECT COUNT(*)::TEXT AS synced FROM upserted`,
+    [userId, tenantId, JSON.stringify(normalized)],
+  );
+
+  return { synced: parseInt(result.rows[0]?.synced ?? '0', 10) };
+}
+
 /**
   * Lấy study time tuần hiện tại (Thứ 2 → CN) cho user.
  * Tối ưu: dùng unique index (user_id, study_date) → O(1) per day, tổng 7 lookups.
  */
 export async function getWeeklyStudyTime(
   userId: string,
-): Promise<{ entries: Array<{ date: string; minutes: number }> }> {
-  // Dùng múi giờ Asia/Ho_Chi_Minh để xác định "hôm nay" và tuần hiện tại
+  tenantId: string,
+  options: StudyTimeSeriesOptions = {},
+): Promise<StudyTimeSeriesResponse> {
+  return getStudyTimeSeries(userId, tenantId, options);
+}
+
+export async function getStudyTimeSeries(
+  userId: string,
+  tenantId: string,
+  options: StudyTimeSeriesOptions = {},
+): Promise<StudyTimeSeriesResponse> {
+  const meta = normalizeStudyTimeOptions(options);
+  const params = [userId, meta.from, meta.to, tenantId];
+
+  if (meta.granularity === 'month') {
+    const result = await query<{ date: string; minutes: string }>(
+      `WITH bounds AS (
+         SELECT $2::DATE AS from_date, $3::DATE AS to_date
+       ),
+       months AS (
+         SELECT generate_series(
+           date_trunc('month', from_date)::DATE,
+           date_trunc('month', to_date)::DATE,
+           '1 month'
+         )::DATE AS bucket
+         FROM bounds
+       )
+       SELECT months.bucket::TEXT AS date,
+              COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
+       FROM months
+       LEFT JOIN study_sessions ss
+         ON ss.user_id = $1
+        AND ss.tenant_id = $4
+        AND ss.study_date >= months.bucket
+        AND ss.study_date < (months.bucket + INTERVAL '1 month')
+        AND ss.study_date >= (SELECT from_date FROM bounds)
+        AND ss.study_date <= (SELECT to_date FROM bounds)
+       GROUP BY months.bucket
+       ORDER BY months.bucket`,
+      params,
+    );
+
+    return {
+      entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
+      meta,
+    };
+  }
+
+  if (meta.granularity === 'year') {
+    const result = await query<{ date: string; minutes: string }>(
+      `WITH bounds AS (
+         SELECT $2::DATE AS from_date, $3::DATE AS to_date
+       ),
+       years AS (
+         SELECT generate_series(
+           date_trunc('year', from_date)::DATE,
+           date_trunc('year', to_date)::DATE,
+           '1 year'
+         )::DATE AS bucket
+         FROM bounds
+       )
+       SELECT years.bucket::TEXT AS date,
+              COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
+       FROM years
+       LEFT JOIN study_sessions ss
+         ON ss.user_id = $1
+        AND ss.tenant_id = $4
+        AND ss.study_date >= years.bucket
+        AND ss.study_date < (years.bucket + INTERVAL '1 year')
+        AND ss.study_date >= (SELECT from_date FROM bounds)
+        AND ss.study_date <= (SELECT to_date FROM bounds)
+       GROUP BY years.bucket
+       ORDER BY years.bucket`,
+      params,
+    );
+
+    return {
+      entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
+      meta,
+    };
+  }
+
   // Cast ::TEXT tránh pg driver serialize DATE thành JS Date (bị lệch timezone)
   const result = await query<{ date: string; minutes: string }>(
-    `WITH today AS (SELECT (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::DATE AS d),
-          week_start AS (SELECT date_trunc('week', today.d)::DATE AS d FROM today)
+    `WITH bounds AS (
+       SELECT $2::DATE AS from_date, $3::DATE AS to_date
+     )
      SELECT g::DATE::TEXT AS date,
-            COALESCE(ss.duration_minutes, 0) AS minutes
-     FROM week_start, generate_series(week_start.d, week_start.d + 6, '1 day') AS g
+            COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
+     FROM bounds, generate_series(bounds.from_date, bounds.to_date, '1 day') AS g
      LEFT JOIN study_sessions ss
-       ON ss.study_date = g::DATE AND ss.user_id = $1
+       ON ss.study_date = g::DATE
+      AND ss.user_id = $1
+      AND ss.tenant_id = $4
+     GROUP BY g
      ORDER BY g`,
-    [userId],
+    params,
   );
 
   return {
     entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes) })),
+    meta,
   };
 }
 

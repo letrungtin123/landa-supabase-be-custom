@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
 
 // ── Types ──
 
@@ -771,26 +772,35 @@ export async function getUserBadges(
 export async function getUserStudyTime(
   username: string,
   tenantId: string,
-): Promise<{ username: string; entries: Array<{ date: string; minutes: number }> }> {
-  // Tuần hiện tại: Thứ 2 → CN — dùng múi giờ Asia/Ho_Chi_Minh
-  // Cast ::TEXT tránh pg driver serialize DATE thành JS Date (bị lệch timezone)
-  const result = await query<{ date: string; minutes: string }>(
-    `WITH today AS (SELECT (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::DATE AS d),
-          week_start AS (SELECT date_trunc('week', today.d)::DATE AS d FROM today),
-          target_user AS (SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1)
-     SELECT g::DATE::TEXT AS date,
-            COALESCE(ss.duration_minutes, 0) AS minutes
-     FROM week_start, generate_series(week_start.d, week_start.d + 6, '1 day') AS g
-     LEFT JOIN study_sessions ss
-       ON ss.study_date = g::DATE
-       AND ss.user_id = (SELECT id FROM target_user)
-     ORDER BY g`,
+  options: { from?: string; to?: string; granularity?: StudyTimeGranularity } = {},
+): Promise<{ username: string; entries: Array<{ date: string; minutes: number }>; meta: StudyTimeSeriesResponse['meta'] }> {
+  const userResult = await query<{ id: string }>(
+    `SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1`,
     [username, tenantId],
   );
 
+  if (userResult.rowCount === 0) {
+    return {
+      username,
+      entries: [],
+      meta: {
+        from: options.from || '',
+        to: options.to || '',
+        granularity: options.granularity || 'day',
+        requested_granularity: options.granularity || 'day',
+        default_weekly: !options.from && !options.to && !options.granularity,
+        point_count: 0,
+        reduced_granularity: false,
+      },
+    };
+  }
+
+  const series = await getStudyTimeSeries(userResult.rows[0].id, tenantId, options);
+
   return {
     username,
-    entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes) })),
+    entries: series.entries,
+    meta: series.meta,
   };
 }
 

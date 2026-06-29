@@ -7,6 +7,8 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
 import { bulkEnrollSchema } from './enrollments.validator.js';
 
+const VALID_GRANULARITIES = new Set(['day', 'month', 'year']);
+
 /** POST /api/enrollments — Enroll user(s) into a course */
 export async function enroll(req: Request, res: Response) {
   const { user_id, user_ids, course_id } = req.body;
@@ -52,9 +54,24 @@ export async function updateProgress(req: Request, res: Response) {
 
 /** POST /api/enrollments/study-session — Record study time */
 export async function recordStudySession(req: Request, res: Response) {
-  const { course_id, duration_minutes, started_at } = req.body;
+  const { course_id, duration_minutes, started_at, entries } = req.body;
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
+
+  if (Array.isArray(entries)) {
+    if (entries.length > 370) {
+      return sendError(res, 'entries must contain 370 items or fewer', 400);
+    }
+
+    const normalized = entries.map((entry: any) => ({
+      date: String(entry.date || ''),
+      minutes: Number(entry.minutes || 0),
+      course_id: entry.course_id || null,
+    }));
+
+    const result = await svc.recordStudySessionEntries(userId, tenantId, normalized);
+    return sendSuccess(res, { success: true, synced: result.synced });
+  }
 
   if (!duration_minutes) {
     return sendError(res, 'duration_minutes is required', 400);
@@ -67,7 +84,18 @@ export async function recordStudySession(req: Request, res: Response) {
 /** GET /api/enrollments/weekly-study-time — Weekly study time for current user */
 export async function getWeeklyStudyTime(req: Request, res: Response) {
   const userId = req.user!.id;
-  const result = await svc.getWeeklyStudyTime(userId);
+  const tenantId = req.user!.tenantId!;
+  const granularity = req.query.granularity as string | undefined;
+
+  if (granularity && !VALID_GRANULARITIES.has(granularity)) {
+    return sendError(res, 'granularity must be day, month, or year', 400);
+  }
+
+  const result = await svc.getWeeklyStudyTime(userId, tenantId, {
+    from: req.query.from as string | undefined,
+    to: req.query.to as string | undefined,
+    granularity: granularity as svc.StudyTimeGranularity | undefined,
+  });
   sendSuccess(res, result);
 }
 

@@ -6,6 +6,9 @@ import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
+import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
+
+const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
 
 /**
  * Cho learner_plus: lấy danh sách org_group_ids mà user thuộc về.
@@ -151,7 +154,16 @@ export async function getUserStudyTime(req: Request, res: Response) {
   const username = req.query.username as string;
   if (!username) return sendError(res, 'username is required', 400);
 
-  const result = await svc.getUserStudyTime(username, tenantId);
+  const granularity = req.query.granularity as string | undefined;
+  if (granularity && !VALID_STUDY_GRANULARITIES.has(granularity)) {
+    return sendError(res, 'granularity must be day, month, or year', 400);
+  }
+
+  const result = await svc.getUserStudyTime(username, tenantId, {
+    from: req.query.from as string | undefined,
+    to: req.query.to as string | undefined,
+    granularity: granularity as StudyTimeGranularity | undefined,
+  });
   sendSuccess(res, result);
 }
 
