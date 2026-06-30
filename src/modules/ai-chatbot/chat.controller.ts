@@ -94,32 +94,6 @@ export async function unassignLessonAuthorKb(req: Request, res: Response): Promi
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
-export async function assignLessonAuthorPersona(req: Request, res: Response): Promise<void> {
-  const tenantId = req.user!.tenantId!;
-  const { bot_id, persona_id } = req.body ?? {};
-
-  if (!bot_id || typeof bot_id !== 'string' || !UUID_REGEX.test(bot_id)) {
-    sendError(res, 'bot_id không hợp lệ', 400); return;
-  }
-  if (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id)) {
-    sendError(res, 'persona_id không hợp lệ', 400); return;
-  }
-
-  try {
-    await chatService.assignLessonAuthorPersona(tenantId, bot_id, persona_id);
-    sendSuccess(res, { message: 'Đã gán mascot chuyên gia bài học' });
-  } catch (err: any) { sendError(res, err.message, 400); }
-}
-
-export async function unassignLessonAuthorPersona(req: Request, res: Response): Promise<void> {
-  const tenantId = req.user!.tenantId!;
-  try {
-    const deleted = await chatService.unassignLessonAuthorPersona(tenantId);
-    if (!deleted) { sendError(res, 'Chưa có mascot active', 404); return; }
-    sendSuccess(res, { message: 'Đã bỏ gán mascot chuyên gia bài học' });
-  } catch (err: any) { sendError(res, err.message, 400); }
-}
-
 export async function applyLessonAuthorJob(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const userId = req.user!.id;
@@ -165,18 +139,25 @@ export async function createConversation(req: Request, res: Response): Promise<v
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { persona_id } = req.body ?? {};
+  const target = resolveTarget(req);
 
-  if (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id)) {
+  if (target !== 'lesson_author' && (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id))) {
     sendError(res, 'persona_id không hợp lệ', 400); return;
   }
 
   try {
-    const target = resolveTarget(req);
     const courseId = resolveCourseId(req);
     const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendError(res, 'Chưa có bot nào được kích hoạt', 400); return; }
 
-    const conversation = await chatService.createConversation(userId, tenantId, activeBot.bot_id, persona_id, target, courseId);
+    const conversation = await chatService.createConversation(
+      userId,
+      tenantId,
+      activeBot.bot_id,
+      typeof persona_id === 'string' ? persona_id : null,
+      target,
+      courseId,
+    );
     sendSuccess(res, conversation);
   } catch (err: any) { sendError(res, err.message, 400); }
 }

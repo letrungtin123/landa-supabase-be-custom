@@ -3,7 +3,7 @@
 // Only superadmin can manage. Max 6 active globally.
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
 
@@ -17,6 +17,7 @@ export interface PromptTemplate {
   avatar_url: string | null;
   fullbody_url: string | null;
   is_active: boolean;
+  is_lesson_author: boolean;
   sort_order: number;
   created_by: string | null;
   created_at: string;
@@ -82,21 +83,80 @@ export async function getTemplate(id: string): Promise<PromptTemplate | null> {
 
 export async function getActiveCount(): Promise<number> {
   const r = await query<{ cnt: string }>(
-    `SELECT COUNT(*)::text AS cnt FROM system_prompt_templates WHERE is_active = true`,
+    `SELECT COUNT(*)::text AS cnt
+     FROM system_prompt_templates
+     WHERE is_active = true AND is_lesson_author = false`,
   );
   return parseInt(r.rows[0]?.cnt || '0');
 }
 
 export async function listActiveTemplates(): Promise<PromptTemplate[]> {
   const result = await query<PromptTemplate>(
-    `SELECT * FROM system_prompt_templates WHERE is_active = true ORDER BY sort_order ASC, created_at ASC LIMIT ${MAX_ACTIVE}`,
+    `SELECT *
+     FROM system_prompt_templates
+     WHERE is_active = true AND is_lesson_author = false
+     ORDER BY sort_order ASC, created_at ASC
+     LIMIT ${MAX_ACTIVE}`,
   );
   return result.rows;
 }
 
+export async function getActiveLessonAuthorTemplate(): Promise<PromptTemplate | null> {
+  const result = await query<PromptTemplate>(
+    `SELECT *
+     FROM system_prompt_templates
+     WHERE is_lesson_author = true
+     LIMIT 1`,
+  );
+  return result.rows[0] || null;
+}
+
+async function setLessonAuthorTemplate(id: string, enabled: boolean): Promise<PromptTemplate | null> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const existing = await client.query<PromptTemplate>(
+      `SELECT * FROM system_prompt_templates WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    if (!existing.rows[0]) {
+      await client.query('ROLLBACK');
+      return null;
+    }
+
+    if (enabled) {
+      await client.query(
+        `UPDATE system_prompt_templates
+         SET is_lesson_author = false, updated_at = now()
+         WHERE is_lesson_author = true AND id <> $1`,
+        [id],
+      );
+    }
+
+    const updated = await client.query<PromptTemplate>(
+      `UPDATE system_prompt_templates
+       SET is_lesson_author = $2,
+           is_active = CASE WHEN $2 = true THEN false ELSE is_active END,
+           updated_at = now()
+       WHERE id = $1
+       RETURNING *`,
+      [id, enabled],
+    );
+
+    await client.query('COMMIT');
+    return updated.rows[0] || null;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function createTemplate(input: CreateTemplateInput, userId: string): Promise<PromptTemplate> {
   // Enforce max active
-  if (input.is_active) {
+  if (input.is_active && !input.is_lesson_author) {
     const activeCount = await getActiveCount();
     if (activeCount >= MAX_ACTIVE) {
       throw new Error(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`);
@@ -107,15 +167,33 @@ export async function createTemplate(input: CreateTemplateInput, userId: string)
     `INSERT INTO system_prompt_templates (name, description, prompt, is_active, sort_order, created_by)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING *`,
-    [input.name, input.description || '', input.prompt, input.is_active || false, input.sort_order || 0, userId],
+    [
+      input.name,
+      input.description || '',
+      input.prompt,
+      input.is_lesson_author ? false : (input.is_active || false),
+      input.sort_order || 0,
+      userId,
+    ],
   );
-  return result.rows[0];
+  const created = result.rows[0];
+  if (input.is_lesson_author) {
+    const lessonAuthorTemplate = await setLessonAuthorTemplate(created.id, true);
+    return lessonAuthorTemplate || created;
+  }
+  return created;
 }
 
 export async function updateTemplate(id: string, input: UpdateTemplateInput): Promise<PromptTemplate | null> {
+  const current = await getTemplate(id);
+  if (!current) return null;
+
+  if (input.is_active === true && (current.is_lesson_author || input.is_lesson_author === true)) {
+    throw new Error('Mascot chuyên gia bài học không hiển thị trong AI Chatbot. Hãy tắt cờ chuyên gia trước khi bật mascot thường.');
+  }
+
   // Enforce max active when toggling on
   if (input.is_active === true) {
-    const current = await getTemplate(id);
     if (current && !current.is_active) {
       const activeCount = await getActiveCount();
       if (activeCount >= MAX_ACTIVE) {
@@ -135,14 +213,19 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
   if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
   sets.push('updated_at = now()');
 
-  if (sets.length <= 1) return getTemplate(id);
+  if (sets.length > 1) {
+    params.push(id);
+    await query<PromptTemplate>(
+      `UPDATE system_prompt_templates SET ${sets.join(', ')} WHERE id = $${idx++} RETURNING *`,
+      params,
+    );
+  }
 
-  params.push(id);
-  const result = await query<PromptTemplate>(
-    `UPDATE system_prompt_templates SET ${sets.join(', ')} WHERE id = $${idx++} RETURNING *`,
-    params,
-  );
-  return result.rows[0] || null;
+  if (input.is_lesson_author !== undefined) {
+    return setLessonAuthorTemplate(id, input.is_lesson_author);
+  }
+
+  return getTemplate(id);
 }
 
 export async function deleteTemplate(id: string): Promise<boolean> {

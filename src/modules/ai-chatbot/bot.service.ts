@@ -57,6 +57,7 @@ export async function listBots(
               FROM bot_personas bp
               JOIN system_prompt_templates spt ON spt.id = bp.template_id
               WHERE bp.bot_id = c.id
+                AND spt.is_lesson_author = false
               ), '[]'
             ) AS persona_previews
      FROM chatbots c
@@ -213,7 +214,7 @@ export interface BotPersona {
   template_prompt: string;
   template_avatar_url: string | null;
   template_fullbody_url: string | null;
-  is_lesson_author_persona?: boolean;
+  template_is_lesson_author?: boolean;
 }
 
 /**
@@ -225,7 +226,7 @@ async function autoAssignPersonas(botId: string): Promise<void> {
     `INSERT INTO bot_personas (bot_id, template_id, sort_order)
      SELECT $1, id, sort_order
      FROM system_prompt_templates
-     WHERE is_active = true
+     WHERE is_active = true AND is_lesson_author = false
      ORDER BY sort_order ASC
      LIMIT 6
      ON CONFLICT (bot_id, template_id) DO NOTHING`,
@@ -248,18 +249,30 @@ export async function listBotPersonas(botId: string, tenantId: string): Promise<
             spt.prompt AS template_prompt,
             spt.avatar_url AS template_avatar_url,
             spt.fullbody_url AS template_fullbody_url,
-            (tpa.persona_id IS NOT NULL) AS is_lesson_author_persona
+            spt.is_lesson_author AS template_is_lesson_author
      FROM bot_personas bp
      JOIN system_prompt_templates spt ON spt.id = bp.template_id
-     LEFT JOIN tenant_persona_assignments tpa
-       ON tpa.tenant_id = $2
-      AND tpa.target = 'lesson_author'
-      AND tpa.persona_id = bp.id
      WHERE bp.bot_id = $1
+       AND spt.is_lesson_author = false
      ORDER BY bp.sort_order ASC, bp.created_at ASC`,
-    [botId, tenantId],
+    [botId],
   );
   return result.rows;
+}
+
+async function assertMutableBotPersona(botId: string, personaId: string): Promise<boolean> {
+  const result = await query<{ is_lesson_author: boolean }>(
+    `SELECT spt.is_lesson_author
+     FROM bot_personas bp
+     JOIN system_prompt_templates spt ON spt.id = bp.template_id
+     WHERE bp.id = $1 AND bp.bot_id = $2`,
+    [personaId, botId],
+  );
+  if (!result.rows[0]) return false;
+  if (result.rows[0].is_lesson_author) {
+    throw new Error('Nhân cách chuyên gia bài học chỉ được chỉnh trong Prompt hệ thống bởi superadmin.');
+  }
+  return true;
 }
 
 /**
@@ -274,6 +287,8 @@ export async function updateBotPersona(
 ): Promise<BotPersona | null> {
   const bot = await getBot(botId, tenantId);
   if (!bot) return null;
+  const mutable = await assertMutableBotPersona(botId, personaId);
+  if (!mutable) return null;
 
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -310,6 +325,8 @@ export async function resetBotPersona(
 ): Promise<BotPersona | null> {
   const bot = await getBot(botId, tenantId);
   if (!bot) return null;
+  const mutable = await assertMutableBotPersona(botId, personaId);
+  if (!mutable) return null;
 
   const result = await query(
     `UPDATE bot_personas SET custom_name = NULL, custom_description = NULL, custom_prompt = NULL, updated_at = now()
@@ -347,11 +364,14 @@ export async function addBotPersona(
   }
 
   // Verify template exists
-  const tplCheck = await query<{ id: string; sort_order: number }>(
-    `SELECT id, sort_order FROM system_prompt_templates WHERE id = $1`,
+  const tplCheck = await query<{ id: string; sort_order: number; is_lesson_author: boolean }>(
+    `SELECT id, sort_order, is_lesson_author FROM system_prompt_templates WHERE id = $1`,
     [templateId],
   );
   if (!tplCheck.rows[0]) throw new Error('Template không tồn tại');
+  if (tplCheck.rows[0].is_lesson_author) {
+    throw new Error('Nhân cách chuyên gia bài học được quản lý trong Prompt hệ thống, không thể thêm thủ công vào AI Chatbot.');
+  }
 
   await query(
     `INSERT INTO bot_personas (bot_id, template_id, sort_order) VALUES ($1, $2, $3)`,
@@ -372,6 +392,8 @@ export async function removeBotPersona(
 ): Promise<boolean> {
   const bot = await getBot(botId, tenantId);
   if (!bot) return false;
+  const mutable = await assertMutableBotPersona(botId, personaId);
+  if (!mutable) return false;
 
   const result = await query(
     `DELETE FROM bot_personas WHERE id = $1 AND bot_id = $2`,

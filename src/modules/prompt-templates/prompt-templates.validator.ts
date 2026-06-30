@@ -9,6 +9,7 @@ export const createTemplateSchema = z.object({
   description: z.string().max(2000).optional().default(''),
   prompt: z.string().min(1, 'Prompt không được trống').max(20000),
   is_active: z.boolean().optional().default(false),
+  is_lesson_author: z.boolean().optional().default(false),
   sort_order: z.number().int().min(0).optional().default(0),
 });
 
@@ -17,6 +18,7 @@ export const updateTemplateSchema = z.object({
   description: z.string().max(2000).optional(),
   prompt: z.string().min(1).max(20000).optional(),
   is_active: z.boolean().optional(),
+  is_lesson_author: z.boolean().optional(),
   sort_order: z.number().int().min(0).optional(),
 });
 

@@ -448,6 +448,10 @@ export async function assignBot(tenantId: string, target: ChatTarget, botId: str
      ON CONFLICT (tenant_id, target) DO UPDATE SET bot_id = $3, created_at = now()`,
     [tenantId, target, botId],
   );
+
+  if (target === LESSON_AUTHOR_TARGET) {
+    await resolveLessonAuthorPersonaForBot(tenantId, botId);
+  }
 }
 
 export async function unassignBot(tenantId: string, target: ChatTarget): Promise<boolean> {
@@ -489,33 +493,88 @@ export async function getActiveKbAssignment(tenantId: string): Promise<KbAssignm
   return result.rows[0] || null;
 }
 
-export async function getActivePersonaAssignment(tenantId: string): Promise<PersonaAssignment | null> {
+async function resolveLessonAuthorPersonaForBot(
+  tenantId: string,
+  botId: string,
+  opts: { strict?: boolean } = {},
+): Promise<PersonaAssignment | null> {
+  if (!isValidUUID(botId)) throw new Error('bot_id không hợp lệ');
+
   const result = await query<PersonaAssignment>(
-    `SELECT tpa.id,
-            tpa.tenant_id,
-            tpa.target,
-            tpa.bot_id,
-            tpa.persona_id,
-            COALESCE(bp.custom_name, spt.name) AS persona_name,
-            spt.avatar_url AS persona_avatar_url,
-            spt.fullbody_url AS persona_fullbody_url,
-            tpa.updated_at
-     FROM tenant_persona_assignments tpa
-     JOIN chatbots c ON c.id = tpa.bot_id AND c.tenant_id = tpa.tenant_id
-     JOIN bot_personas bp ON bp.id = tpa.persona_id AND bp.bot_id = tpa.bot_id
-     JOIN system_prompt_templates spt ON spt.id = bp.template_id
-     WHERE tpa.tenant_id = $1 AND tpa.target = $2`,
-    [tenantId, LESSON_AUTHOR_TARGET],
+    `WITH bot_check AS (
+       SELECT id
+       FROM chatbots
+       WHERE id = $2 AND tenant_id = $1
+     ), active_template AS (
+       SELECT id, name, avatar_url, fullbody_url, sort_order
+       FROM system_prompt_templates
+       WHERE is_lesson_author = true
+       LIMIT 1
+     ), inserted_persona AS (
+       INSERT INTO bot_personas (bot_id, template_id, sort_order)
+       SELECT bot_check.id, active_template.id, active_template.sort_order
+       FROM bot_check
+       CROSS JOIN active_template
+       ON CONFLICT (bot_id, template_id)
+       DO NOTHING
+       RETURNING id, bot_id, template_id, updated_at
+     ), resolved_persona AS (
+       SELECT id, bot_id, template_id, updated_at
+       FROM inserted_persona
+       UNION ALL
+       SELECT bp.id, bp.bot_id, bp.template_id, bp.updated_at
+       FROM bot_personas bp
+       JOIN bot_check ON bot_check.id = bp.bot_id
+       JOIN active_template ON active_template.id = bp.template_id
+       WHERE NOT EXISTS (SELECT 1 FROM inserted_persona)
+     )
+     SELECT resolved_persona.id,
+            $1::uuid AS tenant_id,
+            $3::varchar AS target,
+            resolved_persona.bot_id,
+            resolved_persona.id AS persona_id,
+            active_template.name AS persona_name,
+            active_template.avatar_url AS persona_avatar_url,
+            active_template.fullbody_url AS persona_fullbody_url,
+            resolved_persona.updated_at
+     FROM resolved_persona
+     JOIN active_template ON active_template.id = resolved_persona.template_id`,
+    [tenantId, botId, LESSON_AUTHOR_TARGET],
   );
-  return result.rows[0] || null;
+
+  if (result.rows[0]) return result.rows[0];
+  if (!opts.strict) return null;
+
+  const check = await query<{ has_bot: boolean; has_template: boolean }>(
+    `SELECT
+       EXISTS(SELECT 1 FROM chatbots WHERE id = $2 AND tenant_id = $1) AS has_bot,
+       EXISTS(SELECT 1 FROM system_prompt_templates WHERE is_lesson_author = true) AS has_template`,
+    [tenantId, botId],
+  );
+
+  if (!check.rows[0]?.has_bot) {
+    throw new Error('Bot không tồn tại hoặc không thuộc tenant');
+  }
+  if (!check.rows[0]?.has_template) {
+    throw new Error('Chưa cấu hình nhân cách chuyên gia bài học trong Prompt hệ thống');
+  }
+  return null;
+}
+
+export async function getActivePersonaAssignment(tenantId: string): Promise<PersonaAssignment | null> {
+  const activeBot = await getActiveBot(tenantId, LESSON_AUTHOR_TARGET);
+  if (!activeBot) return null;
+  return resolveLessonAuthorPersonaForBot(tenantId, activeBot.bot_id);
 }
 
 export async function getLessonAuthorSettings(tenantId: string): Promise<LessonAuthorSettings> {
-  const [activeBot, activeKb, activePersona] = await Promise.all([
+  const [activeBot, activeKb] = await Promise.all([
     getActiveBot(tenantId, LESSON_AUTHOR_TARGET),
     getActiveKbAssignment(tenantId),
-    getActivePersonaAssignment(tenantId),
   ]);
+  const activePersona = activeBot
+    ? await resolveLessonAuthorPersonaForBot(tenantId, activeBot.bot_id)
+    : null;
   return { active_bot: activeBot, active_kb: activeKb, active_persona: activePersona };
 }
 
@@ -552,38 +611,6 @@ export async function unassignLessonAuthorKb(tenantId: string): Promise<boolean>
 // ═══════════════════════════════════════════════════════════════
 // Conversations — with tenant isolation
 // ═══════════════════════════════════════════════════════════════
-
-export async function assignLessonAuthorPersona(tenantId: string, botId: string, personaId: string): Promise<void> {
-  if (!isValidUUID(botId)) throw new Error('bot_id không hợp lệ');
-  if (!isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
-
-  const personaCheck = await query<{ id: string }>(
-    `SELECT bp.id
-     FROM bot_personas bp
-     JOIN chatbots c ON c.id = bp.bot_id
-     WHERE bp.id = $1 AND bp.bot_id = $2 AND c.tenant_id = $3`,
-    [personaId, botId, tenantId],
-  );
-  if (!personaCheck.rowCount || personaCheck.rowCount === 0) {
-    throw new Error('Persona không tồn tại hoặc không thuộc bot/tenant');
-  }
-
-  await query(
-    `INSERT INTO tenant_persona_assignments (tenant_id, target, bot_id, persona_id, updated_at)
-     VALUES ($1, $2, $3, $4, now())
-     ON CONFLICT (tenant_id, target)
-     DO UPDATE SET bot_id = $3, persona_id = $4, updated_at = now()`,
-    [tenantId, LESSON_AUTHOR_TARGET, botId, personaId],
-  );
-}
-
-export async function unassignLessonAuthorPersona(tenantId: string): Promise<boolean> {
-  const result = await query(
-    `DELETE FROM tenant_persona_assignments WHERE tenant_id = $1 AND target = $2`,
-    [tenantId, LESSON_AUTHOR_TARGET],
-  );
-  return (result.rowCount ?? 0) > 0;
-}
 
 export async function listConversations(
   userId: string,
@@ -624,15 +651,20 @@ export async function createConversation(
   userId: string,
   tenantId: string,
   botId: string,
-  personaId: string,
+  personaId: string | null,
   target: ChatTarget = 'admin',
   courseId?: string,
 ): Promise<ChatConversation> {
-  if (!isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
-
   if (target === LESSON_AUTHOR_TARGET && !courseId) {
     throw new Error('courseId is required for lesson_author conversations');
   }
+
+  if (target === LESSON_AUTHOR_TARGET) {
+    const activePersona = await resolveLessonAuthorPersonaForBot(tenantId, botId, { strict: true });
+    personaId = activePersona?.persona_id ?? null;
+  }
+
+  if (!personaId || !isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
 
   // Single CTE: count + validate persona in one round-trip
   const result = await query<ChatConversation & { conv_count: number; persona_valid: boolean }>(
@@ -843,7 +875,7 @@ async function loadConversationContext(conversationId: string, userId: string, t
     target: row.target,
     courseId: row.course_id,
     botKbId,
-    systemPrompt: row.custom_prompt ?? row.template_prompt,
+    systemPrompt: row.target === LESSON_AUTHOR_TARGET ? row.template_prompt : (row.custom_prompt ?? row.template_prompt),
     messageCount: row.msg_count,
   };
 }
