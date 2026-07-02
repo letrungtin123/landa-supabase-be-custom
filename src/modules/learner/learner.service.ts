@@ -301,7 +301,7 @@ export async function getCourseBlocks(
 
   const result = await query<any>(sql, params);
 
-  const blocks = result.rows;
+  const blocks = result.rows.map(toLearnerBlockRow);
   const root = blocks.find((b: any) => b.block_type === 'course') ?? null;
 
 
@@ -346,7 +346,61 @@ export async function getBlockDetail(blockId: string, role = 'learner') {
   );
 
   if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
-  return result.rows[0];
+  return toLearnerBlockRow(result.rows[0]);
+}
+
+function toLearnerBlockRow(row: any) {
+  if (row?.block_type !== 'la_media_quiz') return row;
+  return {
+    ...row,
+    data: toLearnerMediaQuizData(row.data),
+  };
+}
+
+function safeJsonParse(value: string): any {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function mediaQuizModeValue(raw: unknown, fallback: 'single_select' | 'multiple_select'): 'single_select' | 'multiple_select' {
+  return raw === 'single_select' || raw === 'multiple_select' ? raw : fallback;
+}
+
+function toLearnerMediaQuizData(raw: any) {
+  const data = typeof raw === 'string' ? safeJsonParse(raw) : raw;
+  if (!data || typeof data !== 'object') return data;
+  const mode = mediaQuizModeValue(data.mode, 'single_select');
+  const questions = Array.isArray(data.questions)
+    ? data.questions.map((question: any, questionIndex: number) => ({
+        id: typeof question?.id === 'string' ? question.id : `q_${questionIndex + 1}`,
+        mode: mediaQuizModeValue(question?.mode, mode),
+        prompt_html: typeof question?.prompt_html === 'string' ? question.prompt_html : '',
+        explanation_html: typeof question?.explanation_html === 'string' ? question.explanation_html : '',
+        hints: Array.isArray(question?.hints)
+          ? question.hints
+              .filter((hint: unknown): hint is string => typeof hint === 'string' && hint.trim().length > 0)
+              .slice(0, 10)
+          : [],
+        media: question?.media && typeof question.media === 'object'
+          ? {
+              type: question.media.type === 'video' ? 'video' : 'image',
+              storage_path: typeof question.media.storage_path === 'string' ? question.media.storage_path : '',
+              alt: typeof question.media.alt === 'string' ? question.media.alt : '',
+            }
+          : null,
+        choices: Array.isArray(question?.choices)
+          ? question.choices.map((choice: any, choiceIndex: number) => ({
+              id: typeof choice?.id === 'string' ? choice.id : `choice_${choiceIndex}`,
+              html: typeof choice?.html === 'string' ? choice.html : '',
+            }))
+          : [],
+      }))
+    : [];
+  return {
+    version: 1,
+    mode,
+    require_correct_to_advance: true,
+    questions,
+  };
 }
 
 /**
@@ -391,6 +445,9 @@ export async function submitBlockAnswer(
     case 'problem':
       return gradeProblem(block, body.answers || {});
 
+    case 'la_media_quiz':
+      return gradeMediaQuiz(block, body);
+
     case 'la_crossword':
       return gradeCrossword(block, body.answers || {});
 
@@ -403,6 +460,59 @@ export async function submitBlockAnswer(
 }
 
 /** Grade problem block — parse OLX XML, support all 5 problem types */
+function normalizeMediaQuizAnswer(raw: unknown): string[] {
+  const values = Array.isArray(raw) ? raw : [raw];
+  return Array.from(new Set(
+    values
+      .map(value => typeof value === 'string' ? value.trim() : String(value ?? '').trim())
+      .filter(Boolean),
+  ));
+}
+
+function gradeMediaQuiz(block: any, body: any) {
+  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.questions)) {
+    return { status: 'error', message: 'Câu hỏi kèm media chưa có dữ liệu câu hỏi', score: 0 };
+  }
+
+  const questionId = typeof body?.question_id === 'string' ? body.question_id : '';
+  const questionIndex = data.questions.findIndex((question: any) => question?.id === questionId);
+  if (questionIndex < 0) {
+    return { status: 'error', message: 'Không tìm thấy câu hỏi', score: 0 };
+  }
+
+  const question = data.questions[questionIndex];
+  const mode = mediaQuizModeValue(question?.mode, mediaQuizModeValue(data.mode, 'single_select'));
+  const choices = Array.isArray(question?.choices) ? question.choices : [];
+  const correctSet = new Set<string>(
+    choices
+      .filter((choice: any) => choice?.correct === true)
+      .map((choice: any) => String(choice.id)),
+  );
+  if (correctSet.size === 0) {
+    return { status: 'error', message: 'Câu hỏi chưa có đáp án đúng', score: 0, question_id: questionId };
+  }
+
+  const answerSource = body?.answer ?? body?.answers?.[questionId] ?? body?.answers;
+  const submitted = normalizeMediaQuizAnswer(answerSource);
+  const submittedSet = new Set<string>(mode === 'single_select' ? submitted.slice(0, 1) : submitted);
+  const isCorrect = submittedSet.size === correctSet.size
+    && [...correctSet].every(answer => submittedSet.has(answer));
+  const isLastQuestion = questionIndex >= data.questions.length - 1;
+  const nextQuestion = data.questions[questionIndex + 1];
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác! Media tiếp theo đã được mở.' : 'Chưa đúng, hãy thử lại.',
+    score: isCorrect ? 100 : 0,
+    question_id: questionId,
+    completed: isCorrect && isLastQuestion,
+    next_question_id: isCorrect && nextQuestion?.id ? nextQuestion.id : null,
+    explanation_html: isCorrect && typeof question?.explanation_html === 'string' ? question.explanation_html : undefined,
+    correctness: { [questionId]: isCorrect ? 'correct' : 'incorrect' },
+  };
+}
+
 function gradeProblem(block: any, userAnswers: Record<string, string | string[]>) {
   const data = typeof block.data === 'string' ? block.data : '';
   if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', correctness: {} };

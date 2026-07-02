@@ -226,6 +226,7 @@ export async function createBlock(
   displayName?: string,
   data?: any,
   metadata?: any,
+  boilerplate?: string,
 ): Promise<{ id: string }> {
   const courseCheck = await query<{ id: string }>(
     `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
@@ -247,12 +248,17 @@ export async function createBlock(
   const sortOrder = maxResult.rows[0]?.max_order ?? 0;
 
   const defaultName = displayName || getDefaultName(blockType);
+  const defaultData = data ?? getDefaultData(blockType, boilerplate);
+  const defaultMetadata = {
+    ...getDefaultMetadata(blockType, boilerplate),
+    ...(metadata ?? {}),
+  };
 
   const result = await query<{ id: string }>(
     `INSERT INTO course_blocks (course_id, parent_id, block_type, display_name, data, metadata, sort_order)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id`,
-    [courseId, parentId, blockType, defaultName, JSON.stringify(data ?? {}), metadata ?? {}, sortOrder],
+    [courseId, parentId, blockType, defaultName, JSON.stringify(defaultData), defaultMetadata, sortOrder],
   );
 
   // Mark parent + ancestors as having changes (quả cầu vàng)
@@ -271,6 +277,7 @@ function getDefaultName(blockType: string): string {
     video: 'Video',
     html: 'Văn bản',
     problem: 'Câu hỏi',
+    la_media_quiz: 'Câu hỏi kèm media',
     la_crossword: 'Đố vui ô chữ',
     la_sortable: 'sắp xếp ô chữ',
     la_diagram: 'Biểu đồ',
@@ -278,6 +285,70 @@ function getDefaultName(blockType: string): string {
     la_pdf: 'PDF',
   };
   return names[blockType] ?? 'Block mới';
+}
+
+function mediaQuizModeFromBoilerplate(boilerplate?: string): 'single_select' | 'multiple_select' {
+  return boilerplate === 'media_quiz_multiple_select' ? 'multiple_select' : 'single_select';
+}
+
+function mediaQuizModeValue(raw: unknown, fallback: 'single_select' | 'multiple_select'): 'single_select' | 'multiple_select' {
+  return raw === 'single_select' || raw === 'multiple_select' ? raw : fallback;
+}
+
+function getDefaultData(blockType: string, boilerplate?: string): any {
+  if (blockType !== 'la_media_quiz') return {};
+  const mode = mediaQuizModeFromBoilerplate(boilerplate);
+  return {
+    version: 1,
+    mode,
+    require_correct_to_advance: true,
+    questions: [
+      {
+        id: 'q1',
+        mode,
+        prompt_html: '<p>Câu hỏi 1</p>',
+        explanation_html: '',
+        hints: [],
+        media: null,
+        choices: [
+          { id: 'choice_0', html: '<p>Đáp án đúng</p>', correct: true },
+          { id: 'choice_1', html: '<p>Đáp án sai</p>', correct: false },
+          ...(mode === 'multiple_select'
+            ? [{ id: 'choice_2', html: '<p>Một đáp án đúng khác</p>', correct: true }]
+            : []),
+        ],
+      },
+    ],
+  };
+}
+
+function getDefaultMetadata(blockType: string, boilerplate?: string): Record<string, unknown> {
+  if (blockType !== 'la_media_quiz') return {};
+  return { media_quiz_mode: mediaQuizModeFromBoilerplate(boilerplate) };
+}
+
+function assertPublishableMediaQuizData(raw: any, label: string): void {
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.questions) || data.questions.length === 0) {
+    throw new AppError(`${label} cần ít nhất một câu hỏi kèm media trước khi publish`, 400);
+  }
+  const dataMode = mediaQuizModeValue(data.mode, 'single_select');
+  data.questions.forEach((question: any, index: number) => {
+    const questionMode = mediaQuizModeValue(question?.mode, dataMode);
+    if (!question?.media?.storage_path || typeof question.media.storage_path !== 'string') {
+      throw new AppError(`${label} - câu hỏi ${index + 1} cần tải media lên trước khi publish`, 400);
+    }
+    if (!Array.isArray(question?.choices) || question.choices.length < 2) {
+      throw new AppError(`${label} - câu hỏi ${index + 1} cần ít nhất hai lựa chọn trước khi publish`, 400);
+    }
+    const correctCount = question.choices.filter((choice: any) => choice?.correct === true).length;
+    if (correctCount === 0) {
+      throw new AppError(`${label} - câu hỏi ${index + 1} cần ít nhất một đáp án đúng trước khi publish`, 400);
+    }
+    if (questionMode === 'single_select' && correctCount !== 1) {
+      throw new AppError(`${label} - câu hỏi ${index + 1} phải có đúng một đáp án đúng trước khi publish`, 400);
+    }
+  });
 }
 
 export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
@@ -448,6 +519,26 @@ export async function renameBlock(blockId: string, displayName: string): Promise
 export async function publishBlock(blockId: string): Promise<BlockInfo> {
   const block = await getBlockInfo(blockId);
   const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
+
+  const mediaQuizRows = await query<{ display_name: string; data: any }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT display_name, data
+     FROM course_blocks
+     WHERE id IN (SELECT id FROM descendants)
+       AND block_type = 'la_media_quiz'
+       AND deleted_at IS NULL`,
+    [blockId],
+  );
+
+  for (const row of mediaQuizRows.rows) {
+    assertPublishableMediaQuizData(row.data, row.display_name || 'Câu hỏi kèm media');
+  }
 
   // Cascade: publish block + tất cả children (recursive) trong 1 query
   // Copy data → published_data, metadata → published_metadata (giống edX draft/published branches)

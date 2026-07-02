@@ -98,6 +98,105 @@ function sanitizeHtmlMedia(raw: any) {
   return { images };
 }
 
+function sanitizeMediaQuizHtml(raw: unknown, fallback: string, maxLength: number): string {
+  const value = typeof raw === 'string' ? raw : fallback;
+  return value
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed\b[^>]*>[\s\S]*?<\/embed>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
+    .slice(0, maxLength)
+    .trim();
+}
+
+function sanitizeMediaQuizId(raw: unknown, fallback: string): string {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  return /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : fallback;
+}
+
+function sanitizeMediaQuizMode(raw: unknown, fallback: 'single_select' | 'multiple_select'): 'single_select' | 'multiple_select' {
+  return raw === 'single_select' || raw === 'multiple_select' ? raw : fallback;
+}
+
+function sanitizeMediaQuizData(raw: any) {
+  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu câu hỏi kèm media phải là object');
+
+  const mode = sanitizeMediaQuizMode(parsed.mode, 'single_select');
+  if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+    throw new Error('Câu hỏi kèm media cần ít nhất một câu hỏi');
+  }
+
+  const questions = parsed.questions.slice(0, 50).map((question: any, questionIndex: number) => {
+    const questionMode = sanitizeMediaQuizMode(question?.mode, mode);
+    const mediaType = question?.media?.type === 'video' ? 'video' : 'image';
+    const storagePath = typeof question?.media?.storage_path === 'string'
+      ? question.media.storage_path.trim()
+      : '';
+    if (!isSafeCourseAssetPath(storagePath)) {
+      throw new Error(`Câu hỏi ${questionIndex + 1} cần tải media của khóa học lên`);
+    }
+
+    if (!Array.isArray(question?.choices) || question.choices.length < 2) {
+      throw new Error(`Câu hỏi ${questionIndex + 1} cần ít nhất hai lựa chọn`);
+    }
+
+    const choices = question.choices.slice(0, 12).map((choice: any, choiceIndex: number) => ({
+      id: sanitizeMediaQuizId(choice?.id, `choice_${choiceIndex}`),
+      html: sanitizeMediaQuizHtml(choice?.html, `Lựa chọn ${choiceIndex + 1}`, 2000),
+      correct: choice?.correct === true,
+    }));
+
+    const correctCount = choices.filter((choice: any) => choice.correct).length;
+    if (correctCount === 0) {
+      throw new Error(`Câu hỏi ${questionIndex + 1} cần ít nhất một đáp án đúng`);
+    }
+    if (questionMode === 'single_select' && correctCount !== 1) {
+      throw new Error(`Câu hỏi ${questionIndex + 1} phải có đúng một đáp án đúng`);
+    }
+
+    const hints = Array.isArray(question?.hints)
+      ? question.hints
+          .slice(0, 10)
+          .map((hint: unknown) => sanitizeMediaQuizHtml(hint, '', 2000))
+          .filter(Boolean)
+      : [];
+
+    return {
+      id: sanitizeMediaQuizId(question?.id, `q_${questionIndex + 1}`),
+      mode: questionMode,
+      prompt_html: sanitizeMediaQuizHtml(question?.prompt_html, `Câu hỏi ${questionIndex + 1}`, 4000),
+      explanation_html: sanitizeMediaQuizHtml(question?.explanation_html, '', 8000),
+      hints,
+      media: {
+        type: mediaType,
+        storage_path: storagePath,
+        alt: typeof question?.media?.alt === 'string'
+          ? question.media.alt.replace(/[<>]/g, '').slice(0, 200)
+          : '',
+      },
+      choices,
+    };
+  });
+
+  return {
+    version: 1,
+    mode: questions[0]?.mode ?? mode,
+    require_correct_to_advance: true,
+    questions,
+  };
+}
+
+function getMediaQuizMetadataMode(data: any): 'single_select' | 'multiple_select' | 'mixed' {
+  const questions = Array.isArray(data?.questions) ? data.questions : [];
+  const hasSingle = questions.some((question: any) => question?.mode !== 'multiple_select');
+  const hasMultiple = questions.some((question: any) => question?.mode === 'multiple_select');
+  if (hasSingle && hasMultiple) return 'mixed';
+  return hasMultiple ? 'multiple_select' : 'single_select';
+}
+
 function sanitizeMetadata(metadata: any) {
   if (!metadata || typeof metadata !== 'object') return undefined;
   const next = { ...metadata };
@@ -163,13 +262,25 @@ export async function createBlock(req: Request, res: Response) {
     }
   }
 
+  const sanitizedCreateData = resolvedType === 'la_media_quiz' && data !== undefined
+    ? sanitizeMediaQuizData(data)
+    : data;
+  const mediaQuizMetadataMode = resolvedType === 'la_media_quiz'
+    ? data !== undefined
+      ? getMediaQuizMetadataMode(sanitizedCreateData)
+      : boilerplate === 'media_quiz_multiple_select' ? 'multiple_select' : 'single_select'
+    : undefined;
+
   const result = await svc.createBlock(
     finalCourseId,
     resolvedParentId,
     resolvedType,
     display_name,
-    data,
-    metadata,
+    sanitizedCreateData,
+    resolvedType === 'la_media_quiz'
+      ? { ...(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
+      : metadata,
+    boilerplate,
   );
 
   // Return edX-compatible response
@@ -203,10 +314,23 @@ export async function updateBlock(req: Request, res: Response) {
     // Handle metadata.display_name (edX compat)
     const resolvedName = display_name ?? metadata?.display_name;
 
+    let sanitizedData = data;
+    let sanitizedMetadata = sanitizeMetadata(metadata);
+    if (data !== undefined) {
+      const currentBlock = await svc.getBlockInfo(req.params.blockId);
+      if (currentBlock.block_type === 'la_media_quiz') {
+        sanitizedData = sanitizeMediaQuizData(data);
+        sanitizedMetadata = {
+          ...(sanitizedMetadata ?? {}),
+          media_quiz_mode: getMediaQuizMetadataMode(sanitizedData),
+        };
+      }
+    }
+
     const result = await svc.updateBlock(req.params.blockId, {
       display_name: resolvedName,
-      data,
-      metadata: sanitizeMetadata(metadata),
+      data: sanitizedData,
+      metadata: sanitizedMetadata,
     });
     sendSuccess(res, result);
   } catch (err: any) {
