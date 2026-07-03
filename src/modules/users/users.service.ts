@@ -10,6 +10,7 @@ import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-h
 import { blacklistUser } from '../../middleware/authenticate.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 import { isLearnerRole } from '../../types/index.js';
+import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
 
 /**
  * Danh sách users — phân trang, search, filter role.
@@ -215,6 +216,10 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
   // JWT cũ vẫn chứa role cũ → nếu không revoke, user tiếp tục dùng
   // token với role cũ nhưng team_members đã bị xóa → API trả rỗng.
   // Force re-login để nhận JWT với role mới.
+  if ((oldRole === 'learner' && input.role !== undefined && input.role !== 'learner') || input.is_active === false) {
+    await removeUserFromDemoLogin(userId);
+  }
+
   if (input.role !== undefined && oldRole && input.role !== oldRole) {
     await query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [userId]);
     // Blacklist user ngay lập tức — access token cũ bị reject TỨC THÌ
@@ -422,4 +427,3 @@ export async function changePassword(userId: string, currentPassword: string, ne
   const newHash = await hashPassword(newPassword);
   await query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
 }
-

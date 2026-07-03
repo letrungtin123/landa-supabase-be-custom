@@ -33,6 +33,8 @@ import aiChatbotRoutes from './modules/ai-chatbot/ai-chatbot.routes.js';
 import promptTemplatesRoutes from './modules/prompt-templates/prompt-templates.routes.js';
 import badgesRoutes from './modules/badges/badges.routes.js';
 import ssoRoutes from './modules/sso/sso.routes.js';
+import demoLoginRoutes from './modules/demo-login/demo-login.routes.js';
+import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
@@ -77,6 +79,14 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const demoLoginLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 120,
+  message: { success: false, message: 'Quá nhiều request demo login, vui lòng thử lại sau' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ── Static files (uploaded course assets) ──
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
@@ -108,6 +118,9 @@ app.use('/api/branding', brandingRoutes);
 // Dashboard Content — /by-domain/:domain is public, rest is protected
 app.use('/api/dashboard-content', dashboardContentRoutes);
 
+app.use('/api/demo-login', demoLoginLimiter);
+app.use('/api/demo-login', demoLoginRoutes);
+
 app.use('/api', apiLimiter);                     // general rate limit
 
 // Study session — rate limit riêng (tránh spam từ FE study time tracker)
@@ -134,6 +147,7 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/course-authoring', courseAuthoringRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/learner', learnerRoutes);
+app.use('/api/welcome-init', welcomeInitRoutes);
 app.use('/api/ai-chatbot', aiChatbotRoutes);
 app.use('/api/prompt-templates', promptTemplatesRoutes);
 app.use('/api/badges', badgesRoutes);
