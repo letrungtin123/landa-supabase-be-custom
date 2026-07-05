@@ -73,6 +73,27 @@ export async function uploadFile(
 }
 
 /**
+ * Download a file buffer from Supabase Storage.
+ * Used by authenticated/private download endpoints.
+ */
+export async function downloadFileBuffer(storagePath: string): Promise<{ buffer: Buffer; contentType: string | null }> {
+  await ensureBucket();
+
+  const { data, error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .download(storagePath);
+
+  if (error || !data) {
+    throw new Error(`[Storage] Download failed (${storagePath}): ${error?.message || 'No data'}`);
+  }
+
+  return {
+    buffer: Buffer.from(await data.arrayBuffer()),
+    contentType: data.type || null,
+  };
+}
+
+/**
  * Delete a file from storage.
  */
 export async function deleteFile(storagePath: string): Promise<void> {
@@ -170,7 +191,7 @@ export function buildFileName(originalName: string): string {
  */
 export function buildStoragePath(
   tenantId: string,
-  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding' | 'kb-documents' | 'kb-files' | 'kb-faqs' | 'kb-articles' | 'prompt-mascots',
+  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding' | 'kb-documents' | 'kb-files' | 'kb-faqs' | 'kb-articles' | 'prompt-mascots' | 'assignments',
   fileName: string,
   subFolder?: string,
 ): string {

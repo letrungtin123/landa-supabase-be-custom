@@ -1263,7 +1263,7 @@ export async function getMyNotifications(
   const offset = (page - 1) * page_size;
 
   const result = await query<any>(
-    `SELECT n.id, n.title, n.message, n.course_id, n.created_at,
+    `SELECT n.id, n.title, n.message, n.course_id, n.type, n.metadata, n.created_at,
             nr.is_read, nr.read_at,
             u.full_name AS sent_by_name,
             COUNT(*) OVER() AS full_count

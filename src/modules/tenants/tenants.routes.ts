@@ -18,6 +18,8 @@ import {
   listSimpleController,
   getUserTenantsController,
   setUserTenantsController,
+  getSmtpController,
+  updateSmtpController,
   updateRoleLabelsController,
 } from './tenants.controller.js';
 
@@ -40,6 +42,8 @@ router.put('/:id/modules', authorize('superadmin'), updateModulesController);
 router.get('/:id/role-labels', authorize('superadmin'), getRoleLabelsController);
 router.put('/:id/role-labels', authorize('superadmin'), updateRoleLabelsController);
 router.get('/:id/quota', authorize('superadmin'), getQuotaController);
+router.get('/:id/smtp', authorize('superadmin'), getSmtpController);
+router.put('/:id/smtp', authorize('superadmin'), updateSmtpController);
 
 // ── User-Tenants — superadmin only ──
 router.get('/user-tenants/:userId', authorize('superadmin'), getUserTenantsController);

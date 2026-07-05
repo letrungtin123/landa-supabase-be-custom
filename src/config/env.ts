@@ -74,6 +74,9 @@ export const env = {
   // SSO config encryption (optional until SSO secrets are configured)
   SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',
 
+  // SMTP config encryption (optional until tenant SMTP is configured)
+  SMTP_CONFIG_ENCRYPTION_KEY: process.env.SMTP_CONFIG_ENCRYPTION_KEY?.trim() || '',
+
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 

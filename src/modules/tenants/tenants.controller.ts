@@ -5,7 +5,9 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as tenantsService from './tenants.service.js';
 import * as roleLabelsService from './tenant-role-labels.service.js';
+import * as smtpService from './tenant-smtp.service.js';
 import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema } from './tenants.validator.js';
+import { updateTenantSmtpSchema } from './tenant-smtp.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 import { invalidateTenantCache } from '../../middleware/tenant-context.js';
@@ -136,5 +138,25 @@ export async function setUserTenantsController(req: Request, res: Response, next
     const result = await tenantsService.setUserTenants(req.params.userId, tenant_ids);
     auditFromReq(req, 'UPDATE', 'user_tenants', req.params.userId, undefined, `Gán ${result.updated} tenants`);
     sendSuccess(res, result, 'Gán tenants thành công');
+  } catch (err) { next(err); }
+}
+
+/** GET /api/tenants/:id/smtp */
+export async function getSmtpController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const config = await smtpService.getTenantSmtpConfig(req.params.id);
+    sendSuccess(res, config);
+  } catch (err) { next(err); }
+}
+
+/** PUT /api/tenants/:id/smtp */
+export async function updateSmtpController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = updateTenantSmtpSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+
+    const config = await smtpService.updateTenantSmtpConfig(req.params.id, parsed.data);
+    auditFromReq(req, 'UPDATE', 'tenant_smtp_config', req.params.id, undefined, 'Cap nhat SMTP tenant');
+    sendSuccess(res, config, 'Cap nhat SMTP thanh cong');
   } catch (err) { next(err); }
 }

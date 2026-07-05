@@ -25,6 +25,8 @@ import enrollmentsRoutes from './modules/enrollments/enrollments.routes.js';
 import reportsRoutes from './modules/reports/reports.routes.js';
 import courseAuthoringRoutes from './modules/course-authoring/course-authoring.routes.js';
 import notificationsRoutes from './modules/notifications/notifications.routes.js';
+import assignmentsRoutes from './modules/assignments/assignments.routes.js';
+import { startEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
 import brandingRoutes from './modules/branding/branding.routes.js';
@@ -38,6 +40,7 @@ import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
+startEmailOutboxWorker();
 
 // ── Security Headers ──
 app.use(helmet({
@@ -146,6 +149,7 @@ app.use('/api/enrollments', enrollmentsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/course-authoring', courseAuthoringRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/assignments', assignmentsRoutes);
 app.use('/api/learner', learnerRoutes);
 app.use('/api/welcome-init', welcomeInitRoutes);
 app.use('/api/ai-chatbot', aiChatbotRoutes);
