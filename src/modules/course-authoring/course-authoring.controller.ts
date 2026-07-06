@@ -300,7 +300,7 @@ export async function updateBlock(req: Request, res: Response) {
 
     // Handle discard draft (rollback to published version)
     if (publish === 'discard_changes') {
-      const result = await svc.discardDraft(req.params.blockId);
+      const result = await svc.discardDraftCascade(req.params.blockId);
       return sendSuccess(res, result);
     }
 

@@ -37,6 +37,10 @@ export interface CourseAssignment {
     score: number | null;
     feedback_text: string | null;
     feedback_files: AssignmentFileMeta[];
+    feedback_by: string | null;
+    feedback_by_username: string | null;
+    feedback_by_name: string | null;
+    feedback_by_email: string | null;
     feedback_at: string | null;
   } | null;
 }

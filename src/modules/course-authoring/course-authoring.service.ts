@@ -59,9 +59,13 @@ export interface AssetRecord {
   display_name: string;
   content_type: string;
   file_size: number;
+  storage_path?: string;
   url: string;
   thumbnail_url: string | null;
   is_locked: boolean;
+  is_reference?: boolean;
+  is_outline_media?: boolean;
+  outline_reference_count?: number;
   date_added: string;
 }
 
@@ -532,7 +536,13 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
      FROM course_blocks
      WHERE id IN (SELECT id FROM descendants)
        AND block_type = 'la_media_quiz'
-       AND deleted_at IS NULL`,
+       AND deleted_at IS NULL
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata OR
+         is_published = false
+       )`,
     [blockId],
   );
 
@@ -556,7 +566,14 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
          published_data = data,
          published_metadata = metadata,
          updated_at = now()
-     WHERE id IN (SELECT id FROM descendants) AND deleted_at IS NULL`,
+     WHERE id IN (SELECT id FROM descendants)
+       AND deleted_at IS NULL
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata OR
+         is_published = false
+       )`,
     [blockId],
   );
 
@@ -601,6 +618,88 @@ export async function discardDraft(blockId: string): Promise<BlockInfo> {
 
   // Propagate clean state upward: if no siblings remain dirty, clear ancestor flags
   await recalculateAncestorDraftFlags(blockId);
+
+  return getBlockInfo(blockId);
+}
+
+export async function discardDraftCascade(blockId: string): Promise<BlockInfo> {
+  const block = await getBlockInfo(blockId);
+
+  if (!block.has_draft_changes) {
+    throw new AppError('Block has no draft changes to discard', 400);
+  }
+
+  const pubCheck = await query<{ has_pub: boolean }>(
+    `SELECT published_data IS NOT NULL AS has_pub
+     FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
+    [blockId],
+  );
+  if (!pubCheck.rows[0]?.has_pub) {
+    throw new AppError('Block has never been published - cannot rollback', 400);
+  }
+
+  const previousDraftPaths = await collectDraftStoragePathsForSubtree(blockId);
+
+  await query(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     UPDATE course_blocks
+     SET data = published_data,
+         metadata = published_metadata,
+         has_draft_changes = false,
+         updated_at = now()
+     WHERE id IN (SELECT id FROM descendants)
+       AND deleted_at IS NULL
+       AND published_data IS NOT NULL
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata
+       )`,
+    [blockId],
+  );
+
+  await query(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     ),
+     dirty_nodes AS (
+       SELECT id, parent_id
+       FROM course_blocks
+       WHERE id IN (SELECT id FROM descendants)
+         AND has_draft_changes = true
+         AND deleted_at IS NULL
+     ),
+     dirty_ancestors AS (
+       SELECT parent_id AS id
+       FROM dirty_nodes
+       WHERE parent_id IS NOT NULL
+       UNION
+       SELECT cb.parent_id AS id
+       FROM course_blocks cb
+       JOIN dirty_ancestors da ON cb.id = da.id
+       WHERE cb.parent_id IS NOT NULL
+         AND cb.deleted_at IS NULL
+     )
+     UPDATE course_blocks
+     SET has_draft_changes = true,
+         updated_at = now()
+     WHERE id IN (SELECT id FROM dirty_ancestors WHERE id IS NOT NULL)
+       AND deleted_at IS NULL`,
+    [blockId],
+  );
+
+  await recalculateAncestorDraftFlags(blockId);
+  await cleanupStoragePathsNoLongerReferenced(block.course_id, previousDraftPaths);
 
   return getBlockInfo(blockId);
 }
@@ -805,6 +904,7 @@ export async function getCourseAssets(
   params.push(pageSize, offset);
   const result = await query<any>(
     `SELECT ca.id, ca.course_id, ca.display_name, ca.content_type,
+            ca.storage_path,
             ca.file_size, ca.url, ca.thumbnail_url, ca.is_locked, ca.is_reference,
             ca.created_at AS date_added
      FROM course_assets ca
@@ -814,13 +914,52 @@ export async function getCourseAssets(
     params,
   );
 
+  const storagePaths = result.rows
+    .map((row) => (typeof row.storage_path === 'string' ? row.storage_path.trim() : ''))
+    .filter(isCourseStoragePath);
+  const outlineReferenceCountByPath = new Map<string, number>();
+
+  if (storagePaths.length > 0) {
+    const referenceResult = await query<{ storage_path: string; reference_count: string }>(
+      `WITH candidate(storage_path) AS (
+         SELECT unnest($2::text[])
+       )
+       SELECT c.storage_path, COUNT(DISTINCT cb.id)::text AS reference_count
+       FROM candidate c
+       JOIN course_blocks cb ON cb.course_id = $1
+        AND cb.deleted_at IS NULL
+        AND (
+          position(c.storage_path in COALESCE(cb.data::text, '')) > 0 OR
+          position(c.storage_path in COALESCE(cb.metadata::text, '')) > 0 OR
+          position(c.storage_path in COALESCE(cb.published_data::text, '')) > 0 OR
+          position(c.storage_path in COALESCE(cb.published_metadata::text, '')) > 0
+        )
+       GROUP BY c.storage_path`,
+      [courseId, Array.from(new Set(storagePaths))],
+    );
+
+    for (const row of referenceResult.rows) {
+      outlineReferenceCountByPath.set(row.storage_path, Number(row.reference_count) || 0);
+    }
+  }
+
+  const assets = result.rows.map((row) => {
+    const storagePath = typeof row.storage_path === 'string' ? row.storage_path : '';
+    const outlineReferenceCount = outlineReferenceCountByPath.get(storagePath) ?? 0;
+    return {
+      ...row,
+      is_outline_media: outlineReferenceCount > 0,
+      outline_reference_count: outlineReferenceCount,
+    };
+  });
+
   return {
     start: offset,
     end: Math.min(offset + pageSize, total),
     page,
     pageSize,
     totalCount: total,
-    assets: result.rows,
+    assets,
   };
 }
 
@@ -993,7 +1132,13 @@ async function collectPublishedStoragePathsForSubtree(blockId: string): Promise<
      )
      SELECT published_data, published_metadata
      FROM course_blocks
-     WHERE id IN (SELECT id FROM descendants)`,
+     WHERE id IN (SELECT id FROM descendants)
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata OR
+         is_published = false
+       )`,
     [blockId],
   );
 
@@ -1001,6 +1146,34 @@ async function collectPublishedStoragePathsForSubtree(blockId: string): Promise<
   for (const row of result.rows) {
     collectCourseStoragePaths(row.published_data, paths);
     collectCourseStoragePaths(row.published_metadata, paths);
+  }
+  return paths;
+}
+
+async function collectDraftStoragePathsForSubtree(blockId: string): Promise<Set<string>> {
+  const result = await query<{ data: any; metadata: any }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT data, metadata
+     FROM course_blocks
+     WHERE id IN (SELECT id FROM descendants)
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata
+       )`,
+    [blockId],
+  );
+
+  const paths = new Set<string>();
+  for (const row of result.rows) {
+    collectCourseStoragePaths(row.data, paths);
+    collectCourseStoragePaths(row.metadata, paths);
   }
   return paths;
 }
@@ -1042,11 +1215,51 @@ async function deleteCourseAssetsByStoragePaths(courseId: string, storagePaths: 
   return deletedPaths;
 }
 
-async function cleanupStoragePathsNoLongerReferenced(courseId: string, previousPublishedPaths: Set<string>): Promise<string[]> {
-  if (previousPublishedPaths.size === 0) return [];
+function chunkList<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
 
-  const currentPaths = await collectAllStoragePathsForCourse(courseId);
-  const removedPaths = Array.from(previousPublishedPaths).filter((path) => !currentPaths.has(path));
+async function collectReferencedCandidateStoragePaths(courseId: string, storagePaths: string[]): Promise<Set<string>> {
+  const uniquePaths = Array.from(new Set(storagePaths.filter(isCourseStoragePath)));
+  const referenced = new Set<string>();
+  if (uniquePaths.length === 0) return referenced;
+
+  for (const chunk of chunkList(uniquePaths, 100)) {
+    const result = await query<{ storage_path: string }>(
+      `WITH candidate(storage_path) AS (
+         SELECT unnest($2::text[])
+       )
+       SELECT DISTINCT c.storage_path
+       FROM course_blocks cb
+       JOIN candidate c ON (
+         position(c.storage_path in COALESCE(cb.data::text, '')) > 0 OR
+         position(c.storage_path in COALESCE(cb.metadata::text, '')) > 0 OR
+         position(c.storage_path in COALESCE(cb.published_data::text, '')) > 0 OR
+         position(c.storage_path in COALESCE(cb.published_metadata::text, '')) > 0
+       )
+       WHERE cb.course_id = $1
+         AND cb.deleted_at IS NULL`,
+      [courseId, chunk],
+    );
+
+    for (const row of result.rows) {
+      if (row.storage_path) referenced.add(row.storage_path);
+    }
+  }
+
+  return referenced;
+}
+
+async function cleanupStoragePathsNoLongerReferenced(courseId: string, candidateStoragePaths: Set<string>): Promise<string[]> {
+  if (candidateStoragePaths.size === 0) return [];
+
+  const candidatePaths = Array.from(candidateStoragePaths).filter(isCourseStoragePath);
+  const currentPaths = await collectReferencedCandidateStoragePaths(courseId, candidatePaths);
+  const removedPaths = candidatePaths.filter((path) => !currentPaths.has(path));
   return deleteCourseAssetsByStoragePaths(courseId, removedPaths);
 }
 
@@ -1060,14 +1273,12 @@ export async function deleteAsset(assetId: string, courseId: string, tenantId: s
 
   const referencingBlocks = await getBlocksReferencingStoragePath(asset.course_id, asset.storage_path);
   const publishedReferenceCount = countPublishedReferences(referencingBlocks, asset.storage_path);
-  await cleanupBlockReferences(asset.course_id, asset.storage_path, { includePublished: publishedReferenceCount === 0 });
-
-  if (publishedReferenceCount > 0) {
+  if (referencingBlocks.length > 0) {
     return {
       asset,
       deleted: false,
       pendingPublishedReferences: true,
-      publishedReferenceCount,
+      publishedReferenceCount: Math.max(publishedReferenceCount, referencingBlocks.length),
       storagePathsToDelete: [],
     };
   }
@@ -1093,13 +1304,11 @@ export async function deleteAssetByStoragePath(
 ): Promise<DeleteAssetByStoragePathResult> {
   const referencingBlocks = await getBlocksReferencingStoragePath(courseId, storagePath);
   const publishedReferenceCount = countPublishedReferences(referencingBlocks, storagePath);
-  await cleanupBlockReferences(courseId, storagePath, { includePublished: publishedReferenceCount === 0 });
-
-  if (publishedReferenceCount > 0) {
+  if (referencingBlocks.length > 0) {
     return {
       deletedRows: [],
       pendingPublishedReferences: true,
-      publishedReferenceCount,
+      publishedReferenceCount: Math.max(publishedReferenceCount, referencingBlocks.length),
       storagePathsToDelete: [],
     };
   }

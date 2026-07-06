@@ -688,10 +688,15 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
             (ca.deadline_enabled = true AND ca.deadline_at IS NOT NULL AND ca.deadline_at <= now()) AS is_deadline_expired,
             COALESCE(s.status::text, 'not_submitted') AS status,
             s.id AS submission_id, s.answer_text, s.files, s.submitted_at,
-            s.submission_version, s.score, s.feedback_text, s.feedback_files, s.feedback_at
+            s.submission_version, s.score, s.feedback_text, s.feedback_files,
+            s.feedback_by, s.feedback_at,
+            fb.username AS feedback_by_username,
+            fb.full_name AS feedback_by_name,
+            fb.email AS feedback_by_email
      FROM course_assignments ca
      LEFT JOIN assignment_submissions s
        ON s.assignment_id = ca.id AND s.learner_id = $3
+     LEFT JOIN users fb ON fb.id = s.feedback_by
      WHERE ca.course_id = $1
        AND ca.tenant_id = $2
        AND ca.deleted_at IS NULL
@@ -729,6 +734,10 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
       score: row.score,
       feedback_text: row.feedback_text,
       feedback_files: normalizeFiles(row.feedback_files),
+      feedback_by: row.feedback_by,
+      feedback_by_username: row.feedback_by_username,
+      feedback_by_name: row.feedback_by_name,
+      feedback_by_email: row.feedback_by_email,
       feedback_at: row.feedback_at,
     } : null,
     };
