@@ -87,6 +87,13 @@ export async function feedbackSubmission(req: Request, res: Response, next: Next
   } catch (err) { next(err); }
 }
 
+export async function listSubmissionFeedbackHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const result = await service.listSubmissionFeedbackHistory(req.params.submissionId, tenantId(req));
+    sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
 export async function listLearnerCourseAssignments(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = await service.listLearnerCourseAssignments(req.params.courseId, req.user!);

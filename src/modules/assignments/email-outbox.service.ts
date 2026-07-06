@@ -13,6 +13,7 @@ interface FeedbackEmailContext {
   courseName: string;
   assignmentTitle: string;
   feedbackText: string;
+  score?: number | null;
 }
 
 interface AssignmentCreatedEmailContext {
@@ -21,6 +22,8 @@ interface AssignmentCreatedEmailContext {
   courseName: string;
   assignmentTitle: string;
   assignmentQuestion: string;
+  deadlineEnabled?: boolean;
+  deadlineAt?: string | Date | null;
 }
 
 function escapeHtml(value: string): string {
@@ -34,10 +37,12 @@ function escapeHtml(value: string): string {
 
 function buildFeedbackEmail(ctx: FeedbackEmailContext) {
   const subject = `Feedback bai tap: ${ctx.courseName}`;
+  const scoreLine = ctx.score !== undefined && ctx.score !== null ? `Diem: ${ctx.score}/100` : '';
   const text = [
     `Xin chao ${ctx.learnerName},`,
     '',
     `Bai tap "${ctx.assignmentTitle}" trong khoa hoc "${ctx.courseName}" da co feedback.`,
+    scoreLine,
     '',
     'Nhan xet:',
     ctx.feedbackText,
@@ -52,6 +57,7 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext) {
         <h1 style="font-size:20px;line-height:1.3;margin:0 0 16px;color:#111827">Bai tap da co feedback</h1>
         <p style="margin:0 0 12px">Xin chao <strong>${escapeHtml(ctx.learnerName)}</strong>,</p>
         <p style="margin:0 0 12px">Bai tap <strong>${escapeHtml(ctx.assignmentTitle)}</strong> trong khoa hoc <strong>${escapeHtml(ctx.courseName)}</strong> da duoc admin nhan xet.</p>
+        ${scoreLine ? `<div style="display:inline-block;background:#ecfdf5;border:1px solid #bbf7d0;color:#047857;font-weight:700;border-radius:999px;padding:6px 12px;margin:4px 0 12px">${escapeHtml(scoreLine)}</div>` : ''}
         <div style="border-left:4px solid #2563eb;background:#eff6ff;padding:12px 14px;margin:18px 0;border-radius:8px">
           ${escapeHtml(ctx.feedbackText).replace(/\n/g, '<br>')}
         </div>
@@ -65,10 +71,14 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext) {
 
 function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext) {
   const subject = `Bai tap moi: ${ctx.courseName}`;
+  const deadlineLine = ctx.deadlineEnabled && ctx.deadlineAt
+    ? `Han nop: ${new Date(ctx.deadlineAt).toLocaleString('vi-VN')}`
+    : '';
   const text = [
     'Xin chao,',
     '',
     `Khoa hoc "${ctx.courseName}" vua co bai tap moi: "${ctx.assignmentTitle}".`,
+    deadlineLine,
     '',
     'Cau hoi:',
     ctx.assignmentQuestion,
@@ -85,6 +95,7 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext) {
         <div style="border:1px solid #dbeafe;background:#eff6ff;padding:14px 16px;margin:18px 0;border-radius:10px">
           <div style="font-size:13px;color:#1d4ed8;margin-bottom:4px">Bai tap</div>
           <div style="font-size:16px;font-weight:700;color:#111827">${escapeHtml(ctx.assignmentTitle)}</div>
+          ${deadlineLine ? `<div style="margin-top:8px;font-size:13px;color:#b45309;font-weight:700">${escapeHtml(deadlineLine)}</div>` : ''}
         </div>
         <div style="border-left:4px solid #2563eb;background:#f8fafc;padding:12px 14px;margin:18px 0;border-radius:8px">
           ${escapeHtml(ctx.assignmentQuestion).replace(/\n/g, '<br>')}

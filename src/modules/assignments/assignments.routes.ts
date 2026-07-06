@@ -33,7 +33,7 @@ router.post('/courses/:courseId/reorder', checkPermission('courses', 'can_edit')
 router.get('/courses/:courseId/submissions', checkPermission('courses', 'can_view'), ctrl.listCourseSubmissions);
 router.patch('/:assignmentId', checkPermission('courses', 'can_edit'), ctrl.updateAssignment);
 router.delete('/:assignmentId', checkPermission('courses', 'can_delete'), ctrl.deleteAssignment);
+router.get('/submissions/:submissionId/feedback-history', checkPermission('courses', 'can_view'), ctrl.listSubmissionFeedbackHistory);
 router.post('/submissions/:submissionId/feedback', checkPermission('courses', 'can_edit'), upload.array('feedback_files', 5), ctrl.feedbackSubmission);
 
 export default router;
-

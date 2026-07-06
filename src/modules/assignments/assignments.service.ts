@@ -55,6 +55,20 @@ function normalizeFiles(value: unknown): AssignmentFileMeta[] {
   }));
 }
 
+function isDeadlineExpired(deadlineEnabled: boolean, deadlineAt?: string | Date | null): boolean {
+  if (!deadlineEnabled || !deadlineAt) return false;
+  const deadlineTime = new Date(deadlineAt).getTime();
+  return Number.isFinite(deadlineTime) && deadlineTime <= Date.now();
+}
+
+function normalizeDeadlineForWrite(deadlineEnabled?: boolean, deadlineAt?: string | null) {
+  const enabled = deadlineEnabled === true;
+  return {
+    deadlineEnabled: enabled,
+    deadlineAt: enabled ? deadlineAt : null,
+  };
+}
+
 async function ensureCourseForAdmin(courseId: string, tenantId: string): Promise<CourseRow> {
   const result = await query<CourseRow>(
     `SELECT id, display_name, tenant_id, COALESCE(visible_to_staff_only, false) AS visible_to_staff_only
@@ -176,7 +190,8 @@ export async function listCourseAssignments(courseId: string, tenantId: string) 
   await ensureCourseForAdmin(courseId, tenantId);
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.is_published, ca.allow_resubmission, ca.created_at, ca.updated_at,
+            ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
+            ca.grading_enabled, ca.created_at, ca.updated_at,
             COUNT(s.id) FILTER (WHERE s.status = 'submitted')::int AS submitted_count,
             COUNT(s.id) FILTER (WHERE s.status = 'feedback_given')::int AS feedback_count
      FROM course_assignments ca
@@ -203,19 +218,24 @@ export async function createAssignment(
     courseName: string;
     assignmentTitle: string;
     assignmentQuestion: string;
+    deadlineEnabled: boolean;
+    deadlineAt: string | Date | null;
   } | null = null;
+  const deadline = normalizeDeadlineForWrite(input.deadline_enabled, input.deadline_at);
 
   try {
     await client.query('BEGIN');
 
     const result = await client.query(
       `INSERT INTO course_assignments (
-         tenant_id, course_id, title, question, is_published, allow_resubmission, sort_order, created_by
+         tenant_id, course_id, title, question, is_published, allow_resubmission,
+         deadline_enabled, deadline_at, grading_enabled, sort_order, created_by
        )
        VALUES (
          $1::uuid, $2::varchar, $3::varchar, $4::text, $5::boolean, $6::boolean,
+         $7::boolean, $8::timestamptz, $9::boolean,
          COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $1::uuid AND course_id = $2::varchar AND deleted_at IS NULL), 0),
-         $7::uuid
+         $10::uuid
        )
        RETURNING *`,
       [
@@ -225,6 +245,9 @@ export async function createAssignment(
         input.question,
         input.is_published,
         input.allow_resubmission,
+        deadline.deadlineEnabled,
+        deadline.deadlineAt,
+        input.grading_enabled,
         userId,
       ],
     );
@@ -245,10 +268,15 @@ export async function createAssignment(
             course_name: course.display_name,
             assignment_title: assignment.title,
             assignment_question: assignment.question,
+            deadline_enabled: assignment.deadline_enabled,
+            deadline_at: assignment.deadline_at,
+            grading_enabled: assignment.grading_enabled,
             created_at: assignment.created_at,
           }),
           'Bài tập mới',
-          `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}".`,
+          assignment.deadline_enabled && assignment.deadline_at
+            ? `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Hạn nộp: ${new Date(assignment.deadline_at).toLocaleString('vi-VN')}.`
+            : `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}".`,
           userId,
         ],
       );
@@ -297,6 +325,8 @@ export async function createAssignment(
           courseName: course.display_name,
           assignmentTitle: assignment.title,
           assignmentQuestion: assignment.question,
+          deadlineEnabled: assignment.deadline_enabled,
+          deadlineAt: assignment.deadline_at,
         };
       } else {
         await client.query('DELETE FROM notifications WHERE id = $1::uuid', [notificationId]);
@@ -324,22 +354,37 @@ export async function createAssignment(
 }
 
 export async function updateAssignment(assignmentId: string, tenantId: string, input: UpdateAssignmentInput) {
-  await getAssignmentForAdmin(assignmentId, tenantId);
+  const current = await getAssignmentForAdmin(assignmentId, tenantId);
+  const nextDeadlineEnabled = input.deadline_enabled ?? current.deadline_enabled;
+  const nextDeadlineAt = input.deadline_enabled === false
+    ? null
+    : input.deadline_at !== undefined
+      ? input.deadline_at
+      : current.deadline_at;
+  if (nextDeadlineEnabled && !nextDeadlineAt) {
+    throw new AppError('Vui long chon thoi han nop bai', 400);
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
 
-  if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); }
-  if (input.question !== undefined) { sets.push(`question = $${idx++}`); params.push(input.question); }
-  if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}`); params.push(input.is_published); }
-  if (input.allow_resubmission !== undefined) { sets.push(`allow_resubmission = $${idx++}`); params.push(input.allow_resubmission); }
+  if (input.title !== undefined) { sets.push(`title = $${idx++}::varchar`); params.push(input.title); }
+  if (input.question !== undefined) { sets.push(`question = $${idx++}::text`); params.push(input.question); }
+  if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}::boolean`); params.push(input.is_published); }
+  if (input.allow_resubmission !== undefined) { sets.push(`allow_resubmission = $${idx++}::boolean`); params.push(input.allow_resubmission); }
+  if (input.deadline_enabled !== undefined) { sets.push(`deadline_enabled = $${idx++}::boolean`); params.push(input.deadline_enabled); }
+  if (input.deadline_at !== undefined || input.deadline_enabled === false) {
+    sets.push(`deadline_at = $${idx++}::timestamptz`);
+    params.push(input.deadline_enabled === false ? null : input.deadline_at);
+  }
   if (sets.length === 0) throw new AppError('Khong co du lieu can cap nhat', 400);
 
   params.push(assignmentId, tenantId);
   const result = await query(
     `UPDATE course_assignments
      SET ${sets.join(', ')}
-     WHERE id = $${idx++} AND tenant_id = $${idx} AND deleted_at IS NULL
+     WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid AND deleted_at IS NULL
      RETURNING *`,
     params,
   );
@@ -452,7 +497,8 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
           )
       ),
       filtered_assignments AS (
-        SELECT ca.id, ca.title, ca.question, ca.sort_order, ca.created_at
+        SELECT ca.id, ca.title, ca.question, ca.deadline_enabled, ca.deadline_at,
+               ca.grading_enabled, ca.sort_order, ca.created_at
         FROM course_assignments ca
         WHERE ${assignmentConditions.join(' AND ')}
       ),
@@ -466,12 +512,16 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
                COALESCE(s.status::text, 'not_submitted') AS status,
                s.submitted_at,
                COALESCE(s.submission_version, 0) AS submission_version,
+               s.score,
                s.feedback_text,
                COALESCE(s.feedback_files, '[]'::jsonb) AS feedback_files,
                s.feedback_by,
                s.feedback_at,
                fa.title AS assignment_title,
                fa.question AS assignment_question,
+               fa.deadline_enabled,
+               fa.deadline_at,
+               fa.grading_enabled,
                el.username AS learner_username,
                el.full_name AS learner_name,
                el.email AS learner_email,
@@ -560,8 +610,9 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
     ),
     query(
       `SELECT s.id, s.assignment_id, s.learner_id, s.answer_text, s.files, s.status,
-              s.submitted_at, s.submission_version, s.feedback_text, s.feedback_files,
+              s.submitted_at, s.submission_version, s.score, s.feedback_text, s.feedback_files,
               s.feedback_by, s.feedback_at, ca.title AS assignment_title, ca.question AS assignment_question,
+              ca.deadline_enabled, ca.deadline_at, ca.grading_enabled,
               u.username AS learner_username, u.full_name AS learner_name, u.email AS learner_email,
               u.role AS learner_role,
               fb.username AS feedback_by_username, fb.full_name AS feedback_by_name, fb.email AS feedback_by_email,
@@ -632,10 +683,12 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
   const canSubmit = progress >= 100 || access.rows[0].is_completed === true;
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.is_published, ca.allow_resubmission,
+            ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
+            ca.grading_enabled,
+            (ca.deadline_enabled = true AND ca.deadline_at IS NOT NULL AND ca.deadline_at <= now()) AS is_deadline_expired,
             COALESCE(s.status::text, 'not_submitted') AS status,
             s.id AS submission_id, s.answer_text, s.files, s.submitted_at,
-            s.submission_version, s.feedback_text, s.feedback_files, s.feedback_at
+            s.submission_version, s.score, s.feedback_text, s.feedback_files, s.feedback_at
      FROM course_assignments ca
      LEFT JOIN assignment_submissions s
        ON s.assignment_id = ca.id AND s.learner_id = $3
@@ -647,7 +700,10 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
     [courseId, user.tenantId, user.id],
   );
 
-  return result.rows.map((row: any) => ({
+  return result.rows.map((row: any) => {
+    const deadlineExpired = row.is_deadline_expired === true;
+    const canSubmitAssignment = canSubmit && !deadlineExpired;
+    return {
     id: row.id,
     tenant_id: row.tenant_id,
     course_id: row.course_id,
@@ -656,8 +712,13 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
     sort_order: row.sort_order,
     is_published: row.is_published,
     allow_resubmission: row.allow_resubmission,
+    deadline_enabled: row.deadline_enabled,
+    deadline_at: row.deadline_at,
+    grading_enabled: row.grading_enabled,
+    is_deadline_expired: deadlineExpired,
     status: row.status,
-    can_submit: canSubmit,
+    can_submit: canSubmitAssignment,
+    locked_reason: canSubmit ? (deadlineExpired ? 'deadline' : null) : 'progress',
     submission: row.submission_id ? {
       id: row.submission_id,
       answer_text: row.answer_text,
@@ -665,11 +726,13 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
       status: row.status,
       submitted_at: row.submitted_at,
       submission_version: row.submission_version,
+      score: row.score,
       feedback_text: row.feedback_text,
       feedback_files: normalizeFiles(row.feedback_files),
       feedback_at: row.feedback_at,
     } : null,
-  }));
+    };
+  });
 }
 
 export async function getLearnerAssignment(assignmentId: string, user: AuthUser) {
@@ -704,11 +767,14 @@ export async function submitAssignment(
     course_id: string;
     title: string;
     allow_resubmission: boolean;
+    deadline_enabled: boolean;
+    deadline_at: string | Date | null;
     enrollment_id: string;
     progress: string;
     is_completed: boolean;
   }>(
     `SELECT ca.id AS assignment_id, ca.tenant_id, ca.course_id, ca.title, ca.allow_resubmission,
+            ca.deadline_enabled, ca.deadline_at,
             e.id AS enrollment_id, COALESCE(cp.progress, 0)::text AS progress,
             COALESCE(cp.is_completed, false) AS is_completed
      FROM course_assignments ca
@@ -742,6 +808,9 @@ export async function submitAssignment(
   const ctx = access.rows[0];
   if (Number(ctx.progress || 0) < 100 && !ctx.is_completed) {
     throw new AppError('Can hoan thanh 100% khoa hoc truoc khi nop bai tap', 403);
+  }
+  if (isDeadlineExpired(ctx.deadline_enabled, ctx.deadline_at)) {
+    throw new AppError('Da het thoi han nop bai tap', 403);
   }
 
   const existing = await query<{
@@ -796,7 +865,8 @@ export async function submitAssignment(
              feedback_text = NULL,
              feedback_files = '[]'::jsonb,
              feedback_by = NULL,
-             feedback_at = NULL
+             feedback_at = NULL,
+             score = NULL
          WHERE id = $3`,
         [input.answer_text, JSON.stringify(uploadedFiles.map(({ storage_path, ...rest }) => rest)), submissionId],
       );
@@ -862,12 +932,14 @@ export async function feedbackSubmission(
     course_name: string;
     assignment_title: string;
     assignment_question: string;
+    grading_enabled: boolean;
     learner_name: string;
     learner_email: string;
   }>(
     `SELECT s.id, s.tenant_id, s.course_id, s.assignment_id, s.learner_id,
             s.status::text AS status, s.feedback_at,
             c.display_name AS course_name, ca.title AS assignment_title, ca.question AS assignment_question,
+            ca.grading_enabled,
             COALESCE(NULLIF(u.full_name, ''), u.username) AS learner_name,
             u.email AS learner_email
      FROM assignment_submissions s
@@ -879,8 +951,11 @@ export async function feedbackSubmission(
   );
   if (submission.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
   const ctx = submission.rows[0];
-  if (ctx.status === 'feedback_given' || ctx.feedback_at) {
-    throw new AppError('Bai tap nay da duoc feedback, khong the feedback lai', 409);
+  if (ctx.grading_enabled && input.score === undefined) {
+    throw new AppError('Vui long nhap diem tu 0 den 100', 400);
+  }
+  if (!ctx.grading_enabled && input.score !== undefined) {
+    throw new AppError('Bai tap nay khong bat cham diem', 400);
   }
 
   const uploadedFiles = await uploadAssignmentFiles(
@@ -900,36 +975,43 @@ export async function feedbackSubmission(
     const current = await client.query<{
       status: 'submitted' | 'feedback_given';
       feedback_at: string | null;
+      feedback_files: unknown;
     }>(
-      `SELECT status::text AS status, feedback_at
+      `SELECT status::text AS status, feedback_at, feedback_files
        FROM assignment_submissions
        WHERE id = $1 AND tenant_id = $2
        FOR UPDATE`,
       [submissionId, tenantId],
     );
     if (current.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
-    if (current.rows[0].status === 'feedback_given' || current.rows[0].feedback_at) {
-      throw new AppError('Bai tap nay da duoc feedback, khong the feedback lai', 409);
+    if (current.rows[0].status !== 'submitted' && current.rows[0].status !== 'feedback_given') {
+      throw new AppError('Submission chua san sang de feedback', 409);
     }
 
-    const nextFeedbackFiles = uploadedFiles.map(({ storage_path, ...rest }) => rest);
+    const uploadedFeedbackFiles = uploadedFiles.map(({ storage_path, ...rest }) => rest);
+    const nextFeedbackFiles = uploadedFeedbackFiles.length > 0
+      ? uploadedFeedbackFiles
+      : normalizeFiles(current.rows[0].feedback_files);
+    const score = ctx.grading_enabled ? input.score! : null;
 
-    const feedbackUpdate = await client.query(
+    const feedbackUpdate = await client.query<{ feedback_at: string }>(
       `UPDATE assignment_submissions
        SET status = 'feedback_given',
            feedback_text = $1,
            feedback_files = $2,
-           feedback_by = $3,
+           score = $3,
+           feedback_by = $4,
            feedback_at = now()
-       WHERE id = $4
-         AND tenant_id = $5
-         AND status = 'submitted'
-         AND feedback_at IS NULL`,
-      [input.feedback_text, JSON.stringify(nextFeedbackFiles), adminId, submissionId, tenantId],
+       WHERE id = $5
+         AND tenant_id = $6
+         AND status IN ('submitted', 'feedback_given')
+       RETURNING feedback_at`,
+      [input.feedback_text, JSON.stringify(nextFeedbackFiles), score, adminId, submissionId, tenantId],
     );
     if (feedbackUpdate.rowCount === 0) {
-      throw new AppError('Bai tap nay da duoc feedback, khong the feedback lai', 409);
+      throw new AppError('Khong the cap nhat feedback cho submission nay', 409);
     }
+    const feedbackAt = feedbackUpdate.rows[0].feedback_at;
 
     await insertAssignmentFileRows(
       client,
@@ -940,6 +1022,26 @@ export async function feedbackSubmission(
       adminId,
       'feedback',
       uploadedFiles,
+    );
+
+    await client.query(
+      `INSERT INTO assignment_feedback_history (
+         tenant_id, course_id, assignment_id, submission_id, learner_id,
+         feedback_text, feedback_files, score, feedback_by, feedback_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        ctx.tenant_id,
+        ctx.course_id,
+        ctx.assignment_id,
+        ctx.id,
+        ctx.learner_id,
+        input.feedback_text,
+        JSON.stringify(nextFeedbackFiles),
+        score,
+        adminId,
+        feedbackAt,
+      ],
     );
 
     const notification = await client.query<{ id: string }>(
@@ -957,12 +1059,11 @@ export async function feedbackSubmission(
           course_name: ctx.course_name,
           assignment_title: ctx.assignment_title,
           assignment_question: ctx.assignment_question,
-          feedback_text: input.feedback_text,
-          feedback_files: nextFeedbackFiles,
-          feedback_at: new Date().toISOString(),
+          grading_enabled: ctx.grading_enabled,
+          feedback_at: feedbackAt,
         }),
         'Bài tập đã có feedback',
-        `Bài tập "${ctx.assignment_title}" trong khóa học "${ctx.course_name}" đã có feedback.`,
+        `Bài tập "${ctx.assignment_title}" trong khóa học "${ctx.course_name}" đã có feedback mới.`,
         adminId,
       ],
     );
@@ -982,6 +1083,7 @@ export async function feedbackSubmission(
       courseName: ctx.course_name,
       assignmentTitle: ctx.assignment_title,
       feedbackText: input.feedback_text,
+      score,
     });
 
     await client.query('COMMIT');
@@ -1000,6 +1102,36 @@ export async function feedbackSubmission(
   return listCourseSubmissions(ctx.course_id, tenantId, { page: '1', page_size: '1', assignment_id: ctx.assignment_id });
 }
 
+export async function listSubmissionFeedbackHistory(submissionId: string, tenantId: string) {
+  const submission = await query<{ id: string }>(
+    `SELECT id
+     FROM assignment_submissions
+     WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [submissionId, tenantId],
+  );
+  if (submission.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
+
+  const result = await query(
+    `SELECT h.id, h.submission_id, h.assignment_id, h.learner_id,
+            h.feedback_text, h.feedback_files, h.score, h.feedback_by, h.feedback_at, h.created_at,
+            u.username AS feedback_by_username,
+            u.full_name AS feedback_by_name,
+            u.email AS feedback_by_email
+     FROM assignment_feedback_history h
+     LEFT JOIN users u ON u.id = h.feedback_by
+     WHERE h.submission_id = $1::uuid
+       AND h.tenant_id = $2::uuid
+     ORDER BY h.feedback_at DESC, h.id DESC
+     LIMIT 100`,
+    [submissionId, tenantId],
+  );
+
+  return result.rows.map((row: any) => ({
+    ...row,
+    feedback_files: normalizeFiles(row.feedback_files),
+  }));
+}
+
 export async function getAssignmentFileForDownload(fileId: string, user: AuthUser) {
   const result = await query<{
     id: string;
@@ -1007,12 +1139,13 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
     learner_id: string;
     uploaded_by: string | null;
     kind: 'submission' | 'feedback';
+    feedback_files: unknown;
     storage_path: string;
     original_name: string;
     mime_type: string;
   }>(
     `SELECT af.id, af.tenant_id, af.uploaded_by, af.kind, af.storage_path,
-            af.original_name, af.mime_type, s.learner_id
+            af.original_name, af.mime_type, s.learner_id, s.feedback_files
      FROM assignment_files af
      JOIN assignment_submissions s ON s.id = af.submission_id
      WHERE af.id = $1`,
@@ -1023,7 +1156,11 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
 
   const sameTenant = user.role === 'superadmin' || user.tenantId === file.tenant_id;
   const isAdmin = sameTenant && await hasCoursePermission(user);
-  const learnerAllowed = file.learner_id === user.id && (file.kind === 'feedback' || file.uploaded_by === user.id);
+  const currentFeedbackFileIds = new Set(normalizeFiles(file.feedback_files).map(item => item.id));
+  const learnerAllowed = file.learner_id === user.id && (
+    (file.kind === 'submission' && file.uploaded_by === user.id)
+    || (file.kind === 'feedback' && currentFeedbackFileIds.has(file.id))
+  );
   if ((!isAdmin && !learnerAllowed) || !sameTenant) {
     throw new AppError('Khong co quyen tai file nay', 403);
   }
