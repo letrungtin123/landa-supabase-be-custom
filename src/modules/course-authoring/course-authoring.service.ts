@@ -430,6 +430,15 @@ export async function updateBlock(
 
   const block = result.rows[0];
 
+  if (updates.display_name !== undefined && block.block_type === 'course' && block.parent_id === null) {
+    await query(
+      `UPDATE courses
+       SET display_name = $1, updated_at = now()
+       WHERE id = $2 AND deleted_at IS NULL`,
+      [updates.display_name, block.course_id],
+    );
+  }
+
   // Propagate has_draft_changes lên toàn bộ ancestor chain (giống edX)
   // Khi edit child → parent, grandparent, ... đều hiện quả cầu vàng
   if (!updates.is_published && block.parent_id) {
