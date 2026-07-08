@@ -276,6 +276,7 @@ export async function createAssignment(
   let assignmentCreatedEmailContext: {
     tenantId: string;
     notificationId: string;
+    courseId: string;
     courseName: string;
     assignmentTitle: string;
     assignmentQuestion: string;
@@ -399,6 +400,7 @@ export async function createAssignment(
         assignmentCreatedEmailContext = {
           tenantId,
           notificationId,
+          courseId,
           courseName: course.display_name,
           assignmentTitle: assignment.title,
           assignmentQuestion: assignment.question,

@@ -29,6 +29,7 @@ interface FeedbackEmailContext {
 interface AssignmentCreatedEmailContext {
   tenantId: string;
   notificationId: string;
+  courseId: string;
   courseName: string;
   assignmentTitle: string;
   assignmentQuestion: string;
@@ -90,6 +91,20 @@ function displayDomain(url: string | null): string | null {
   return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 }
 
+function buildLearnerCourseFocusUrl(branding: EmailBranding, courseId?: string | null): string | null {
+  if (!branding.learnerUrl) return null;
+  if (!courseId) return branding.learnerUrl;
+  try {
+    const url = new URL('/explore', branding.learnerUrl);
+    url.searchParams.set('focus_course', courseId);
+    url.searchParams.set('source', 'assignment_email');
+    return url.toString();
+  } catch {
+    const base = branding.learnerUrl.replace(/\/+$/, '');
+    return `${base}/explore?focus_course=${encodeURIComponent(courseId)}&source=assignment_email`;
+  }
+}
+
 function cleanEmailBody(value: string): string {
   return value
     .split(OWNER_FEEDBACK_HTML_MARKER).join('')
@@ -137,7 +152,14 @@ async function getEmailBranding(tenantId: string, client?: PoolClient): Promise<
   };
 }
 
-function shellEmail(branding: EmailBranding, eyebrow: string, title: string, intro: string, body: string): string {
+function shellEmail(
+  branding: EmailBranding,
+  eyebrow: string,
+  title: string,
+  intro: string,
+  body: string,
+  learnerHref?: string | null,
+): string {
   return `<!doctype html>
 <html lang="vi">
   <head>
@@ -190,7 +212,7 @@ function shellEmail(branding: EmailBranding, eyebrow: string, title: string, int
                   <tr>
                     <td style="${EMAIL_FONT_STYLE}padding:28px">
                       ${body}
-                      ${learnerAccessBlock(branding)}
+                      ${learnerAccessBlock(branding, learnerHref)}
                       <div style="${EMAIL_FONT_STYLE}height:1px;background:#e5e7eb;margin:28px 0 16px"></div>
                       <p style="${EMAIL_FONT_STYLE}margin:0;color:#64748b;font-size:12px;line-height:20px">
                         Email này được gửi tự động từ ${escapeHtml(branding.brandName)}. Vui lòng đăng nhập hệ thống để xem đầy đủ nội dung và tệp đính kèm nếu có.
@@ -248,10 +270,11 @@ function quoteBlock(value: string): string {
   `;
 }
 
-function learnerAccessBlock(branding: EmailBranding): string {
+function learnerAccessBlock(branding: EmailBranding, learnerHref?: string | null): string {
   if (!branding.learnerUrl || !branding.learnerDomainLabel) {
     return '';
   }
+  const href = learnerHref || branding.learnerUrl;
   return `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:24px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:18px">
       <tr>
@@ -259,7 +282,7 @@ function learnerAccessBlock(branding: EmailBranding): string {
           <div style="${EMAIL_FONT_STYLE}font-size:12px;line-height:18px;color:#047857;font-weight:800;text-transform:uppercase;letter-spacing:.5px">Cổng học viên</div>
           <div style="${EMAIL_FONT_STYLE}margin-top:6px;font-size:16px;line-height:24px;color:#064e3b;font-weight:800">${escapeHtml(branding.learnerDomainLabel)}</div>
           <div style="${EMAIL_FONT_STYLE}margin-top:14px">
-            <a href="${escapeHtml(branding.learnerUrl)}" style="${EMAIL_FONT_STYLE}display:inline-block;background:#059669;color:#ffffff;text-decoration:none;border-radius:12px;padding:11px 16px;font-size:14px;line-height:18px;font-weight:800">
+            <a href="${escapeHtml(href)}" style="${EMAIL_FONT_STYLE}display:inline-block;background:#059669;color:#ffffff;text-decoration:none;border-radius:12px;padding:11px 16px;font-size:14px;line-height:18px;font-weight:800">
               Mở cổng học viên
             </a>
           </div>
@@ -346,8 +369,9 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, brandin
   const subject = `Bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
   const deadline = deadlineLabel(ctx);
   const unlock = unlockLabel(ctx.submissionUnlockMode);
-  const learnerAccess = branding.learnerDomainLabel
-    ? `Cổng học viên: ${branding.learnerDomainLabel}`
+  const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId);
+  const learnerAccess = learnerHref
+    ? `Cổng học viên: ${learnerHref}`
     : '';
   const text = [
     'Xin chào,',
@@ -381,6 +405,7 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, brandin
       ${sectionTitle('Yêu cầu bài tập')}
       ${quoteBlock(ctx.assignmentQuestion)}
     `,
+    learnerHref,
   );
 
   return { subject, text, html };
