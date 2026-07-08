@@ -40,8 +40,6 @@ const DEFAULT_SCOPES: Record<SsoProvider, string[]> = {
   microsoft365: ['openid', 'email', 'profile'],
 };
 
-const SSO_LOG_BODY_LIMIT = 4_000;
-
 function hasInputField(input: UpdateSsoConfigInput, field: keyof UpdateSsoConfigInput): boolean {
   return Object.prototype.hasOwnProperty.call(input, field);
 }
@@ -61,46 +59,6 @@ function normalizeUrlHost(value: string): string {
   } catch {
     return normalizeDomain(value);
   }
-}
-
-function truncateForLog(value: string, max = SSO_LOG_BODY_LIMIT): string {
-  return value.length > max ? `${value.slice(0, max)}...[truncated ${value.length - max} chars]` : value;
-}
-
-function errorForLog(err: unknown) {
-  if (!(err instanceof Error)) return { message: String(err) };
-  const cause = err.cause instanceof Error
-    ? { name: err.cause.name, message: err.cause.message }
-    : err.cause;
-  return { name: err.name, message: err.message, cause };
-}
-
-async function responseBodyForLog(response: { text: () => Promise<string> }): Promise<string> {
-  try {
-    return truncateForLog(await response.text());
-  } catch (err) {
-    return `[unable to read response body: ${err instanceof Error ? err.message : String(err)}]`;
-  }
-}
-
-function ssoLogContext(row: SsoConfigRow, input: ExchangeSsoCodeInput, tokenUrl: string, userinfoUrl: string) {
-  return {
-    tenant_id: input.tenant_id,
-    provider: row.provider,
-    client_id: row.client_id,
-    issuer_url: row.issuer_url,
-    token_url: tokenUrl,
-    userinfo_url: userinfoUrl,
-    redirect_uri: input.redirect_uri,
-    client_app: input.client_app ?? null,
-    has_code_verifier: Boolean(input.code_verifier),
-    code_length: input.code.length,
-    has_client_secret: Boolean(row.client_secret_enc),
-  };
-}
-
-function shouldLogSsoProvider(row: SsoConfigRow): boolean {
-  return row.provider === 'keycloak';
 }
 
 function compactConfig(row?: SsoConfigRow | null) {
@@ -298,35 +256,9 @@ async function getEnabledConfig(tenantId: string, provider: SsoProvider): Promis
 async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeInput): Promise<ProviderProfile> {
   const tokenUrl = resolveTokenUrl(row);
   const userinfoUrl = resolveUserinfoUrl(row);
-  const shouldLog = shouldLogSsoProvider(row);
-  const logContext = ssoLogContext(row, input, tokenUrl, userinfoUrl);
-  let clientSecret: string | null;
-  try {
-    clientSecret = decryptSecret(row.client_secret_enc);
-  } catch (err) {
-    if (shouldLog) {
-      console.error('[SSO][exchange] client secret decrypt failed', {
-        ...logContext,
-        error: errorForLog(err),
-      });
-    }
-    throw err;
-  }
-
-  if (shouldLog) {
-    console.info('[SSO][exchange] token request start', {
-      ...logContext,
-      has_decrypted_client_secret: Boolean(clientSecret),
-    });
-  }
+  const clientSecret = decryptSecret(row.client_secret_enc);
 
   if (!row.client_id || !clientSecret || !tokenUrl || !userinfoUrl) {
-    if (shouldLog) {
-      console.warn('[SSO][exchange] provider config incomplete', {
-        ...logContext,
-        has_decrypted_client_secret: Boolean(clientSecret),
-      });
-    }
     throw new AppError('SSO provider chưa được cấu hình đầy đủ', 400);
   }
 
@@ -347,23 +279,9 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
       body,
     });
   } catch (err) {
-    if (shouldLog) {
-      console.error('[SSO][exchange] token request network error', {
-        ...logContext,
-        error: errorForLog(err),
-      });
-    }
     throw err;
   }
   if (!tokenResponse.ok) {
-    if (shouldLog) {
-      console.warn('[SSO][exchange] token request rejected', {
-        ...logContext,
-        status: tokenResponse.status,
-        status_text: tokenResponse.statusText,
-        body: await responseBodyForLog(tokenResponse),
-      });
-    }
     throw new AppError('Không thể xác thực SSO code', 401);
   }
 
@@ -371,30 +289,9 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
   try {
     tokenJson = await tokenResponse.json() as { access_token?: string };
   } catch (err) {
-    if (shouldLog) {
-      console.error('[SSO][exchange] token response JSON parse failed', {
-        ...logContext,
-        status: tokenResponse.status,
-        error: errorForLog(err),
-      });
-    }
     throw err;
   }
-  if (shouldLog) {
-    console.info('[SSO][exchange] token request accepted', {
-      ...logContext,
-      status: tokenResponse.status,
-      has_access_token: Boolean(tokenJson.access_token),
-    });
-  }
   if (!tokenJson.access_token) {
-    if (shouldLog) {
-      console.warn('[SSO][exchange] token response missing access token', {
-        ...logContext,
-        status: tokenResponse.status,
-        token_keys: Object.keys(tokenJson),
-      });
-    }
     throw new AppError('SSO provider không trả access token', 401);
   }
 
@@ -404,23 +301,9 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
       headers: { Authorization: `Bearer ${tokenJson.access_token}` },
     });
   } catch (err) {
-    if (shouldLog) {
-      console.error('[SSO][exchange] userinfo request network error', {
-        ...logContext,
-        error: errorForLog(err),
-      });
-    }
     throw err;
   }
   if (!profileResponse.ok) {
-    if (shouldLog) {
-      console.warn('[SSO][exchange] userinfo request rejected', {
-        ...logContext,
-        status: profileResponse.status,
-        status_text: profileResponse.statusText,
-        body: await responseBodyForLog(profileResponse),
-      });
-    }
     throw new AppError('Không thể lấy thông tin SSO user', 401);
   }
 
@@ -428,24 +311,7 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
   try {
     profile = await profileResponse.json() as ProviderProfile;
   } catch (err) {
-    if (shouldLog) {
-      console.error('[SSO][exchange] userinfo response JSON parse failed', {
-        ...logContext,
-        status: profileResponse.status,
-        error: errorForLog(err),
-      });
-    }
     throw err;
-  }
-  if (shouldLog) {
-    console.info('[SSO][exchange] userinfo profile received', {
-      ...logContext,
-      status: profileResponse.status,
-      has_sub: Boolean(profile.sub),
-      email: profile.email || null,
-      email_verified: profile.email_verified ?? null,
-      name: profile.name || null,
-    });
   }
   if (!profile.sub || !profile.email) throw new AppError('SSO profile thiếu email hoặc subject', 401);
   if (profile.email_verified === false || profile.email_verified === 'false') {
@@ -476,6 +342,39 @@ async function buildUniqueUsername(email: string): Promise<string> {
     if (existing.rowCount === 0) return username;
   }
   return `${base.slice(0, 140)}-${randomBytes(4).toString('hex')}`;
+}
+
+function isPgUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === '23505';
+}
+
+async function linkSsoIdentity(tenantId: string, userId: string, provider: SsoProvider, profile: ProviderProfile): Promise<void> {
+  const subjectIdentity = await query<{ user_id: string }>(
+    `SELECT user_id
+     FROM sso_user_identities
+     WHERE tenant_id = $1 AND provider = $2 AND provider_subject = $3
+     LIMIT 1`,
+    [tenantId, provider, profile.sub],
+  );
+  const linkedUserId = subjectIdentity.rows[0]?.user_id;
+  if (linkedUserId && linkedUserId !== userId) {
+    throw new AppError('Tài khoản SSO đã được liên kết với người dùng khác', 409);
+  }
+
+  try {
+    await query(
+      `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant_id, provider, user_id)
+       DO UPDATE SET provider_subject = EXCLUDED.provider_subject, email = EXCLUDED.email, updated_at = now()`,
+      [tenantId, userId, provider, profile.sub, profile.email],
+    );
+  } catch (err) {
+    if (isPgUniqueViolation(err)) {
+      throw new AppError('Tài khoản SSO đã được liên kết với người dùng khác', 409);
+    }
+    throw err;
+  }
 }
 
 async function createLearnerFromProfile(
@@ -552,13 +451,7 @@ async function resolveUserForProfile(tenantId: string, provider: SsoProvider, pr
   }
 
   const userId = existingUser.id;
-  await query(
-    `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (tenant_id, provider, provider_subject)
-     DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email, updated_at = now()`,
-    [tenantId, userId, provider, profile.sub, profile.email],
-  );
+  await linkSsoIdentity(tenantId, userId, provider, profile);
   return { userId, role: existingUser.role };
 }
 
