@@ -25,8 +25,18 @@ import {
   enqueueFeedbackEmails,
   processEmailOutboxBatch,
 } from './email-outbox.service.js';
+import {
+  getEnrollmentContentCompletion,
+  recalculateCourseProgressForActiveEnrollments,
+  recalculateEnrollmentProgress,
+} from '../learner/progress-calculation.service.js';
 
 const MAX_ASSIGNMENT_FILES = 5;
+const DEADLINE_MODES = ['none', 'absolute', 'relative_to_enrollment'] as const;
+const SUBMISSION_UNLOCK_MODES = ['after_content_complete', 'anytime'] as const;
+
+type AssignmentDeadlineMode = typeof DEADLINE_MODES[number];
+type AssignmentSubmissionUnlockMode = typeof SUBMISSION_UNLOCK_MODES[number];
 
 interface CourseRow {
   id: string;
@@ -55,18 +65,65 @@ function normalizeFiles(value: unknown): AssignmentFileMeta[] {
   }));
 }
 
-function isDeadlineExpired(deadlineEnabled: boolean, deadlineAt?: string | Date | null): boolean {
-  if (!deadlineEnabled || !deadlineAt) return false;
+function isDeadlineExpired(deadlineAt?: string | Date | null): boolean {
+  if (!deadlineAt) return false;
   const deadlineTime = new Date(deadlineAt).getTime();
   return Number.isFinite(deadlineTime) && deadlineTime <= Date.now();
 }
 
-function normalizeDeadlineForWrite(deadlineEnabled?: boolean, deadlineAt?: string | null) {
-  const enabled = deadlineEnabled === true;
+function normalizeDeadlineMode(value: unknown, fallback: AssignmentDeadlineMode = 'none'): AssignmentDeadlineMode {
+  return DEADLINE_MODES.includes(value as AssignmentDeadlineMode) ? value as AssignmentDeadlineMode : fallback;
+}
+
+function normalizeSubmissionUnlockMode(value: unknown): AssignmentSubmissionUnlockMode {
+  return SUBMISSION_UNLOCK_MODES.includes(value as AssignmentSubmissionUnlockMode)
+    ? value as AssignmentSubmissionUnlockMode
+    : 'after_content_complete';
+}
+
+function inferDeadlineMode(input: {
+  deadline_mode?: string;
+  deadline_enabled?: boolean;
+  deadline_at?: string | null;
+  deadline_after_days?: number | null;
+}): AssignmentDeadlineMode {
+  if (input.deadline_mode) return normalizeDeadlineMode(input.deadline_mode);
+  if (input.deadline_enabled === true) return input.deadline_after_days ? 'relative_to_enrollment' : 'absolute';
+  if (input.deadline_at) return 'absolute';
+  if (input.deadline_after_days) return 'relative_to_enrollment';
+  return 'none';
+}
+
+function normalizeDeadlineForWrite(input: {
+  deadline_mode?: string;
+  deadline_enabled?: boolean;
+  deadline_at?: string | null;
+  deadline_after_days?: number | null;
+}) {
+  const mode = inferDeadlineMode(input);
+  if (mode === 'absolute' && !input.deadline_at) {
+    throw new AppError('Vui lòng chọn thời hạn nộp bài', 400);
+  }
+  if (mode === 'relative_to_enrollment' && !input.deadline_after_days) {
+    throw new AppError('Vui lòng nhập số ngày tính từ lúc học viên ghi danh', 400);
+  }
   return {
-    deadlineEnabled: enabled,
-    deadlineAt: enabled ? deadlineAt : null,
+    deadlineEnabled: mode !== 'none',
+    deadlineMode: mode,
+    deadlineAt: mode === 'absolute' ? input.deadline_at : null,
+    deadlineAfterDays: mode === 'relative_to_enrollment' ? input.deadline_after_days : null,
   };
+}
+
+function effectiveDeadlineExpression(alias = 'ca', enrollmentAlias = 'e'): string {
+  return `CASE
+    WHEN COALESCE(${alias}.deadline_mode, CASE WHEN ${alias}.deadline_enabled THEN 'absolute' ELSE 'none' END) = 'absolute'
+      THEN ${alias}.deadline_at
+    WHEN COALESCE(${alias}.deadline_mode, CASE WHEN ${alias}.deadline_enabled THEN 'absolute' ELSE 'none' END) = 'relative_to_enrollment'
+      AND ${alias}.deadline_after_days IS NOT NULL
+      THEN ${enrollmentAlias}.enrolled_at + (${alias}.deadline_after_days * INTERVAL '1 day')
+    ELSE NULL
+  END`;
 }
 
 async function ensureCourseForAdmin(courseId: string, tenantId: string): Promise<CourseRow> {
@@ -191,7 +248,11 @@ export async function listCourseAssignments(courseId: string, tenantId: string) 
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
             ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
-            ca.grading_enabled, ca.created_at, ca.updated_at,
+            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
+            ca.deadline_after_days,
+            ca.grading_enabled,
+            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
+            ca.created_at, ca.updated_at,
             COUNT(s.id) FILTER (WHERE s.status = 'submitted')::int AS submitted_count,
             COUNT(s.id) FILTER (WHERE s.status = 'feedback_given')::int AS feedback_count
      FROM course_assignments ca
@@ -220,8 +281,12 @@ export async function createAssignment(
     assignmentQuestion: string;
     deadlineEnabled: boolean;
     deadlineAt: string | Date | null;
+    deadlineMode: AssignmentDeadlineMode;
+    deadlineAfterDays: number | null;
+    submissionUnlockMode: AssignmentSubmissionUnlockMode;
   } | null = null;
-  const deadline = normalizeDeadlineForWrite(input.deadline_enabled, input.deadline_at);
+  const deadline = normalizeDeadlineForWrite(input);
+  const submissionUnlockMode = normalizeSubmissionUnlockMode(input.submission_unlock_mode);
 
   try {
     await client.query('BEGIN');
@@ -229,13 +294,15 @@ export async function createAssignment(
     const result = await client.query(
       `INSERT INTO course_assignments (
          tenant_id, course_id, title, question, is_published, allow_resubmission,
-         deadline_enabled, deadline_at, grading_enabled, sort_order, created_by
+         deadline_enabled, deadline_mode, deadline_at, deadline_after_days,
+         submission_unlock_mode, grading_enabled, sort_order, created_by
        )
        VALUES (
          $1::uuid, $2::varchar, $3::varchar, $4::text, $5::boolean, $6::boolean,
-         $7::boolean, $8::timestamptz, $9::boolean,
+         $7::boolean, $8::varchar, $9::timestamptz, $10::integer,
+         $11::varchar, $12::boolean,
          COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $1::uuid AND course_id = $2::varchar AND deleted_at IS NULL), 0),
-         $10::uuid
+         $13::uuid
        )
        RETURNING *`,
       [
@@ -246,12 +313,19 @@ export async function createAssignment(
         input.is_published,
         input.allow_resubmission,
         deadline.deadlineEnabled,
+        deadline.deadlineMode,
         deadline.deadlineAt,
+        deadline.deadlineAfterDays,
+        submissionUnlockMode,
         input.grading_enabled,
         userId,
       ],
     );
     const assignment = result.rows[0];
+
+    if (assignment.is_published) {
+      await recalculateCourseProgressForActiveEnrollments(courseId, client);
+    }
 
     if (assignment.is_published && !course.visible_to_staff_only) {
       const notification = await client.query<{ id: string }>(
@@ -269,8 +343,11 @@ export async function createAssignment(
             assignment_title: assignment.title,
             assignment_question: assignment.question,
             deadline_enabled: assignment.deadline_enabled,
+            deadline_mode: assignment.deadline_mode,
             deadline_at: assignment.deadline_at,
+            deadline_after_days: assignment.deadline_after_days,
             grading_enabled: assignment.grading_enabled,
+            submission_unlock_mode: assignment.submission_unlock_mode,
             created_at: assignment.created_at,
           }),
           'Bài tập mới',
@@ -327,6 +404,9 @@ export async function createAssignment(
           assignmentQuestion: assignment.question,
           deadlineEnabled: assignment.deadline_enabled,
           deadlineAt: assignment.deadline_at,
+          deadlineMode: assignment.deadline_mode,
+          deadlineAfterDays: assignment.deadline_after_days,
+          submissionUnlockMode: assignment.submission_unlock_mode,
         };
       } else {
         await client.query('DELETE FROM notifications WHERE id = $1::uuid', [notificationId]);
@@ -355,14 +435,29 @@ export async function createAssignment(
 
 export async function updateAssignment(assignmentId: string, tenantId: string, input: UpdateAssignmentInput) {
   const current = await getAssignmentForAdmin(assignmentId, tenantId);
-  const nextDeadlineEnabled = input.deadline_enabled ?? current.deadline_enabled;
-  const nextDeadlineAt = input.deadline_enabled === false
-    ? null
-    : input.deadline_at !== undefined
-      ? input.deadline_at
-      : current.deadline_at;
-  if (nextDeadlineEnabled && !nextDeadlineAt) {
-    throw new AppError('Vui long chon thoi han nop bai', 400);
+  const currentDeadlineMode = normalizeDeadlineMode(
+    current.deadline_mode,
+    current.deadline_enabled ? 'absolute' : 'none',
+  );
+
+  if (input.deadline_mode !== undefined && input.deadline_mode !== currentDeadlineMode) {
+    throw new AppError('Không thể đổi kiểu thời hạn sau khi tạo bài tập', 400);
+  }
+  if (input.deadline_enabled !== undefined && input.deadline_enabled !== (currentDeadlineMode !== 'none')) {
+    throw new AppError('Không thể đổi kiểu thời hạn sau khi tạo bài tập', 400);
+  }
+  if (input.deadline_after_days !== undefined) {
+    if (currentDeadlineMode !== 'relative_to_enrollment' || input.deadline_after_days !== current.deadline_after_days) {
+      throw new AppError('Không thể đổi số ngày hết hạn sau khi tạo bài tập', 400);
+    }
+  }
+  if (input.deadline_at !== undefined) {
+    if (currentDeadlineMode !== 'absolute') {
+      throw new AppError('Chỉ bài tập có hạn cụ thể mới được sửa ngày hết hạn', 400);
+    }
+    if (!input.deadline_at) {
+      throw new AppError('Vui lòng chọn thời hạn nộp bài', 400);
+    }
   }
 
   const sets: string[] = [];
@@ -373,33 +468,63 @@ export async function updateAssignment(assignmentId: string, tenantId: string, i
   if (input.question !== undefined) { sets.push(`question = $${idx++}::text`); params.push(input.question); }
   if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}::boolean`); params.push(input.is_published); }
   if (input.allow_resubmission !== undefined) { sets.push(`allow_resubmission = $${idx++}::boolean`); params.push(input.allow_resubmission); }
-  if (input.deadline_enabled !== undefined) { sets.push(`deadline_enabled = $${idx++}::boolean`); params.push(input.deadline_enabled); }
-  if (input.deadline_at !== undefined || input.deadline_enabled === false) {
+  if (input.deadline_at !== undefined) {
     sets.push(`deadline_at = $${idx++}::timestamptz`);
-    params.push(input.deadline_enabled === false ? null : input.deadline_at);
+    params.push(input.deadline_at);
   }
-  if (sets.length === 0) throw new AppError('Khong co du lieu can cap nhat', 400);
+  if (input.submission_unlock_mode !== undefined) { sets.push(`submission_unlock_mode = $${idx++}::varchar`); params.push(input.submission_unlock_mode); }
+  if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
-  params.push(assignmentId, tenantId);
-  const result = await query(
-    `UPDATE course_assignments
-     SET ${sets.join(', ')}
-     WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid AND deleted_at IS NULL
-     RETURNING *`,
-    params,
-  );
-  return result.rows[0];
+  const shouldRecalculateCourse = input.is_published !== undefined && input.is_published !== current.is_published;
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    params.push(assignmentId, tenantId);
+    const result = await client.query(
+      `UPDATE course_assignments
+       SET ${sets.join(', ')}
+       WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid AND deleted_at IS NULL
+       RETURNING *`,
+      params,
+    );
+    if (shouldRecalculateCourse) {
+      await recalculateCourseProgressForActiveEnrollments(current.course_id, client);
+    }
+
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function deleteAssignment(assignmentId: string, tenantId: string) {
-  const result = await query(
-    `UPDATE course_assignments
-     SET deleted_at = now(), is_published = false
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-     RETURNING id`,
-    [assignmentId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
+  const current = await getAssignmentForAdmin(assignmentId, tenantId);
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE course_assignments
+       SET deleted_at = now(), is_published = false
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [assignmentId, tenantId],
+    );
+    if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
+    if (current.is_published) {
+      await recalculateCourseProgressForActiveEnrollments(current.course_id, client);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function reorderAssignments(courseId: string, tenantId: string, assignmentIds: string[]) {
@@ -498,6 +623,9 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
       ),
       filtered_assignments AS (
         SELECT ca.id, ca.title, ca.question, ca.deadline_enabled, ca.deadline_at,
+               COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
+               ca.deadline_after_days,
+               COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
                ca.grading_enabled, ca.sort_order, ca.created_at
         FROM course_assignments ca
         WHERE ${assignmentConditions.join(' AND ')}
@@ -520,7 +648,10 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
                fa.title AS assignment_title,
                fa.question AS assignment_question,
                fa.deadline_enabled,
+               fa.deadline_mode,
                fa.deadline_at,
+               fa.deadline_after_days,
+               fa.submission_unlock_mode,
                fa.grading_enabled,
                el.username AS learner_username,
                el.full_name AS learner_name,
@@ -612,7 +743,11 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
       `SELECT s.id, s.assignment_id, s.learner_id, s.answer_text, s.files, s.status,
               s.submitted_at, s.submission_version, s.score, s.feedback_text, s.feedback_files,
               s.feedback_by, s.feedback_at, ca.title AS assignment_title, ca.question AS assignment_question,
-              ca.deadline_enabled, ca.deadline_at, ca.grading_enabled,
+              ca.deadline_enabled,
+              COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
+              ca.deadline_at, ca.deadline_after_days,
+              COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
+              ca.grading_enabled,
               u.username AS learner_username, u.full_name AS learner_name, u.email AS learner_email,
               u.role AS learner_role,
               fb.username AS feedback_by_username, fb.full_name AS feedback_by_name, fb.email AS feedback_by_email,
@@ -662,15 +797,14 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
        )`
     : '';
 
-  const access = await query<{ enrollment_id: string; progress: string; is_completed: boolean }>(
-    `SELECT e.id AS enrollment_id, COALESCE(cp.progress, 0)::text AS progress, COALESCE(cp.is_completed, false) AS is_completed
+  const access = await query<{ enrollment_id: string | null }>(
+    `SELECT e.id AS enrollment_id
      FROM courses c
      LEFT JOIN enrollments e
        ON e.course_id = c.id
       AND e.user_id = $2
       AND e.tenant_id = c.tenant_id
       AND e.is_active = true
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      WHERE c.id = $1
        AND c.tenant_id = $3
        AND c.deleted_at IS NULL
@@ -679,13 +813,20 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
   );
   if (access.rowCount === 0) throw new AppError('Khong co quyen truy cap course', 403);
 
-  const progress = Number(access.rows[0].progress || 0);
-  const canSubmit = progress >= 100 || access.rows[0].is_completed === true;
+  const enrollmentId = access.rows[0].enrollment_id;
+  const contentCompletion = enrollmentId
+    ? await getEnrollmentContentCompletion(enrollmentId, courseId)
+    : { total: 0, completed: 0, is_complete: false };
+  const effectiveDeadlineSql = effectiveDeadlineExpression('ca', 'e');
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
             ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
+            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
+            ca.deadline_after_days,
+            ${effectiveDeadlineSql} AS effective_deadline_at,
             ca.grading_enabled,
-            (ca.deadline_enabled = true AND ca.deadline_at IS NOT NULL AND ca.deadline_at <= now()) AS is_deadline_expired,
+            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
+            (${effectiveDeadlineSql} IS NOT NULL AND ${effectiveDeadlineSql} <= now()) AS is_deadline_expired,
             COALESCE(s.status::text, 'not_submitted') AS status,
             s.id AS submission_id, s.answer_text, s.files, s.submitted_at,
             s.submission_version, s.score, s.feedback_text, s.feedback_files,
@@ -694,6 +835,11 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
             fb.full_name AS feedback_by_name,
             fb.email AS feedback_by_email
      FROM course_assignments ca
+     LEFT JOIN enrollments e
+       ON e.course_id = ca.course_id
+      AND e.user_id = $3
+      AND e.tenant_id = ca.tenant_id
+      AND e.is_active = true
      LEFT JOIN assignment_submissions s
        ON s.assignment_id = ca.id AND s.learner_id = $3
      LEFT JOIN users fb ON fb.id = s.feedback_by
@@ -707,7 +853,9 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
 
   return result.rows.map((row: any) => {
     const deadlineExpired = row.is_deadline_expired === true;
-    const canSubmitAssignment = canSubmit && !deadlineExpired;
+    const unlockMode = normalizeSubmissionUnlockMode(row.submission_unlock_mode);
+    const unlockedByContent = unlockMode === 'anytime' || contentCompletion.is_complete;
+    const canSubmitAssignment = Boolean(enrollmentId) && unlockedByContent && !deadlineExpired;
     return {
     id: row.id,
     tenant_id: row.tenant_id,
@@ -718,12 +866,16 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
     is_published: row.is_published,
     allow_resubmission: row.allow_resubmission,
     deadline_enabled: row.deadline_enabled,
+    deadline_mode: normalizeDeadlineMode(row.deadline_mode),
     deadline_at: row.deadline_at,
+    deadline_after_days: row.deadline_after_days,
+    effective_deadline_at: row.effective_deadline_at,
     grading_enabled: row.grading_enabled,
+    submission_unlock_mode: unlockMode,
     is_deadline_expired: deadlineExpired,
     status: row.status,
     can_submit: canSubmitAssignment,
-    locked_reason: canSubmit ? (deadlineExpired ? 'deadline' : null) : 'progress',
+    locked_reason: deadlineExpired ? 'deadline' : unlockedByContent ? null : 'content',
     submission: row.submission_id ? {
       id: row.submission_id,
       answer_text: row.answer_text,
@@ -778,18 +930,23 @@ export async function submitAssignment(
     allow_resubmission: boolean;
     deadline_enabled: boolean;
     deadline_at: string | Date | null;
+    deadline_mode: AssignmentDeadlineMode;
+    deadline_after_days: number | null;
+    effective_deadline_at: string | Date | null;
+    submission_unlock_mode: AssignmentSubmissionUnlockMode;
     enrollment_id: string;
-    progress: string;
-    is_completed: boolean;
   }>(
     `SELECT ca.id AS assignment_id, ca.tenant_id, ca.course_id, ca.title, ca.allow_resubmission,
-            ca.deadline_enabled, ca.deadline_at,
-            e.id AS enrollment_id, COALESCE(cp.progress, 0)::text AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed
+            ca.deadline_enabled,
+            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
+            ca.deadline_at,
+            ca.deadline_after_days,
+            ${effectiveDeadlineExpression('ca', 'e')} AS effective_deadline_at,
+            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
+            e.id AS enrollment_id
      FROM course_assignments ca
      JOIN courses c ON c.id = ca.course_id
      JOIN enrollments e ON e.course_id = ca.course_id AND e.user_id = $3 AND e.tenant_id = ca.tenant_id AND e.is_active = true
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
      WHERE ca.id = $1
        AND ca.tenant_id = $2
        AND ca.deleted_at IS NULL
@@ -815,11 +972,14 @@ export async function submitAssignment(
   if (access.rowCount === 0) throw new AppError('Assignment khong ton tai hoac khong co quyen', 404);
 
   const ctx = access.rows[0];
-  if (Number(ctx.progress || 0) < 100 && !ctx.is_completed) {
-    throw new AppError('Can hoan thanh 100% khoa hoc truoc khi nop bai tap', 403);
+  if (ctx.submission_unlock_mode === 'after_content_complete') {
+    const contentCompletion = await getEnrollmentContentCompletion(ctx.enrollment_id, ctx.course_id);
+    if (!contentCompletion.is_complete) {
+      throw new AppError('Cần hoàn thành nội dung khóa học trước khi nộp bài tập', 403);
+    }
   }
-  if (isDeadlineExpired(ctx.deadline_enabled, ctx.deadline_at)) {
-    throw new AppError('Da het thoi han nop bai tap', 403);
+  if (isDeadlineExpired(ctx.effective_deadline_at)) {
+    throw new AppError('Đã hết thời hạn nộp bài tập', 403);
   }
 
   const existing = await query<{
@@ -909,6 +1069,8 @@ export async function submitAssignment(
       'submission',
       uploadedFiles,
     );
+
+    await recalculateEnrollmentProgress(ctx.enrollment_id, ctx.course_id, client);
 
     await client.query('COMMIT');
   } catch (err) {

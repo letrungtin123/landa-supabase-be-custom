@@ -1,4 +1,6 @@
 export type AssignmentSubmissionStatus = 'not_submitted' | 'submitted' | 'feedback_given';
+export type AssignmentDeadlineMode = 'none' | 'absolute' | 'relative_to_enrollment';
+export type AssignmentSubmissionUnlockMode = 'after_content_complete' | 'anytime';
 
 export interface AssignmentFileMeta {
   id: string;
@@ -19,10 +21,14 @@ export interface CourseAssignment {
   is_published: boolean;
   allow_resubmission: boolean;
   deadline_enabled: boolean;
+  deadline_mode: AssignmentDeadlineMode;
   deadline_at: string | null;
+  deadline_after_days: number | null;
+  effective_deadline_at?: string | null;
   grading_enabled: boolean;
   is_deadline_expired?: boolean;
-  locked_reason?: 'progress' | 'deadline' | null;
+  submission_unlock_mode: AssignmentSubmissionUnlockMode;
+  locked_reason?: 'content' | 'deadline' | null;
   submitted_count?: number;
   feedback_count?: number;
   status?: AssignmentSubmissionStatus;

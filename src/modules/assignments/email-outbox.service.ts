@@ -4,6 +4,16 @@ import { decryptSecret } from '../../utils/secret-crypto.js';
 import { sendSmtpMail } from '../../utils/smtp-client.js';
 import { getTenantSmtpConfigForSend } from '../tenants/tenant-smtp.service.js';
 
+type DeadlineMode = 'none' | 'absolute' | 'relative_to_enrollment';
+type SubmissionUnlockMode = 'after_content_complete' | 'anytime';
+
+interface EmailBranding {
+  tenantName: string;
+  brandName: string;
+  learnerUrl: string | null;
+  learnerDomainLabel: string | null;
+}
+
 interface FeedbackEmailContext {
   tenantId: string;
   submissionId: string;
@@ -24,7 +34,25 @@ interface AssignmentCreatedEmailContext {
   assignmentQuestion: string;
   deadlineEnabled?: boolean;
   deadlineAt?: string | Date | null;
+  deadlineMode?: DeadlineMode;
+  deadlineAfterDays?: number | null;
+  submissionUnlockMode?: SubmissionUnlockMode;
 }
+
+interface RecipientSummaryItem {
+  name: string;
+  email: string;
+}
+
+interface RecipientSummary {
+  totalCount: number;
+  recipients: RecipientSummaryItem[];
+}
+
+const OWNER_FEEDBACK_DIGEST_SUBJECT = 'Tổng hợp phản hồi bài tập mới';
+const OWNER_FEEDBACK_DIGEST_DELAY_MINUTES = 5;
+const OWNER_FEEDBACK_HTML_MARKER = '<!-- LANDA_OWNER_FEEDBACK_ITEMS -->';
+const OWNER_FEEDBACK_TEXT_MARKER = '[LANDA_OWNER_FEEDBACK_ITEMS]';
 
 function escapeHtml(value: string): string {
   return value
@@ -35,77 +63,553 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function buildFeedbackEmail(ctx: FeedbackEmailContext) {
-  const subject = `Feedback bai tap: ${ctx.courseName}`;
-  const scoreLine = ctx.score !== undefined && ctx.score !== null ? `Diem: ${ctx.score}/100` : '';
-  const text = [
-    `Xin chao ${ctx.learnerName},`,
-    '',
-    `Bai tap "${ctx.assignmentTitle}" trong khoa hoc "${ctx.courseName}" da co feedback.`,
-    scoreLine,
-    '',
-    'Nhan xet:',
-    ctx.feedbackText,
-    '',
-    'Vui long dang nhap he thong de xem chi tiet va file dinh kem neu co.',
-  ].join('\n');
+function htmlLines(value: string): string {
+  return escapeHtml(value || '').replace(/\n/g, '<br>');
+}
 
-  const html = `
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827;background:#f9fafb;padding:24px">
-      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:24px">
-        <div style="font-size:14px;color:#6b7280;margin-bottom:8px">Landa LMS</div>
-        <h1 style="font-size:20px;line-height:1.3;margin:0 0 16px;color:#111827">Bai tap da co feedback</h1>
-        <p style="margin:0 0 12px">Xin chao <strong>${escapeHtml(ctx.learnerName)}</strong>,</p>
-        <p style="margin:0 0 12px">Bai tap <strong>${escapeHtml(ctx.assignmentTitle)}</strong> trong khoa hoc <strong>${escapeHtml(ctx.courseName)}</strong> da duoc admin nhan xet.</p>
-        ${scoreLine ? `<div style="display:inline-block;background:#ecfdf5;border:1px solid #bbf7d0;color:#047857;font-weight:700;border-radius:999px;padding:6px 12px;margin:4px 0 12px">${escapeHtml(scoreLine)}</div>` : ''}
-        <div style="border-left:4px solid #2563eb;background:#eff6ff;padding:12px 14px;margin:18px 0;border-radius:8px">
-          ${escapeHtml(ctx.feedbackText).replace(/\n/g, '<br>')}
-        </div>
-        <p style="margin:0;color:#4b5563">Vui long dang nhap he thong de xem chi tiet va file dinh kem neu co.</p>
-      </div>
+function formatDateTime(value: string | Date): string {
+  return new Intl.DateTimeFormat('vi-VN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Ho_Chi_Minh',
+  }).format(new Date(value));
+}
+
+function normalizeLearnerUrl(domain?: string | null): string | null {
+  const trimmed = domain?.trim();
+  if (!trimmed) return null;
+  const withoutTrailingSlash = trimmed.replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(withoutTrailingSlash)) return withoutTrailingSlash;
+  return `https://${withoutTrailingSlash.replace(/^\/+/, '')}`;
+}
+
+function displayDomain(url: string | null): string | null {
+  if (!url) return null;
+  return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+function cleanEmailBody(value: string): string {
+  return value
+    .split(OWNER_FEEDBACK_HTML_MARKER).join('')
+    .split(OWNER_FEEDBACK_TEXT_MARKER).join('');
+}
+
+function deadlineLabel(ctx: AssignmentCreatedEmailContext): string {
+  if (ctx.deadlineMode === 'relative_to_enrollment' && ctx.deadlineAfterDays) {
+    return `Hạn nộp sau ${ctx.deadlineAfterDays} ngày kể từ lúc học viên ghi danh.`;
+  }
+  if ((ctx.deadlineMode === 'absolute' || ctx.deadlineEnabled) && ctx.deadlineAt) {
+    return `Hạn nộp: ${formatDateTime(ctx.deadlineAt)}.`;
+  }
+  return 'Bài tập này chưa đặt hạn nộp.';
+}
+
+function unlockLabel(mode?: SubmissionUnlockMode): string {
+  return mode === 'anytime'
+    ? 'Học viên có thể nộp bài trước khi học xong toàn bộ nội dung.'
+    : 'Học viên cần học xong toàn bộ nội dung khóa học trước khi nộp bài.';
+}
+
+async function getEmailBranding(tenantId: string, client?: PoolClient): Promise<EmailBranding> {
+  const sql = `SELECT name, domain_learner
+     FROM tenants
+     WHERE id = $1::uuid`;
+  const params = [tenantId];
+  const result = client
+    ? await client.query<{
+        name: string;
+        domain_learner: string | null;
+      }>(sql, params)
+    : await query<{
+        name: string;
+        domain_learner: string | null;
+      }>(sql, params);
+  const tenant = result.rows[0];
+  const tenantName = tenant?.name || 'Tenant';
+  const learnerUrl = normalizeLearnerUrl(tenant?.domain_learner);
+  return {
+    tenantName,
+    brandName: `${tenantName} E-Learning`,
+    learnerUrl,
+    learnerDomainLabel: displayDomain(learnerUrl),
+  };
+}
+
+function shellEmail(branding: EmailBranding, eyebrow: string, title: string, intro: string, body: string): string {
+  return `<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      body, table, td, div, p, a, span, strong, h1 {
+        font-family: 'Inter', sans-serif !important;
+      }
+    </style>
+    <title>${escapeHtml(title)}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#edf2f7;font-family:'Inter',sans-serif;color:#111827">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background:#edf2f7;margin:0;padding:28px 12px">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;border-collapse:separate;border-spacing:0">
+            <tr>
+              <td style="padding:0 0 14px 0">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="font-size:18px;line-height:26px;font-weight:800;color:#0f172a">
+                      ${escapeHtml(branding.brandName)}
+                    </td>
+                    <td align="right" style="font-size:12px;line-height:18px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">
+                      ${escapeHtml(eyebrow)}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="background:#ffffff;border:1px solid #dbe3ef;border-radius:24px;box-shadow:0 18px 42px rgba(15,23,42,.12)">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#111827;padding:26px 28px 28px;border-bottom:5px solid #10b981">
+                      <div style="font-size:13px;line-height:20px;color:#a7f3d0;font-weight:800;text-transform:uppercase;letter-spacing:.6px">
+                        ${escapeHtml(branding.tenantName)}
+                      </div>
+                      <h1 style="margin:10px 0 0;color:#ffffff;font-size:28px;line-height:36px;font-weight:800">
+                        ${escapeHtml(title)}
+                      </h1>
+                      <p style="margin:12px 0 0;color:#dbeafe;font-size:15px;line-height:24px;font-weight:500">
+                        ${escapeHtml(intro)}
+                      </p>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style="padding:28px">
+                      ${body}
+                      ${learnerAccessBlock(branding)}
+                      <div style="height:1px;background:#e5e7eb;margin:28px 0 16px"></div>
+                      <p style="margin:0;color:#64748b;font-size:12px;line-height:20px">
+                        Email này được gửi tự động từ ${escapeHtml(branding.brandName)}. Vui lòng đăng nhập hệ thống để xem đầy đủ nội dung và tệp đính kèm nếu có.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function pill(label: string, tone: 'blue' | 'green' | 'amber' | 'slate' = 'blue'): string {
+  const palette = {
+    blue: { bg: '#eff6ff', fg: '#1d4ed8', bd: '#bfdbfe' },
+    green: { bg: '#ecfdf5', fg: '#047857', bd: '#bbf7d0' },
+    amber: { bg: '#fffbeb', fg: '#b45309', bd: '#fde68a' },
+    slate: { bg: '#f8fafc', fg: '#334155', bd: '#e2e8f0' },
+  }[tone];
+  return `<span style="display:inline-block;border-radius:999px;background:${palette.bg};border:1px solid ${palette.bd};color:${palette.fg};font-size:12px;line-height:18px;font-weight:800;padding:6px 11px">${escapeHtml(label)}</span>`;
+}
+
+function infoTable(rows: Array<{ label: string; value: string }>): string {
+  const renderedRows = rows.map(row => `
+    <tr>
+      <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;width:36%;vertical-align:top;color:#64748b;font-size:13px;line-height:20px;font-weight:700">
+        ${escapeHtml(row.label)}
+      </td>
+      <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#0f172a;font-size:14px;line-height:22px;font-weight:700">
+        ${escapeHtml(row.value)}
+      </td>
+    </tr>
+  `).join('');
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:18px;border-collapse:collapse">
+      ${renderedRows}
+    </table>
+  `;
+}
+
+function sectionTitle(value: string): string {
+  return `<div style="margin-top:24px;color:#0f172a;font-size:14px;line-height:20px;font-weight:800;text-transform:uppercase;letter-spacing:.5px">${escapeHtml(value)}</div>`;
+}
+
+function quoteBlock(value: string): string {
+  return `
+    <div style="border:1px solid #dbe3ef;border-left:5px solid #2563eb;background:#f8fafc;border-radius:16px;padding:16px 18px;margin-top:10px;color:#1f2937;font-size:15px;line-height:24px">
+      ${htmlLines(value)}
     </div>
   `;
+}
+
+function learnerAccessBlock(branding: EmailBranding): string {
+  if (!branding.learnerUrl || !branding.learnerDomainLabel) {
+    return '';
+  }
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:18px">
+      <tr>
+        <td style="padding:18px 20px">
+          <div style="font-size:12px;line-height:18px;color:#047857;font-weight:800;text-transform:uppercase;letter-spacing:.5px">Cổng học viên</div>
+          <div style="margin-top:6px;font-size:16px;line-height:24px;color:#064e3b;font-weight:800">${escapeHtml(branding.learnerDomainLabel)}</div>
+          <div style="margin-top:14px">
+            <a href="${escapeHtml(branding.learnerUrl)}" style="display:inline-block;background:#059669;color:#ffffff;text-decoration:none;border-radius:12px;padding:11px 16px;font-size:14px;line-height:18px;font-weight:800">
+              Mở cổng học viên
+            </a>
+          </div>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function recipientList(summary: RecipientSummary): string {
+  if (summary.totalCount <= 0) return '';
+  const rows = summary.recipients.map((recipient, index) => `
+    <tr>
+      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#64748b;font-size:13px;line-height:20px;font-weight:800;width:44px">${index + 1}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-size:14px;line-height:21px;font-weight:700">${escapeHtml(recipient.name)}</td>
+      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#475569;font-size:13px;line-height:21px">${escapeHtml(recipient.email)}</td>
+    </tr>
+  `).join('');
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;border:1px solid #e2e8f0;border-radius:16px;border-collapse:separate;border-spacing:0;background:#ffffff">
+      <tr>
+        <td style="padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;border-radius:16px 16px 0 0;color:#0f172a;font-size:14px;line-height:22px;font-weight:800">
+          Danh sách học viên nhận thông báo (${summary.totalCount})
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:0">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+            ${rows}
+          </table>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function scoreLabel(score?: number | null): string {
+  return score !== undefined && score !== null ? `Điểm: ${score}/100` : 'Đã có phản hồi';
+}
+
+function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) {
+  const subject = `Phản hồi bài tập: ${ctx.assignmentTitle} - ${ctx.courseName}`;
+  const score = scoreLabel(ctx.score);
+  const learnerAccess = branding.learnerDomainLabel
+    ? `Cổng học viên: ${branding.learnerDomainLabel}`
+    : '';
+  const text = [
+    `Xin chào ${ctx.learnerName},`,
+    '',
+    `Bài tập "${ctx.assignmentTitle}" trong khóa học "${ctx.courseName}" đã có phản hồi mới.`,
+    score,
+    learnerAccess,
+    '',
+    'Nhận xét:',
+    ctx.feedbackText,
+    '',
+    'Vui lòng đăng nhập hệ thống để xem chi tiết và tệp đính kèm nếu có.',
+  ].filter(Boolean).join('\n');
+
+  const html = shellEmail(
+    branding,
+    'Phản hồi bài tập',
+    'Bài tập của bạn đã có phản hồi',
+    `Xin chào ${ctx.learnerName}, quản trị viên đã gửi nhận xét mới cho bài tập của bạn.`,
+    `
+      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+        Bài tập <strong>${escapeHtml(ctx.assignmentTitle)}</strong> trong khóa học <strong>${escapeHtml(ctx.courseName)}</strong> đã được phản hồi.
+      </p>
+      <div style="margin-top:16px">${pill(score, ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+      ${infoTable([
+        { label: 'Khóa học', value: ctx.courseName },
+        { label: 'Bài tập', value: ctx.assignmentTitle },
+        { label: 'Người học', value: `${ctx.learnerName} (${ctx.learnerEmail})` },
+      ])}
+      ${sectionTitle('Nhận xét từ quản trị viên')}
+      ${quoteBlock(ctx.feedbackText)}
+    `,
+  );
 
   return { subject, text, html };
 }
 
-function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext) {
-  const subject = `Bai tap moi: ${ctx.courseName}`;
-  const deadlineLine = ctx.deadlineEnabled && ctx.deadlineAt
-    ? `Han nop: ${new Date(ctx.deadlineAt).toLocaleString('vi-VN')}`
+function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, branding: EmailBranding) {
+  const subject = `Bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
+  const deadline = deadlineLabel(ctx);
+  const unlock = unlockLabel(ctx.submissionUnlockMode);
+  const learnerAccess = branding.learnerDomainLabel
+    ? `Cổng học viên: ${branding.learnerDomainLabel}`
     : '';
   const text = [
-    'Xin chao,',
+    'Xin chào,',
     '',
-    `Khoa hoc "${ctx.courseName}" vua co bai tap moi: "${ctx.assignmentTitle}".`,
-    deadlineLine,
+    `Khóa học "${ctx.courseName}" vừa có bài tập mới: "${ctx.assignmentTitle}".`,
+    deadline,
+    unlock,
+    learnerAccess,
     '',
-    'Cau hoi:',
+    'Yêu cầu bài tập:',
     ctx.assignmentQuestion,
     '',
-    'Vui long dang nhap he thong de xem chi tiet. Ban chi co the nop bai sau khi hoan thanh 100% tien do khoa hoc.',
-  ].join('\n');
+    'Vui lòng đăng nhập hệ thống để xem chi tiết.',
+  ].filter(Boolean).join('\n');
 
-  const html = `
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827;background:#f9fafb;padding:24px">
-      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;padding:24px">
-        <div style="font-size:14px;color:#6b7280;margin-bottom:8px">Landa LMS</div>
-        <h1 style="font-size:20px;line-height:1.3;margin:0 0 16px;color:#111827">Khoa hoc co bai tap moi</h1>
-        <p style="margin:0 0 12px">Khoa hoc <strong>${escapeHtml(ctx.courseName)}</strong> vua co bai tap moi.</p>
-        <div style="border:1px solid #dbeafe;background:#eff6ff;padding:14px 16px;margin:18px 0;border-radius:10px">
-          <div style="font-size:13px;color:#1d4ed8;margin-bottom:4px">Bai tap</div>
-          <div style="font-size:16px;font-weight:700;color:#111827">${escapeHtml(ctx.assignmentTitle)}</div>
-          ${deadlineLine ? `<div style="margin-top:8px;font-size:13px;color:#b45309;font-weight:700">${escapeHtml(deadlineLine)}</div>` : ''}
-        </div>
-        <div style="border-left:4px solid #2563eb;background:#f8fafc;padding:12px 14px;margin:18px 0;border-radius:8px">
-          ${escapeHtml(ctx.assignmentQuestion).replace(/\n/g, '<br>')}
-        </div>
-        <p style="margin:0;color:#4b5563">Vui long dang nhap he thong de xem chi tiet. Ban chi co the nop bai sau khi hoan thanh 100% tien do khoa hoc.</p>
-      </div>
-    </div>
-  `;
+  const html = shellEmail(
+    branding,
+    'Bài tập mới',
+    'Khóa học vừa có bài tập mới',
+    `Một bài tập mới đã được thêm vào khóa học ${ctx.courseName}.`,
+    `
+      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+        Khóa học <strong>${escapeHtml(ctx.courseName)}</strong> vừa có bài tập mới. Hãy đăng nhập để xem đầy đủ yêu cầu và chuẩn bị bài nộp đúng hạn.
+      </p>
+      ${infoTable([
+        { label: 'Khóa học', value: ctx.courseName },
+        { label: 'Bài tập', value: ctx.assignmentTitle },
+        { label: 'Thời hạn', value: deadline },
+        { label: 'Điều kiện nộp', value: unlock },
+      ])}
+      ${sectionTitle('Yêu cầu bài tập')}
+      ${quoteBlock(ctx.assignmentQuestion)}
+    `,
+  );
 
   return { subject, text, html };
+}
+
+function buildAssignmentCreatedOwnerEmail(
+  ctx: AssignmentCreatedEmailContext,
+  branding: EmailBranding,
+  summary: RecipientSummary,
+) {
+  const subject = `Đã gửi bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
+  const deadline = deadlineLabel(ctx);
+  const unlock = unlockLabel(ctx.submissionUnlockMode);
+  const learnerAccess = branding.learnerDomainLabel
+    ? `Cổng học viên: ${branding.learnerDomainLabel}`
+    : '';
+  const textRecipients = summary.recipients
+    .map((recipient, index) => `${index + 1}. ${recipient.name} <${recipient.email}>`)
+    .join('\n');
+  const text = [
+    `Thông báo bài tập mới đã được gửi đến ${summary.totalCount} học viên.`,
+    '',
+    `Khóa học: ${ctx.courseName}`,
+    `Bài tập: ${ctx.assignmentTitle}`,
+    deadline,
+    unlock,
+    learnerAccess,
+    '',
+    'Danh sách học viên:',
+    textRecipients,
+    '',
+    'Yêu cầu bài tập:',
+    ctx.assignmentQuestion,
+  ].filter(Boolean).join('\n');
+
+  const html = shellEmail(
+    branding,
+    'Tổng hợp gửi thông báo',
+    'Đã gửi thông báo bài tập mới',
+    `Thông báo bài tập mới đã được gửi đến ${summary.totalCount} học viên.`,
+    `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:18px">
+        <tr>
+          <td style="padding:20px">
+            <div style="font-size:36px;line-height:42px;color:#0f172a;font-weight:800">${summary.totalCount}</div>
+            <div style="margin-top:4px;color:#475569;font-size:14px;line-height:22px;font-weight:700">học viên nhận thông báo bài tập mới</div>
+          </td>
+        </tr>
+      </table>
+      ${infoTable([
+        { label: 'Khóa học', value: ctx.courseName },
+        { label: 'Bài tập', value: ctx.assignmentTitle },
+        { label: 'Thời hạn', value: deadline },
+        { label: 'Điều kiện nộp', value: unlock },
+      ])}
+      ${recipientList(summary)}
+      ${sectionTitle('Yêu cầu bài tập')}
+      ${quoteBlock(ctx.assignmentQuestion)}
+    `,
+  );
+
+  return { subject, text, html };
+}
+
+function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
+  const learner = `${ctx.learnerName} (${ctx.learnerEmail})`;
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
+      <tr>
+        <td style="padding:16px 18px">
+          <div style="color:#0f172a;font-size:15px;line-height:22px;font-weight:800">${escapeHtml(ctx.assignmentTitle)}</div>
+          <div style="margin-top:4px;color:#64748b;font-size:13px;line-height:20px">${escapeHtml(ctx.courseName)}</div>
+          <div style="margin-top:10px">${pill(scoreLabel(ctx.score), ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+          ${infoTable([
+            { label: 'Học viên', value: learner },
+            { label: 'Khóa học', value: ctx.courseName },
+          ])}
+          ${sectionTitle('Nhận xét')}
+          ${quoteBlock(ctx.feedbackText)}
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function ownerFeedbackItemText(ctx: FeedbackEmailContext): string {
+  return [
+    `Học viên: ${ctx.learnerName} <${ctx.learnerEmail}>`,
+    `Khóa học: ${ctx.courseName}`,
+    `Bài tập: ${ctx.assignmentTitle}`,
+    scoreLabel(ctx.score),
+    'Nhận xét:',
+    ctx.feedbackText,
+  ].join('\n');
+}
+
+function buildOwnerFeedbackDigestEmail(ctx: FeedbackEmailContext, branding: EmailBranding) {
+  const learnerAccess = branding.learnerDomainLabel
+    ? `Cổng học viên: ${branding.learnerDomainLabel}`
+    : '';
+  const text = [
+    'Có phản hồi bài tập mới cần theo dõi.',
+    learnerAccess,
+    '',
+    ownerFeedbackItemText(ctx),
+    '',
+    OWNER_FEEDBACK_TEXT_MARKER,
+  ].filter(Boolean).join('\n');
+
+  const html = shellEmail(
+    branding,
+    'Tổng hợp phản hồi',
+    'Tổng hợp phản hồi bài tập mới',
+    'Các phản hồi bài tập mới đang được tổng hợp trong email này.',
+    `
+      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+        Các phản hồi bài tập mới đang được tổng hợp tại đây để owner doanh nghiệp theo dõi một lần, không bị tách thành nhiều email rời.
+      </p>
+      ${ownerFeedbackItemHtml(ctx)}
+      ${OWNER_FEEDBACK_HTML_MARKER}
+    `,
+  );
+
+  return { subject: OWNER_FEEDBACK_DIGEST_SUBJECT, text, html };
+}
+
+async function insertOutboxEmail(
+  client: PoolClient,
+  input: {
+    tenantId: string;
+    relatedSubmissionId?: string | null;
+    recipientUserId?: string | null;
+    recipientEmail: string;
+    recipientName?: string | null;
+    subject: string;
+    html: string;
+    text: string;
+    delayMinutes?: number;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO email_outbox (
+       tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
+       subject, html_body, text_body, next_attempt_at
+     )
+     VALUES (
+       $1::uuid, $2::uuid, $3::uuid, $4::varchar, $5::varchar,
+       LEFT($6::text, 255), $7::text, $8::text,
+       now() + (($9::int || ' minutes')::interval)
+     )`,
+    [
+      input.tenantId,
+      input.relatedSubmissionId ?? null,
+      input.recipientUserId ?? null,
+      input.recipientEmail,
+      input.recipientName ?? null,
+      input.subject,
+      input.html,
+      input.text,
+      input.delayMinutes ?? 0,
+    ],
+  );
+}
+
+async function enqueueOwnerFeedbackDigestEmail(
+  client: PoolClient,
+  ctx: FeedbackEmailContext,
+  branding: EmailBranding,
+  recipientEmail: string,
+): Promise<number> {
+  const existing = await client.query<{ id: string }>(
+    `SELECT id
+     FROM email_outbox
+     WHERE tenant_id = $1::uuid
+       AND recipient_email = $2::varchar
+       AND recipient_user_id IS NULL
+       AND related_submission_id IS NULL
+       AND subject = $3::varchar
+       AND status = 'pending'::email_outbox_status
+       AND next_attempt_at > now()
+       AND html_body LIKE '%' || $4::text || '%'
+     ORDER BY created_at DESC
+     LIMIT 1
+     FOR UPDATE`,
+    [ctx.tenantId, recipientEmail, OWNER_FEEDBACK_DIGEST_SUBJECT, OWNER_FEEDBACK_HTML_MARKER],
+  );
+
+  const nextHtmlItem = ownerFeedbackItemHtml(ctx);
+  const nextTextItem = `\n\n${ownerFeedbackItemText(ctx)}`;
+
+  if (existing.rowCount && existing.rows[0]) {
+    await client.query(
+      `UPDATE email_outbox
+       SET html_body = REPLACE(html_body, $2::text, $3::text || $2::text),
+           text_body = REPLACE(text_body, $4::text, $5::text || E'\n' || $4::text),
+           next_attempt_at = now() + (($6::int || ' minutes')::interval),
+           updated_at = now()
+       WHERE id = $1::uuid`,
+      [
+        existing.rows[0].id,
+        OWNER_FEEDBACK_HTML_MARKER,
+        nextHtmlItem,
+        OWNER_FEEDBACK_TEXT_MARKER,
+        nextTextItem,
+        OWNER_FEEDBACK_DIGEST_DELAY_MINUTES,
+      ],
+    );
+    return 1;
+  }
+
+  const { subject, text, html } = buildOwnerFeedbackDigestEmail(ctx, branding);
+  await insertOutboxEmail(client, {
+    tenantId: ctx.tenantId,
+    recipientEmail,
+    recipientName: 'Owner doanh nghiệp',
+    subject,
+    html,
+    text,
+    delayMinutes: OWNER_FEEDBACK_DIGEST_DELAY_MINUTES,
+  });
+  return 1;
+}
+
+function normalizeRecipients(rows: RecipientSummaryItem[] | null | undefined): RecipientSummaryItem[] {
+  if (!Array.isArray(rows)) return [];
+  return rows
+    .filter(row => row && typeof row.email === 'string' && row.email.trim())
+    .map(row => ({
+      name: (typeof row.name === 'string' && row.name.trim()) ? row.name.trim() : row.email,
+      email: row.email.trim(),
+    }));
 }
 
 export async function enqueueFeedbackEmails(client: PoolClient, ctx: FeedbackEmailContext): Promise<number> {
@@ -123,46 +627,30 @@ export async function enqueueFeedbackEmails(client: PoolClient, ctx: FeedbackEma
 
   if (smtp.rowCount === 0) return 0;
 
-  const { subject, text, html } = buildFeedbackEmail(ctx);
+  const branding = await getEmailBranding(ctx.tenantId, client);
+  const { subject, text, html } = buildFeedbackEmail(ctx, branding);
   const row = smtp.rows[0];
-  const recipients = new Map<string, { email: string; name: string | null; userId: string | null }>();
-  recipients.set(ctx.learnerEmail.toLowerCase(), {
-    email: ctx.learnerEmail,
-    name: ctx.learnerName,
-    userId: ctx.learnerId,
-  });
+  let count = 0;
 
-  if (row.copy_to_sender) {
-    const copyEmail = row.copy_to_email || row.username;
-    if (copyEmail) {
-      recipients.set(copyEmail.toLowerCase(), {
-        email: copyEmail,
-        name: 'SMTP copy',
-        userId: null,
-      });
-    }
+  if (ctx.learnerEmail?.trim()) {
+    await insertOutboxEmail(client, {
+      tenantId: ctx.tenantId,
+      relatedSubmissionId: ctx.submissionId,
+      recipientUserId: ctx.learnerId,
+      recipientEmail: ctx.learnerEmail,
+      recipientName: ctx.learnerName,
+      subject,
+      html,
+      text,
+    });
+    count += 1;
   }
 
-  let count = 0;
-  for (const recipient of recipients.values()) {
-    await client.query(
-      `INSERT INTO email_outbox (
-         tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
-         subject, html_body, text_body
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [
-        ctx.tenantId,
-        ctx.submissionId,
-        recipient.userId,
-        recipient.email,
-        recipient.name,
-        subject,
-        html,
-        text,
-      ],
-    );
-    count += 1;
+  if (row.copy_to_sender) {
+    const copyEmail = (row.copy_to_email || row.username || '').trim();
+    if (copyEmail) {
+      count += await enqueueOwnerFeedbackDigestEmail(client, ctx, branding, copyEmail);
+    }
   }
 
   return count;
@@ -172,54 +660,93 @@ export async function enqueueAssignmentCreatedEmails(
   client: PoolClient,
   ctx: AssignmentCreatedEmailContext,
 ): Promise<number> {
-  const { subject, text, html } = buildAssignmentCreatedEmail(ctx);
-  const result = await client.query<{ id: string }>(
-    `WITH smtp AS (
-       SELECT username, copy_to_sender, copy_to_email
-       FROM tenant_smtp_configs
-       WHERE tenant_id = $1::uuid AND is_enabled = true
-       LIMIT 1
-     ),
-     learner_recipients AS (
-       SELECT nr.user_id,
+  const smtp = await client.query<{
+    username: string;
+    copy_to_sender: boolean;
+    copy_to_email: string | null;
+  }>(
+    `SELECT username, copy_to_sender, copy_to_email
+     FROM tenant_smtp_configs
+     WHERE tenant_id = $1::uuid AND is_enabled = true
+     LIMIT 1`,
+    [ctx.tenantId],
+  );
+
+  if (smtp.rowCount === 0) return 0;
+
+  const branding = await getEmailBranding(ctx.tenantId, client);
+  const learnerEmail = buildAssignmentCreatedEmail(ctx, branding);
+  const inserted = await client.query<{
+    total_count: number;
+    recipients: RecipientSummaryItem[] | null;
+  }>(
+    `WITH learner_recipients AS (
+       SELECT DISTINCT ON (LOWER(u.email))
+              nr.user_id,
               u.email::text AS email,
               COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name
        FROM notification_recipients nr
        JOIN users u ON u.id = nr.user_id
-       JOIN smtp ON true
-       WHERE nr.notification_id = $2::uuid
+       WHERE nr.notification_id = $1::uuid
          AND u.email IS NOT NULL
          AND BTRIM(u.email) <> ''
+       ORDER BY LOWER(u.email), nr.user_id
      ),
-     copy_recipients AS (
-       SELECT NULL::uuid AS user_id,
-              COALESCE(NULLIF(copy_to_email, ''), username)::text AS email,
-              'SMTP copy'::text AS name
-       FROM smtp
-       WHERE copy_to_sender = true
-         AND COALESCE(NULLIF(copy_to_email, ''), username) IS NOT NULL
-         AND BTRIM(COALESCE(NULLIF(copy_to_email, ''), username)) <> ''
+     inserted AS (
+       INSERT INTO email_outbox (
+         tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
+         subject, html_body, text_body
+       )
+       SELECT $2::uuid, NULL::uuid, user_id, email, name, LEFT($3::text, 255), $4::text, $5::text
+       FROM learner_recipients
+       RETURNING recipient_email AS email, COALESCE(recipient_name, recipient_email)::text AS name
      ),
-     deduped AS (
-       SELECT DISTINCT ON (LOWER(email)) user_id, email, name
-       FROM (
-         SELECT * FROM learner_recipients
-         UNION ALL
-         SELECT * FROM copy_recipients
-       ) recipients
-       ORDER BY LOWER(email), user_id NULLS LAST
+     numbered AS (
+       SELECT email,
+              name,
+              COUNT(*) OVER ()::int AS total_count
+       FROM inserted
      )
-     INSERT INTO email_outbox (
-       tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
-       subject, html_body, text_body
-     )
-     SELECT $1::uuid, NULL::uuid, user_id, email, name, LEFT($3::text, 255), $4::text, $5::text
-     FROM deduped
-     RETURNING id`,
-    [ctx.tenantId, ctx.notificationId, subject, html, text],
+     SELECT COALESCE(MAX(total_count), 0)::int AS total_count,
+            COALESCE(
+              jsonb_agg(jsonb_build_object('name', name, 'email', email) ORDER BY name, email),
+              '[]'::jsonb
+            ) AS recipients
+     FROM numbered`,
+    [
+      ctx.notificationId,
+      ctx.tenantId,
+      learnerEmail.subject,
+      learnerEmail.html,
+      learnerEmail.text,
+    ],
   );
 
-  return result.rowCount ?? 0;
+  const totalCount = Number(inserted.rows[0]?.total_count || 0);
+  const summary: RecipientSummary = {
+    totalCount,
+    recipients: normalizeRecipients(inserted.rows[0]?.recipients),
+  };
+  let count = totalCount;
+
+  const row = smtp.rows[0];
+  if (row.copy_to_sender && totalCount > 0) {
+    const copyEmail = (row.copy_to_email || row.username || '').trim();
+    if (copyEmail) {
+      const ownerEmail = buildAssignmentCreatedOwnerEmail(ctx, branding, summary);
+      await insertOutboxEmail(client, {
+        tenantId: ctx.tenantId,
+        recipientEmail: copyEmail,
+        recipientName: 'Owner doanh nghiệp',
+        subject: ownerEmail.subject,
+        html: ownerEmail.html,
+        text: ownerEmail.text,
+      });
+      count += 1;
+    }
+  }
+
+  return count;
 }
 
 export async function enqueueAssignmentCreatedEmailsForNotification(
@@ -301,8 +828,8 @@ export async function processEmailOutboxBatch(tenantId?: string, limit = 10): Pr
           {
             to: job.recipient_email,
             subject: job.subject,
-            html: job.html_body,
-            text: job.text_body,
+            html: cleanEmailBody(job.html_body),
+            text: cleanEmailBody(job.text_body),
           },
         );
 

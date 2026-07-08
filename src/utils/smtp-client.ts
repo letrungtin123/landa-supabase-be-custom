@@ -29,12 +29,24 @@ function encodeHeader(value: string): string {
 }
 
 function formatAddress(email: string, name?: string | null): string {
-  if (!name) return `<${email}>`;
-  return `"${encodeHeader(name).replace(/"/g, '\\"')}" <${email}>`;
+  const trimmedEmail = email.trim();
+  const trimmedName = name?.trim();
+  if (!trimmedName) return `<${trimmedEmail}>`;
+  if (/^[\x00-\x7F]*$/.test(trimmedName)) {
+    return `"${trimmedName.replace(/["\\]/g, '\\$&')}" <${trimmedEmail}>`;
+  }
+  return `${encodeHeader(trimmedName)} <${trimmedEmail}>`;
 }
 
 function dotStuff(value: string): string {
   return value.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
+}
+
+function encodeBody(value: string): string {
+  return Buffer.from(value, 'utf8')
+    .toString('base64')
+    .replace(/.{1,76}/g, '$&\r\n')
+    .trimEnd();
 }
 
 function buildMimeMessage(config: SmtpConfig, mail: SmtpMail): string {
@@ -53,15 +65,15 @@ function buildMimeMessage(config: SmtpConfig, mail: SmtpMail): string {
     '',
     `--${boundary}`,
     'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: 8bit',
+    'Content-Transfer-Encoding: base64',
     '',
-    mail.text,
+    encodeBody(mail.text),
     '',
     `--${boundary}`,
     'Content-Type: text/html; charset=UTF-8',
-    'Content-Transfer-Encoding: 8bit',
+    'Content-Transfer-Encoding: base64',
     '',
-    mail.html,
+    encodeBody(mail.html),
     '',
     `--${boundary}--`,
     '',

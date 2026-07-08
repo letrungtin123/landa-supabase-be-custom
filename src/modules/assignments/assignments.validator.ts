@@ -10,10 +10,18 @@ const optionalNullableDatetimeSchema = z.preprocess((value) => {
   return value;
 }, z.string().datetime({ offset: true }).nullable().optional());
 
+const optionalPositiveDaysSchema = z.preprocess((value) => {
+  if (value === '' || value === undefined || value === null) return undefined;
+  return Number(value);
+}, z.number().int().min(1).max(3650).optional());
+
 const optionalScoreSchema = z.preprocess((value) => {
   if (value === '' || value === undefined || value === null) return undefined;
   return Number(value);
 }, z.number().int().min(0).max(100).optional());
+
+const deadlineModeSchema = z.enum(['none', 'absolute', 'relative_to_enrollment']);
+const submissionUnlockModeSchema = z.enum(['after_content_complete', 'anytime']);
 
 export const createAssignmentSchema = z.object({
   title: z.string().trim().min(1).max(255),
@@ -21,14 +29,25 @@ export const createAssignmentSchema = z.object({
   is_published: z.boolean().optional().default(true),
   allow_resubmission: z.boolean().optional().default(false),
   deadline_enabled: z.boolean().optional().default(false),
+  deadline_mode: deadlineModeSchema.optional(),
   deadline_at: nullableDatetimeSchema.optional().default(null),
+  deadline_after_days: optionalPositiveDaysSchema,
   grading_enabled: z.boolean().optional().default(false),
+  submission_unlock_mode: submissionUnlockModeSchema.optional().default('after_content_complete'),
 }).superRefine((value, ctx) => {
-  if (value.deadline_enabled && !value.deadline_at) {
+  const mode = value.deadline_mode ?? (value.deadline_enabled ? 'absolute' : 'none');
+  if (mode === 'absolute' && !value.deadline_at) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['deadline_at'],
-      message: 'Vui long chon thoi han nop bai',
+      message: 'Vui lòng chọn thời hạn nộp bài',
+    });
+  }
+  if (mode === 'relative_to_enrollment' && !value.deadline_after_days) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['deadline_after_days'],
+      message: 'Vui lòng nhập số ngày tính từ lúc học viên ghi danh',
     });
   }
 });
@@ -39,13 +58,16 @@ export const updateAssignmentSchema = z.object({
   is_published: z.boolean().optional(),
   allow_resubmission: z.boolean().optional(),
   deadline_enabled: z.boolean().optional(),
+  deadline_mode: deadlineModeSchema.optional(),
   deadline_at: optionalNullableDatetimeSchema,
+  deadline_after_days: optionalPositiveDaysSchema,
+  submission_unlock_mode: submissionUnlockModeSchema.optional(),
 }).superRefine((value, ctx) => {
-  if (value.deadline_enabled === true && !value.deadline_at) {
+  if (value.deadline_mode === 'absolute' && !value.deadline_at) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['deadline_at'],
-      message: 'Vui long chon thoi han nop bai',
+      message: 'Vui lòng chọn thời hạn nộp bài',
     });
   }
 });

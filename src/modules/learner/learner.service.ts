@@ -6,6 +6,7 @@
 import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
+import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 
 // ── Courses ──
 
@@ -1093,43 +1094,7 @@ export async function markBlocksComplete(
  * Chỉ tính leaf blocks (video, html, problem, la_*).
  */
 async function recalculateProgress(enrollmentId: string, courseId: string) {
-  const result = await query<{ total: string; completed: string }>(
-    `WITH RECURSIVE active_tree AS (
-       SELECT b.id, b.parent_id, b.block_type
-       FROM course_blocks b
-       JOIN courses c ON c.id = b.course_id
-       WHERE b.course_id = $2
-         AND b.parent_id IS NULL
-         AND b.is_published = true
-         AND b.deleted_at IS NULL
-         AND c.deleted_at IS NULL
-       UNION ALL
-       SELECT child.id, child.parent_id, child.block_type
-       FROM course_blocks child
-       JOIN active_tree parent ON parent.id = child.parent_id
-       WHERE child.is_published = true
-         AND child.deleted_at IS NULL
-     )
-     SELECT
-       COUNT(*) FILTER (WHERE b.block_type NOT IN ('course','chapter','sequential','vertical')) AS total,
-       COUNT(*) FILTER (WHERE b.block_type NOT IN ('course','chapter','sequential','vertical') AND bc.id IS NOT NULL) AS completed
-     FROM active_tree b
-     LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $1
-     `,
-    [enrollmentId, courseId],
-  );
-
-  const total = parseInt(result.rows[0].total);
-  const completed = parseInt(result.rows[0].completed);
-  const progress = total > 0 ? Math.round((completed / total) * 10000) / 100 : 0;
-  const isCompleted = total > 0 && completed >= total;
-
-  await query(
-    `UPDATE course_progress
-     SET progress = $1, is_completed = $2, completed_at = $3, last_activity_at = now(), updated_at = now()
-     WHERE enrollment_id = $4`,
-    [progress, isCompleted, isCompleted ? new Date() : null, enrollmentId],
-  );
+  await recalculateEnrollmentProgress(enrollmentId, courseId);
 }
 
 // ── Progress ──
