@@ -53,6 +53,8 @@ const OWNER_FEEDBACK_DIGEST_SUBJECT = 'Tổng hợp phản hồi bài tập mớ
 const OWNER_FEEDBACK_DIGEST_DELAY_MINUTES = 5;
 const OWNER_FEEDBACK_HTML_MARKER = '<!-- LANDA_OWNER_FEEDBACK_ITEMS -->';
 const OWNER_FEEDBACK_TEXT_MARKER = '[LANDA_OWNER_FEEDBACK_ITEMS]';
+const EMAIL_FONT_FAMILY = "'Google Sans','Product Sans',Arial,sans-serif";
+const EMAIL_FONT_STYLE = `font-family:${EMAIL_FONT_FAMILY};`;
 
 function escapeHtml(value: string): string {
   return value
@@ -142,27 +144,27 @@ function shellEmail(branding: EmailBranding, eyebrow: string, title: string, int
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <meta name="x-apple-disable-message-reformatting">
     <style>
-      body, table, td, div, p, a, span, strong, h1 {
-        font-family: 'Inter', sans-serif !important;
+      html, body, table, tbody, tr, td, div, p, a, span, strong, h1, h2, h3 {
+        font-family: ${EMAIL_FONT_FAMILY} !important;
       }
     </style>
     <title>${escapeHtml(title)}</title>
   </head>
-  <body style="margin:0;padding:0;background:#edf2f7;font-family:'Inter',sans-serif;color:#111827">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background:#edf2f7;margin:0;padding:28px 12px">
+  <body style="${EMAIL_FONT_STYLE}margin:0;padding:0;background:#edf2f7;color:#111827">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}width:100%;background:#edf2f7;margin:0;padding:28px 12px">
       <tr>
         <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:680px;border-collapse:separate;border-spacing:0">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}width:100%;max-width:680px;border-collapse:separate;border-spacing:0">
             <tr>
-              <td style="padding:0 0 14px 0">
+              <td style="${EMAIL_FONT_STYLE}padding:0 0 14px 0">
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                   <tr>
-                    <td style="font-size:18px;line-height:26px;font-weight:800;color:#0f172a">
+                    <td style="${EMAIL_FONT_STYLE}font-size:18px;line-height:26px;font-weight:800;color:#0f172a">
                       ${escapeHtml(branding.brandName)}
                     </td>
-                    <td align="right" style="font-size:12px;line-height:18px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">
+                    <td align="right" style="${EMAIL_FONT_STYLE}font-size:12px;line-height:18px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">
                       ${escapeHtml(eyebrow)}
                     </td>
                   </tr>
@@ -170,27 +172,27 @@ function shellEmail(branding: EmailBranding, eyebrow: string, title: string, int
               </td>
             </tr>
             <tr>
-              <td style="background:#ffffff;border:1px solid #dbe3ef;border-radius:24px;box-shadow:0 18px 42px rgba(15,23,42,.12)">
+              <td style="${EMAIL_FONT_STYLE}background:#ffffff;border:1px solid #dbe3ef;border-radius:24px;box-shadow:0 18px 42px rgba(15,23,42,.12)">
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                   <tr>
-                    <td style="background:#111827;padding:26px 28px 28px;border-bottom:5px solid #10b981">
-                      <div style="font-size:13px;line-height:20px;color:#a7f3d0;font-weight:800;text-transform:uppercase;letter-spacing:.6px">
+                    <td style="${EMAIL_FONT_STYLE}background:#111827;padding:26px 28px 28px;border-bottom:5px solid #10b981">
+                      <div style="${EMAIL_FONT_STYLE}font-size:13px;line-height:20px;color:#a7f3d0;font-weight:800;text-transform:uppercase;letter-spacing:.6px">
                         ${escapeHtml(branding.tenantName)}
                       </div>
-                      <h1 style="margin:10px 0 0;color:#ffffff;font-size:28px;line-height:36px;font-weight:800">
+                      <h1 style="${EMAIL_FONT_STYLE}margin:10px 0 0;color:#ffffff;font-size:28px;line-height:36px;font-weight:800">
                         ${escapeHtml(title)}
                       </h1>
-                      <p style="margin:12px 0 0;color:#dbeafe;font-size:15px;line-height:24px;font-weight:500">
+                      <p style="${EMAIL_FONT_STYLE}margin:12px 0 0;color:#dbeafe;font-size:15px;line-height:24px;font-weight:500">
                         ${escapeHtml(intro)}
                       </p>
                     </td>
                   </tr>
                   <tr>
-                    <td style="padding:28px">
+                    <td style="${EMAIL_FONT_STYLE}padding:28px">
                       ${body}
                       ${learnerAccessBlock(branding)}
-                      <div style="height:1px;background:#e5e7eb;margin:28px 0 16px"></div>
-                      <p style="margin:0;color:#64748b;font-size:12px;line-height:20px">
+                      <div style="${EMAIL_FONT_STYLE}height:1px;background:#e5e7eb;margin:28px 0 16px"></div>
+                      <p style="${EMAIL_FONT_STYLE}margin:0;color:#64748b;font-size:12px;line-height:20px">
                         Email này được gửi tự động từ ${escapeHtml(branding.brandName)}. Vui lòng đăng nhập hệ thống để xem đầy đủ nội dung và tệp đính kèm nếu có.
                       </p>
                     </td>
@@ -213,34 +215,34 @@ function pill(label: string, tone: 'blue' | 'green' | 'amber' | 'slate' = 'blue'
     amber: { bg: '#fffbeb', fg: '#b45309', bd: '#fde68a' },
     slate: { bg: '#f8fafc', fg: '#334155', bd: '#e2e8f0' },
   }[tone];
-  return `<span style="display:inline-block;border-radius:999px;background:${palette.bg};border:1px solid ${palette.bd};color:${palette.fg};font-size:12px;line-height:18px;font-weight:800;padding:6px 11px">${escapeHtml(label)}</span>`;
+  return `<span style="${EMAIL_FONT_STYLE}display:inline-block;border-radius:999px;background:${palette.bg};border:1px solid ${palette.bd};color:${palette.fg};font-size:12px;line-height:18px;font-weight:800;padding:6px 11px">${escapeHtml(label)}</span>`;
 }
 
 function infoTable(rows: Array<{ label: string; value: string }>): string {
   const renderedRows = rows.map(row => `
     <tr>
-      <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;width:36%;vertical-align:top;color:#64748b;font-size:13px;line-height:20px;font-weight:700">
+      <td style="${EMAIL_FONT_STYLE}padding:12px 0;border-bottom:1px solid #e5e7eb;width:36%;vertical-align:top;color:#64748b;font-size:13px;line-height:20px;font-weight:700">
         ${escapeHtml(row.label)}
       </td>
-      <td style="padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#0f172a;font-size:14px;line-height:22px;font-weight:700">
+      <td style="${EMAIL_FONT_STYLE}padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#0f172a;font-size:14px;line-height:22px;font-weight:700">
         ${escapeHtml(row.value)}
       </td>
     </tr>
   `).join('');
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:18px;border-collapse:collapse">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:18px;border-collapse:collapse">
       ${renderedRows}
     </table>
   `;
 }
 
 function sectionTitle(value: string): string {
-  return `<div style="margin-top:24px;color:#0f172a;font-size:14px;line-height:20px;font-weight:800;text-transform:uppercase;letter-spacing:.5px">${escapeHtml(value)}</div>`;
+  return `<div style="${EMAIL_FONT_STYLE}margin-top:24px;color:#0f172a;font-size:14px;line-height:20px;font-weight:800;text-transform:uppercase;letter-spacing:.5px">${escapeHtml(value)}</div>`;
 }
 
 function quoteBlock(value: string): string {
   return `
-    <div style="border:1px solid #dbe3ef;border-left:5px solid #2563eb;background:#f8fafc;border-radius:16px;padding:16px 18px;margin-top:10px;color:#1f2937;font-size:15px;line-height:24px">
+    <div style="${EMAIL_FONT_STYLE}border:1px solid #dbe3ef;border-left:5px solid #2563eb;background:#f8fafc;border-radius:16px;padding:16px 18px;margin-top:10px;color:#1f2937;font-size:15px;line-height:24px">
       ${htmlLines(value)}
     </div>
   `;
@@ -251,13 +253,13 @@ function learnerAccessBlock(branding: EmailBranding): string {
     return '';
   }
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:18px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:24px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:18px">
       <tr>
-        <td style="padding:18px 20px">
-          <div style="font-size:12px;line-height:18px;color:#047857;font-weight:800;text-transform:uppercase;letter-spacing:.5px">Cổng học viên</div>
-          <div style="margin-top:6px;font-size:16px;line-height:24px;color:#064e3b;font-weight:800">${escapeHtml(branding.learnerDomainLabel)}</div>
-          <div style="margin-top:14px">
-            <a href="${escapeHtml(branding.learnerUrl)}" style="display:inline-block;background:#059669;color:#ffffff;text-decoration:none;border-radius:12px;padding:11px 16px;font-size:14px;line-height:18px;font-weight:800">
+        <td style="${EMAIL_FONT_STYLE}padding:18px 20px">
+          <div style="${EMAIL_FONT_STYLE}font-size:12px;line-height:18px;color:#047857;font-weight:800;text-transform:uppercase;letter-spacing:.5px">Cổng học viên</div>
+          <div style="${EMAIL_FONT_STYLE}margin-top:6px;font-size:16px;line-height:24px;color:#064e3b;font-weight:800">${escapeHtml(branding.learnerDomainLabel)}</div>
+          <div style="${EMAIL_FONT_STYLE}margin-top:14px">
+            <a href="${escapeHtml(branding.learnerUrl)}" style="${EMAIL_FONT_STYLE}display:inline-block;background:#059669;color:#ffffff;text-decoration:none;border-radius:12px;padding:11px 16px;font-size:14px;line-height:18px;font-weight:800">
               Mở cổng học viên
             </a>
           </div>
@@ -271,21 +273,21 @@ function recipientList(summary: RecipientSummary): string {
   if (summary.totalCount <= 0) return '';
   const rows = summary.recipients.map((recipient, index) => `
     <tr>
-      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#64748b;font-size:13px;line-height:20px;font-weight:800;width:44px">${index + 1}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-size:14px;line-height:21px;font-weight:700">${escapeHtml(recipient.name)}</td>
-      <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#475569;font-size:13px;line-height:21px">${escapeHtml(recipient.email)}</td>
+      <td style="${EMAIL_FONT_STYLE}padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#64748b;font-size:13px;line-height:20px;font-weight:800;width:44px">${index + 1}</td>
+      <td style="${EMAIL_FONT_STYLE}padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-size:14px;line-height:21px;font-weight:700">${escapeHtml(recipient.name)}</td>
+      <td style="${EMAIL_FONT_STYLE}padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#475569;font-size:13px;line-height:21px">${escapeHtml(recipient.email)}</td>
     </tr>
   `).join('');
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;border:1px solid #e2e8f0;border-radius:16px;border-collapse:separate;border-spacing:0;background:#ffffff">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:12px;border:1px solid #e2e8f0;border-radius:16px;border-collapse:separate;border-spacing:0;background:#ffffff">
       <tr>
-        <td style="padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;border-radius:16px 16px 0 0;color:#0f172a;font-size:14px;line-height:22px;font-weight:800">
+        <td style="${EMAIL_FONT_STYLE}padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;border-radius:16px 16px 0 0;color:#0f172a;font-size:14px;line-height:22px;font-weight:800">
           Danh sách học viên nhận thông báo (${summary.totalCount})
         </td>
       </tr>
       <tr>
-        <td style="padding:0">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+        <td style="${EMAIL_FONT_STYLE}padding:0">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}border-collapse:collapse">
             ${rows}
           </table>
         </td>
@@ -323,10 +325,10 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) 
     'Bài tập của bạn đã có phản hồi',
     `Xin chào ${ctx.learnerName}, quản trị viên đã gửi nhận xét mới cho bài tập của bạn.`,
     `
-      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+      <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Bài tập <strong>${escapeHtml(ctx.assignmentTitle)}</strong> trong khóa học <strong>${escapeHtml(ctx.courseName)}</strong> đã được phản hồi.
       </p>
-      <div style="margin-top:16px">${pill(score, ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+      <div style="${EMAIL_FONT_STYLE}margin-top:16px">${pill(score, ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
       ${infoTable([
         { label: 'Khóa học', value: ctx.courseName },
         { label: 'Bài tập', value: ctx.assignmentTitle },
@@ -367,7 +369,7 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, brandin
     'Khóa học vừa có bài tập mới',
     `Một bài tập mới đã được thêm vào khóa học ${ctx.courseName}.`,
     `
-      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+      <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Khóa học <strong>${escapeHtml(ctx.courseName)}</strong> vừa có bài tập mới. Hãy đăng nhập để xem đầy đủ yêu cầu và chuẩn bị bài nộp đúng hạn.
       </p>
       ${infoTable([
@@ -420,11 +422,11 @@ function buildAssignmentCreatedOwnerEmail(
     'Đã gửi thông báo bài tập mới',
     `Thông báo bài tập mới đã được gửi đến ${summary.totalCount} học viên.`,
     `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:18px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}background:#f8fafc;border:1px solid #e2e8f0;border-radius:18px">
         <tr>
-          <td style="padding:20px">
-            <div style="font-size:36px;line-height:42px;color:#0f172a;font-weight:800">${summary.totalCount}</div>
-            <div style="margin-top:4px;color:#475569;font-size:14px;line-height:22px;font-weight:700">học viên nhận thông báo bài tập mới</div>
+          <td style="${EMAIL_FONT_STYLE}padding:20px">
+            <div style="${EMAIL_FONT_STYLE}font-size:36px;line-height:42px;color:#0f172a;font-weight:800">${summary.totalCount}</div>
+            <div style="${EMAIL_FONT_STYLE}margin-top:4px;color:#475569;font-size:14px;line-height:22px;font-weight:700">học viên nhận thông báo bài tập mới</div>
           </td>
         </tr>
       </table>
@@ -446,12 +448,12 @@ function buildAssignmentCreatedOwnerEmail(
 function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
   const learner = `${ctx.learnerName} (${ctx.learnerEmail})`;
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:14px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
       <tr>
-        <td style="padding:16px 18px">
-          <div style="color:#0f172a;font-size:15px;line-height:22px;font-weight:800">${escapeHtml(ctx.assignmentTitle)}</div>
-          <div style="margin-top:4px;color:#64748b;font-size:13px;line-height:20px">${escapeHtml(ctx.courseName)}</div>
-          <div style="margin-top:10px">${pill(scoreLabel(ctx.score), ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+        <td style="${EMAIL_FONT_STYLE}padding:16px 18px">
+          <div style="${EMAIL_FONT_STYLE}color:#0f172a;font-size:15px;line-height:22px;font-weight:800">${escapeHtml(ctx.assignmentTitle)}</div>
+          <div style="${EMAIL_FONT_STYLE}margin-top:4px;color:#64748b;font-size:13px;line-height:20px">${escapeHtml(ctx.courseName)}</div>
+          <div style="${EMAIL_FONT_STYLE}margin-top:10px">${pill(scoreLabel(ctx.score), ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
           ${infoTable([
             { label: 'Học viên', value: learner },
             { label: 'Khóa học', value: ctx.courseName },
@@ -494,7 +496,7 @@ function buildOwnerFeedbackDigestEmail(ctx: FeedbackEmailContext, branding: Emai
     'Tổng hợp phản hồi bài tập mới',
     'Các phản hồi bài tập mới đang được tổng hợp trong email này.',
     `
-      <p style="margin:0;color:#334155;font-size:15px;line-height:24px">
+      <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Các phản hồi bài tập mới đang được tổng hợp tại đây để owner doanh nghiệp theo dõi một lần, không bị tách thành nhiều email rời.
       </p>
       ${ownerFeedbackItemHtml(ctx)}
