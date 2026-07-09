@@ -27,6 +27,7 @@ import courseAuthoringRoutes from './modules/course-authoring/course-authoring.r
 import notificationsRoutes from './modules/notifications/notifications.routes.js';
 import assignmentsRoutes from './modules/assignments/assignments.routes.js';
 import { startEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
+import emailTemplatesRoutes from './modules/email-templates/email-templates.routes.js';
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
 import brandingRoutes from './modules/branding/branding.routes.js';
@@ -150,6 +151,7 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/course-authoring', courseAuthoringRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/assignments', assignmentsRoutes);
+app.use('/api/email-templates', emailTemplatesRoutes);
 app.use('/api/learner', learnerRoutes);
 app.use('/api/welcome-init', welcomeInitRoutes);
 app.use('/api/ai-chatbot', aiChatbotRoutes);

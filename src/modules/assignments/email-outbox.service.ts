@@ -4,10 +4,18 @@ import { decryptSecret } from '../../utils/secret-crypto.js';
 import { sendSmtpMail } from '../../utils/smtp-client.js';
 import { getTenantSmtpConfigForSend } from '../tenants/tenant-smtp.service.js';
 import {
+  DEFAULT_GROUP_LABELS,
   getGroupLabelSet,
   lowerGroupLabel,
   type GroupLabelMap,
 } from '../tenants/tenant-group-labels.service.js';
+import {
+  getEmailTemplateForRender,
+  renderTemplateToHtml,
+  renderTemplateToText,
+  type EmailTemplateKey,
+  type TemplateTokenMap,
+} from '../email-templates/email-templates.service.js';
 
 type DeadlineMode = 'none' | 'absolute' | 'relative_to_enrollment';
 type SubmissionUnlockMode = 'after_content_complete' | 'anytime';
@@ -359,6 +367,123 @@ function learnerAccessBlock(branding: EmailBranding, learnerHref?: string | null
   `;
 }
 
+function commonTemplateTokens(branding: EmailBranding): TemplateTokenMap {
+  return {
+    tenant_name: { text: branding.tenantName },
+    brand_name: { text: branding.brandName },
+    learner_domain: { text: branding.learnerDomainLabel || '' },
+    learner_portal_url: { text: branding.learnerUrl || '' },
+  };
+}
+
+function templateTokenHtml(tokens: TemplateTokenMap, key: string): string {
+  const token = tokens[key];
+  if (!token) return '';
+  return token.html ?? htmlLines(token.text || '');
+}
+
+function systemDataRowsTable(rows: Array<{ label: string; value: string }>): string {
+  if (rows.length === 0) return '';
+  const renderedRows = rows.map(row => `
+    <tr>
+      <td style="${EMAIL_FONT_STYLE}padding:12px 0;border-bottom:1px solid #e5e7eb;width:38%;vertical-align:top;color:#64748b;font-size:13px;line-height:20px;font-weight:800">
+        ${escapeHtml(row.label)}
+      </td>
+      <td style="${EMAIL_FONT_STYLE}padding:12px 0;border-bottom:1px solid #e5e7eb;vertical-align:top;color:#0f172a;font-size:14px;line-height:22px;font-weight:800">
+        ${row.value}
+      </td>
+    </tr>
+  `).join('');
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:20px;border-collapse:collapse">
+      ${renderedRows}
+    </table>
+  `;
+}
+
+function systemDataBlock(key: EmailTemplateKey, tokens: TemplateTokenMap, templateBody: string): string {
+  if (key === 'course_notification') {
+    return systemDataRowsTable([
+      { label: 'Khóa học', value: templateTokenHtml(tokens, 'course_name') },
+      { label: 'Tiêu đề', value: templateTokenHtml(tokens, 'notification_title') },
+      { label: 'Cổng học viên', value: templateTokenHtml(tokens, 'learner_domain') },
+    ]);
+  }
+
+  if (key === 'assignment_created') {
+    return systemDataRowsTable([
+      { label: 'Khóa học', value: templateTokenHtml(tokens, 'course_name') },
+      { label: 'Bài tập', value: templateTokenHtml(tokens, 'assignment_title') },
+      { label: 'Thời hạn', value: templateTokenHtml(tokens, 'deadline_text') },
+      { label: 'Điều kiện nộp', value: templateTokenHtml(tokens, 'submission_unlock_text') },
+      { label: 'Cổng học viên', value: templateTokenHtml(tokens, 'learner_domain') },
+    ]);
+  }
+
+  if (key === 'assignment_feedback') {
+    return systemDataRowsTable([
+      { label: 'Học viên', value: `${templateTokenHtml(tokens, 'learner_name')} (${templateTokenHtml(tokens, 'learner_email')})` },
+      { label: 'Khóa học', value: templateTokenHtml(tokens, 'course_name') },
+      { label: 'Bài tập', value: templateTokenHtml(tokens, 'assignment_title') },
+      { label: 'Người feedback', value: templateTokenHtml(tokens, 'feedback_by_name') },
+      { label: 'Điểm/Trạng thái', value: templateTokenHtml(tokens, 'score_text') },
+      { label: 'Cổng học viên', value: templateTokenHtml(tokens, 'learner_domain') },
+    ]);
+  }
+
+  if (key === 'team_member_added') {
+    const hasInlineCategoriesTable = /\{\{\s*course_categories_table\s*\}\}/.test(templateBody);
+    return `
+      ${systemDataRowsTable([
+        { label: tokens.group_label?.text || DEFAULT_GROUP_LABELS.group, value: templateTokenHtml(tokens, 'group_name') },
+        { label: tokens.subgroup_label?.text || DEFAULT_GROUP_LABELS.subgroup, value: templateTokenHtml(tokens, 'subgroup_name') },
+        { label: tokens.team_label?.text || DEFAULT_GROUP_LABELS.team, value: templateTokenHtml(tokens, 'team_name') },
+        { label: 'Cổng học viên', value: templateTokenHtml(tokens, 'learner_domain') },
+      ])}
+      ${hasInlineCategoriesTable ? '' : templateTokenHtml(tokens, 'course_categories_table')}
+    `;
+  }
+
+  return '';
+}
+
+async function buildCustomTemplateEmail(
+  client: PoolClient,
+  key: EmailTemplateKey,
+  tenantId: string,
+  branding: EmailBranding,
+  meta: { eyebrow: string; fallbackTitle: string; fallbackIntro: string; learnerHref?: string | null },
+  tokens: TemplateTokenMap,
+): Promise<{ subject: string; text: string; html: string } | null> {
+  const template = await getEmailTemplateForRender(tenantId, key, client);
+  if (!template) return null;
+
+  const mergedTokens = {
+    ...commonTemplateTokens(branding),
+    ...tokens,
+  };
+  const subject = renderTemplateToText(template.subject_template, mergedTokens).trim() || meta.fallbackTitle;
+  const intro = renderTemplateToText(template.preheader_template, mergedTokens).trim() || meta.fallbackIntro;
+  const bodyHtml = renderTemplateToHtml(template.body_template, mergedTokens);
+  const systemHtml = systemDataBlock(key, mergedTokens, template.body_template);
+  const bodyText = renderTemplateToText(template.body_template, mergedTokens).trim();
+  const ctaText = meta.learnerHref ? `\n\nCổng học viên: ${meta.learnerHref}` : '';
+  const html = shellEmail(
+    branding,
+    meta.eyebrow,
+    subject,
+    intro,
+    `<div style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">${bodyHtml}</div>${systemHtml}`,
+    meta.learnerHref,
+  );
+
+  return {
+    subject,
+    text: `${bodyText}${ctaText}`,
+    html,
+  };
+}
+
 function recipientList(summary: RecipientSummary): string {
   if (summary.totalCount <= 0) return '';
   const rows = summary.recipients.map((recipient, index) => `
@@ -439,6 +564,37 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) 
   return { subject, text, html };
 }
 
+async function renderFeedbackEmail(client: PoolClient, ctx: FeedbackEmailContext, branding: EmailBranding) {
+  const score = scoreLabel(ctx.score);
+  const reviewer = ctx.feedbackByEmail
+    ? `${ctx.feedbackByName} (${ctx.feedbackByEmail})`
+    : ctx.feedbackByName;
+  const custom = await buildCustomTemplateEmail(
+    client,
+    'assignment_feedback',
+    ctx.tenantId,
+    branding,
+    {
+      eyebrow: 'Phản hồi bài tập',
+      fallbackTitle: 'Bài tập của bạn đã có phản hồi',
+      fallbackIntro: `Xin chào ${ctx.learnerName}, quản trị viên đã gửi nhận xét mới cho bài tập của bạn.`,
+      learnerHref: branding.learnerUrl,
+    },
+    {
+      learner_name: { text: ctx.learnerName },
+      learner_email: { text: ctx.learnerEmail },
+      course_name: { text: ctx.courseName },
+      assignment_title: { text: ctx.assignmentTitle },
+      feedback_text: { text: ctx.feedbackText },
+      feedback_by_name: { text: ctx.feedbackByName },
+      feedback_by_email: { text: ctx.feedbackByEmail || '' },
+      reviewer: { text: reviewer },
+      score_text: { text: score },
+    },
+  );
+  return custom || buildFeedbackEmail(ctx, branding);
+}
+
 function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, branding: EmailBranding, deadline = deadlineLabel(ctx)) {
   const subject = `Bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
   const unlock = unlockLabel(ctx.submissionUnlockMode);
@@ -482,6 +638,36 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, brandin
   );
 
   return { subject, text, html };
+}
+
+async function renderAssignmentCreatedEmail(
+  client: PoolClient,
+  ctx: AssignmentCreatedEmailContext,
+  branding: EmailBranding,
+  deadline = deadlineLabel(ctx),
+) {
+  const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId);
+  const unlock = unlockLabel(ctx.submissionUnlockMode);
+  const custom = await buildCustomTemplateEmail(
+    client,
+    'assignment_created',
+    ctx.tenantId,
+    branding,
+    {
+      eyebrow: 'Bài tập mới',
+      fallbackTitle: 'Khóa học vừa có bài tập mới',
+      fallbackIntro: `Một bài tập mới đã được thêm vào khóa học ${ctx.courseName}.`,
+      learnerHref,
+    },
+    {
+      course_name: { text: ctx.courseName },
+      assignment_title: { text: ctx.assignmentTitle },
+      assignment_question: { text: ctx.assignmentQuestion },
+      deadline_text: { text: deadline },
+      submission_unlock_text: { text: unlock },
+    },
+  );
+  return custom || buildAssignmentCreatedEmail(ctx, branding, deadline);
 }
 
 function buildAssignmentCreatedOwnerEmail(
@@ -586,6 +772,32 @@ function buildCourseNotificationEmail(ctx: CourseNotificationEmailContext, brand
   return { subject, text, html };
 }
 
+async function renderCourseNotificationEmail(
+  client: PoolClient,
+  ctx: CourseNotificationEmailContext,
+  branding: EmailBranding,
+) {
+  const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId, 'course_notification_email');
+  const custom = await buildCustomTemplateEmail(
+    client,
+    'course_notification',
+    ctx.tenantId,
+    branding,
+    {
+      eyebrow: 'Thông báo khóa học',
+      fallbackTitle: ctx.title,
+      fallbackIntro: `Khóa học ${ctx.courseName} vừa có thông báo mới dành cho bạn.`,
+      learnerHref,
+    },
+    {
+      course_name: { text: ctx.courseName },
+      notification_title: { text: ctx.title },
+      notification_message: { text: ctx.message },
+    },
+  );
+  return custom || buildCourseNotificationEmail(ctx, branding);
+}
+
 function courseCategorySummaryText(categories: TeamMemberAddedCourseCategory[], teamLabel: string): string {
   if (categories.length === 0) {
     return `${teamLabel} này chưa được phân danh mục khóa học.`;
@@ -675,6 +887,49 @@ function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: E
   );
 
   return { subject, text, html };
+}
+
+async function renderTeamMemberAddedEmail(
+  client: PoolClient,
+  ctx: TeamMemberAddedEmailContext,
+  branding: EmailBranding,
+) {
+  const labels = getGroupLabelSet(ctx.groupLabels);
+  const groupLabel = labels.group;
+  const subgroupLabel = labels.subgroup;
+  const teamLabel = labels.team;
+  const teamLabelLower = lowerGroupLabel(teamLabel);
+  const subgroupLabelLower = lowerGroupLabel(subgroupLabel);
+  const groupLabelLower = lowerGroupLabel(groupLabel);
+  const custom = await buildCustomTemplateEmail(
+    client,
+    'team_member_added',
+    ctx.tenantId,
+    branding,
+    {
+      eyebrow: teamLabel,
+      fallbackTitle: `Bạn đã được thêm vào ${teamLabelLower}`,
+      fallbackIntro: `Bạn vừa được thêm vào ${teamLabelLower} ${ctx.teamName}.`,
+      learnerHref: branding.learnerUrl,
+    },
+    {
+      group_label: { text: groupLabel },
+      subgroup_label: { text: subgroupLabel },
+      team_label: { text: teamLabel },
+      group_label_lower: { text: groupLabelLower },
+      subgroup_label_lower: { text: subgroupLabelLower },
+      team_label_lower: { text: teamLabelLower },
+      group_name: { text: ctx.orgGroupName },
+      subgroup_name: { text: ctx.subGroupName },
+      team_name: { text: ctx.teamName },
+      course_categories_text: { text: courseCategorySummaryText(ctx.courseCategories, teamLabel) },
+      course_categories_table: {
+        text: courseCategorySummaryText(ctx.courseCategories, teamLabel),
+        html: courseCategorySummaryTable(ctx.courseCategories),
+      },
+    },
+  );
+  return custom || buildTeamMemberAddedEmail(ctx, branding);
 }
 
 function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
@@ -903,7 +1158,7 @@ export async function enqueueFeedbackEmails(client: PoolClient, ctx: FeedbackEma
   if (smtp.rowCount === 0) return 0;
 
   const branding = await getEmailBranding(ctx.tenantId, client);
-  const { subject, text, html } = buildFeedbackEmail(ctx, branding);
+  const { subject, text, html } = await renderFeedbackEmail(client, ctx, branding);
   const row = smtp.rows[0];
   let count = 0;
 
@@ -983,17 +1238,17 @@ export async function enqueueAssignmentCreatedEmails(
   }));
 
   const emailGroups = new Map<string, {
-    email: ReturnType<typeof buildAssignmentCreatedEmail>;
+    email: { subject: string; text: string; html: string };
     recipients: AssignmentCreatedEmailRecipient[];
   }>();
   for (const recipient of recipients) {
     const deadline = learnerDeadlineLabel(ctx, recipient.enrolledAt);
-    const email = buildAssignmentCreatedEmail(ctx, branding, deadline);
     const groupKey = deadline;
     const group = emailGroups.get(groupKey);
     if (group) {
       group.recipients.push(recipient);
     } else {
+      const email = await renderAssignmentCreatedEmail(client, ctx, branding, deadline);
       emailGroups.set(groupKey, { email, recipients: [recipient] });
     }
   }
@@ -1076,7 +1331,7 @@ export async function enqueueTeamMemberAddedEmails(
   if (recipients.rowCount === 0) return 0;
 
   const branding = await getEmailBranding(ctx.tenantId, client);
-  const email = buildTeamMemberAddedEmail(ctx, branding);
+  const email = await renderTeamMemberAddedEmail(client, ctx, branding);
   const insertResult = await client.query(
     `INSERT INTO email_outbox (
        tenant_id, related_submission_id, related_notification_id, recipient_user_id,
@@ -1221,7 +1476,7 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     }
 
     const branding = await getEmailBranding(row.tenant_id, client);
-    const email = buildCourseNotificationEmail({
+    const email = await renderCourseNotificationEmail(client, {
       tenantId: row.tenant_id,
       notificationId: row.notification_id,
       courseId: row.course_id,
