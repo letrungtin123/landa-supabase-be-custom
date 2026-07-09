@@ -5,6 +5,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as tenantsService from './tenants.service.js';
 import * as roleLabelsService from './tenant-role-labels.service.js';
+import * as groupLabelsService from './tenant-group-labels.service.js';
 import * as smtpService from './tenant-smtp.service.js';
 import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema } from './tenants.validator.js';
 import { updateTenantSmtpSchema } from './tenant-smtp.validator.js';
@@ -101,6 +102,26 @@ export async function updateRoleLabelsController(req: Request, res: Response, ne
     );
     auditFromReq(req, 'UPDATE', 'tenant_role_labels', req.params.id, undefined, 'Cap nhat ten hien thi role tenant');
     sendSuccess(res, { labels }, 'Cap nhat ten role thanh cong');
+  } catch (err) { next(err); }
+}
+
+export async function getGroupLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const labels = await groupLabelsService.getTenantGroupLabels(req.params.id);
+    sendSuccess(res, { labels });
+  } catch (err) { next(err); }
+}
+
+export async function updateGroupLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const labelsInput = req.body?.labels ?? req.body?.group_labels ?? {};
+    const labels = await groupLabelsService.replaceTenantGroupLabels(
+      req.params.id,
+      labelsInput,
+      req.user?.id ?? null,
+    );
+    auditFromReq(req, 'UPDATE', 'tenant_group_labels', req.params.id, undefined, 'Cap nhat ten hien thi group hierarchy tenant');
+    sendSuccess(res, { labels }, 'Cap nhat ten group hierarchy thanh cong');
   } catch (err) { next(err); }
 }
 

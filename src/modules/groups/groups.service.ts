@@ -11,6 +11,11 @@ import {
   processEmailOutboxBatch,
 } from '../assignments/email-outbox.service.js';
 import { getCourseNotificationSmtpStatus } from '../notifications/notifications.service.js';
+import {
+  getGroupLabelSet,
+  getTenantGroupLabels,
+  lowerGroupLabel,
+} from '../tenants/tenant-group-labels.service.js';
 
 interface AddTeamMembersOptions {
   tenantId: string;
@@ -273,6 +278,11 @@ export async function addTeamMembers(
       .filter(Boolean),
   ));
   const sendEmail = Boolean(options.sendEmail);
+  const groupLabels = await getTenantGroupLabels(options.tenantId);
+  const labels = getGroupLabelSet(groupLabels);
+  const groupLabelLower = lowerGroupLabel(labels.group);
+  const subgroupLabelLower = lowerGroupLabel(labels.subgroup);
+  const teamLabelLower = lowerGroupLabel(labels.team);
 
   if (normalizedUserIds.length === 0) {
     return {
@@ -320,7 +330,7 @@ export async function addTeamMembers(
 
     const team = teamResult.rows[0];
     if (!team) {
-      throw new AppError('Phòng ban không tồn tại hoặc không thuộc tenant hiện tại.', 404);
+      throw new AppError(`${labels.team} không tồn tại hoặc không thuộc tenant hiện tại.`, 404);
     }
 
     const insertResult = await client.query<{ user_id: string }>(
@@ -373,8 +383,8 @@ export async function addTeamMembers(
         name: row.name,
         courseCount: Number(row.course_count || 0),
       }));
-      const title = `Bạn đã được thêm vào phòng ban ${team.team_name}`;
-      const message = `Bạn vừa được thêm vào phòng ban ${team.team_name} thuộc ${team.subgroup_name} - ${team.org_group_name}.`;
+      const title = `Bạn đã được thêm vào ${teamLabelLower} ${team.team_name}`;
+      const message = `Bạn vừa được thêm vào ${teamLabelLower} ${team.team_name} thuộc ${subgroupLabelLower} ${team.subgroup_name} - ${groupLabelLower} ${team.org_group_name}.`;
 
       const notification = await client.query<{ id: string }>(
         `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
@@ -389,6 +399,7 @@ export async function addTeamMembers(
              'team_name', $3::text,
              'subgroup_name', $4::text,
              'org_group_name', $5::text,
+             'group_labels', $12::jsonb,
              'course_categories', $7::jsonb
            ),
            $8::varchar,
@@ -409,6 +420,7 @@ export async function addTeamMembers(
           message,
           options.actorUserId,
           added,
+          JSON.stringify(labels),
         ],
       );
       notificationId = notification.rows[0].id;
@@ -427,6 +439,7 @@ export async function addTeamMembers(
           orgGroupName: team.org_group_name,
           subGroupName: team.subgroup_name,
           teamName: team.team_name,
+          groupLabels,
           courseCategories,
         });
       }

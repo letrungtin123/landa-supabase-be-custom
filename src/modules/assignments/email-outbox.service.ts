@@ -3,6 +3,11 @@ import { getClient, query } from '../../config/database.js';
 import { decryptSecret } from '../../utils/secret-crypto.js';
 import { sendSmtpMail } from '../../utils/smtp-client.js';
 import { getTenantSmtpConfigForSend } from '../tenants/tenant-smtp.service.js';
+import {
+  getGroupLabelSet,
+  lowerGroupLabel,
+  type GroupLabelMap,
+} from '../tenants/tenant-group-labels.service.js';
 
 type DeadlineMode = 'none' | 'absolute' | 'relative_to_enrollment';
 type SubmissionUnlockMode = 'after_content_complete' | 'anytime';
@@ -63,6 +68,7 @@ interface TeamMemberAddedEmailContext {
   orgGroupName: string;
   subGroupName: string;
   teamName: string;
+  groupLabels?: GroupLabelMap;
   courseCategories: TeamMemberAddedCourseCategory[];
 }
 
@@ -580,9 +586,9 @@ function buildCourseNotificationEmail(ctx: CourseNotificationEmailContext, brand
   return { subject, text, html };
 }
 
-function courseCategorySummaryText(categories: TeamMemberAddedCourseCategory[]): string {
+function courseCategorySummaryText(categories: TeamMemberAddedCourseCategory[], teamLabel: string): string {
   if (categories.length === 0) {
-    return 'Nhóm này chưa được phân danh mục khóa học.';
+    return `${teamLabel} này chưa được phân danh mục khóa học.`;
   }
   return categories
     .map(category => `- ${category.name}: ${category.courseCount} khóa học`)
@@ -621,17 +627,24 @@ function courseCategorySummaryTable(categories: TeamMemberAddedCourseCategory[])
 }
 
 function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: EmailBranding) {
-  const subject = `Bạn đã được thêm vào phòng ban ${ctx.teamName}`;
+  const labels = getGroupLabelSet(ctx.groupLabels);
+  const groupLabel = labels.group;
+  const subgroupLabel = labels.subgroup;
+  const teamLabel = labels.team;
+  const teamLabelLower = lowerGroupLabel(teamLabel);
+  const subgroupLabelLower = lowerGroupLabel(subgroupLabel);
+  const groupLabelLower = lowerGroupLabel(groupLabel);
+  const subject = `Bạn đã được thêm vào ${teamLabelLower} ${ctx.teamName}`;
   const learnerAccess = branding.learnerDomainLabel
     ? `Cổng học viên: ${branding.learnerDomainLabel}`
     : '';
   const text = [
     'Xin chào,',
     '',
-    `Bạn vừa được thêm vào phòng ban "${ctx.teamName}" thuộc "${ctx.subGroupName}" - "${ctx.orgGroupName}".`,
+    `Bạn vừa được thêm vào ${teamLabelLower} "${ctx.teamName}" thuộc ${subgroupLabelLower} "${ctx.subGroupName}" - ${groupLabelLower} "${ctx.orgGroupName}".`,
     '',
     'Danh mục khóa học được phân:',
-    courseCategorySummaryText(ctx.courseCategories),
+    courseCategorySummaryText(ctx.courseCategories, teamLabel),
     '',
     learnerAccess,
     '',
@@ -640,20 +653,20 @@ function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: E
 
   const html = shellEmail(
     branding,
-    'Nhóm học viên',
-    'Bạn đã được thêm vào nhóm học viên',
-    `Bạn vừa được thêm vào phòng ban ${ctx.teamName}. Các khóa học sẽ hiển thị theo danh mục được phân cho nhóm này.`,
+    teamLabel,
+    `Bạn đã được thêm vào ${teamLabelLower}`,
+    `Bạn vừa được thêm vào ${teamLabelLower} ${ctx.teamName}. Các khóa học sẽ hiển thị theo danh mục được phân cho ${teamLabelLower} này.`,
     `
       <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
-        Bạn vừa được thêm vào phòng ban <strong>${escapeHtml(ctx.teamName)}</strong>. Hãy đăng nhập cổng học viên để xem các khóa học được phân cho nhóm của bạn.
+        Bạn vừa được thêm vào ${escapeHtml(teamLabelLower)} <strong>${escapeHtml(ctx.teamName)}</strong>. Hãy đăng nhập cổng học viên để xem các khóa học được phân cho ${escapeHtml(teamLabelLower)} của bạn.
       </p>
       <div style="${EMAIL_FONT_STYLE}margin-top:16px">
         ${pill(`${ctx.courseCategories.length} danh mục khóa học`, ctx.courseCategories.length > 0 ? 'green' : 'slate')}
       </div>
       ${infoTable([
-        { label: 'Nhóm', value: ctx.orgGroupName },
-        { label: 'Chi nhánh', value: ctx.subGroupName },
-        { label: 'Phòng ban', value: ctx.teamName },
+        { label: groupLabel, value: ctx.orgGroupName },
+        { label: subgroupLabel, value: ctx.subGroupName },
+        { label: teamLabel, value: ctx.teamName },
       ])}
       ${sectionTitle('Danh mục khóa học')}
       ${courseCategorySummaryTable(ctx.courseCategories)}

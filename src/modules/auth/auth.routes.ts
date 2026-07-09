@@ -10,6 +10,7 @@ import {
   refreshController,
   logoutController,
   getMeController,
+  getGroupLabelsController,
   getRoleLabelsController,
   changePasswordController,
   updateProfileController,
@@ -28,6 +29,7 @@ router.post('/ott/exchange', exchangeOTTController);
 router.post('/logout', authenticate, logoutController);
 router.get('/me', authenticate, getMeController);
 router.get('/role-labels', authenticate, tenantContext, getRoleLabelsController);
+router.get('/group-labels', authenticate, tenantContext, getGroupLabelsController);
 router.post('/change-password', authenticate, changePasswordController);
 router.patch('/profile', authenticate, updateProfileController);
 router.post('/ott/generate', authenticate, generateOTTController);

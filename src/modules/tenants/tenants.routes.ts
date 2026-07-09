@@ -14,12 +14,14 @@ import {
   getModulesController,
   updateModulesController,
   getQuotaController,
+  getGroupLabelsController,
   getRoleLabelsController,
   listSimpleController,
   getUserTenantsController,
   setUserTenantsController,
   getSmtpController,
   updateSmtpController,
+  updateGroupLabelsController,
   updateRoleLabelsController,
 } from './tenants.controller.js';
 
@@ -41,6 +43,8 @@ router.get('/:id/modules', authorize('superadmin'), getModulesController);
 router.put('/:id/modules', authorize('superadmin'), updateModulesController);
 router.get('/:id/role-labels', authorize('superadmin'), getRoleLabelsController);
 router.put('/:id/role-labels', authorize('superadmin'), updateRoleLabelsController);
+router.get('/:id/group-labels', authorize('superadmin'), getGroupLabelsController);
+router.put('/:id/group-labels', authorize('superadmin'), updateGroupLabelsController);
 router.get('/:id/quota', authorize('superadmin'), getQuotaController);
 router.get('/:id/smtp', authorize('superadmin'), getSmtpController);
 router.put('/:id/smtp', authorize('superadmin'), updateSmtpController);

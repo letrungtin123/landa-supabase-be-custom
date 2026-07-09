@@ -13,6 +13,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
+import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
 
 /** Hash refresh token bằng SHA-256 trước khi lưu DB */
 function hashToken(token: string): string {
@@ -41,7 +42,23 @@ function resolveRoleLabelTenantId(
 }
 
 export async function getRoleLabelsForTenant(tenantId: string | null | undefined) {
-  return { role_labels: await getTenantRoleLabels(tenantId) };
+  const [roleLabels, groupLabels] = await Promise.all([
+    getTenantRoleLabels(tenantId),
+    getTenantGroupLabels(tenantId),
+  ]);
+  return { role_labels: roleLabels, group_labels: groupLabels };
+}
+
+export async function getGroupLabelsForTenant(tenantId: string | null | undefined) {
+  return { group_labels: await getTenantGroupLabels(tenantId) };
+}
+
+async function getDisplayLabelsForTenant(tenantId: string | null | undefined) {
+  const [roleLabels, groupLabels] = await Promise.all([
+    getTenantRoleLabels(tenantId),
+    getTenantGroupLabels(tenantId),
+  ]);
+  return { roleLabels, groupLabels };
 }
 
 /**
@@ -169,7 +186,9 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
-  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
+    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+  );
 
   // learner_plus: lấy danh sách org groups mà user thuộc về
   const memberGroups = user.role === 'learner_plus'
@@ -195,6 +214,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
     role_labels: roleLabels,
+    group_labels: groupLabels,
     member_groups: memberGroups,
   };
 }
@@ -284,12 +304,14 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   const managedTenants = (row.role === 'superuser' || row.role === 'superadmin')
     ? await resolveManagedTenants(row.user_id, row.tenant_id, row.role)
     : [];
-  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(
-    row.role,
-    row.tenant_id,
-    managedTenants,
-    selectedTenantId,
-  ));
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
+    resolveRoleLabelTenantId(
+      row.role,
+      row.tenant_id,
+      managedTenants,
+      selectedTenantId,
+    ),
+  );
   const memberGroups = row.role === 'learner_plus'
     ? await resolveMemberGroups(row.user_id)
     : [];
@@ -313,6 +335,7 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
     role_labels: roleLabels,
+    group_labels: groupLabels,
     member_groups: memberGroups,
   };
 }
@@ -368,7 +391,9 @@ export async function issueSessionForUserId(userId: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
-  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
+    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+  );
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
     : [];
@@ -392,6 +417,7 @@ export async function issueSessionForUserId(userId: string) {
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
     role_labels: roleLabels,
+    group_labels: groupLabels,
     member_groups: memberGroups,
   };
 }
@@ -418,12 +444,14 @@ export async function getMe(userId: string, selectedTenantId?: string | null) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
-  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(
-    user.role,
-    user.tenant_id,
-    managedTenants,
-    selectedTenantId,
-  ));
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
+    resolveRoleLabelTenantId(
+      user.role,
+      user.tenant_id,
+      managedTenants,
+      selectedTenantId,
+    ),
+  );
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
     : [];
@@ -450,6 +478,7 @@ export async function getMe(userId: string, selectedTenantId?: string | null) {
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
     role_labels: roleLabels,
+    group_labels: groupLabels,
     member_groups: memberGroups,
   };
 }
@@ -702,7 +731,9 @@ export async function exchangeOTT(token: string) {
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
-  const roleLabels = await getTenantRoleLabels(resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants));
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
+    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+  );
 
   return {
     access_token: accessToken,
@@ -723,6 +754,7 @@ export async function exchangeOTT(token: string) {
     tenant_modules: tenantModules,
     managed_tenants: managedTenants,
     role_labels: roleLabels,
+    group_labels: groupLabels,
   };
 }
 

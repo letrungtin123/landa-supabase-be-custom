@@ -103,6 +103,24 @@ export async function getRoleLabelsController(req: Request, res: Response, next:
 }
 
 /**
+ * GET /api/auth/group-labels
+ * Lay ten hien thi cau truc nhom theo tenant context hien tai.
+ */
+export async function getGroupLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) {
+      sendError(res, 'Chưa xác thực', 401);
+      return;
+    }
+
+    const result = await authService.getGroupLabelsForTenant(req.user.tenantId);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * POST /api/auth/change-password
  * Đổi mật khẩu — verify mật khẩu cũ.
  */
