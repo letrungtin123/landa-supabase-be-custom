@@ -46,6 +46,7 @@ interface AssignmentCreatedEmailContext {
   notificationId: string;
   courseId: string;
   courseName: string;
+  learnerName?: string;
   assignmentTitle: string;
   assignmentQuestion: string;
   deadlineEnabled?: boolean;
@@ -61,6 +62,7 @@ interface CourseNotificationEmailContext {
   notificationId: string;
   courseId: string;
   courseName: string;
+  learnerName: string;
   title: string;
   message: string;
 }
@@ -73,6 +75,7 @@ interface TeamMemberAddedCourseCategory {
 interface TeamMemberAddedEmailContext {
   tenantId: string;
   notificationId: string;
+  learnerName?: string;
   orgGroupName: string;
   subGroupName: string;
   teamName: string;
@@ -404,6 +407,7 @@ function systemDataRowsTable(rows: Array<{ label: string; value: string }>): str
 function systemDataBlock(key: EmailTemplateKey, tokens: TemplateTokenMap, templateBody: string): string {
   if (key === 'course_notification') {
     return systemDataRowsTable([
+      { label: 'Học viên', value: templateTokenHtml(tokens, 'learner_name') },
       { label: 'Khóa học', value: templateTokenHtml(tokens, 'course_name') },
       { label: 'Tiêu đề', value: templateTokenHtml(tokens, 'notification_title') },
       { label: 'Cổng học viên', value: templateTokenHtml(tokens, 'learner_domain') },
@@ -412,6 +416,7 @@ function systemDataBlock(key: EmailTemplateKey, tokens: TemplateTokenMap, templa
 
   if (key === 'assignment_created') {
     return systemDataRowsTable([
+      { label: 'Học viên', value: templateTokenHtml(tokens, 'learner_name') },
       { label: 'Khóa học', value: templateTokenHtml(tokens, 'course_name') },
       { label: 'Bài tập', value: templateTokenHtml(tokens, 'assignment_title') },
       { label: 'Thời hạn', value: templateTokenHtml(tokens, 'deadline_text') },
@@ -435,6 +440,7 @@ function systemDataBlock(key: EmailTemplateKey, tokens: TemplateTokenMap, templa
     const hasInlineCategoriesTable = /\{\{\s*course_categories_table\s*\}\}/.test(templateBody);
     return `
       ${systemDataRowsTable([
+        { label: 'Học viên', value: templateTokenHtml(tokens, 'learner_name') },
         { label: tokens.group_label?.text || DEFAULT_GROUP_LABELS.group, value: templateTokenHtml(tokens, 'group_name') },
         { label: tokens.subgroup_label?.text || DEFAULT_GROUP_LABELS.subgroup, value: templateTokenHtml(tokens, 'subgroup_name') },
         { label: tokens.team_label?.text || DEFAULT_GROUP_LABELS.team, value: templateTokenHtml(tokens, 'team_name') },
@@ -598,12 +604,13 @@ async function renderFeedbackEmail(client: PoolClient, ctx: FeedbackEmailContext
 function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, branding: EmailBranding, deadline = deadlineLabel(ctx)) {
   const subject = `Bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
   const unlock = unlockLabel(ctx.submissionUnlockMode);
+  const learnerName = ctx.learnerName?.trim() || 'bạn';
   const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId);
   const learnerAccess = learnerHref
     ? `Cổng học viên: ${learnerHref}`
     : '';
   const text = [
-    'Xin chào,',
+    `Xin chào ${learnerName},`,
     '',
     `Khóa học "${ctx.courseName}" vừa có bài tập mới: "${ctx.assignmentTitle}".`,
     deadline,
@@ -622,6 +629,9 @@ function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, brandin
     'Khóa học vừa có bài tập mới',
     `Một bài tập mới đã được thêm vào khóa học ${ctx.courseName}.`,
     `
+      <p style="${EMAIL_FONT_STYLE}margin:0 0 14px;color:#334155;font-size:15px;line-height:24px">
+        Xin chào <strong>${escapeHtml(learnerName)}</strong>,
+      </p>
       <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Khóa học <strong>${escapeHtml(ctx.courseName)}</strong> vừa có bài tập mới. Hãy đăng nhập để xem đầy đủ yêu cầu và chuẩn bị bài nộp đúng hạn.
       </p>
@@ -660,6 +670,7 @@ async function renderAssignmentCreatedEmail(
       learnerHref,
     },
     {
+      learner_name: { text: ctx.learnerName?.trim() || 'bạn' },
       course_name: { text: ctx.courseName },
       assignment_title: { text: ctx.assignmentTitle },
       assignment_question: { text: ctx.assignmentQuestion },
@@ -736,7 +747,7 @@ function buildCourseNotificationEmail(ctx: CourseNotificationEmailContext, brand
     ? `Cổng học viên: ${learnerHref}`
     : '';
   const text = [
-    'Xin chào,',
+    `Xin chào ${ctx.learnerName},`,
     '',
     `Khóa học "${ctx.courseName}" vừa có thông báo mới.`,
     '',
@@ -756,6 +767,9 @@ function buildCourseNotificationEmail(ctx: CourseNotificationEmailContext, brand
     ctx.title,
     `Khóa học ${ctx.courseName} vừa có thông báo mới dành cho bạn.`,
     `
+      <p style="${EMAIL_FONT_STYLE}margin:0 0 14px;color:#334155;font-size:15px;line-height:24px">
+        Xin chào <strong>${escapeHtml(ctx.learnerName)}</strong>,
+      </p>
       <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Khóa học <strong>${escapeHtml(ctx.courseName)}</strong> vừa có thông báo mới.
       </p>
@@ -791,6 +805,7 @@ async function renderCourseNotificationEmail(
     },
     {
       course_name: { text: ctx.courseName },
+      learner_name: { text: ctx.learnerName },
       notification_title: { text: ctx.title },
       notification_message: { text: ctx.message },
     },
@@ -846,12 +861,13 @@ function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: E
   const teamLabelLower = lowerGroupLabel(teamLabel);
   const subgroupLabelLower = lowerGroupLabel(subgroupLabel);
   const groupLabelLower = lowerGroupLabel(groupLabel);
+  const learnerName = ctx.learnerName?.trim() || 'bạn';
   const subject = `Bạn đã được thêm vào ${teamLabelLower} ${ctx.teamName}`;
   const learnerAccess = branding.learnerDomainLabel
     ? `Cổng học viên: ${branding.learnerDomainLabel}`
     : '';
   const text = [
-    'Xin chào,',
+    `Xin chào ${learnerName},`,
     '',
     `Bạn vừa được thêm vào ${teamLabelLower} "${ctx.teamName}" thuộc ${subgroupLabelLower} "${ctx.subGroupName}" - ${groupLabelLower} "${ctx.orgGroupName}".`,
     '',
@@ -869,6 +885,9 @@ function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: E
     `Bạn đã được thêm vào ${teamLabelLower}`,
     `Bạn vừa được thêm vào ${teamLabelLower} ${ctx.teamName}. Các khóa học sẽ hiển thị theo danh mục được phân cho ${teamLabelLower} này.`,
     `
+      <p style="${EMAIL_FONT_STYLE}margin:0 0 14px;color:#334155;font-size:15px;line-height:24px">
+        Xin chào <strong>${escapeHtml(learnerName)}</strong>,
+      </p>
       <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
         Bạn vừa được thêm vào ${escapeHtml(teamLabelLower)} <strong>${escapeHtml(ctx.teamName)}</strong>. Hãy đăng nhập cổng học viên để xem các khóa học được phân cho ${escapeHtml(teamLabelLower)} của bạn.
       </p>
@@ -913,6 +932,7 @@ async function renderTeamMemberAddedEmail(
       learnerHref: branding.learnerUrl,
     },
     {
+      learner_name: { text: ctx.learnerName?.trim() || 'bạn' },
       group_label: { text: groupLabel },
       subgroup_label: { text: subgroupLabel },
       team_label: { text: teamLabel },
@@ -1047,9 +1067,7 @@ async function insertAssignmentCreatedOutboxBatch(
   input: {
     tenantId: string;
     recipients: AssignmentCreatedEmailRecipient[];
-    subject: string;
-    html: string;
-    text: string;
+    emails: Array<{ subject: string; html: string; text: string }>;
   },
 ): Promise<number> {
   if (input.recipients.length === 0) return 0;
@@ -1058,16 +1076,16 @@ async function insertAssignmentCreatedOutboxBatch(
        tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
        subject, html_body, text_body
      )
-     SELECT $1::uuid, NULL::uuid, x.user_id, x.email, x.name, LEFT($5::text, 255), $6::text, $7::text
-     FROM unnest($2::uuid[], $3::varchar[], $4::varchar[]) AS x(user_id, email, name)`,
+     SELECT $1::uuid, NULL::uuid, x.user_id, x.email, x.name, LEFT(x.subject, 255), x.html_body, x.text_body
+     FROM unnest($2::uuid[], $3::varchar[], $4::varchar[], $5::text[], $6::text[], $7::text[]) AS x(user_id, email, name, subject, html_body, text_body)`,
     [
       input.tenantId,
       input.recipients.map(recipient => recipient.userId),
       input.recipients.map(recipient => recipient.email),
       input.recipients.map(recipient => recipient.name),
-      input.subject,
-      input.html,
-      input.text,
+      input.emails.map(email => email.subject),
+      input.emails.map(email => email.html),
+      input.emails.map(email => email.text),
     ],
   );
   return input.recipients.length;
@@ -1237,32 +1255,20 @@ export async function enqueueAssignmentCreatedEmails(
     enrolledAt: row.enrolled_at,
   }));
 
-  const emailGroups = new Map<string, {
-    email: { subject: string; text: string; html: string };
-    recipients: AssignmentCreatedEmailRecipient[];
-  }>();
+  const renderedEmails: Array<{ subject: string; text: string; html: string }> = [];
   for (const recipient of recipients) {
     const deadline = learnerDeadlineLabel(ctx, recipient.enrolledAt);
-    const groupKey = deadline;
-    const group = emailGroups.get(groupKey);
-    if (group) {
-      group.recipients.push(recipient);
-    } else {
-      const email = await renderAssignmentCreatedEmail(client, ctx, branding, deadline);
-      emailGroups.set(groupKey, { email, recipients: [recipient] });
-    }
+    renderedEmails.push(await renderAssignmentCreatedEmail(client, {
+      ...ctx,
+      learnerName: recipient.name,
+    }, branding, deadline));
   }
 
-  let insertedCount = 0;
-  for (const group of emailGroups.values()) {
-    insertedCount += await insertAssignmentCreatedOutboxBatch(client, {
-      tenantId: ctx.tenantId,
-      recipients: group.recipients,
-      subject: group.email.subject,
-      html: group.email.html,
-      text: group.email.text,
-    });
-  }
+  const insertedCount = await insertAssignmentCreatedOutboxBatch(client, {
+    tenantId: ctx.tenantId,
+    recipients,
+    emails: renderedEmails,
+  });
 
   const totalCount = insertedCount;
   const summary: RecipientSummary = {
@@ -1331,7 +1337,13 @@ export async function enqueueTeamMemberAddedEmails(
   if (recipients.rowCount === 0) return 0;
 
   const branding = await getEmailBranding(ctx.tenantId, client);
-  const email = await renderTeamMemberAddedEmail(client, ctx, branding);
+  const renderedEmails: Array<{ subject: string; html: string; text: string }> = [];
+  for (const recipient of recipients.rows) {
+    renderedEmails.push(await renderTeamMemberAddedEmail(client, {
+      ...ctx,
+      learnerName: recipient.name,
+    }, branding));
+  }
   const insertResult = await client.query(
     `INSERT INTO email_outbox (
        tenant_id, related_submission_id, related_notification_id, recipient_user_id,
@@ -1343,10 +1355,10 @@ export async function enqueueTeamMemberAddedEmails(
             x.user_id,
             x.email,
             x.name,
-            LEFT($6::text, 255),
-            $7::text,
-            $8::text
-     FROM unnest($3::uuid[], $4::varchar[], $5::varchar[]) AS x(user_id, email, name)
+            LEFT(x.subject, 255),
+            x.html_body,
+            x.text_body
+     FROM unnest($3::uuid[], $4::varchar[], $5::varchar[], $6::text[], $7::text[], $8::text[]) AS x(user_id, email, name, subject, html_body, text_body)
      ON CONFLICT DO NOTHING`,
     [
       ctx.tenantId,
@@ -1354,9 +1366,9 @@ export async function enqueueTeamMemberAddedEmails(
       recipients.rows.map(recipient => recipient.user_id),
       recipients.rows.map(recipient => recipient.email),
       recipients.rows.map(recipient => recipient.name),
-      email.subject,
-      email.html,
-      email.text,
+      renderedEmails.map(email => email.subject),
+      renderedEmails.map(email => email.html),
+      renderedEmails.map(email => email.text),
     ],
   );
 
@@ -1476,14 +1488,18 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     }
 
     const branding = await getEmailBranding(row.tenant_id, client);
-    const email = await renderCourseNotificationEmail(client, {
-      tenantId: row.tenant_id,
-      notificationId: row.notification_id,
-      courseId: row.course_id,
-      courseName: notificationRow.course_name,
-      title: notificationRow.title,
-      message: notificationRow.message || '',
-    }, branding);
+    const renderedEmails: Array<{ subject: string; html: string; text: string }> = [];
+    for (const recipient of recipients.rows) {
+      renderedEmails.push(await renderCourseNotificationEmail(client, {
+        tenantId: row.tenant_id,
+        notificationId: row.notification_id,
+        courseId: row.course_id,
+        courseName: notificationRow.course_name,
+        learnerName: recipient.name,
+        title: notificationRow.title,
+        message: notificationRow.message || '',
+      }, branding));
+    }
 
     const insertResult = await client.query(
       `INSERT INTO email_outbox (
@@ -1496,10 +1512,10 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
               x.user_id,
               x.email,
               x.name,
-              LEFT($6::text, 255),
-              $7::text,
-              $8::text
-       FROM unnest($3::uuid[], $4::varchar[], $5::varchar[]) AS x(user_id, email, name)
+              LEFT(x.subject, 255),
+              x.html_body,
+              x.text_body
+       FROM unnest($3::uuid[], $4::varchar[], $5::varchar[], $6::text[], $7::text[], $8::text[]) AS x(user_id, email, name, subject, html_body, text_body)
        ON CONFLICT DO NOTHING`,
       [
         row.tenant_id,
@@ -1507,9 +1523,9 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
         recipients.rows.map(recipient => recipient.user_id),
         recipients.rows.map(recipient => recipient.email),
         recipients.rows.map(recipient => recipient.name),
-        email.subject,
-        email.html,
-        email.text,
+        renderedEmails.map(email => email.subject),
+        renderedEmails.map(email => email.html),
+        renderedEmails.map(email => email.text),
       ],
     );
 

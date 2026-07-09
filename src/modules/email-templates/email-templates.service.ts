@@ -93,7 +93,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     subjectTemplate: '{{notification_title}} - {{course_name}}',
     preheaderTemplate: 'Khóa học {{course_name}} vừa có thông báo mới dành cho bạn.',
     bodyTemplate: [
-      'Xin chào,',
+      'Xin chào {{learner_name}},',
       '',
       'Khóa học {{course_name}} vừa có thông báo mới.',
       '',
@@ -106,6 +106,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     ].join('\n'),
     variables: [
       ...COMMON_VARIABLES,
+      { key: 'learner_name', label: 'Tên học viên', description: 'Tên học viên nhận thông báo.', system: true },
       { key: 'course_name', label: 'Tên khóa học', description: 'Tên khóa học phát sinh thông báo.', system: true },
       { key: 'notification_title', label: 'Tiêu đề thông báo', description: 'Tiêu đề admin nhập khi gửi thông báo.', system: true },
       { key: 'notification_message', label: 'Nội dung thông báo', description: 'Nội dung admin nhập khi gửi thông báo.', system: true },
@@ -118,7 +119,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     subjectTemplate: 'Bài tập mới: {{assignment_title}} - {{course_name}}',
     preheaderTemplate: 'Khóa học {{course_name}} vừa có bài tập mới. Hạn nộp: {{deadline_text}}',
     bodyTemplate: [
-      'Xin chào,',
+      'Xin chào {{learner_name}},',
       '',
       'Khóa học {{course_name}} vừa có bài tập mới: {{assignment_title}}.',
       '',
@@ -132,6 +133,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     ].join('\n'),
     variables: [
       ...COMMON_VARIABLES,
+      { key: 'learner_name', label: 'Tên học viên', description: 'Tên học viên nhận thông báo bài tập.', system: true },
       { key: 'course_name', label: 'Tên khóa học', description: 'Tên khóa học có bài tập mới.', system: true },
       { key: 'assignment_title', label: 'Tiêu đề bài tập', description: 'Tiêu đề bài tập do admin tạo.', system: true },
       { key: 'assignment_question', label: 'Câu hỏi bài tập', description: 'Nội dung/câu hỏi bài tập.', system: true },
@@ -177,7 +179,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     subjectTemplate: 'Bạn đã được thêm vào {{team_label_lower}} {{team_name}}',
     preheaderTemplate: 'Các khóa học sẽ hiển thị theo danh mục được phân cho {{team_label_lower}} của bạn.',
     bodyTemplate: [
-      'Xin chào,',
+      'Xin chào {{learner_name}},',
       '',
       'Bạn vừa được thêm vào {{team_label_lower}} {{team_name}} thuộc {{subgroup_label_lower}} {{subgroup_name}} - {{group_label_lower}} {{group_name}}.',
       '',
@@ -187,6 +189,7 @@ const DEFAULT_TEMPLATES: Record<EmailTemplateKey, EmailTemplateDefinition> = {
     ].join('\n'),
     variables: [
       ...COMMON_VARIABLES,
+      { key: 'learner_name', label: 'Tên học viên', description: 'Tên học viên vừa được thêm vào nhóm.', system: true },
       { key: 'group_label', label: 'Label group', description: 'Tên label group theo tenant.', system: true },
       { key: 'subgroup_label', label: 'Label sub-group', description: 'Tên label sub-group theo tenant.', system: true },
       { key: 'team_label', label: 'Label team', description: 'Tên label team theo tenant.', system: true },
