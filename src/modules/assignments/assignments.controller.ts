@@ -20,6 +20,10 @@ function files(req: Request): Express.Multer.File[] {
   return (req.files as Express.Multer.File[] | undefined) || [];
 }
 
+function file(req: Request): Express.Multer.File | undefined {
+  return req.file;
+}
+
 export async function listCourseAssignments(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = await service.listCourseAssignments(req.params.courseId, tenantId(req));
@@ -31,7 +35,7 @@ export async function createAssignment(req: Request, res: Response, next: NextFu
   try {
     const parsed = createAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    const result = await service.createAssignment(req.params.courseId, tenantId(req), req.user!.id, parsed.data);
+    const result = await service.createAssignment(req.params.courseId, tenantId(req), req.user!.id, parsed.data, file(req));
     sendSuccess(res, result, 'Tao assignment thanh cong', 201);
   } catch (err) { next(err); }
 }
@@ -40,7 +44,7 @@ export async function updateAssignment(req: Request, res: Response, next: NextFu
   try {
     const parsed = updateAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    const result = await service.updateAssignment(req.params.assignmentId, tenantId(req), parsed.data);
+    const result = await service.updateAssignment(req.params.assignmentId, tenantId(req), req.user!.id, parsed.data, file(req));
     sendSuccess(res, result, 'Cap nhat assignment thanh cong');
   } catch (err) { next(err); }
 }

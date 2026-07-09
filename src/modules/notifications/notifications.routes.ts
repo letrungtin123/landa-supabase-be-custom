@@ -12,6 +12,7 @@ const router = Router();
 
 router.use(authenticate, tenantContext);
 
+router.get('/smtp-status', checkPermission('courses', 'can_view'), ctrl.smtpStatus);
 router.post('/', checkPermission('courses', 'can_edit'), ctrl.send);
 router.get('/', checkPermission('courses', 'can_view'), ctrl.list);
 

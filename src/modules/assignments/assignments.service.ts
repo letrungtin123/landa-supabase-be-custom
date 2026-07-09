@@ -32,6 +32,7 @@ import {
 } from '../learner/progress-calculation.service.js';
 
 const MAX_ASSIGNMENT_FILES = 5;
+const MAX_ASSIGNMENT_FILE_SIZE_BYTES = 25 * 1024 * 1024;
 const DEADLINE_MODES = ['none', 'absolute', 'relative_to_enrollment'] as const;
 const SUBMISSION_UNLOCK_MODES = ['after_content_complete', 'anytime'] as const;
 
@@ -47,6 +48,10 @@ interface CourseRow {
 
 interface UploadedAssignmentFile extends AssignmentFileMeta {
   storage_path: string;
+}
+
+interface StoredAssignmentAttachment extends UploadedAssignmentFile {
+  created_at?: string;
 }
 
 function fileDownloadUrl(id: string): string {
@@ -65,6 +70,34 @@ function normalizeFiles(value: unknown): AssignmentFileMeta[] {
   }));
 }
 
+function normalizeAttachmentFile(value: unknown): AssignmentFileMeta | null {
+  if (!value || typeof value !== 'object') return null;
+  const file = value as Record<string, unknown>;
+  const id = typeof file.id === 'string' ? file.id : '';
+  if (!id) return null;
+  return {
+    id,
+    original_name: String(file.original_name || file.originalName || 'file'),
+    mime_type: String(file.mime_type || file.mimeType || 'application/octet-stream'),
+    size_bytes: Number(file.size_bytes || file.size || 0),
+    download_url: fileDownloadUrl(id),
+    created_at: typeof file.created_at === 'string' ? file.created_at : undefined,
+  };
+}
+
+function attachmentStoragePath(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const storagePath = (value as Record<string, unknown>).storage_path;
+  return typeof storagePath === 'string' && storagePath ? storagePath : null;
+}
+
+function normalizeAssignmentRow<T extends Record<string, any>>(row: T): T & { attachment_file: AssignmentFileMeta | null } {
+  return {
+    ...row,
+    attachment_file: normalizeAttachmentFile(row.attachment_file),
+  };
+}
+
 function isDeadlineExpired(deadlineAt?: string | Date | null): boolean {
   if (!deadlineAt) return false;
   const deadlineTime = new Date(deadlineAt).getTime();
@@ -81,37 +114,41 @@ function normalizeSubmissionUnlockMode(value: unknown): AssignmentSubmissionUnlo
     : 'after_content_complete';
 }
 
-function inferDeadlineMode(input: {
-  deadline_mode?: string;
-  deadline_enabled?: boolean;
-  deadline_at?: string | null;
-  deadline_after_days?: number | null;
-}): AssignmentDeadlineMode {
-  if (input.deadline_mode) return normalizeDeadlineMode(input.deadline_mode);
-  if (input.deadline_enabled === true) return input.deadline_after_days ? 'relative_to_enrollment' : 'absolute';
-  if (input.deadline_at) return 'absolute';
-  if (input.deadline_after_days) return 'relative_to_enrollment';
-  return 'none';
-}
-
 function normalizeDeadlineForWrite(input: {
   deadline_mode?: string;
   deadline_enabled?: boolean;
   deadline_at?: string | null;
   deadline_after_days?: number | null;
 }) {
-  const mode = inferDeadlineMode(input);
-  if (mode === 'absolute' && !input.deadline_at) {
-    throw new AppError('Vui lòng chọn thời hạn nộp bài', 400);
+  if (input.deadline_at) {
+    throw new AppError('Không còn hỗ trợ hạn cụ thể cho bài tập', 400);
   }
-  if (mode === 'relative_to_enrollment' && !input.deadline_after_days) {
-    throw new AppError('Vui lòng nhập số ngày tính từ lúc học viên ghi danh', 400);
+  if (input.deadline_mode === 'absolute') {
+    throw new AppError('Không còn hỗ trợ hạn cụ thể cho bài tập', 400);
+  }
+
+  const mode = input.deadline_mode === 'none' || input.deadline_enabled === false
+    ? 'none'
+    : 'relative_to_enrollment';
+
+  if (mode === 'none') {
+    return {
+      deadlineEnabled: false,
+      deadlineMode: 'none' as const,
+      deadlineAt: null,
+      deadlineAfterDays: null,
+    };
+  }
+
+  const afterDays = input.deadline_after_days || 7;
+  if (!Number.isInteger(afterDays) || afterDays < 1 || afterDays > 3650) {
+    throw new AppError('Vui lòng nhập số ngày từ 1 đến 3650', 400);
   }
   return {
-    deadlineEnabled: mode !== 'none',
-    deadlineMode: mode,
-    deadlineAt: mode === 'absolute' ? input.deadline_at : null,
-    deadlineAfterDays: mode === 'relative_to_enrollment' ? input.deadline_after_days : null,
+    deadlineEnabled: true,
+    deadlineMode: 'relative_to_enrollment' as const,
+    deadlineAt: null,
+    deadlineAfterDays: afterDays,
   };
 }
 
@@ -121,7 +158,8 @@ function effectiveDeadlineExpression(alias = 'ca', enrollmentAlias = 'e'): strin
       THEN ${alias}.deadline_at
     WHEN COALESCE(${alias}.deadline_mode, CASE WHEN ${alias}.deadline_enabled THEN 'absolute' ELSE 'none' END) = 'relative_to_enrollment'
       AND ${alias}.deadline_after_days IS NOT NULL
-      THEN ${enrollmentAlias}.enrolled_at + (${alias}.deadline_after_days * INTERVAL '1 day')
+      AND ${enrollmentAlias}.enrolled_at IS NOT NULL
+      THEN GREATEST(${enrollmentAlias}.enrolled_at, ${alias}.created_at) + (${alias}.deadline_after_days * INTERVAL '1 day')
     ELSE NULL
   END`;
 }
@@ -209,6 +247,39 @@ async function uploadAssignmentFiles(
   }
 }
 
+async function uploadAssignmentAttachment(
+  file: Express.Multer.File | undefined,
+  tenantId: string,
+  courseId: string,
+  assignmentId: string,
+  uploadedBy: string,
+): Promise<StoredAssignmentAttachment | null> {
+  if (!file) return null;
+  if (file.size > MAX_ASSIGNMENT_FILE_SIZE_BYTES) {
+    throw new AppError('File đính kèm không được vượt quá 25MB', 400);
+  }
+
+  const id = uuidv4();
+  const originalName = fixMulterFilename(file.originalname);
+  const storageName = `${id}_${buildFileName(originalName)}`;
+  const storagePath = buildStoragePath(
+    tenantId,
+    'assignments',
+    storageName,
+    `${courseId}/${assignmentId}/attachment/${uploadedBy}`,
+  );
+  await uploadFile(storagePath, file.buffer, file.mimetype || 'application/octet-stream');
+  return {
+    id,
+    original_name: originalName,
+    mime_type: file.mimetype || 'application/octet-stream',
+    size_bytes: file.size,
+    storage_path: storagePath,
+    download_url: fileDownloadUrl(id),
+    created_at: new Date().toISOString(),
+  };
+}
+
 async function insertAssignmentFileRows(
   client: PoolClient,
   tenantId: string,
@@ -250,6 +321,7 @@ export async function listCourseAssignments(courseId: string, tenantId: string) 
             ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
             COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
             ca.deadline_after_days,
+            ca.attachment_file,
             ca.grading_enabled,
             COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
             ca.created_at, ca.updated_at,
@@ -262,7 +334,7 @@ export async function listCourseAssignments(courseId: string, tenantId: string) 
      ORDER BY ca.sort_order ASC, ca.created_at ASC`,
     [tenantId, courseId],
   );
-  return result.rows;
+  return result.rows.map((row: any) => normalizeAssignmentRow(row));
 }
 
 export async function createAssignment(
@@ -270,8 +342,24 @@ export async function createAssignment(
   tenantId: string,
   userId: string,
   input: CreateAssignmentInput,
+  attachmentFile?: Express.Multer.File,
 ) {
   const course = await ensureCourseForAdmin(courseId, tenantId);
+  const existing = await query<{ id: string }>(
+    `SELECT id
+     FROM course_assignments
+     WHERE tenant_id = $1::uuid
+       AND course_id = $2::varchar
+       AND deleted_at IS NULL
+     LIMIT 1`,
+    [tenantId, courseId],
+  );
+  if ((existing.rowCount ?? 0) > 0) {
+    throw new AppError('Mỗi khóa học chỉ được có 1 bài tập', 409);
+  }
+
+  const assignmentId = uuidv4();
+  const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId, userId);
   const client = await getClient();
   let assignmentCreatedEmailContext: {
     tenantId: string;
@@ -284,6 +372,7 @@ export async function createAssignment(
     deadlineAt: string | Date | null;
     deadlineMode: AssignmentDeadlineMode;
     deadlineAfterDays: number | null;
+    assignmentCreatedAt: string | Date | null;
     submissionUnlockMode: AssignmentSubmissionUnlockMode;
   } | null = null;
   const deadline = normalizeDeadlineForWrite(input);
@@ -294,19 +383,20 @@ export async function createAssignment(
 
     const result = await client.query(
       `INSERT INTO course_assignments (
-         tenant_id, course_id, title, question, is_published, allow_resubmission,
+         id, tenant_id, course_id, title, question, is_published, allow_resubmission,
          deadline_enabled, deadline_mode, deadline_at, deadline_after_days,
-         submission_unlock_mode, grading_enabled, sort_order, created_by
+         submission_unlock_mode, grading_enabled, attachment_file, sort_order, created_by
        )
        VALUES (
-         $1::uuid, $2::varchar, $3::varchar, $4::text, $5::boolean, $6::boolean,
-         $7::boolean, $8::varchar, $9::timestamptz, $10::integer,
-         $11::varchar, $12::boolean,
-         COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $1::uuid AND course_id = $2::varchar AND deleted_at IS NULL), 0),
-         $13::uuid
+         $1::uuid, $2::uuid, $3::varchar, $4::varchar, $5::text, $6::boolean, $7::boolean,
+         $8::boolean, $9::varchar, $10::timestamptz, $11::integer,
+         $12::varchar, $13::boolean, $14::jsonb,
+         COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $2::uuid AND course_id = $3::varchar AND deleted_at IS NULL), 0),
+         $15::uuid
        )
        RETURNING *`,
       [
+        assignmentId,
         tenantId,
         courseId,
         input.title,
@@ -319,6 +409,7 @@ export async function createAssignment(
         deadline.deadlineAfterDays,
         submissionUnlockMode,
         input.grading_enabled,
+        uploadedAttachment ? JSON.stringify(uploadedAttachment) : null,
         userId,
       ],
     );
@@ -343,6 +434,7 @@ export async function createAssignment(
             course_name: course.display_name,
             assignment_title: assignment.title,
             assignment_question: assignment.question,
+            attachment_file: normalizeAttachmentFile(assignment.attachment_file),
             deadline_enabled: assignment.deadline_enabled,
             deadline_mode: assignment.deadline_mode,
             deadline_at: assignment.deadline_at,
@@ -352,9 +444,9 @@ export async function createAssignment(
             created_at: assignment.created_at,
           }),
           'Bài tập mới',
-          assignment.deadline_enabled && assignment.deadline_at
-            ? `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Hạn nộp: ${new Date(assignment.deadline_at).toLocaleString('vi-VN')}.`
-            : `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}".`,
+          assignment.deadline_mode === 'relative_to_enrollment' && assignment.deadline_after_days
+            ? `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Hạn nộp sau ${assignment.deadline_after_days} ngày, tính từ lúc học viên ghi danh hoặc từ lúc bài tập được tạo nếu học viên đã ghi danh trước đó.`
+            : `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Bài tập này không có thời hạn nộp.`,
           userId,
         ],
       );
@@ -408,6 +500,7 @@ export async function createAssignment(
           deadlineAt: assignment.deadline_at,
           deadlineMode: assignment.deadline_mode,
           deadlineAfterDays: assignment.deadline_after_days,
+          assignmentCreatedAt: assignment.created_at,
           submissionUnlockMode: assignment.submission_unlock_mode,
         };
       } else {
@@ -426,21 +519,42 @@ export async function createAssignment(
       });
     }
 
-    return assignment;
+    return normalizeAssignmentRow(assignment);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
+    if (uploadedAttachment) {
+      await deleteFile(uploadedAttachment.storage_path).catch(() => undefined);
+    }
+    if ((err as { code?: string }).code === '23505') {
+      throw new AppError('Mỗi khóa học chỉ được có 1 bài tập', 409);
+    }
     throw err;
   } finally {
     client.release();
   }
 }
 
-export async function updateAssignment(assignmentId: string, tenantId: string, input: UpdateAssignmentInput) {
+export async function updateAssignment(
+  assignmentId: string,
+  tenantId: string,
+  userId: string,
+  input: UpdateAssignmentInput,
+  attachmentFile?: Express.Multer.File,
+) {
   const current = await getAssignmentForAdmin(assignmentId, tenantId);
   const currentDeadlineMode = normalizeDeadlineMode(
     current.deadline_mode,
     current.deadline_enabled ? 'absolute' : 'none',
   );
+
+  if (
+    input.deadline_mode !== undefined
+    || input.deadline_enabled !== undefined
+    || input.deadline_at !== undefined
+    || input.deadline_after_days !== undefined
+  ) {
+    throw new AppError('Không thể chỉnh hạn bài tập sau khi đã tạo', 400);
+  }
 
   if (input.deadline_mode !== undefined && input.deadline_mode !== currentDeadlineMode) {
     throw new AppError('Không thể đổi kiểu thời hạn sau khi tạo bài tập', 400);
@@ -462,6 +576,16 @@ export async function updateAssignment(assignmentId: string, tenantId: string, i
     }
   }
 
+  const uploadedAttachment = await uploadAssignmentAttachment(
+    attachmentFile,
+    tenantId,
+    current.course_id,
+    assignmentId,
+    userId,
+  );
+  const shouldChangeAttachment = Boolean(uploadedAttachment || input.remove_attachment);
+  const oldAttachmentPath = shouldChangeAttachment ? attachmentStoragePath(current.attachment_file) : null;
+
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
@@ -475,6 +599,10 @@ export async function updateAssignment(assignmentId: string, tenantId: string, i
     params.push(input.deadline_at);
   }
   if (input.submission_unlock_mode !== undefined) { sets.push(`submission_unlock_mode = $${idx++}::varchar`); params.push(input.submission_unlock_mode); }
+  if (shouldChangeAttachment) {
+    sets.push(`attachment_file = $${idx++}::jsonb`);
+    params.push(uploadedAttachment ? JSON.stringify(uploadedAttachment) : null);
+  }
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
   const shouldRecalculateCourse = input.is_published !== undefined && input.is_published !== current.is_published;
@@ -495,9 +623,15 @@ export async function updateAssignment(assignmentId: string, tenantId: string, i
     }
 
     await client.query('COMMIT');
-    return result.rows[0];
+    if (oldAttachmentPath) {
+      await deleteFile(oldAttachmentPath).catch(() => undefined);
+    }
+    return normalizeAssignmentRow(result.rows[0]);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
+    if (uploadedAttachment) {
+      await deleteFile(uploadedAttachment.storage_path).catch(() => undefined);
+    }
     throw err;
   } finally {
     client.release();
@@ -826,6 +960,7 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
             COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
             ca.deadline_after_days,
             ${effectiveDeadlineSql} AS effective_deadline_at,
+            ca.attachment_file,
             ca.grading_enabled,
             COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
             (${effectiveDeadlineSql} IS NOT NULL AND ${effectiveDeadlineSql} <= now()) AS is_deadline_expired,
@@ -872,6 +1007,7 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
     deadline_at: row.deadline_at,
     deadline_after_days: row.deadline_after_days,
     effective_deadline_at: row.effective_deadline_at,
+    attachment_file: normalizeAttachmentFile(row.attachment_file),
     grading_enabled: row.grading_enabled,
     submission_unlock_mode: unlockMode,
     is_deadline_expired: deadlineExpired,
@@ -1131,6 +1267,17 @@ export async function feedbackSubmission(
     throw new AppError('Bai tap nay khong bat cham diem', 400);
   }
 
+  const admin = await query<{ name: string; email: string | null }>(
+    `SELECT COALESCE(NULLIF(full_name, ''), username, email, 'Quản trị viên') AS name,
+            email
+     FROM users
+     WHERE id = $1::uuid
+     LIMIT 1`,
+    [adminId],
+  );
+  const feedbackByName = admin.rows[0]?.name || 'Quản trị viên';
+  const feedbackByEmail = admin.rows[0]?.email || null;
+
   const uploadedFiles = await uploadAssignmentFiles(
     files,
     ctx.tenant_id,
@@ -1233,6 +1380,8 @@ export async function feedbackSubmission(
           assignment_title: ctx.assignment_title,
           assignment_question: ctx.assignment_question,
           grading_enabled: ctx.grading_enabled,
+          feedback_by_name: feedbackByName,
+          feedback_by_email: feedbackByEmail,
           feedback_at: feedbackAt,
         }),
         'Bài tập đã có feedback',
@@ -1256,6 +1405,8 @@ export async function feedbackSubmission(
       courseName: ctx.course_name,
       assignmentTitle: ctx.assignment_title,
       feedbackText: input.feedback_text,
+      feedbackByName,
+      feedbackByEmail,
       score,
     });
 
@@ -1306,6 +1457,72 @@ export async function listSubmissionFeedbackHistory(submissionId: string, tenant
 }
 
 export async function getAssignmentFileForDownload(fileId: string, user: AuthUser) {
+  const attachment = await query<{
+    assignment_id: string;
+    tenant_id: string;
+    course_id: string;
+    storage_path: string | null;
+    original_name: string | null;
+    mime_type: string | null;
+  }>(
+    `SELECT ca.id AS assignment_id,
+            ca.tenant_id,
+            ca.course_id,
+            ca.attachment_file ->> 'storage_path' AS storage_path,
+            ca.attachment_file ->> 'original_name' AS original_name,
+            ca.attachment_file ->> 'mime_type' AS mime_type
+     FROM course_assignments ca
+     WHERE ca.attachment_file ->> 'id' = $1
+       AND ca.deleted_at IS NULL`,
+    [fileId],
+  );
+
+  if ((attachment.rowCount ?? 0) > 0) {
+    const file = attachment.rows[0];
+    const sameTenant = user.role === 'superadmin' || user.tenantId === file.tenant_id;
+    const isAdmin = sameTenant && await hasCoursePermission(user);
+    let learnerAllowed = false;
+
+    if (sameTenant && user.tenantId && isLearnerRole(user.role)) {
+      const access = await query<{ allowed: boolean }>(
+        `SELECT true AS allowed
+         FROM courses c
+         WHERE c.id = $1::varchar
+           AND c.tenant_id = $2::uuid
+           AND c.deleted_at IS NULL
+           AND c.visible_to_staff_only = false
+           AND EXISTS (
+             SELECT 1 FROM (
+               SELECT 1
+               FROM team_course_categories tcc
+               JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+               JOIN team_members tm ON tm.team_id = tcc.team_id
+               WHERE ccc.course_id = c.id AND tm.user_id = $3::uuid
+               UNION ALL
+               SELECT 1
+               FROM team_courses tc
+               JOIN team_members tm ON tm.team_id = tc.team_id
+               WHERE tc.course_id = c.id AND tm.user_id = $3::uuid
+             ) AS access_check
+           )
+         LIMIT 1`,
+        [file.course_id, user.tenantId, user.id],
+      );
+      learnerAllowed = (access.rowCount ?? 0) > 0;
+    }
+
+    if ((!isAdmin && !learnerAllowed) || !sameTenant || !file.storage_path) {
+      throw new AppError('Khong co quyen tai file nay', 403);
+    }
+
+    const downloaded = await downloadFileBuffer(file.storage_path);
+    return {
+      buffer: downloaded.buffer,
+      contentType: file.mime_type || downloaded.contentType || 'application/octet-stream',
+      originalName: file.original_name || 'file',
+    };
+  }
+
   const result = await query<{
     id: string;
     tenant_id: string;

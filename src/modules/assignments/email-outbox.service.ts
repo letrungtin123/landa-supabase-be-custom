@@ -23,6 +23,8 @@ interface FeedbackEmailContext {
   courseName: string;
   assignmentTitle: string;
   feedbackText: string;
+  feedbackByName: string;
+  feedbackByEmail?: string | null;
   score?: number | null;
 }
 
@@ -37,7 +39,31 @@ interface AssignmentCreatedEmailContext {
   deadlineAt?: string | Date | null;
   deadlineMode?: DeadlineMode;
   deadlineAfterDays?: number | null;
+  assignmentCreatedAt?: string | Date | null;
   submissionUnlockMode?: SubmissionUnlockMode;
+}
+
+interface CourseNotificationEmailContext {
+  tenantId: string;
+  notificationId: string;
+  courseId: string;
+  courseName: string;
+  title: string;
+  message: string;
+}
+
+interface TeamMemberAddedCourseCategory {
+  name: string;
+  courseCount: number;
+}
+
+interface TeamMemberAddedEmailContext {
+  tenantId: string;
+  notificationId: string;
+  orgGroupName: string;
+  subGroupName: string;
+  teamName: string;
+  courseCategories: TeamMemberAddedCourseCategory[];
 }
 
 interface RecipientSummaryItem {
@@ -50,11 +76,16 @@ interface RecipientSummary {
   recipients: RecipientSummaryItem[];
 }
 
+interface AssignmentCreatedEmailRecipient extends RecipientSummaryItem {
+  userId: string;
+  enrolledAt?: string | Date | null;
+}
+
 const OWNER_FEEDBACK_DIGEST_SUBJECT = 'Tổng hợp phản hồi bài tập mới';
 const OWNER_FEEDBACK_DIGEST_DELAY_MINUTES = 5;
 const OWNER_FEEDBACK_HTML_MARKER = '<!-- LANDA_OWNER_FEEDBACK_ITEMS -->';
 const OWNER_FEEDBACK_TEXT_MARKER = '[LANDA_OWNER_FEEDBACK_ITEMS]';
-const EMAIL_FONT_FAMILY = "'Google Sans','Product Sans',Arial,sans-serif";
+const EMAIL_FONT_FAMILY = "'Google Sans'";
 const EMAIL_FONT_STYLE = `font-family:${EMAIL_FONT_FAMILY};`;
 
 function escapeHtml(value: string): string {
@@ -91,17 +122,21 @@ function displayDomain(url: string | null): string | null {
   return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 }
 
-function buildLearnerCourseFocusUrl(branding: EmailBranding, courseId?: string | null): string | null {
+function buildLearnerCourseFocusUrl(
+  branding: EmailBranding,
+  courseId?: string | null,
+  source = 'assignment_email',
+): string | null {
   if (!branding.learnerUrl) return null;
   if (!courseId) return branding.learnerUrl;
   try {
     const url = new URL('/explore', branding.learnerUrl);
     url.searchParams.set('focus_course', courseId);
-    url.searchParams.set('source', 'assignment_email');
+    url.searchParams.set('source', source);
     return url.toString();
   } catch {
     const base = branding.learnerUrl.replace(/\/+$/, '');
-    return `${base}/explore?focus_course=${encodeURIComponent(courseId)}&source=assignment_email`;
+    return `${base}/explore?focus_course=${encodeURIComponent(courseId)}&source=${encodeURIComponent(source)}`;
   }
 }
 
@@ -111,14 +146,40 @@ function cleanEmailBody(value: string): string {
     .split(OWNER_FEEDBACK_TEXT_MARKER).join('');
 }
 
+function relativeDeadlinePolicyLabel(ctx: AssignmentCreatedEmailContext): string {
+  return `Hạn nộp sau ${ctx.deadlineAfterDays} ngày. Nếu học viên đã ghi danh trước khi bài tập được tạo, hạn nộp được tính từ lúc bài tập được tạo; nếu ghi danh sau, hạn nộp được tính từ lúc ghi danh.`;
+}
+
 function deadlineLabel(ctx: AssignmentCreatedEmailContext): string {
   if (ctx.deadlineMode === 'relative_to_enrollment' && ctx.deadlineAfterDays) {
-    return `Hạn nộp sau ${ctx.deadlineAfterDays} ngày kể từ lúc học viên ghi danh.`;
+    return relativeDeadlinePolicyLabel(ctx);
   }
   if ((ctx.deadlineMode === 'absolute' || ctx.deadlineEnabled) && ctx.deadlineAt) {
     return `Hạn nộp: ${formatDateTime(ctx.deadlineAt)}.`;
   }
-  return 'Bài tập này chưa đặt hạn nộp.';
+  return 'Bài tập này không có thời hạn nộp.';
+}
+
+function learnerDeadlineLabel(ctx: AssignmentCreatedEmailContext, enrolledAt?: string | Date | null): string {
+  if (ctx.deadlineMode !== 'relative_to_enrollment' || !ctx.deadlineAfterDays) {
+    return deadlineLabel(ctx);
+  }
+
+  const enrolledDate = enrolledAt ? new Date(enrolledAt) : null;
+  if (!enrolledDate || Number.isNaN(enrolledDate.getTime())) {
+    return `Hạn nộp sẽ được tính sau ${ctx.deadlineAfterDays} ngày kể từ khi bạn ghi danh khóa học.`;
+  }
+
+  const createdDate = ctx.assignmentCreatedAt ? new Date(ctx.assignmentCreatedAt) : null;
+  const hasCreatedDate = Boolean(createdDate && !Number.isNaN(createdDate.getTime()));
+  const baseDate = hasCreatedDate && createdDate && createdDate.getTime() > enrolledDate.getTime()
+    ? createdDate
+    : enrolledDate;
+  const deadlineAt = new Date(baseDate.getTime() + ctx.deadlineAfterDays * 24 * 60 * 60 * 1000);
+  const reason = hasCreatedDate && createdDate && baseDate.getTime() === createdDate.getTime()
+    ? 'Bạn đã ghi danh trước khi bài tập được tạo, nên hạn nộp được tính từ thời điểm bài tập được tạo.'
+    : `Hạn nộp được tính sau ${ctx.deadlineAfterDays} ngày kể từ lúc bạn ghi danh khóa học.`;
+  return `Hạn nộp: ${formatDateTime(deadlineAt)}. ${reason}`;
 }
 
 function unlockLabel(mode?: SubmissionUnlockMode): string {
@@ -326,6 +387,9 @@ function scoreLabel(score?: number | null): string {
 function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) {
   const subject = `Phản hồi bài tập: ${ctx.assignmentTitle} - ${ctx.courseName}`;
   const score = scoreLabel(ctx.score);
+  const reviewer = ctx.feedbackByEmail
+    ? `${ctx.feedbackByName} (${ctx.feedbackByEmail})`
+    : ctx.feedbackByName;
   const learnerAccess = branding.learnerDomainLabel
     ? `Cổng học viên: ${branding.learnerDomainLabel}`
     : '';
@@ -333,6 +397,7 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) 
     `Xin chào ${ctx.learnerName},`,
     '',
     `Bài tập "${ctx.assignmentTitle}" trong khóa học "${ctx.courseName}" đã có phản hồi mới.`,
+    `Người phản hồi: ${reviewer}`,
     score,
     learnerAccess,
     '',
@@ -352,6 +417,9 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) 
         Bài tập <strong>${escapeHtml(ctx.assignmentTitle)}</strong> trong khóa học <strong>${escapeHtml(ctx.courseName)}</strong> đã được phản hồi.
       </p>
       <div style="${EMAIL_FONT_STYLE}margin-top:16px">${pill(score, ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+      <div style="${EMAIL_FONT_STYLE}margin-top:12px;color:#334155;font-size:14px;line-height:22px">
+        Người phản hồi: <strong>${escapeHtml(reviewer)}</strong>
+      </div>
       ${infoTable([
         { label: 'Khóa học', value: ctx.courseName },
         { label: 'Bài tập', value: ctx.assignmentTitle },
@@ -365,9 +433,8 @@ function buildFeedbackEmail(ctx: FeedbackEmailContext, branding: EmailBranding) 
   return { subject, text, html };
 }
 
-function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, branding: EmailBranding) {
+function buildAssignmentCreatedEmail(ctx: AssignmentCreatedEmailContext, branding: EmailBranding, deadline = deadlineLabel(ctx)) {
   const subject = `Bài tập mới: ${ctx.assignmentTitle} - ${ctx.courseName}`;
-  const deadline = deadlineLabel(ctx);
   const unlock = unlockLabel(ctx.submissionUnlockMode);
   const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId);
   const learnerAccess = learnerHref
@@ -470,8 +537,138 @@ function buildAssignmentCreatedOwnerEmail(
   return { subject, text, html };
 }
 
+function buildCourseNotificationEmail(ctx: CourseNotificationEmailContext, branding: EmailBranding) {
+  const subject = `${ctx.title} - ${ctx.courseName}`;
+  const learnerHref = buildLearnerCourseFocusUrl(branding, ctx.courseId, 'course_notification_email');
+  const learnerAccess = learnerHref
+    ? `Cổng học viên: ${learnerHref}`
+    : '';
+  const text = [
+    'Xin chào,',
+    '',
+    `Khóa học "${ctx.courseName}" vừa có thông báo mới.`,
+    '',
+    `Tiêu đề: ${ctx.title}`,
+    '',
+    'Nội dung thông báo:',
+    ctx.message,
+    '',
+    learnerAccess,
+    '',
+    'Vui lòng đăng nhập hệ thống để xem chi tiết.',
+  ].filter(Boolean).join('\n');
+
+  const html = shellEmail(
+    branding,
+    'Thông báo khóa học',
+    ctx.title,
+    `Khóa học ${ctx.courseName} vừa có thông báo mới dành cho bạn.`,
+    `
+      <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
+        Khóa học <strong>${escapeHtml(ctx.courseName)}</strong> vừa có thông báo mới.
+      </p>
+      ${infoTable([
+        { label: 'Khóa học', value: ctx.courseName },
+        { label: 'Tiêu đề', value: ctx.title },
+      ])}
+      ${sectionTitle('Nội dung thông báo')}
+      ${quoteBlock(ctx.message)}
+    `,
+    learnerHref,
+  );
+
+  return { subject, text, html };
+}
+
+function courseCategorySummaryText(categories: TeamMemberAddedCourseCategory[]): string {
+  if (categories.length === 0) {
+    return 'Nhóm này chưa được phân danh mục khóa học.';
+  }
+  return categories
+    .map(category => `- ${category.name}: ${category.courseCount} khóa học`)
+    .join('\n');
+}
+
+function courseCategorySummaryTable(categories: TeamMemberAddedCourseCategory[]): string {
+  if (categories.length === 0) {
+    return quoteBlock('Nhóm này chưa được phân danh mục khóa học.');
+  }
+
+  const rows = categories.map((category, index) => `
+    <tr>
+      <td style="${EMAIL_FONT_STYLE}padding:12px 14px;border-bottom:1px solid #e5e7eb;color:#64748b;font-size:13px;line-height:20px;font-weight:800;width:44px">
+        ${index + 1}
+      </td>
+      <td style="${EMAIL_FONT_STYLE}padding:12px 14px;border-bottom:1px solid #e5e7eb;color:#0f172a;font-size:14px;line-height:22px;font-weight:800">
+        ${escapeHtml(category.name)}
+      </td>
+      <td align="right" style="${EMAIL_FONT_STYLE}padding:12px 14px;border-bottom:1px solid #e5e7eb;color:#047857;font-size:14px;line-height:22px;font-weight:800;white-space:nowrap">
+        ${category.courseCount} khóa học
+      </td>
+    </tr>
+  `).join('');
+
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:12px;border:1px solid #dbe3ef;border-radius:16px;border-collapse:separate;border-spacing:0;background:#ffffff;overflow:hidden">
+      <tr>
+        <td colspan="3" style="${EMAIL_FONT_STYLE}padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e5e7eb;color:#0f172a;font-size:14px;line-height:22px;font-weight:900">
+          Danh mục khóa học được phân
+        </td>
+      </tr>
+      ${rows}
+    </table>
+  `;
+}
+
+function buildTeamMemberAddedEmail(ctx: TeamMemberAddedEmailContext, branding: EmailBranding) {
+  const subject = `Bạn đã được thêm vào phòng ban ${ctx.teamName}`;
+  const learnerAccess = branding.learnerDomainLabel
+    ? `Cổng học viên: ${branding.learnerDomainLabel}`
+    : '';
+  const text = [
+    'Xin chào,',
+    '',
+    `Bạn vừa được thêm vào phòng ban "${ctx.teamName}" thuộc "${ctx.subGroupName}" - "${ctx.orgGroupName}".`,
+    '',
+    'Danh mục khóa học được phân:',
+    courseCategorySummaryText(ctx.courseCategories),
+    '',
+    learnerAccess,
+    '',
+    'Vui lòng đăng nhập hệ thống để xem các khóa học được phân cho bạn.',
+  ].filter(Boolean).join('\n');
+
+  const html = shellEmail(
+    branding,
+    'Nhóm học viên',
+    'Bạn đã được thêm vào nhóm học viên',
+    `Bạn vừa được thêm vào phòng ban ${ctx.teamName}. Các khóa học sẽ hiển thị theo danh mục được phân cho nhóm này.`,
+    `
+      <p style="${EMAIL_FONT_STYLE}margin:0;color:#334155;font-size:15px;line-height:24px">
+        Bạn vừa được thêm vào phòng ban <strong>${escapeHtml(ctx.teamName)}</strong>. Hãy đăng nhập cổng học viên để xem các khóa học được phân cho nhóm của bạn.
+      </p>
+      <div style="${EMAIL_FONT_STYLE}margin-top:16px">
+        ${pill(`${ctx.courseCategories.length} danh mục khóa học`, ctx.courseCategories.length > 0 ? 'green' : 'slate')}
+      </div>
+      ${infoTable([
+        { label: 'Nhóm', value: ctx.orgGroupName },
+        { label: 'Chi nhánh', value: ctx.subGroupName },
+        { label: 'Phòng ban', value: ctx.teamName },
+      ])}
+      ${sectionTitle('Danh mục khóa học')}
+      ${courseCategorySummaryTable(ctx.courseCategories)}
+    `,
+    branding.learnerUrl,
+  );
+
+  return { subject, text, html };
+}
+
 function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
   const learner = `${ctx.learnerName} (${ctx.learnerEmail})`;
+  const reviewer = ctx.feedbackByEmail
+    ? `${ctx.feedbackByName} (${ctx.feedbackByEmail})`
+    : ctx.feedbackByName;
   return `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}margin-top:14px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff">
       <tr>
@@ -479,6 +676,7 @@ function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
           <div style="${EMAIL_FONT_STYLE}color:#0f172a;font-size:15px;line-height:22px;font-weight:800">${escapeHtml(ctx.assignmentTitle)}</div>
           <div style="${EMAIL_FONT_STYLE}margin-top:4px;color:#64748b;font-size:13px;line-height:20px">${escapeHtml(ctx.courseName)}</div>
           <div style="${EMAIL_FONT_STYLE}margin-top:10px">${pill(scoreLabel(ctx.score), ctx.score !== undefined && ctx.score !== null ? 'green' : 'blue')}</div>
+          <div style="${EMAIL_FONT_STYLE}margin-top:10px;color:#334155;font-size:13px;line-height:20px">Người phản hồi: <strong>${escapeHtml(reviewer)}</strong></div>
           ${infoTable([
             { label: 'Học viên', value: learner },
             { label: 'Khóa học', value: ctx.courseName },
@@ -492,7 +690,11 @@ function ownerFeedbackItemHtml(ctx: FeedbackEmailContext): string {
 }
 
 function ownerFeedbackItemText(ctx: FeedbackEmailContext): string {
+  const reviewer = ctx.feedbackByEmail
+    ? `${ctx.feedbackByName} <${ctx.feedbackByEmail}>`
+    : ctx.feedbackByName;
   return [
+    `Người phản hồi: ${reviewer}`,
     `Học viên: ${ctx.learnerName} <${ctx.learnerEmail}>`,
     `Khóa học: ${ctx.courseName}`,
     `Bài tập: ${ctx.assignmentTitle}`,
@@ -537,6 +739,7 @@ async function insertOutboxEmail(
   input: {
     tenantId: string;
     relatedSubmissionId?: string | null;
+    relatedNotificationId?: string | null;
     recipientUserId?: string | null;
     recipientEmail: string;
     recipientName?: string | null;
@@ -548,17 +751,18 @@ async function insertOutboxEmail(
 ): Promise<void> {
   await client.query(
     `INSERT INTO email_outbox (
-       tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
+       tenant_id, related_submission_id, related_notification_id, recipient_user_id, recipient_email, recipient_name,
        subject, html_body, text_body, next_attempt_at
      )
      VALUES (
-       $1::uuid, $2::uuid, $3::uuid, $4::varchar, $5::varchar,
-       LEFT($6::text, 255), $7::text, $8::text,
-       now() + (($9::int || ' minutes')::interval)
+       $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::varchar, $6::varchar,
+       LEFT($7::text, 255), $8::text, $9::text,
+       now() + (($10::int || ' minutes')::interval)
      )`,
     [
       input.tenantId,
       input.relatedSubmissionId ?? null,
+      input.relatedNotificationId ?? null,
       input.recipientUserId ?? null,
       input.recipientEmail,
       input.recipientName ?? null,
@@ -568,6 +772,37 @@ async function insertOutboxEmail(
       input.delayMinutes ?? 0,
     ],
   );
+}
+
+async function insertAssignmentCreatedOutboxBatch(
+  client: PoolClient,
+  input: {
+    tenantId: string;
+    recipients: AssignmentCreatedEmailRecipient[];
+    subject: string;
+    html: string;
+    text: string;
+  },
+): Promise<number> {
+  if (input.recipients.length === 0) return 0;
+  await client.query(
+    `INSERT INTO email_outbox (
+       tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
+       subject, html_body, text_body
+     )
+     SELECT $1::uuid, NULL::uuid, x.user_id, x.email, x.name, LEFT($5::text, 255), $6::text, $7::text
+     FROM unnest($2::uuid[], $3::varchar[], $4::varchar[]) AS x(user_id, email, name)`,
+    [
+      input.tenantId,
+      input.recipients.map(recipient => recipient.userId),
+      input.recipients.map(recipient => recipient.email),
+      input.recipients.map(recipient => recipient.name),
+      input.subject,
+      input.html,
+      input.text,
+    ],
+  );
+  return input.recipients.length;
 }
 
 async function enqueueOwnerFeedbackDigestEmail(
@@ -702,57 +937,69 @@ export async function enqueueAssignmentCreatedEmails(
   if (smtp.rowCount === 0) return 0;
 
   const branding = await getEmailBranding(ctx.tenantId, client);
-  const learnerEmail = buildAssignmentCreatedEmail(ctx, branding);
-  const inserted = await client.query<{
-    total_count: number;
-    recipients: RecipientSummaryItem[] | null;
+  const recipientResult = await client.query<{
+    user_id: string;
+    email: string;
+    name: string;
+    enrolled_at: string | Date | null;
   }>(
-    `WITH learner_recipients AS (
-       SELECT DISTINCT ON (LOWER(u.email))
-              nr.user_id,
-              u.email::text AS email,
-              COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name
-       FROM notification_recipients nr
-       JOIN users u ON u.id = nr.user_id
-       WHERE nr.notification_id = $1::uuid
-         AND u.email IS NOT NULL
-         AND BTRIM(u.email) <> ''
-       ORDER BY LOWER(u.email), nr.user_id
-     ),
-     inserted AS (
-       INSERT INTO email_outbox (
-         tenant_id, related_submission_id, recipient_user_id, recipient_email, recipient_name,
-         subject, html_body, text_body
-       )
-       SELECT $2::uuid, NULL::uuid, user_id, email, name, LEFT($3::text, 255), $4::text, $5::text
-       FROM learner_recipients
-       RETURNING recipient_email AS email, COALESCE(recipient_name, recipient_email)::text AS name
-     ),
-     numbered AS (
-       SELECT email,
-              name,
-              COUNT(*) OVER ()::int AS total_count
-       FROM inserted
-     )
-     SELECT COALESCE(MAX(total_count), 0)::int AS total_count,
-            COALESCE(
-              jsonb_agg(jsonb_build_object('name', name, 'email', email) ORDER BY name, email),
-              '[]'::jsonb
-            ) AS recipients
-     FROM numbered`,
-    [
-      ctx.notificationId,
-      ctx.tenantId,
-      learnerEmail.subject,
-      learnerEmail.html,
-      learnerEmail.text,
-    ],
+    `SELECT DISTINCT ON (LOWER(u.email))
+            nr.user_id,
+            u.email::text AS email,
+            COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name,
+            e.enrolled_at
+     FROM notification_recipients nr
+     JOIN users u ON u.id = nr.user_id
+     LEFT JOIN enrollments e
+       ON e.user_id = nr.user_id
+      AND e.course_id = $2::varchar
+      AND e.tenant_id = $3::uuid
+      AND e.is_active = true
+     WHERE nr.notification_id = $1::uuid
+       AND u.email IS NOT NULL
+       AND BTRIM(u.email) <> ''
+     ORDER BY LOWER(u.email), e.enrolled_at DESC NULLS LAST, nr.user_id`,
+    [ctx.notificationId, ctx.courseId, ctx.tenantId],
   );
 
-  const totalCount = Number(inserted.rows[0]?.total_count || 0);
+  const recipients: AssignmentCreatedEmailRecipient[] = recipientResult.rows.map(row => ({
+    userId: row.user_id,
+    email: row.email,
+    name: row.name,
+    enrolledAt: row.enrolled_at,
+  }));
+
+  const emailGroups = new Map<string, {
+    email: ReturnType<typeof buildAssignmentCreatedEmail>;
+    recipients: AssignmentCreatedEmailRecipient[];
+  }>();
+  for (const recipient of recipients) {
+    const deadline = learnerDeadlineLabel(ctx, recipient.enrolledAt);
+    const email = buildAssignmentCreatedEmail(ctx, branding, deadline);
+    const groupKey = deadline;
+    const group = emailGroups.get(groupKey);
+    if (group) {
+      group.recipients.push(recipient);
+    } else {
+      emailGroups.set(groupKey, { email, recipients: [recipient] });
+    }
+  }
+
+  let insertedCount = 0;
+  for (const group of emailGroups.values()) {
+    insertedCount += await insertAssignmentCreatedOutboxBatch(client, {
+      tenantId: ctx.tenantId,
+      recipients: group.recipients,
+      subject: group.email.subject,
+      html: group.email.html,
+      text: group.email.text,
+    });
+  }
+
+  const totalCount = insertedCount;
   const summary: RecipientSummary = {
     totalCount,
-    recipients: normalizeRecipients(inserted.rows[0]?.recipients),
+    recipients: normalizeRecipients(recipients),
   };
   let count = totalCount;
 
@@ -776,12 +1023,314 @@ export async function enqueueAssignmentCreatedEmails(
   return count;
 }
 
+export async function enqueueTeamMemberAddedEmails(
+  client: PoolClient,
+  ctx: TeamMemberAddedEmailContext,
+): Promise<number> {
+  const smtp = await client.query(
+    `SELECT 1
+     FROM tenant_smtp_configs
+     WHERE tenant_id = $1::uuid
+       AND is_enabled = true
+     LIMIT 1`,
+    [ctx.tenantId],
+  );
+
+  if (smtp.rowCount === 0) return 0;
+
+  const recipients = await client.query<{
+    user_id: string;
+    email: string;
+    name: string;
+  }>(
+    `SELECT DISTINCT ON (LOWER(u.email))
+            nr.user_id,
+            BTRIM(u.email)::text AS email,
+            COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name
+     FROM notification_recipients nr
+     JOIN users u
+       ON u.id = nr.user_id
+      AND u.tenant_id = $2::uuid
+     WHERE nr.notification_id = $1::uuid
+       AND u.email IS NOT NULL
+       AND BTRIM(u.email) <> ''
+       AND u.role IN ('learner', 'learner_plus')
+       AND u.is_active = true
+     ORDER BY LOWER(u.email), nr.user_id`,
+    [ctx.notificationId, ctx.tenantId],
+  );
+
+  if (recipients.rowCount === 0) return 0;
+
+  const branding = await getEmailBranding(ctx.tenantId, client);
+  const email = buildTeamMemberAddedEmail(ctx, branding);
+  const insertResult = await client.query(
+    `INSERT INTO email_outbox (
+       tenant_id, related_submission_id, related_notification_id, recipient_user_id,
+       recipient_email, recipient_name, subject, html_body, text_body
+     )
+     SELECT $1::uuid,
+            NULL::uuid,
+            $2::uuid,
+            x.user_id,
+            x.email,
+            x.name,
+            LEFT($6::text, 255),
+            $7::text,
+            $8::text
+     FROM unnest($3::uuid[], $4::varchar[], $5::varchar[]) AS x(user_id, email, name)
+     ON CONFLICT DO NOTHING`,
+    [
+      ctx.tenantId,
+      ctx.notificationId,
+      recipients.rows.map(recipient => recipient.user_id),
+      recipients.rows.map(recipient => recipient.email),
+      recipients.rows.map(recipient => recipient.name),
+      email.subject,
+      email.html,
+      email.text,
+    ],
+  );
+
+  return insertResult.rowCount || 0;
+}
+
 export async function enqueueAssignmentCreatedEmailsForNotification(
   ctx: AssignmentCreatedEmailContext,
 ): Promise<number> {
   const client = await getClient();
   try {
     return await enqueueAssignmentCreatedEmails(client, ctx);
+  } finally {
+    client.release();
+  }
+}
+
+export async function enqueueCourseNotificationEmailJob(
+  client: PoolClient,
+  ctx: Pick<CourseNotificationEmailContext, 'tenantId' | 'notificationId' | 'courseId'>,
+): Promise<number> {
+  const result = await client.query(
+    `INSERT INTO notification_email_jobs (tenant_id, notification_id, course_id, status, next_attempt_at)
+     VALUES ($1::uuid, $2::uuid, $3::varchar, 'pending', now())
+     ON CONFLICT (notification_id) DO NOTHING`,
+    [ctx.tenantId, ctx.notificationId, ctx.courseId],
+  );
+  return result.rowCount || 0;
+}
+
+async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize: number): Promise<number> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const job = await client.query<{
+      id: string;
+      tenant_id: string;
+      notification_id: string;
+      course_id: string;
+      last_user_id: string | null;
+      attempts: number;
+    }>(
+      `SELECT id, tenant_id, notification_id, course_id, last_user_id, attempts
+       FROM notification_email_jobs
+       WHERE id = $1::uuid
+       FOR UPDATE`,
+      [jobId],
+    );
+
+    const row = job.rows[0];
+    if (!row) {
+      await client.query('COMMIT');
+      return 0;
+    }
+
+    const notification = await client.query<{
+      title: string;
+      message: string | null;
+      course_name: string;
+    }>(
+      `SELECT n.title,
+              n.message,
+              COALESCE(NULLIF(c.display_name, ''), n.course_id)::text AS course_name
+       FROM notifications n
+       LEFT JOIN courses c ON c.id = n.course_id AND c.tenant_id = n.tenant_id
+       WHERE n.id = $1::uuid
+         AND n.tenant_id = $2::uuid`,
+      [row.notification_id, row.tenant_id],
+    );
+
+    const notificationRow = notification.rows[0];
+    if (!notificationRow) {
+      await client.query(
+        `UPDATE notification_email_jobs
+         SET status = 'failed',
+             attempts = attempts + 1,
+             last_error = 'Notification not found',
+             next_attempt_at = now() + interval '15 minutes',
+             updated_at = now()
+         WHERE id = $1::uuid`,
+        [row.id],
+      );
+      await client.query('COMMIT');
+      return 0;
+    }
+
+    const recipients = await client.query<{
+      user_id: string;
+      email: string;
+      name: string;
+    }>(
+      `SELECT nr.user_id,
+              BTRIM(u.email)::text AS email,
+              COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name
+       FROM notification_recipients nr
+       JOIN users u ON u.id = nr.user_id
+       WHERE nr.notification_id = $1::uuid
+         AND ($2::uuid IS NULL OR nr.user_id > $2::uuid)
+         AND u.email IS NOT NULL
+         AND BTRIM(u.email) <> ''
+       ORDER BY nr.user_id ASC
+       LIMIT $3::int`,
+      [row.notification_id, row.last_user_id, batchSize],
+    );
+
+    if (recipients.rowCount === 0) {
+      await client.query(
+        `UPDATE notification_email_jobs
+         SET status = 'done',
+             last_error = NULL,
+             updated_at = now()
+         WHERE id = $1::uuid`,
+        [row.id],
+      );
+      await client.query('COMMIT');
+      return 0;
+    }
+
+    const branding = await getEmailBranding(row.tenant_id, client);
+    const email = buildCourseNotificationEmail({
+      tenantId: row.tenant_id,
+      notificationId: row.notification_id,
+      courseId: row.course_id,
+      courseName: notificationRow.course_name,
+      title: notificationRow.title,
+      message: notificationRow.message || '',
+    }, branding);
+
+    const insertResult = await client.query(
+      `INSERT INTO email_outbox (
+         tenant_id, related_submission_id, related_notification_id, recipient_user_id,
+         recipient_email, recipient_name, subject, html_body, text_body
+       )
+       SELECT $1::uuid,
+              NULL::uuid,
+              $2::uuid,
+              x.user_id,
+              x.email,
+              x.name,
+              LEFT($6::text, 255),
+              $7::text,
+              $8::text
+       FROM unnest($3::uuid[], $4::varchar[], $5::varchar[]) AS x(user_id, email, name)
+       ON CONFLICT DO NOTHING`,
+      [
+        row.tenant_id,
+        row.notification_id,
+        recipients.rows.map(recipient => recipient.user_id),
+        recipients.rows.map(recipient => recipient.email),
+        recipients.rows.map(recipient => recipient.name),
+        email.subject,
+        email.html,
+        email.text,
+      ],
+    );
+
+    const lastUserId = recipients.rows[recipients.rows.length - 1].user_id;
+    const isDone = recipients.rows.length < batchSize;
+    await client.query(
+      `UPDATE notification_email_jobs
+       SET status = $2,
+           last_user_id = $3::uuid,
+           queued_count = queued_count + $4::int,
+           last_error = NULL,
+           next_attempt_at = now(),
+           updated_at = now()
+       WHERE id = $1::uuid`,
+      [row.id, isDone ? 'done' : 'pending', lastUserId, insertResult.rowCount || 0],
+    );
+
+    await client.query('COMMIT');
+    return insertResult.rowCount || 0;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    const message = err instanceof Error ? err.message : String(err);
+    await query(
+      `UPDATE notification_email_jobs
+       SET status = 'failed',
+           attempts = attempts + 1,
+           last_error = $2::text,
+           next_attempt_at = now() + interval '5 minutes',
+           updated_at = now()
+       WHERE id = $1::uuid`,
+      [jobId, message.slice(0, 2000)],
+    ).catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function processCourseNotificationEmailFanoutBatch(
+  tenantId?: string,
+  jobsLimit = 2,
+  batchSize = 1000,
+): Promise<number> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const params: unknown[] = [jobsLimit];
+    let tenantFilter = '';
+    if (tenantId) {
+      params.push(tenantId);
+      tenantFilter = `AND tenant_id = $${params.length}::uuid`;
+    }
+
+    const jobs = await client.query<{ id: string }>(
+      `SELECT id
+       FROM notification_email_jobs
+       WHERE (
+           (status IN ('pending', 'failed') AND next_attempt_at <= now())
+           OR (status = 'running' AND updated_at < now() - interval '5 minutes')
+         )
+         ${tenantFilter}
+       ORDER BY next_attempt_at ASC, created_at ASC
+       LIMIT $1::int
+       FOR UPDATE SKIP LOCKED`,
+      params,
+    );
+
+    if (jobs.rowCount === 0) {
+      await client.query('COMMIT');
+      return 0;
+    }
+
+    await client.query(
+      `UPDATE notification_email_jobs
+       SET status = 'running',
+           updated_at = now()
+       WHERE id = ANY($1::uuid[])`,
+      [jobs.rows.map(job => job.id)],
+    );
+    await client.query('COMMIT');
+
+    let queued = 0;
+    for (const job of jobs.rows) {
+      queued += await processCourseNotificationEmailFanoutJob(job.id, batchSize);
+    }
+    return queued;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
   } finally {
     client.release();
   }
@@ -897,8 +1446,10 @@ export function startEmailOutboxWorker(): void {
   if (workerStarted) return;
   workerStarted = true;
   setInterval(() => {
-    processEmailOutboxBatch().catch(err => {
-      console.error('[EmailOutbox] Worker error:', err instanceof Error ? err.message : err);
-    });
+    processCourseNotificationEmailFanoutBatch()
+      .then(() => processEmailOutboxBatch())
+      .catch(err => {
+        console.error('[EmailOutbox] Worker error:', err instanceof Error ? err.message : err);
+      });
   }, 60_000).unref();
 }

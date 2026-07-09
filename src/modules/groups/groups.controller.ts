@@ -125,11 +125,26 @@ export async function deleteTeamController(req: Request, res: Response, next: Ne
 
 export async function addTeamMembersController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { user_ids } = req.body;
+    const { user_ids, send_email } = req.body;
     if (!Array.isArray(user_ids)) { sendError(res, 'user_ids phải là mảng', 400); return; }
-    const result = await svc.addTeamMembers(req.params.teamId, user_ids);
+    const tenantId = req.user!.tenantId;
+    const actorUserId = req.user!.id;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const result = await svc.addTeamMembers(req.params.teamId, user_ids, {
+      tenantId,
+      actorUserId,
+      sendEmail: send_email === true,
+    });
     auditFromReq(req, 'UPDATE', 'team_member', req.params.teamId, '', `Thêm ${result.added} thành viên`);
     sendSuccess(res, result);
+  } catch (err) { next(err); }
+}
+
+export async function groupSmtpStatusController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.getGroupNotificationSmtpStatus(tenantId));
   } catch (err) { next(err); }
 }
 

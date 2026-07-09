@@ -14,13 +14,14 @@ import {
   assignTeamCoursesController, revokeTeamCourseController,
   assignTeamDocCategoriesController, revokeTeamDocCategoryController,
   assignTeamCourseCategoriesController, revokeTeamCourseCategoryController,
-  groupAuditLogsController,
+  groupAuditLogsController, groupSmtpStatusController,
 } from './groups.controller.js';
 
 const router = Router();
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));
 
 // Org Groups
+router.get('/smtp-status', checkPermission('groups', 'can_view'), groupSmtpStatusController);
 router.get('/', checkPermission('groups', 'can_view'), listOrgGroupsController);
 router.post('/', checkPermission('groups', 'can_add'), createOrgGroupController);
 router.patch('/:id', checkPermission('groups', 'can_edit'), updateOrgGroupController);

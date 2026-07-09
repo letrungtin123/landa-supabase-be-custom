@@ -6,6 +6,22 @@
 import { query, getClient } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+import {
+  enqueueTeamMemberAddedEmails,
+  processEmailOutboxBatch,
+} from '../assignments/email-outbox.service.js';
+import { getCourseNotificationSmtpStatus } from '../notifications/notifications.service.js';
+
+interface AddTeamMembersOptions {
+  tenantId: string;
+  actorUserId: string;
+  sendEmail?: boolean;
+}
+
+interface CourseCategorySummary {
+  name: string;
+  courseCount: number;
+}
 
 // ═══ Org Groups (level 1) ═══
 
@@ -241,13 +257,206 @@ export async function deleteTeam(id: string) {
 
 // ═══ Team Members ═══
 
-export async function addTeamMembers(teamId: string, userIds: string[]) {
-  let added = 0, skipped = 0;
-  for (const uid of userIds) {
-    const r = await query('INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, uid]);
-    if (r.rowCount! > 0) added++; else skipped++;
+export async function getGroupNotificationSmtpStatus(tenantId: string) {
+  return getCourseNotificationSmtpStatus(tenantId);
+}
+
+export async function addTeamMembers(
+  teamId: string,
+  userIds: string[],
+  options: AddTeamMembersOptions,
+) {
+  const normalizedUserIds = Array.from(new Set(
+    userIds
+      .filter((uid): uid is string => typeof uid === 'string')
+      .map(uid => uid.trim())
+      .filter(Boolean),
+  ));
+  const sendEmail = Boolean(options.sendEmail);
+
+  if (normalizedUserIds.length === 0) {
+    return {
+      success: true,
+      added: 0,
+      skipped: 0,
+      notification_id: null,
+      email_requested: sendEmail,
+      email_queued: 0,
+    };
   }
-  return { success: true, added, skipped };
+
+  if (sendEmail) {
+    const smtpStatus = await getCourseNotificationSmtpStatus(options.tenantId);
+    if (!smtpStatus.can_send_email) {
+      throw new AppError(smtpStatus.reason || 'Tenant chưa cấu hình SMTP Google.', 400);
+    }
+  }
+
+  const client = await getClient();
+  let notificationId: string | null = null;
+  let added = 0;
+  let emailQueued = 0;
+  try {
+    await client.query('BEGIN');
+
+    const teamResult = await client.query<{
+      id: string;
+      team_name: string;
+      subgroup_name: string;
+      org_group_name: string;
+    }>(
+      `SELECT t.id,
+              t.name AS team_name,
+              sg.name AS subgroup_name,
+              og.name AS org_group_name
+       FROM teams t
+       JOIN sub_groups sg ON sg.id = t.sub_group_id
+       JOIN org_groups og ON og.id = sg.org_group_id
+       WHERE t.id = $1::uuid
+         AND og.tenant_id = $2::uuid
+       FOR SHARE`,
+      [teamId, options.tenantId],
+    );
+
+    const team = teamResult.rows[0];
+    if (!team) {
+      throw new AppError('Phòng ban không tồn tại hoặc không thuộc tenant hiện tại.', 404);
+    }
+
+    const insertResult = await client.query<{ user_id: string }>(
+      `WITH input_users AS (
+         SELECT DISTINCT unnest($2::uuid[]) AS user_id
+       ),
+       eligible_users AS (
+         SELECT iu.user_id
+         FROM input_users iu
+         JOIN users u
+           ON u.id = iu.user_id
+          AND u.tenant_id = $3::uuid
+         WHERE u.role IN ('learner', 'learner_plus')
+           AND u.is_active = true
+       )
+       INSERT INTO team_members (team_id, user_id)
+       SELECT $1::uuid, user_id
+       FROM eligible_users
+       ON CONFLICT DO NOTHING
+       RETURNING user_id`,
+      [teamId, normalizedUserIds, options.tenantId],
+    );
+
+    const insertedUserIds = insertResult.rows.map(row => row.user_id);
+    added = insertedUserIds.length;
+
+    if (added > 0) {
+      const categoryResult = await client.query<{
+        name: string;
+        course_count: string;
+      }>(
+        `SELECT cc.name,
+                COUNT(DISTINCT c.id)::int AS course_count
+         FROM team_course_categories tcc
+         JOIN course_categories cc
+           ON cc.id = tcc.category_id
+         LEFT JOIN course_category_courses ccc
+           ON ccc.category_id = tcc.category_id
+         LEFT JOIN courses c
+           ON c.id = ccc.course_id
+          AND c.tenant_id = $2::uuid
+          AND c.deleted_at IS NULL
+          AND c.visible_to_staff_only = false
+         WHERE tcc.team_id = $1::uuid
+         GROUP BY cc.id, cc.name
+         ORDER BY cc.name`,
+        [teamId, options.tenantId],
+      );
+      const courseCategories: CourseCategorySummary[] = categoryResult.rows.map(row => ({
+        name: row.name,
+        courseCount: Number(row.course_count || 0),
+      }));
+      const title = `Bạn đã được thêm vào phòng ban ${team.team_name}`;
+      const message = `Bạn vừa được thêm vào phòng ban ${team.team_name} thuộc ${team.subgroup_name} - ${team.org_group_name}.`;
+
+      const notification = await client.query<{ id: string }>(
+        `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
+         VALUES (
+           $1::uuid,
+           NULL,
+           'team_member_added',
+           jsonb_build_object(
+             'send_email', $6::boolean,
+             'recipient_rule', 'team_members_added',
+             'team_id', $2::uuid,
+             'team_name', $3::text,
+             'subgroup_name', $4::text,
+             'org_group_name', $5::text,
+             'course_categories', $7::jsonb
+           ),
+           $8::varchar,
+           $9::text,
+           $10::uuid,
+           $11::int
+         )
+         RETURNING id`,
+        [
+          options.tenantId,
+          teamId,
+          team.team_name,
+          team.subgroup_name,
+          team.org_group_name,
+          sendEmail,
+          JSON.stringify(courseCategories),
+          title,
+          message,
+          options.actorUserId,
+          added,
+        ],
+      );
+      notificationId = notification.rows[0].id;
+
+      await client.query(
+        `INSERT INTO notification_recipients (notification_id, user_id)
+         SELECT $1::uuid, unnest($2::uuid[])
+         ON CONFLICT DO NOTHING`,
+        [notificationId, insertedUserIds],
+      );
+
+      if (sendEmail) {
+        emailQueued = await enqueueTeamMemberAddedEmails(client, {
+          tenantId: options.tenantId,
+          notificationId,
+          orgGroupName: team.org_group_name,
+          subGroupName: team.subgroup_name,
+          teamName: team.team_name,
+          courseCategories,
+        });
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  if (emailQueued > 0) {
+    setImmediate(() => {
+      processEmailOutboxBatch(options.tenantId)
+        .catch(err => {
+          console.error('[Groups] Email outbox error:', err instanceof Error ? err.message : err);
+        });
+    });
+  }
+
+  return {
+    success: true,
+    added,
+    skipped: normalizedUserIds.length - added,
+    notification_id: notificationId,
+    email_requested: sendEmail,
+    email_queued: emailQueued,
+  };
 }
 
 export async function removeTeamMember(teamId: string, userId: string) {

@@ -1,14 +1,22 @@
 import { z } from 'zod';
 
-const nullableDatetimeSchema = z.preprocess((value) => {
-  if (value === '' || value === undefined) return null;
-  return value;
-}, z.string().datetime({ offset: true }).nullable());
-
 const optionalNullableDatetimeSchema = z.preprocess((value) => {
   if (value === '' || value === undefined) return undefined;
   return value;
 }, z.string().datetime({ offset: true }).nullable().optional());
+
+const booleanSchema = z.preprocess((value) => {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+}, z.boolean());
+
+const optionalBooleanSchema = z.preprocess((value) => {
+  if (value === '' || value === undefined || value === null) return undefined;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return value;
+}, z.boolean().optional());
 
 const optionalPositiveDaysSchema = z.preprocess((value) => {
   if (value === '' || value === undefined || value === null) return undefined;
@@ -20,34 +28,36 @@ const optionalScoreSchema = z.preprocess((value) => {
   return Number(value);
 }, z.number().int().min(0).max(100).optional());
 
-const deadlineModeSchema = z.enum(['none', 'absolute', 'relative_to_enrollment']);
+const optionalDeadlineModeSchema = z.preprocess((value) => {
+  if (value === '' || value === undefined || value === null) return undefined;
+  return value;
+}, z.enum(['none', 'absolute', 'relative_to_enrollment']).optional());
 const submissionUnlockModeSchema = z.enum(['after_content_complete', 'anytime']);
 
 export const createAssignmentSchema = z.object({
   title: z.string().trim().min(1).max(255),
   question: z.string().trim().min(1).max(20_000),
-  is_published: z.boolean().optional().default(true),
-  allow_resubmission: z.boolean().optional().default(false),
-  deadline_enabled: z.boolean().optional().default(false),
-  deadline_mode: deadlineModeSchema.optional(),
-  deadline_at: nullableDatetimeSchema.optional().default(null),
+  is_published: booleanSchema.optional().default(true),
+  allow_resubmission: booleanSchema.optional().default(false),
+  deadline_enabled: booleanSchema.optional().default(true),
+  deadline_mode: optionalDeadlineModeSchema.default('relative_to_enrollment'),
+  deadline_at: optionalNullableDatetimeSchema,
   deadline_after_days: optionalPositiveDaysSchema,
-  grading_enabled: z.boolean().optional().default(false),
+  grading_enabled: booleanSchema.optional().default(false),
   submission_unlock_mode: submissionUnlockModeSchema.optional().default('after_content_complete'),
 }).superRefine((value, ctx) => {
-  const mode = value.deadline_mode ?? (value.deadline_enabled ? 'absolute' : 'none');
-  if (mode === 'absolute' && !value.deadline_at) {
+  if (value.deadline_mode === 'absolute') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['deadline_mode'],
+      message: 'Không còn hỗ trợ hạn cụ thể cho bài tập',
+    });
+  }
+  if (value.deadline_at !== undefined && value.deadline_at !== null) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['deadline_at'],
-      message: 'Vui lòng chọn thời hạn nộp bài',
-    });
-  }
-  if (mode === 'relative_to_enrollment' && !value.deadline_after_days) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['deadline_after_days'],
-      message: 'Vui lòng nhập số ngày tính từ lúc học viên ghi danh',
+      message: 'Không còn hỗ trợ hạn cụ thể cho bài tập',
     });
   }
 });
@@ -55,19 +65,25 @@ export const createAssignmentSchema = z.object({
 export const updateAssignmentSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
   question: z.string().trim().min(1).max(20_000).optional(),
-  is_published: z.boolean().optional(),
-  allow_resubmission: z.boolean().optional(),
-  deadline_enabled: z.boolean().optional(),
-  deadline_mode: deadlineModeSchema.optional(),
+  is_published: optionalBooleanSchema,
+  allow_resubmission: optionalBooleanSchema,
+  deadline_enabled: optionalBooleanSchema,
+  deadline_mode: optionalDeadlineModeSchema,
   deadline_at: optionalNullableDatetimeSchema,
   deadline_after_days: optionalPositiveDaysSchema,
   submission_unlock_mode: submissionUnlockModeSchema.optional(),
+  remove_attachment: optionalBooleanSchema,
 }).superRefine((value, ctx) => {
-  if (value.deadline_mode === 'absolute' && !value.deadline_at) {
+  if (
+    value.deadline_enabled !== undefined
+    || value.deadline_mode !== undefined
+    || value.deadline_at !== undefined
+    || value.deadline_after_days !== undefined
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ['deadline_at'],
-      message: 'Vui lòng chọn thời hạn nộp bài',
+      path: ['deadline_after_days'],
+      message: 'Không thể chỉnh hạn bài tập sau khi đã tạo',
     });
   }
 });

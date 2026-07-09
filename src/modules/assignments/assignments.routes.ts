@@ -28,10 +28,10 @@ router.post('/learner/:assignmentId/submit', upload.array('files', 5), ctrl.subm
 // Admin-facing APIs.
 router.use(tenantContext);
 router.get('/courses/:courseId', checkPermission('courses', 'can_view'), ctrl.listCourseAssignments);
-router.post('/courses/:courseId', checkPermission('courses', 'can_add'), ctrl.createAssignment);
+router.post('/courses/:courseId', checkPermission('courses', 'can_add'), upload.single('attachment_file'), ctrl.createAssignment);
 router.post('/courses/:courseId/reorder', checkPermission('courses', 'can_edit'), ctrl.reorderAssignments);
 router.get('/courses/:courseId/submissions', checkPermission('courses', 'can_view'), ctrl.listCourseSubmissions);
-router.patch('/:assignmentId', checkPermission('courses', 'can_edit'), ctrl.updateAssignment);
+router.patch('/:assignmentId', checkPermission('courses', 'can_edit'), upload.single('attachment_file'), ctrl.updateAssignment);
 router.delete('/:assignmentId', checkPermission('courses', 'can_delete'), ctrl.deleteAssignment);
 router.get('/submissions/:submissionId/feedback-history', checkPermission('courses', 'can_view'), ctrl.listSubmissionFeedbackHistory);
 router.post('/submissions/:submissionId/feedback', checkPermission('courses', 'can_edit'), upload.array('feedback_files', 5), ctrl.feedbackSubmission);
