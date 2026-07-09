@@ -371,6 +371,20 @@ export function getTemplateDefinitions(): EmailTemplateDefinition[] {
   return EMAIL_TEMPLATE_KEYS.map(key => DEFAULT_TEMPLATES[key]);
 }
 
+function buildDefaultTemplateRenderRow(tenantId: string, key: EmailTemplateKey): TenantTemplateRow {
+  const definition = DEFAULT_TEMPLATES[key];
+  return {
+    tenant_id: tenantId,
+    template_key: key,
+    subject_template: definition.subjectTemplate,
+    preheader_template: definition.preheaderTemplate,
+    body_template: definition.bodyTemplate,
+    is_enabled: true,
+    updated_at: null,
+    updated_by: null,
+  };
+}
+
 export async function getEmailTemplateForRender(
   tenantId: string,
   key: EmailTemplateKey,
@@ -381,13 +395,15 @@ export async function getEmailTemplateForRender(
   if (cached && cached.expires > Date.now()) return cached.value;
 
   try {
-    const value = await selectTemplate(tenantId, key, client);
+    const value = await selectTemplate(tenantId, key, client)
+      || buildDefaultTemplateRenderRow(tenantId, key);
     templateCache.set(keyName, { value, expires: Date.now() + TEMPLATE_CACHE_TTL_MS });
     return value;
   } catch (err) {
     if (isUndefinedTableError(err)) {
-      templateCache.set(keyName, { value: null, expires: Date.now() + 10_000 });
-      return null;
+      const value = buildDefaultTemplateRenderRow(tenantId, key);
+      templateCache.set(keyName, { value, expires: Date.now() + 10_000 });
+      return value;
     }
     throw err;
   }

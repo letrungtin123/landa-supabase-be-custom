@@ -23,9 +23,57 @@ type SmtpSocket = net.Socket | tls.TLSSocket;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+function sanitizeHeader(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
+function foldAsciiHeader(value: string, maxLength = 64): string {
+  if (value.length <= maxLength) return value;
+
+  const lines: string[] = [];
+  let current = '';
+  for (const word of value.split(/\s+/)) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if (`${current} ${word}`.length <= maxLength) {
+      current += ` ${word}`;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+
+  return lines.length > 0 ? lines.join('\r\n ') : value;
+}
+
+function encodeMimeWords(value: string): string {
+  const words: string[] = [];
+  let chunk = '';
+
+  for (const char of Array.from(value)) {
+    const next = chunk + char;
+    if (chunk && Buffer.byteLength(next, 'utf8') > 45) {
+      words.push(`=?UTF-8?B?${Buffer.from(chunk, 'utf8').toString('base64')}?=`);
+      chunk = char;
+      continue;
+    }
+    chunk = next;
+  }
+
+  if (chunk) {
+    words.push(`=?UTF-8?B?${Buffer.from(chunk, 'utf8').toString('base64')}?=`);
+  }
+
+  return words.join('\r\n ');
+}
+
 function encodeHeader(value: string): string {
-  if (/^[\x00-\x7F]*$/.test(value)) return value;
-  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+  const sanitized = sanitizeHeader(value);
+  if (/^[\x00-\x7F]*$/.test(sanitized)) return foldAsciiHeader(sanitized);
+  return encodeMimeWords(sanitized);
 }
 
 function formatAddress(email: string, name?: string | null): string {

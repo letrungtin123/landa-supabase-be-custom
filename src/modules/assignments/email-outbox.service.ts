@@ -163,6 +163,15 @@ function cleanEmailBody(value: string): string {
     .split(OWNER_FEEDBACK_TEXT_MARKER).join('');
 }
 
+function hiddenPreheader(intro: string): string {
+  const spacer = '&zwnj;&nbsp;'.repeat(90);
+  return `
+    <div style="${EMAIL_FONT_STYLE}display:none!important;max-height:0;max-width:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#edf2f7;opacity:0">
+      ${escapeHtml(intro)}${spacer}
+    </div>
+  `;
+}
+
 function relativeDeadlinePolicyLabel(ctx: AssignmentCreatedEmailContext): string {
   return `Hạn nộp sau ${ctx.deadlineAfterDays} ngày. Nếu học viên đã ghi danh trước khi bài tập được tạo, hạn nộp được tính từ lúc bài tập được tạo; nếu ghi danh sau, hạn nộp được tính từ lúc ghi danh.`;
 }
@@ -253,6 +262,7 @@ function shellEmail(
     <title>${escapeHtml(title)}</title>
   </head>
   <body style="${EMAIL_FONT_STYLE}margin:0;padding:0;background:#edf2f7;color:#111827">
+    ${hiddenPreheader(intro)}
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${EMAIL_FONT_STYLE}width:100%;background:#edf2f7;margin:0;padding:28px 12px">
       <tr>
         <td align="center">
@@ -474,6 +484,7 @@ async function buildCustomTemplateEmail(
   const systemHtml = systemDataBlock(key, mergedTokens, template.body_template);
   const bodyText = renderTemplateToText(template.body_template, mergedTokens).trim();
   const ctaText = meta.learnerHref ? `\n\nCổng học viên: ${meta.learnerHref}` : '';
+  const text = [intro, bodyText].filter(Boolean).join('\n\n') + ctaText;
   const html = shellEmail(
     branding,
     meta.eyebrow,
@@ -485,7 +496,7 @@ async function buildCustomTemplateEmail(
 
   return {
     subject,
-    text: `${bodyText}${ctaText}`,
+    text,
     html,
   };
 }
