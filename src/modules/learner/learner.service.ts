@@ -1188,7 +1188,7 @@ export async function getMyBadges(userId: string) {
 export async function getActiveBadges(tenantId: string) {
   const result = await query<any>(
     `SELECT b.id, b.name, b.description, b.image_key,
-            tbs.card_image_url, tbs.icon_image_url
+            tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url
      FROM badge_definitions b
      LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
      WHERE COALESCE(tbs.is_active, true) = true

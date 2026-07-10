@@ -21,5 +21,6 @@ router.patch('/tenants/:tenantId', ctrl.updateTenantBadges);
 // Upload badge images (superadmin only)
 router.post('/tenants/:tenantId/:badgeId/card-image', upload.single('file'), ctrl.uploadCardImage);
 router.post('/tenants/:tenantId/:badgeId/icon-image', upload.single('file'), ctrl.uploadIconImage);
+router.post('/tenants/:tenantId/:badgeId/mobile-card-image', upload.single('file'), ctrl.uploadMobileCardImage);
 
 export default router;
