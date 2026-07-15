@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
+import { ZodError } from 'zod';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createBotSchema, updateBotSchema } from './bot.validator.js';
 import * as botService from './bot.service.js';
@@ -81,6 +82,36 @@ export async function uploadAvatar(req: Request, res: Response): Promise<void> {
     auditFromReq(req, 'UPDATE', 'chatbot', req.params.id, undefined, 'Avatar upload');
     sendSuccess(res, bot);
   } catch (err: any) {
+    sendError(res, err.message, 400);
+  }
+}
+
+export async function getInputFilterConfig(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+
+  try {
+    const config = await botService.getBotInputFilterConfig(req.params.id, tenantId);
+    if (!config) { sendError(res, 'Bot không tồn tại', 404); return; }
+    sendSuccess(res, config);
+  } catch (err: any) {
+    sendError(res, err.message, 400);
+  }
+}
+
+export async function updateInputFilterConfig(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const rawInput = req.body?.input_filter ?? req.body;
+
+  try {
+    const config = await botService.updateBotInputFilterConfig(req.params.id, tenantId, rawInput);
+    if (!config) { sendError(res, 'Bot không tồn tại', 404); return; }
+    auditFromReq(req, 'UPDATE', 'chatbot', req.params.id, undefined, 'Update input filter');
+    sendSuccess(res, config);
+  } catch (err: any) {
+    if (err instanceof ZodError) {
+      sendError(res, err.errors[0]?.message || 'Cấu hình bộ lọc không hợp lệ', 400);
+      return;
+    }
     sendError(res, err.message, 400);
   }
 }

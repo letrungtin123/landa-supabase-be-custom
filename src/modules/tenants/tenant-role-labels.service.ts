@@ -1,4 +1,6 @@
 import { getClient, query } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 
@@ -52,20 +54,27 @@ export function sanitizeRoleLabels(input: unknown): RoleLabelMap {
   return labels;
 }
 
-export function invalidateTenantRoleLabelsCache(tenantId?: string | null): void {
+export async function invalidateTenantRoleLabelsCache(tenantId?: string | null): Promise<void> {
   if (!tenantId) {
     roleLabelsCache.clear();
     return;
   }
   roleLabelsCache.delete(tenantId);
+  await bumpCacheVersion(...cacheVersions.tenantLabels(tenantId, 'role'));
 }
 
 export async function getTenantRoleLabels(tenantId: string | null | undefined): Promise<RoleLabelMap> {
   if (!tenantId) return {};
 
-  const cached = roleLabelsCache.get(tenantId);
-  if (cached && cached.expires > Date.now()) return cached.labels;
+  const version = await getCacheVersion(...cacheVersions.tenantLabels(tenantId, 'role'));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'role-labels', version),
+    CACHE_TTL.tenantLabels,
+    () => getTenantRoleLabelsFromDb(tenantId),
+  );
+}
 
+async function getTenantRoleLabelsFromDb(tenantId: string): Promise<RoleLabelMap> {
   try {
     const result = await query<{ role: UserRole; label: string }>(
       `SELECT role::text AS role, label
@@ -113,7 +122,7 @@ export async function replaceTenantRoleLabels(
     }
 
     await client.query('COMMIT');
-    invalidateTenantRoleLabelsCache(tenantId);
+    await invalidateTenantRoleLabelsCache(tenantId);
     return labels;
   } catch (err) {
     await client.query('ROLLBACK');

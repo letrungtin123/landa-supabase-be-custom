@@ -1,7 +1,19 @@
 import { query } from '../../config/database.js';
+import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFileByUrl, buildStoragePath } from '../../config/storage.js';
 
 export async function getTenantBadgeSettings(tenantId: string) {
+  const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'badge-settings', version),
+    CACHE_TTL.badges,
+    () => getTenantBadgeSettingsFromDb(tenantId),
+  );
+}
+
+async function getTenantBadgeSettingsFromDb(tenantId: string) {
   const result = await query<any>(
     `SELECT b.id, b.name, b.description, b.image_key,
             tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url,
@@ -22,6 +34,7 @@ export async function updateTenantBadgeSetting(tenantId: string, badgeId: string
      DO UPDATE SET is_active = $3, updated_at = now()`,
     [tenantId, badgeId, isActive]
   );
+  await invalidateTenantBadgeCaches(tenantId);
 }
 
 export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatuses: { badge_id: string; is_active: boolean }[]) {
@@ -40,6 +53,7 @@ export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatus
      DO UPDATE SET is_active = EXCLUDED.is_active, updated_at = now()`,
     params
   );
+  await invalidateTenantBadgeCaches(tenantId);
 }
 
 const BADGE_IMAGE_EXTENSIONS: Record<string, string> = {
@@ -91,6 +105,7 @@ async function uploadTenantBadgeImage(
     `UPDATE tenant_badge_settings SET ${column} = $1, updated_at = now() WHERE tenant_id = $2 AND badge_id = $3`,
     [storagePath, tenantId, badgeId]
   );
+  await invalidateTenantBadgeCaches(tenantId);
 
   return storagePath;
 }

@@ -46,6 +46,16 @@ function requiredInt(key: string): number {
   return num;
 }
 
+function optionalInt(key: string, fallback: number): number {
+  const raw = process.env[key]?.trim();
+  if (!raw) return fallback;
+  const num = parseInt(raw, 10);
+  if (isNaN(num)) {
+    throw new Error(`[ENV] ${key} must be an integer, received: "${raw}"`);
+  }
+  return num;
+}
+
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
@@ -70,6 +80,10 @@ export const env = {
 
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
+
+  // Redis (optional; DB fallback is used if unavailable)
+  REDIS_URL: process.env.REDIS_URL?.trim() || '',
+  REDIS_CONNECT_TIMEOUT_MS: optionalInt('REDIS_CONNECT_TIMEOUT_MS', 2_000),
 
   // SSO config encryption (optional until SSO secrets are configured)
   SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',

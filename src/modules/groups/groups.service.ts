@@ -4,6 +4,11 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query, getClient } from '../../config/database.js';
+import {
+  invalidateTenantCourseCaches,
+  invalidateTenantLibraryCaches,
+  invalidateUserMembershipCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
@@ -26,6 +31,18 @@ interface AddTeamMembersOptions {
 interface CourseCategorySummary {
   name: string;
   courseCount: number;
+}
+
+async function getTeamTenantId(teamId: string): Promise<string | null> {
+  const result = await query<{ tenant_id: string }>(
+    `SELECT og.tenant_id
+     FROM teams t
+     JOIN sub_groups sg ON sg.id = t.subgroup_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.id = $1`,
+    [teamId],
+  );
+  return result.rows[0]?.tenant_id ?? null;
 }
 
 // ═══ Org Groups (level 1) ═══
@@ -458,9 +475,10 @@ export async function addTeamMembers(
       processEmailOutboxBatch(options.tenantId)
         .catch(err => {
           console.error('[Groups] Email outbox error:', err instanceof Error ? err.message : err);
-        });
+      });
     });
   }
+  await invalidateUserMembershipCaches(normalizedUserIds);
 
   return {
     success: true,
@@ -473,6 +491,12 @@ export async function addTeamMembers(
 }
 
 export async function removeTeamMember(teamId: string, userId: string) {
+  const result = await removeTeamMemberFromDb(teamId, userId);
+  await invalidateUserMembershipCaches([userId]);
+  return result;
+}
+
+async function removeTeamMemberFromDb(teamId: string, userId: string) {
   const r = await query('DELETE FROM team_members WHERE team_id = $1 AND user_id = $2 RETURNING user_id', [teamId, userId]);
   if (r.rowCount === 0) throw new AppError('Thành viên không thuộc team', 404);
   return { success: true };
@@ -481,15 +505,24 @@ export async function removeTeamMember(teamId: string, userId: string) {
 // ═══ Team Courses ═══
 
 export async function assignTeamCourses(teamId: string, courseIds: string[]) {
+  const tenantId = await getTeamTenantId(teamId);
   let assigned = 0, skipped = 0;
   for (const cid of courseIds) {
     const r = await query('INSERT INTO team_courses (team_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
+  if (tenantId) await invalidateTenantCourseCaches(tenantId);
   return { success: true, assigned, skipped };
 }
 
 export async function revokeTeamCourse(teamId: string, courseId: string) {
+  const tenantId = await getTeamTenantId(teamId);
+  const result = await revokeTeamCourseFromDb(teamId, courseId);
+  if (tenantId) await invalidateTenantCourseCaches(tenantId);
+  return result;
+}
+
+async function revokeTeamCourseFromDb(teamId: string, courseId: string) {
   const r = await query('DELETE FROM team_courses WHERE team_id = $1 AND course_id = $2 RETURNING course_id', [teamId, courseId]);
   if (r.rowCount === 0) throw new AppError('Course không thuộc team', 404);
   return { success: true };
@@ -498,15 +531,24 @@ export async function revokeTeamCourse(teamId: string, courseId: string) {
 // ═══ Team Document Categories ═══
 
 export async function assignTeamDocCategories(teamId: string, categoryIds: string[]) {
+  const tenantId = await getTeamTenantId(teamId);
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
     const r = await query('INSERT INTO team_doc_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
+  if (tenantId) await invalidateTenantLibraryCaches(tenantId);
   return { success: true, assigned, skipped };
 }
 
 export async function revokeTeamDocCategory(teamId: string, categoryId: string) {
+  const tenantId = await getTeamTenantId(teamId);
+  const result = await revokeTeamDocCategoryFromDb(teamId, categoryId);
+  if (tenantId) await invalidateTenantLibraryCaches(tenantId);
+  return result;
+}
+
+async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string) {
   const r = await query('DELETE FROM team_doc_categories WHERE team_id = $1 AND category_id = $2 RETURNING category_id', [teamId, categoryId]);
   if (r.rowCount === 0) throw new AppError('Category không thuộc team', 404);
   return { success: true };
@@ -515,15 +557,24 @@ export async function revokeTeamDocCategory(teamId: string, categoryId: string) 
 // ═══ Team Course Categories ═══
 
 export async function assignTeamCourseCategories(teamId: string, categoryIds: string[]) {
+  const tenantId = await getTeamTenantId(teamId);
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
     const r = await query('INSERT INTO team_course_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
+  if (tenantId) await invalidateTenantCourseCaches(tenantId);
   return { success: true, assigned, skipped };
 }
 
 export async function revokeTeamCourseCategory(teamId: string, categoryId: string) {
+  const tenantId = await getTeamTenantId(teamId);
+  const result = await revokeTeamCourseCategoryFromDb(teamId, categoryId);
+  if (tenantId) await invalidateTenantCourseCaches(tenantId);
+  return result;
+}
+
+async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string) {
   const r = await query('DELETE FROM team_course_categories WHERE team_id = $1 AND category_id = $2 RETURNING category_id', [teamId, categoryId]);
   if (r.rowCount === 0) throw new AppError('Course category không thuộc team', 404);
   return { success: true };

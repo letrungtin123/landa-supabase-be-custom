@@ -6,6 +6,10 @@
 
 import { createHash } from 'crypto';
 import { query } from '../../config/database.js';
+import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
+import { getRedisClient } from '../../config/redis.js';
 import {
   applyLessonAuthorProposalToCourse,
   type LessonAuthorChapterProposal,
@@ -16,6 +20,9 @@ import {
   type LessonAuthorUnitProposal,
 } from '../course-authoring/course-authoring.service.js';
 import { getGeminiClient } from './gemini.service.js';
+import { runStoredInputFilter } from './input-filter/input-filter.service.js';
+import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
+import type { FilterResult } from './input-filter/core/index.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -409,6 +416,15 @@ export interface LessonAuthorSettings {
 // ═══════════════════════════════════════════════════════════════
 
 export async function getAssignments(tenantId: string): Promise<BotAssignment[]> {
+  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
+  return cacheJson(
+    cacheKeys.aiTenantResource(tenantId, 'assignments', version),
+    CACHE_TTL.aiConfig,
+    () => getAssignmentsFromDb(tenantId),
+  );
+}
+
+async function getAssignmentsFromDb(tenantId: string): Promise<BotAssignment[]> {
   const result = await query<BotAssignment>(
     `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id
      FROM tenant_bot_assignments tba
@@ -421,6 +437,15 @@ export async function getAssignments(tenantId: string): Promise<BotAssignment[]>
 }
 
 export async function getActiveBot(tenantId: string, target: ChatTarget): Promise<BotAssignment | null> {
+  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
+  return cacheJson(
+    cacheKeys.aiTenantResource(tenantId, 'active-bot', version, { target }),
+    CACHE_TTL.aiConfig,
+    () => getActiveBotFromDb(tenantId, target),
+  );
+}
+
+async function getActiveBotFromDb(tenantId: string, target: ChatTarget): Promise<BotAssignment | null> {
   const result = await query<BotAssignment>(
     `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id
      FROM tenant_bot_assignments tba
@@ -452,6 +477,7 @@ export async function assignBot(tenantId: string, target: ChatTarget, botId: str
   if (target === LESSON_AUTHOR_TARGET) {
     await resolveLessonAuthorPersonaForBot(tenantId, botId);
   }
+  await invalidateTenantAiCaches(tenantId);
 }
 
 export async function unassignBot(tenantId: string, target: ChatTarget): Promise<boolean> {
@@ -459,10 +485,20 @@ export async function unassignBot(tenantId: string, target: ChatTarget): Promise
     `DELETE FROM tenant_bot_assignments WHERE tenant_id = $1 AND target = $2`,
     [tenantId, target],
   );
+  if ((result.rowCount ?? 0) > 0) await invalidateTenantAiCaches(tenantId);
   return (result.rowCount ?? 0) > 0;
 }
 
 export async function getActiveKbAssignment(tenantId: string): Promise<KbAssignment | null> {
+  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
+  return cacheJson(
+    cacheKeys.aiTenantResource(tenantId, 'lesson-author-kb', version),
+    CACHE_TTL.aiConfig,
+    () => getActiveKbAssignmentFromDb(tenantId),
+  );
+}
+
+async function getActiveKbAssignmentFromDb(tenantId: string): Promise<KbAssignment | null> {
   const result = await query<KbAssignment>(
     `SELECT tka.id,
             tka.tenant_id,
@@ -562,12 +598,30 @@ async function resolveLessonAuthorPersonaForBot(
 }
 
 export async function getActivePersonaAssignment(tenantId: string): Promise<PersonaAssignment | null> {
+  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
+  return cacheJson(
+    cacheKeys.aiTenantResource(tenantId, 'lesson-author-persona', version),
+    CACHE_TTL.aiConfig,
+    () => getActivePersonaAssignmentFromDb(tenantId),
+  );
+}
+
+async function getActivePersonaAssignmentFromDb(tenantId: string): Promise<PersonaAssignment | null> {
   const activeBot = await getActiveBot(tenantId, LESSON_AUTHOR_TARGET);
   if (!activeBot) return null;
   return resolveLessonAuthorPersonaForBot(tenantId, activeBot.bot_id);
 }
 
 export async function getLessonAuthorSettings(tenantId: string): Promise<LessonAuthorSettings> {
+  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
+  return cacheJson(
+    cacheKeys.aiTenantResource(tenantId, 'lesson-author-settings', version),
+    CACHE_TTL.aiConfig,
+    () => getLessonAuthorSettingsFromDb(tenantId),
+  );
+}
+
+async function getLessonAuthorSettingsFromDb(tenantId: string): Promise<LessonAuthorSettings> {
   const [activeBot, activeKb] = await Promise.all([
     getActiveBot(tenantId, LESSON_AUTHOR_TARGET),
     getActiveKbAssignment(tenantId),
@@ -598,6 +652,7 @@ export async function assignLessonAuthorKb(tenantId: string, kbId: string): Prom
   );
 
   storeNameCache.delete(kbId);
+  await invalidateTenantAiCaches(tenantId);
 }
 
 export async function unassignLessonAuthorKb(tenantId: string): Promise<boolean> {
@@ -605,6 +660,7 @@ export async function unassignLessonAuthorKb(tenantId: string): Promise<boolean>
     `DELETE FROM tenant_kb_assignments WHERE tenant_id = $1 AND target = $2`,
     [tenantId, LESSON_AUTHOR_TARGET],
   );
+  if ((result.rowCount ?? 0) > 0) await invalidateTenantAiCaches(tenantId);
   return (result.rowCount ?? 0) > 0;
 }
 
@@ -828,24 +884,30 @@ interface ConversationContext {
   botKbId: string | null;
   systemPrompt: string;
   messageCount: number;
+  inputFilterConfig: unknown;
+}
+
+function getInputFilterConfigFromBotConfig(botConfig: unknown): unknown {
+  if (typeof botConfig !== 'object' || botConfig === null || Array.isArray(botConfig)) return null;
+  return (botConfig as Record<string, unknown>)[INPUT_FILTER_CONFIG_KEY] ?? null;
 }
 
 async function loadConversationContext(conversationId: string, userId: string, tenantId: string): Promise<ConversationContext> {
   // Single query: load conversation + bot + persona + prompt + message count via CTE
   const result = await query<{
     id: string; tenant_id: string; bot_id: string; target: ChatTarget; course_id: string | null; bot_kb_id: string | null;
-    custom_prompt: string | null; template_prompt: string;
+    custom_prompt: string | null; template_prompt: string; bot_config: unknown;
     msg_count: number;
   }>(
     `WITH conv AS (
-       SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.course_id, c.kb_id AS bot_kb_id, cc.persona_id
+       SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.course_id, c.kb_id AS bot_kb_id, c.config AS bot_config, cc.persona_id
        FROM chat_conversations cc
        JOIN chatbots c ON c.id = cc.bot_id
        WHERE cc.id = $1 AND cc.user_id = $2 AND cc.tenant_id = $3
      ), msg_cnt AS (
        SELECT COUNT(*)::int AS cnt FROM chat_messages WHERE conversation_id = $1
      )
-     SELECT conv.id, conv.tenant_id, conv.bot_id, conv.target, conv.course_id, conv.bot_kb_id,
+     SELECT conv.id, conv.tenant_id, conv.bot_id, conv.target, conv.course_id, conv.bot_kb_id, conv.bot_config,
             bp.custom_prompt, spt.prompt AS template_prompt,
             msg_cnt.cnt AS msg_count
      FROM conv
@@ -877,7 +939,51 @@ async function loadConversationContext(conversationId: string, userId: string, t
     botKbId,
     systemPrompt: row.target === LESSON_AUTHOR_TARGET ? row.template_prompt : (row.custom_prompt ?? row.template_prompt),
     messageCount: row.msg_count,
+    inputFilterConfig: getInputFilterConfigFromBotConfig(row.bot_config),
   };
+}
+
+async function saveInputFilterRejectedTurn(
+  ctx: ConversationContext,
+  userContent: string,
+  replyMessage: string,
+  result: FilterResult,
+): Promise<void> {
+  await query(
+    `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+     VALUES ($1, 'user', $2, $3)`,
+    [
+      ctx.conversationId,
+      userContent,
+      {
+        input_filter_blocked: true,
+        input_filter_code: result.code,
+      },
+    ],
+  );
+
+  await query(
+    `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+     VALUES ($1, 'assistant', $2, $3)`,
+    [
+      ctx.conversationId,
+      replyMessage,
+      {
+        kind: 'input_filter_rejection',
+        input_filter_code: result.code,
+        input_filter_detail: result.detail ?? null,
+      },
+    ],
+  );
+
+  const title = userContent.slice(0, 50) + (userContent.length > 50 ? '...' : '');
+  await query(
+    `UPDATE chat_conversations
+     SET updated_at = now(),
+         title = CASE WHEN $3::boolean THEN $2 ELSE title END
+     WHERE id = $1 AND tenant_id = $4`,
+    [ctx.conversationId, title, ctx.messageCount === 0, ctx.tenantId],
+  );
 }
 
 async function loadHistory(conversationId: string): Promise<{ role: string; parts: { text: string }[] }[]> {
@@ -3844,6 +3950,41 @@ export async function sendMessageStream(
       throw new Error('Conversation course mismatch');
     }
     const courseId = options.courseId ?? ctx.courseId ?? undefined;
+
+    try {
+      const filterOutcome = await runStoredInputFilter({
+        message: trimmed,
+        sessionId: conversationId,
+        tenantId: ctx.tenantId,
+        botId: ctx.botId,
+        rawConfig: ctx.inputFilterConfig,
+        redisClient: getRedisClient(),
+      });
+
+      if (filterOutcome.blocked && filterOutcome.replyMessage) {
+        markRateLimit(userId);
+        await saveInputFilterRejectedTurn(ctx, trimmed, filterOutcome.replyMessage, filterOutcome.result);
+        logLessonAuthorFlow('input_filter_rejected', {
+          conversation_id: conversationId,
+          tenant_id: ctx.tenantId,
+          bot_id: ctx.botId,
+          target: ctx.target,
+          code: filterOutcome.result.code,
+          processing_time_ms: filterOutcome.result.processingTimeMs ?? null,
+        });
+        onChunk(filterOutcome.replyMessage);
+        onDone();
+        return;
+      }
+    } catch (err) {
+      console.error('[InputFilter] Invalid config or runtime error; continuing chat flow', {
+        conversation_id: conversationId,
+        tenant_id: ctx.tenantId,
+        bot_id: ctx.botId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
     // Pre-classify intent to decide carry-forward (delete intent should never carry forward)
     const preClassify = ctx.target === LESSON_AUTHOR_TARGET

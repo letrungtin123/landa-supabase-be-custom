@@ -4,6 +4,9 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
@@ -16,6 +19,24 @@ import { recalculateEnrollmentProgress } from './progress-calculation.service.js
  * - staff/superuser/superadmin: toàn bộ courses trong tenant
  */
 export async function getMyVisibleCourses(
+  userId: string,
+  tenantId: string,
+  role: string,
+  params: { search?: string; category_id?: string; page?: number; page_size?: number },
+) {
+  const [membershipVersion, coursesVersion, categoriesVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.userMembership(userId)),
+    getCacheVersion(...cacheVersions.tenantCourses(tenantId)),
+    getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)),
+  ]);
+  return cacheJson(
+    cacheKeys.learnerResource(tenantId, userId, 'courses', [membershipVersion, coursesVersion, categoriesVersion], { role, params }),
+    CACHE_TTL.learnerCourses,
+    () => getMyVisibleCoursesFromDb(userId, tenantId, role, params),
+  );
+}
+
+async function getMyVisibleCoursesFromDb(
   userId: string,
   tenantId: string,
   role: string,
@@ -116,6 +137,25 @@ export async function getMyVisibleCourses(
  * Lấy chi tiết 1 khóa học + kiểm tra quyền truy cập.
  */
 export async function getCourseDetail(
+  courseId: string,
+  userId: string,
+  tenantId: string,
+  role: string,
+) {
+  const [courseVersion, membershipVersion, coursesVersion, categoriesVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.courseContent(courseId)),
+    getCacheVersion(...cacheVersions.userMembership(userId)),
+    getCacheVersion(...cacheVersions.tenantCourses(tenantId)),
+    getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)),
+  ]);
+  return cacheJson(
+    cacheKeys.learnerResource(tenantId, userId, `course:${courseId}`, [courseVersion, membershipVersion, coursesVersion, categoriesVersion], { role }),
+    CACHE_TTL.courseDetail,
+    () => getCourseDetailFromDb(courseId, userId, tenantId, role),
+  );
+}
+
+async function getCourseDetailFromDb(
   courseId: string,
   userId: string,
   tenantId: string,
@@ -223,6 +263,25 @@ export async function getCourseBlocks(
   courseId: string,
   userId: string,
   role = 'learner',
+  tenantId?: string | null,
+) {
+  const [courseVersion, progressVersion, coursesVersion, categoriesVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.courseContent(courseId)),
+    getCacheVersion(...cacheVersions.userCourseProgress(userId, courseId)),
+    tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
+    tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
+  ]);
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role }),
+    CACHE_TTL.courseBlocks,
+    () => getCourseBlocksFromDb(courseId, userId, role),
+  );
+}
+
+async function getCourseBlocksFromDb(
+  courseId: string,
+  userId: string,
+  role = 'learner',
 ) {
   const courseCheck = await query<{ id: string }>(
     `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
@@ -318,6 +377,15 @@ export async function getCourseBlocks(
  * Learner route → LUÔN trả published_data, bất kể role.
  */
 export async function getBlockDetail(blockId: string, role = 'learner') {
+  const version = await getCacheVersion(...cacheVersions.blockContent(blockId));
+  return cacheJson(
+    cacheKeys.blockResource(blockId, `${version}:${role}`),
+    CACHE_TTL.blockDetail,
+    () => getBlockDetailFromDb(blockId, role),
+  );
+}
+
+async function getBlockDetailFromDb(blockId: string, role = 'learner') {
   // Learner route: luôn chỉ trả published data
   const isLearner = true;
   // Learner: chỉ đọc published data (KHÔNG fallback draft)
@@ -758,7 +826,20 @@ function gradeSortable(block: any, userOrder: number[]) {
  * Lấy danh sách file/tài liệu đính kèm của course.
  * Learner chỉ thấy file chưa bị khóa (is_locked = false).
  */
-export async function getCourseFiles(courseId: string, role = 'learner') {
+export async function getCourseFiles(courseId: string, role = 'learner', tenantId?: string | null) {
+  const [version, coursesVersion, categoriesVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.courseAssets(courseId)),
+    tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
+    tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
+  ]);
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'files', `${version}:${coursesVersion}:${categoriesVersion}`, { role }),
+    CACHE_TTL.courseFiles,
+    () => getCourseFilesFromDb(courseId, role),
+  );
+}
+
+async function getCourseFilesFromDb(courseId: string, role = 'learner') {
   const lockedFilter = isLearnerRole(role) ? 'AND is_locked = false' : '';
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
@@ -796,6 +877,22 @@ export async function getCourseFiles(courseId: string, role = 'learner') {
  * Staff/superuser/superadmin: thấy tất cả categories trong tenant.
  */
 export async function getMyLibraryCategories(
+  userId: string,
+  tenantId: string,
+  role: string,
+) {
+  const [libraryVersion, membershipVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.tenantLibrary(tenantId)),
+    getCacheVersion(...cacheVersions.userMembership(userId)),
+  ]);
+  return cacheJson(
+    cacheKeys.learnerResource(tenantId, userId, 'library-categories', [libraryVersion, membershipVersion], { role }),
+    CACHE_TTL.library,
+    () => getMyLibraryCategoriesFromDb(userId, tenantId, role),
+  );
+}
+
+async function getMyLibraryCategoriesFromDb(
   userId: string,
   tenantId: string,
   role: string,
@@ -845,6 +942,30 @@ export async function getMyLibraryCategories(
  * Staff+: tất cả docs visible trong tenant.
  */
 export async function getMyLibraryDocuments(
+  userId: string,
+  tenantId: string,
+  role: string,
+  params: {
+    page?: number;
+    page_size?: number;
+    category?: string;
+    extension?: string;
+    search?: string;
+    ordering?: string;
+  },
+) {
+  const [libraryVersion, membershipVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.tenantLibrary(tenantId)),
+    getCacheVersion(...cacheVersions.userMembership(userId)),
+  ]);
+  return cacheJson(
+    cacheKeys.learnerResource(tenantId, userId, 'library-documents', [libraryVersion, membershipVersion], { role, params }),
+    CACHE_TTL.library,
+    () => getMyLibraryDocumentsFromDb(userId, tenantId, role, params),
+  );
+}
+
+async function getMyLibraryDocumentsFromDb(
   userId: string,
   tenantId: string,
   role: string,
@@ -994,6 +1115,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
     }
     // Re-activate
     await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
+    await invalidateUserCourseProgressCache(userId, courseId);
     return { enrollment_id: existing.rows[0].id, already_enrolled: false };
   }
 
@@ -1008,6 +1130,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
     'INSERT INTO course_progress (enrollment_id) VALUES ($1)',
     [enrollmentId],
   );
+  await invalidateUserCourseProgressCache(userId, courseId);
 
   return { enrollment_id: enrollmentId, already_enrolled: false };
 }
@@ -1073,6 +1196,7 @@ export async function markBlocksComplete(
 
   if (activeBlockIds.length === 0) {
     await recalculateProgress(enrollmentId, courseId);
+    await invalidateUserCourseProgressCache(userId, courseId);
     return { marked: 0 };
   }
 
@@ -1085,6 +1209,7 @@ export async function markBlocksComplete(
 
   // Tính lại progress: completed_leaves / total_leaves
   await recalculateProgress(enrollmentId, courseId);
+  await invalidateUserCourseProgressCache(userId, courseId);
 
   return { marked: activeBlockIds.length };
 }
@@ -1186,6 +1311,15 @@ export async function getMyBadges(userId: string) {
 }
 
 export async function getActiveBadges(tenantId: string) {
+  const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'active-badges', version),
+    CACHE_TTL.badges,
+    () => getActiveBadgesFromDb(tenantId),
+  );
+}
+
+async function getActiveBadgesFromDb(tenantId: string) {
   const result = await query<any>(
     `SELECT b.id, b.name, b.description, b.image_key,
             tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url
@@ -1290,6 +1424,15 @@ export async function markAllNotificationsRead(userId: string, tenantId: string)
  * Trả defaults nếu chưa có config.
  */
 export async function getCourseModalConfig(courseId: string) {
+  const version = await getCacheVersion(...cacheVersions.courseModal(courseId));
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'modal-config', version),
+    CACHE_TTL.courseModal,
+    () => getCourseModalConfigFromDb(courseId),
+  );
+}
+
+async function getCourseModalConfigFromDb(courseId: string) {
   const result = await query<any>(
     `SELECT welcome_enabled, welcome_title, welcome_description,
             confirm_enabled, confirm_title, confirm_description, confirm_checkbox_text,
@@ -1384,6 +1527,15 @@ export async function updateCourseModalState(
  * Chỉ trả configs đã bật (enabled = true).
  */
 export async function getSectionModalConfigs(courseId: string) {
+  const version = await getCacheVersion(...cacheVersions.courseModal(courseId));
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'section-modal-configs', version),
+    CACHE_TTL.courseModal,
+    () => getSectionModalConfigsFromDb(courseId),
+  );
+}
+
+async function getSectionModalConfigsFromDb(courseId: string) {
   const result = await query<any>(
     `SELECT section_id, title, description
      FROM section_modal_configs

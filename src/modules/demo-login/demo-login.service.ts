@@ -1,4 +1,7 @@
 import { getClient, query } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
 import { generateOTT } from '../auth/auth.service.js';
@@ -227,6 +230,7 @@ export async function updateDemoLoginConfig(
      WHERE tenant_id = $1`,
     params,
   );
+  await invalidateTenantPublicDomainCaches(tenantId, ['demo-login']);
 
   return getDemoLoginConfig(tenantId);
 }
@@ -346,6 +350,7 @@ export async function replaceDemoLoginAccounts(
   } finally {
     client.release();
   }
+  await invalidateTenantPublicDomainCaches(tenantId, ['demo-login']);
 
   return getDemoLoginConfig(tenantId);
 }
@@ -356,9 +361,20 @@ export async function deleteDemoLoginAccount(tenantId: string, publicId: string)
     [tenantId, publicId],
   );
   if (result.rowCount === 0) throw new AppError('Tài khoản demo không tồn tại', 404);
+  await invalidateTenantPublicDomainCaches(tenantId, ['demo-login']);
 }
 
 export async function listPublicDemoLoginAccounts(domain: string) {
+  const normalizedDomain = normalizeDomain(domain);
+  const version = await getCacheVersion(...cacheVersions.publicDomain(normalizedDomain, 'demo-login'));
+  return cacheJson(
+    cacheKeys.publicDomain(normalizedDomain, 'demo-login', version),
+    CACHE_TTL.demoPublic,
+    () => listPublicDemoLoginAccountsFromDb(normalizedDomain),
+  );
+}
+
+async function listPublicDemoLoginAccountsFromDb(domain: string) {
   const tenant = await getTenantByLearnerDomain(domain);
   const settings = await query<SettingsRow>(
     `SELECT tenant_id, is_enabled, max_demo_accounts, reservation_ttl_seconds,
@@ -453,6 +469,7 @@ export async function claimPublicDemoLoginAccount(domain: string, accountId: str
   if (!claimed) throw new AppError('Tài khoản demo không còn khả dụng', 409);
 
   const ott = generateOTT(claimed.user_id);
+  await bumpCacheVersion(...cacheVersions.publicDomain(domain, 'demo-login'));
   return {
     redirect_url: buildLearnerTargetUrl(tenant, domain, ott),
     expires_in: 30,
@@ -463,7 +480,13 @@ export async function claimPublicDemoLoginAccount(domain: string, accountId: str
 
 export async function removeUserFromDemoLogin(userId: string): Promise<void> {
   try {
+    const tenantResult = await query<{ tenant_id: string }>(
+      'SELECT tenant_id FROM tenant_demo_login_accounts WHERE user_id = $1 LIMIT 1',
+      [userId],
+    );
     await query('DELETE FROM tenant_demo_login_accounts WHERE user_id = $1', [userId]);
+    const tenantId = tenantResult.rows[0]?.tenant_id;
+    if (tenantId) await invalidateTenantPublicDomainCaches(tenantId, ['demo-login']);
   } catch (err) {
     if ((err as { code?: string }).code === '42P01') return;
     throw err;

@@ -1,4 +1,6 @@
 import { getClient, query } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../middleware/error-handler.js';
 
 export type GroupLabelKey = 'group' | 'subgroup' | 'team';
@@ -78,20 +80,27 @@ export function lowerGroupLabel(value: string): string {
   return value.toLocaleLowerCase('vi-VN');
 }
 
-export function invalidateTenantGroupLabelsCache(tenantId?: string | null): void {
+export async function invalidateTenantGroupLabelsCache(tenantId?: string | null): Promise<void> {
   if (!tenantId) {
     groupLabelsCache.clear();
     return;
   }
   groupLabelsCache.delete(tenantId);
+  await bumpCacheVersion(...cacheVersions.tenantLabels(tenantId, 'group'));
 }
 
 export async function getTenantGroupLabels(tenantId: string | null | undefined): Promise<GroupLabelMap> {
   if (!tenantId) return {};
 
-  const cached = groupLabelsCache.get(tenantId);
-  if (cached && cached.expires > Date.now()) return cached.labels;
+  const version = await getCacheVersion(...cacheVersions.tenantLabels(tenantId, 'group'));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'group-labels', version),
+    CACHE_TTL.tenantLabels,
+    () => getTenantGroupLabelsFromDb(tenantId),
+  );
+}
 
+async function getTenantGroupLabelsFromDb(tenantId: string): Promise<GroupLabelMap> {
   try {
     const result = await query<{ label_key: GroupLabelKey; label: string }>(
       `SELECT label_key, label
@@ -139,7 +148,7 @@ export async function replaceTenantGroupLabels(
     }
 
     await client.query('COMMIT');
-    invalidateTenantGroupLabelsCache(tenantId);
+    await invalidateTenantGroupLabelsCache(tenantId);
     return labels;
   } catch (err) {
     await client.query('ROLLBACK');

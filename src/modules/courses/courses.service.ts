@@ -3,6 +3,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import {
+  invalidateCourseReadCaches,
+  invalidateTenantCourseCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
@@ -163,10 +167,20 @@ export async function createCourse(tenantId: string, createdBy: string, input: {
      RETURNING *`,
     [input.id, tenantId, input.display_name, input.description, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
   );
+  await Promise.all([
+    invalidateTenantCourseCaches(tenantId),
+    invalidateCourseReadCaches(result.rows[0].id, tenantId),
+  ]);
   return result.rows[0];
 }
 
 export async function updateCourse(courseId: string, input: { display_name?: string; description?: string; visible_to_staff_only?: boolean; image_url?: string }) {
+  const course = await updateCourseFromDb(courseId, input);
+  await invalidateCourseReadCaches(courseId, course.tenant_id);
+  return course;
+}
+
+async function updateCourseFromDb(courseId: string, input: { display_name?: string; description?: string; visible_to_staff_only?: boolean; image_url?: string }) {
   const sets: string[] = ['updated_at = NOW()'];
   const params: unknown[] = [];
   let idx = 1;
@@ -183,9 +197,10 @@ export async function updateCourse(courseId: string, input: { display_name?: str
 export async function bulkCourseAction(ids: string[], action: string) {
   const staffOnly = action === 'staff_only';
   const r = await query(
-    'UPDATE courses SET visible_to_staff_only = $1, updated_at = NOW() WHERE id = ANY($2) AND deleted_at IS NULL',
+    'UPDATE courses SET visible_to_staff_only = $1, updated_at = NOW() WHERE id = ANY($2) AND deleted_at IS NULL RETURNING id, tenant_id',
     [staffOnly, ids],
   );
+  await Promise.all((r.rows as Array<{ id: string; tenant_id: string }>).map((row) => invalidateCourseReadCaches(row.id, row.tenant_id)));
   return { updated: r.rowCount || 0 };
 }
 
@@ -262,6 +277,7 @@ export async function updateCourseMentor(courseId: string, tenantId: string, men
       [courseId, tenantId],
     );
     if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+    await invalidateCourseReadCaches(courseId, tenantId);
     return null;
   }
 
@@ -283,6 +299,7 @@ export async function updateCourseMentor(courseId: string, tenantId: string, men
     [courseId, tenantId, mentorId],
   );
   if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+  await invalidateCourseReadCaches(courseId, tenantId);
 
   return mentorResult.rows[0];
 }
@@ -321,6 +338,7 @@ export async function upsertCourseMentorSection(
     [tenantId, courseId, description, userId],
   );
 
+  await invalidateCourseReadCaches(courseId, tenantId);
   return mapMentorSection(result.rows[0])!;
 }
 
@@ -366,6 +384,7 @@ export async function uploadCourseMentorSectionLogo(
     await deleteFile(oldPath).catch(() => {});
   }
 
+  await invalidateCourseReadCaches(courseId, tenantId);
   return mapMentorSection(result.rows[0])!;
 }
 
@@ -400,6 +419,7 @@ export async function deleteCourseMentorSectionLogo(
     await deleteFile(oldPath).catch(() => {});
   }
 
+  await invalidateCourseReadCaches(courseId, tenantId);
   return mapMentorSection(result.rows[0]);
 }
 
@@ -467,6 +487,7 @@ export async function upsertCourseModalConfig(courseId: string, input: Record<st
     [courseId],
   );
   await query(`UPDATE course_modal_configs SET ${sets.join(', ')} WHERE course_id = $1`, params);
+  await invalidateCourseReadCaches(courseId);
   return { success: true };
 }
 
@@ -491,5 +512,6 @@ export async function upsertSectionModalConfig(courseId: string, input: { sectio
        updated_at = NOW()`,
     [courseId, input.section_id, input.enabled ?? false, input.title || '', input.description || ''],
   );
+  await invalidateCourseReadCaches(courseId);
   return { success: true };
 }

@@ -3,7 +3,13 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { invalidateCourseReadCaches, invalidateTenantCourseCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+
+async function getCategoryTenantId(catId: string): Promise<string | null> {
+  const result = await query<{ tenant_id: string }>('SELECT tenant_id FROM course_categories WHERE id = $1', [catId]);
+  return result.rows[0]?.tenant_id ?? null;
+}
 
 export async function listCourseCategories(tenantId: string | null) {
   const params: unknown[] = [];
@@ -26,10 +32,17 @@ export async function createCourseCategory(tenantId: string, input: { name: stri
     'INSERT INTO course_categories (tenant_id, name, slug, description, sort_order) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, slug',
     [tenantId, input.name, slug, input.description || '', input.sort_order || 0],
   );
+  await invalidateTenantCourseCaches(tenantId);
   return result.rows[0];
 }
 
 export async function updateCourseCategory(catId: string, input: { name?: string; description?: string; sort_order?: number }) {
+  const category = await updateCourseCategoryFromDb(catId, input);
+  await invalidateTenantCourseCaches(category.tenant_id);
+  return category;
+}
+
+async function updateCourseCategoryFromDb(catId: string, input: { name?: string; description?: string; sort_order?: number }) {
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
@@ -42,14 +55,15 @@ export async function updateCourseCategory(catId: string, input: { name?: string
   if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
   if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
   params.push(catId);
-  const result = await query(`UPDATE course_categories SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug`, params);
+  const result = await query(`UPDATE course_categories SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, tenant_id`, params);
   if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function deleteCourseCategory(catId: string) {
-  const result = await query('DELETE FROM course_categories WHERE id = $1 RETURNING id', [catId]);
+  const result = await query('DELETE FROM course_categories WHERE id = $1 RETURNING id, tenant_id', [catId]);
   if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
+  await invalidateTenantCourseCaches(result.rows[0].tenant_id);
 }
 
 export async function getCategoryCourses(catId: string) {
@@ -65,6 +79,7 @@ export async function getCategoryCourses(catId: string) {
 }
 
 export async function addCoursesToCategory(catId: string, courseIds: string[]) {
+  const tenantId = await getCategoryTenantId(catId);
   let assigned = 0;
   let skipped = 0;
   for (const courseId of courseIds) {
@@ -74,10 +89,27 @@ export async function addCoursesToCategory(catId: string, courseIds: string[]) {
     );
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
+  if (tenantId) {
+    await Promise.all([
+      invalidateTenantCourseCaches(tenantId),
+      ...courseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
+    ]);
+  }
   return { assigned, skipped };
 }
 
 export async function removeCourseFromCategory(catId: string, courseId: string) {
+  const tenantId = await getCategoryTenantId(catId);
+  await removeCourseFromCategoryFromDb(catId, courseId);
+  if (tenantId) {
+    await Promise.all([
+      invalidateTenantCourseCaches(tenantId),
+      invalidateCourseReadCaches(courseId, tenantId),
+    ]);
+  }
+}
+
+async function removeCourseFromCategoryFromDb(catId: string, courseId: string) {
   const result = await query(
     'DELETE FROM course_category_courses WHERE category_id = $1 AND course_id = $2 RETURNING id',
     [catId, courseId],

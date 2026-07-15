@@ -4,8 +4,27 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { invalidateTenantLibraryCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+
+async function getDocumentTenantIds(docIds: readonly string[]): Promise<string[]> {
+  if (docIds.length === 0) return [];
+  const result = await query<{ tenant_id: string }>(
+    'SELECT DISTINCT tenant_id FROM documents WHERE id = ANY($1)',
+    [docIds],
+  );
+  return result.rows.map((row) => row.tenant_id);
+}
+
+async function getCategoryTenantIds(categoryIds: readonly string[]): Promise<string[]> {
+  if (categoryIds.length === 0) return [];
+  const result = await query<{ tenant_id: string }>(
+    'SELECT DISTINCT tenant_id FROM document_categories WHERE id = ANY($1)',
+    [categoryIds],
+  );
+  return result.rows.map((row) => row.tenant_id);
+}
 
 // ── Document Categories ──
 
@@ -42,10 +61,18 @@ export async function createDocCategory(tenantId: string, input: { name: string 
      RETURNING id, name, slug`,
     [tenantId, input.name, slug],
   );
+  await invalidateTenantLibraryCaches(tenantId);
   return result.rows[0];
 }
 
 export async function updateDocCategory(catId: string, input: { name?: string }) {
+  const tenantIds = await getCategoryTenantIds([catId]);
+  const category = await updateDocCategoryFromDb(catId, input);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
+  return category;
+}
+
+async function updateDocCategoryFromDb(catId: string, input: { name?: string }) {
   if (!input.name) throw new AppError('Không có dữ liệu cập nhật', 400);
   const slug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const result = await query(
@@ -57,13 +84,22 @@ export async function updateDocCategory(catId: string, input: { name?: string })
 }
 
 export async function deleteDocCategory(catId: string) {
+  const tenantIds = await getCategoryTenantIds([catId]);
+  const category = await deleteDocCategoryFromDb(catId);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
+  return category;
+}
+
+async function deleteDocCategoryFromDb(catId: string) {
   const result = await query('DELETE FROM document_categories WHERE id = $1 RETURNING id, name', [catId]);
   if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function bulkDeleteDocCategories(ids: string[]) {
+  const tenantIds = await getCategoryTenantIds(ids);
   const result = await query('DELETE FROM document_categories WHERE id = ANY($1) RETURNING id', [ids]);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
   return { deleted: result.rowCount || 0 };
 }
 
@@ -115,10 +151,18 @@ export async function createDocument(tenantId: string, input: {
      RETURNING id, title, file_url, file_size, extension, category_id, is_visible`,
     [tenantId, input.title, input.file_url, input.file_size || 0, input.extension || '', input.category_id || null, input.is_visible ?? true, uploadedBy],
   );
+  await invalidateTenantLibraryCaches(tenantId);
   return result.rows[0];
 }
 
 export async function updateDocument(docId: string, input: { title?: string; is_visible?: boolean; category_id?: string | null }) {
+  const tenantIds = await getDocumentTenantIds([docId]);
+  const document = await updateDocumentFromDb(docId, input);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
+  return document;
+}
+
+async function updateDocumentFromDb(docId: string, input: { title?: string; is_visible?: boolean; category_id?: string | null }) {
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
@@ -135,12 +179,26 @@ export async function updateDocument(docId: string, input: { title?: string; is_
 }
 
 export async function deleteDocument(docId: string) {
+  const tenantIds = await getDocumentTenantIds([docId]);
+  const document = await deleteDocumentFromDb(docId);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
+  return document;
+}
+
+async function deleteDocumentFromDb(docId: string) {
   const result = await query('DELETE FROM documents WHERE id = $1 RETURNING id, title, file_url', [docId]);
   if (result.rowCount === 0) throw new AppError('Document không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function bulkDocumentAction(ids: string[], action: string, categoryId?: string | null) {
+  const tenantIds = await getDocumentTenantIds(ids);
+  const result = await bulkDocumentActionFromDb(ids, action, categoryId);
+  await Promise.all(tenantIds.map((tenantId) => invalidateTenantLibraryCaches(tenantId)));
+  return result;
+}
+
+async function bulkDocumentActionFromDb(ids: string[], action: string, categoryId?: string | null) {
   if (action === 'show') {
     const r = await query('UPDATE documents SET is_visible = true WHERE id = ANY($1)', [ids]);
     return { updated: r.rowCount || 0 };

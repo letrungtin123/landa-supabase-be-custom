@@ -63,6 +63,8 @@ router.post('/bots', checkPermission('ai_chatbot', 'can_add'), botCtrl.createBot
 router.put('/bots/:id', checkPermission('ai_chatbot', 'can_edit'), botCtrl.updateBot);
 router.delete('/bots/:id', checkPermission('ai_chatbot', 'can_delete'), botCtrl.deleteBot);
 router.post('/bots/:id/avatar', checkPermission('ai_chatbot', 'can_edit'), upload.single('avatar'), botCtrl.uploadAvatar);
+router.get('/bots/:id/input-filter', checkPermission('ai_chatbot', 'can_view'), botCtrl.getInputFilterConfig);
+router.put('/bots/:id/input-filter', checkPermission('ai_chatbot', 'can_edit'), botCtrl.updateInputFilterConfig);
 
 // ── Bot Personas ──
 router.get('/bots/:id/personas', checkPermission('ai_chatbot', 'can_view'), botCtrl.listPersonas);

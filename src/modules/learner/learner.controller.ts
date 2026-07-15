@@ -60,6 +60,7 @@ export async function getCourseBlocks(req: Request, res: Response, next: NextFun
       req.params.courseId,
       req.user.id,
       req.user.role,
+      req.user.tenantId,
     );
     sendSuccess(res, result);
   } catch (err) {
@@ -72,7 +73,7 @@ export async function getCourseFiles(req: Request, res: Response, next: NextFunc
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
 
-    const result = await learnerService.getCourseFiles(req.params.courseId, req.user.role);
+    const result = await learnerService.getCourseFiles(req.params.courseId, req.user.role, req.user.tenantId);
     sendSuccess(res, result);
   } catch (err) {
     next(err);

@@ -3,6 +3,7 @@ import { env } from './config/env.js';
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
 import { query } from './config/database.js';
+import { closeRedis, connectRedis } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
@@ -48,6 +49,7 @@ async function initRabbitMQ(): Promise<void> {
 async function bootstrap() {
   // 1. Init RabbitMQ (MUST succeed — crash otherwise)
   await initRabbitMQ();
+  await connectRedis();
 
   // 2. Ensure temp dir for Gemini worker
   try {
@@ -114,6 +116,7 @@ setInterval(async function cleanupAuditLogs() {
 // Graceful shutdown
 async function gracefulShutdown(signal: string) {
   console.log(`[Server] ${signal} received, shutting down...`);
+  await closeRedis();
   await closeRabbitMQ();
   process.exit(0);
 }

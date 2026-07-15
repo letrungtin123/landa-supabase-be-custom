@@ -5,6 +5,9 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
+import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { DashboardContentData, UpsertDashboardContentInput } from './dashboard-content.validator.js';
 
@@ -46,6 +49,15 @@ async function writeDashboardContent(tenantId: string, data: DashboardContentDat
  * Lấy dashboard content theo tenant ID — PROTECTED (admin dashboard).
  */
 export async function getDashboardContentByTenantId(tenantId: string): Promise<DashboardContentResponse> {
+  const version = await getCacheVersion(...cacheVersions.tenantResource(tenantId, 'dashboard-content'));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'dashboard-content', version),
+    CACHE_TTL.publicConfig,
+    () => getDashboardContentByTenantIdFromDb(tenantId),
+  );
+}
+
+async function getDashboardContentByTenantIdFromDb(tenantId: string): Promise<DashboardContentResponse> {
   const content = await readDashboardContent(tenantId);
 
   return {
@@ -63,28 +75,36 @@ export async function getDashboardContentByTenantId(tenantId: string): Promise<D
  * Trả về null nếu domain không match hoặc chưa có content.
  */
 export async function getDashboardContentByDomain(domain: string): Promise<DashboardContentResponse | null> {
-  const result = await query<{ id: string; settings: Record<string, unknown> }>(
-    `SELECT id, settings FROM tenants
-     WHERE (
-       regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
-       OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
-     ) AND is_active = true`,
-    [domain],
+  const normalizedDomain = normalizeCacheDomain(domain);
+  const version = await getCacheVersion(...cacheVersions.publicDomain(normalizedDomain, 'dashboard-content'));
+  return cacheJson(
+    cacheKeys.publicDomain(normalizedDomain, 'dashboard-content', version),
+    CACHE_TTL.publicConfig,
+    async () => {
+      const result = await query<{ id: string; settings: Record<string, unknown> }>(
+        `SELECT id, settings FROM tenants
+         WHERE (
+           regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
+           OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
+         ) AND is_active = true`,
+        [normalizedDomain],
+      );
+
+      if (result.rowCount === 0) return null;
+
+      const tenant = result.rows[0];
+      const content: DashboardContentData | null = (tenant.settings as any)?.dashboard_content || null;
+
+      return {
+        tenant_id: tenant.id,
+        hero_badge: content?.hero_badge || null,
+        hero_title: content?.hero_title || null,
+        tips: content?.tips || null,
+        explore_hero_badge: content?.explore_hero_badge || null,
+        explore_hero_title: content?.explore_hero_title || null,
+      };
+    },
   );
-
-  if (result.rowCount === 0) return null;
-
-  const tenant = result.rows[0];
-  const content: DashboardContentData | null = (tenant.settings as any)?.dashboard_content || null;
-
-  return {
-    tenant_id: tenant.id,
-    hero_badge: content?.hero_badge || null,
-    hero_title: content?.hero_title || null,
-    tips: content?.tips || null,
-    explore_hero_badge: content?.explore_hero_badge || null,
-    explore_hero_title: content?.explore_hero_title || null,
-  };
 }
 
 /**
@@ -110,6 +130,10 @@ export async function upsertDashboardContent(
   };
 
   await writeDashboardContent(tenantId, data);
+  await Promise.all([
+    bumpCacheVersion(...cacheVersions.tenantResource(tenantId, 'dashboard-content')),
+    invalidateTenantPublicDomainCaches(tenantId, ['dashboard-content']),
+  ]);
 
   return {
     tenant_id: tenantId,

@@ -1,4 +1,6 @@
 import type { PoolClient } from 'pg';
+import { bumpCacheVersion, getCacheJson, getCacheVersion, setCacheJson } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 
@@ -74,9 +76,6 @@ interface EmailTemplateInput {
   preheader_template?: unknown;
   body_template?: unknown;
 }
-
-const TEMPLATE_CACHE_TTL_MS = 60_000;
-const templateCache = new Map<string, { expires: number; value: TenantTemplateRow | null }>();
 
 const COMMON_VARIABLES: EmailTemplateVariable[] = [
   { key: 'tenant_name', label: 'Tên tenant', description: 'Tên tenant đang gửi email.', system: true },
@@ -243,10 +242,6 @@ function isUndefinedTableError(err: unknown): boolean {
   return Boolean(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === '42P01');
 }
 
-function cacheKey(tenantId: string, key: EmailTemplateKey): string {
-  return `${tenantId}:${key}`;
-}
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -349,18 +344,16 @@ async function selectTemplate(
   return result.rows[0] || null;
 }
 
-export function invalidateEmailTemplateCache(tenantId?: string, key?: EmailTemplateKey) {
+export async function invalidateEmailTemplateCache(tenantId?: string, key?: EmailTemplateKey) {
   if (!tenantId) {
-    templateCache.clear();
+    await bumpCacheVersion(...cacheVersions.emailTemplates());
     return;
   }
   if (key) {
-    templateCache.delete(cacheKey(tenantId, key));
+    await bumpCacheVersion(...cacheVersions.tenantEmailTemplate(tenantId, key));
     return;
   }
-  for (const existingKey of templateCache.keys()) {
-    if (existingKey.startsWith(`${tenantId}:`)) templateCache.delete(existingKey);
-  }
+  await bumpCacheVersion(...cacheVersions.tenantEmailTemplates(tenantId));
 }
 
 export function getTemplateDefinition(key: EmailTemplateKey): EmailTemplateDefinition {
@@ -385,24 +378,33 @@ function buildDefaultTemplateRenderRow(tenantId: string, key: EmailTemplateKey):
   };
 }
 
+async function getEmailTemplateRenderCacheKey(tenantId: string, key: EmailTemplateKey): Promise<string> {
+  const [globalVersion, tenantVersion, templateVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.emailTemplates()),
+    getCacheVersion(...cacheVersions.tenantEmailTemplates(tenantId)),
+    getCacheVersion(...cacheVersions.tenantEmailTemplate(tenantId, key)),
+  ]);
+  return cacheKeys.emailTemplate(tenantId, key, `${globalVersion}:${tenantVersion}:${templateVersion}`);
+}
+
 export async function getEmailTemplateForRender(
   tenantId: string,
   key: EmailTemplateKey,
   client?: PoolClient,
 ): Promise<TenantTemplateRow | null> {
-  const keyName = cacheKey(tenantId, key);
-  const cached = templateCache.get(keyName);
-  if (cached && cached.expires > Date.now()) return cached.value;
+  const cacheKeyName = await getEmailTemplateRenderCacheKey(tenantId, key);
+  const cached = await getCacheJson<TenantTemplateRow>(cacheKeyName);
+  if (cached.hit) return cached.value;
 
   try {
     const value = await selectTemplate(tenantId, key, client)
       || buildDefaultTemplateRenderRow(tenantId, key);
-    templateCache.set(keyName, { value, expires: Date.now() + TEMPLATE_CACHE_TTL_MS });
+    await setCacheJson(cacheKeyName, value, CACHE_TTL.emailTemplates);
     return value;
   } catch (err) {
     if (isUndefinedTableError(err)) {
       const value = buildDefaultTemplateRenderRow(tenantId, key);
-      templateCache.set(keyName, { value, expires: Date.now() + 10_000 });
+      await setCacheJson(cacheKeyName, value, 10);
       return value;
     }
     throw err;
@@ -507,7 +509,7 @@ export async function updateTenantEmailTemplate(
                is_enabled, updated_at, updated_by`,
     [tenantId, key, normalized.subject_template, normalized.preheader_template, normalized.body_template, updatedBy],
   );
-  invalidateEmailTemplateCache(tenantId, key);
+  await invalidateEmailTemplateCache(tenantId, key);
   return toRecord(DEFAULT_TEMPLATES[key], result.rows[0]);
 }
 
@@ -520,7 +522,7 @@ export async function resetTenantEmailTemplate(tenantId: string, keyValue: strin
        AND template_key = $2`,
     [tenantId, key],
   );
-  invalidateEmailTemplateCache(tenantId, key);
+  await invalidateEmailTemplateCache(tenantId, key);
   return toRecord(DEFAULT_TEMPLATES[key], null);
 }
 

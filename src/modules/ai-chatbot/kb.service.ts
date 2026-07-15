@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, buildStoragePath, buildFileName, deleteFile } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import type { CreateKbInput, UpdateKbInput, CreateArticleInput, UpdateArticleInput } from './kb.validator.js';
@@ -108,6 +109,7 @@ export async function createKnowledgebase(tenantId: string, input: CreateKbInput
      RETURNING *`,
     [tenantId, input.name, input.description || '', userId],
   );
+  await invalidateTenantAiCaches(tenantId);
   return result.rows[0];
 }
 
@@ -127,6 +129,7 @@ export async function updateKnowledgebase(id: string, tenantId: string, input: U
     `UPDATE knowledgebases SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx++} RETURNING *`,
     params,
   );
+  if (result.rows[0]) await invalidateTenantAiCaches(tenantId);
   return result.rows[0] || null;
 }
 
@@ -178,6 +181,7 @@ export async function deleteKnowledgebase(id: string, tenantId: string): Promise
     }
   }
 
+  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
   return (result.rowCount || 0) > 0;
 }
 
@@ -296,6 +300,7 @@ export async function uploadDocument(
     mode: 'file',
   });
 
+  await invalidateTenantAiCaches(tenantId);
   return { ...doc, file_path: storagePath, status: 'learning' };
 }
 
@@ -338,6 +343,7 @@ export async function deleteDocument(docId: string, kbId: string, tenantId: stri
     try { await deleteFile(doc.file_path); } catch { /* ignore */ }
   }
 
+  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
   return (result.rowCount || 0) > 0;
 }
 
@@ -399,6 +405,7 @@ export async function bulkDeleteDocuments(
     }
   }
 
+  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
   return { deleted: result.rowCount || 0 };
 }
 
@@ -448,6 +455,7 @@ export async function retryDocuments(
     });
   }
 
+  await invalidateTenantAiCaches(tenantId);
   return { retried: eligibleIds.length };
 }
 
@@ -459,10 +467,12 @@ export async function updateDocumentStatus(
   status: 'draft' | 'learning' | 'learned' | 'error',
   errorReason?: string,
 ): Promise<void> {
-  await query(
-    `UPDATE kb_documents SET status = $1, error_reason = $2, updated_at = now() WHERE id = $3`,
+  const result = await query<{ tenant_id: string }>(
+    `UPDATE kb_documents SET status = $1, error_reason = $2, updated_at = now() WHERE id = $3 RETURNING tenant_id`,
     [status, errorReason || null, docId],
   );
+  const tenantId = result.rows[0]?.tenant_id;
+  if (tenantId) await invalidateTenantAiCaches(tenantId);
 }
 
 /**
@@ -574,6 +584,7 @@ export async function uploadFaqDocument(
     mode: 'faq',
   });
 
+  await invalidateTenantAiCaches(tenantId);
   return { ...doc, file_path: storagePath, status: 'learning' };
 }
 
@@ -681,6 +692,7 @@ export async function uploadArticle(
       mode: 'article',
     });
 
+    await invalidateTenantAiCaches(tenantId);
     return { ...doc, file_path: storagePath, status: 'learning' };
   } finally {
     try { await fs.unlink(tempPath); } catch { /* ignore */ }
@@ -751,6 +763,7 @@ export async function updateArticle(
       mode: 'article',
     });
 
+    await invalidateTenantAiCaches(tenantId);
     return { ...existing, name: title, content, file_path: storagePath, status: 'learning' };
   } finally {
     try { await fs.unlink(tempPath); } catch { /* ignore */ }

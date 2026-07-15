@@ -3,8 +3,17 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateBotCaches, invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateBotInput, UpdateBotInput } from './bot.validator.js';
+import {
+  INPUT_FILTER_CONFIG_KEY,
+  ensureInputFilterInBotConfig,
+  normalizeInputFilterConfig,
+  type InputFilterConfig,
+} from './input-filter/input-filter.schema.js';
 
 export interface Chatbot {
   id: string;
@@ -20,6 +29,24 @@ export interface Chatbot {
   persona_previews?: { name: string; avatar_url: string | null; fullbody_url: string | null }[];
 }
 
+function asConfigRecord(config: unknown): Record<string, unknown> {
+  if (typeof config === 'string') {
+    try {
+      const parsed = JSON.parse(config);
+      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof config === 'object' && config !== null && !Array.isArray(config) ? { ...(config as Record<string, unknown>) } : {};
+}
+
+async function invalidateBotConfigCaches(tenantId: string, botId: string): Promise<void> {
+  await Promise.all([
+    invalidateBotCaches(botId),
+    invalidateTenantAiCaches(tenantId),
+  ]);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Bot CRUD
@@ -83,6 +110,15 @@ export async function listBots(
 
 
 export async function getBot(id: string, tenantId: string): Promise<Chatbot | null> {
+  const version = await getCacheVersion(...cacheVersions.bot(id));
+  return cacheJson(
+    cacheKeys.botResource(tenantId, id, 'detail', version),
+    CACHE_TTL.aiConfig,
+    () => getBotFromDb(id, tenantId),
+  );
+}
+
+async function getBotFromDb(id: string, tenantId: string): Promise<Chatbot | null> {
   const result = await query<Chatbot>(
     `SELECT c.*, kb.name AS kb_name
      FROM chatbots c
@@ -113,7 +149,7 @@ export async function createBot(tenantId: string, input: CreateBotInput, userId:
       tenantId,
       input.kb_id || null,
       input.name,
-      JSON.stringify(input.config || {}),
+      JSON.stringify(ensureInputFilterInBotConfig(input.config || {})),
       userId,
     ],
   );
@@ -121,6 +157,7 @@ export async function createBot(tenantId: string, input: CreateBotInput, userId:
 
   // Auto-assign active templates as personas
   await autoAssignPersonas(bot.id);
+  await invalidateBotConfigCaches(tenantId, bot.id);
 
   return bot;
 }
@@ -144,7 +181,18 @@ export async function updateBot(id: string, tenantId: string, input: UpdateBotIn
   if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
   if (input.kb_id !== undefined) { sets.push(`kb_id = $${idx++}`); params.push(input.kb_id); }
 
-  if (input.config !== undefined) { sets.push(`config = $${idx++}`); params.push(JSON.stringify(input.config)); }
+  if (input.config !== undefined) {
+    const nextConfig = asConfigRecord(input.config);
+    if (nextConfig[INPUT_FILTER_CONFIG_KEY] === undefined) {
+      const currentBot = await getBot(id, tenantId);
+      const currentConfig = asConfigRecord(currentBot?.config);
+      if (currentConfig[INPUT_FILTER_CONFIG_KEY] !== undefined) {
+        nextConfig[INPUT_FILTER_CONFIG_KEY] = currentConfig[INPUT_FILTER_CONFIG_KEY];
+      }
+    }
+    sets.push(`config = $${idx++}`);
+    params.push(JSON.stringify(ensureInputFilterInBotConfig(nextConfig)));
+  }
   if (input.avatar_url !== undefined) { sets.push(`avatar_url = $${idx++}`); params.push(input.avatar_url); }
   sets.push(`updated_at = now()`);
 
@@ -155,6 +203,7 @@ export async function updateBot(id: string, tenantId: string, input: UpdateBotIn
     `UPDATE chatbots SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx++} RETURNING *`,
     params,
   );
+  if (result.rows[0]) await invalidateBotConfigCaches(tenantId, id);
   return result.rows[0] || null;
 }
 
@@ -163,7 +212,38 @@ export async function deleteBot(id: string, tenantId: string): Promise<boolean> 
     `DELETE FROM chatbots WHERE id = $1 AND tenant_id = $2`,
     [id, tenantId],
   );
+  if ((result.rowCount || 0) > 0) await invalidateBotConfigCaches(tenantId, id);
   return (result.rowCount || 0) > 0;
+}
+
+export async function getBotInputFilterConfig(botId: string, tenantId: string): Promise<InputFilterConfig | null> {
+  const bot = await getBot(botId, tenantId);
+  if (!bot) return null;
+
+  const config = asConfigRecord(bot.config);
+  return normalizeInputFilterConfig(config[INPUT_FILTER_CONFIG_KEY]);
+}
+
+export async function updateBotInputFilterConfig(
+  botId: string,
+  tenantId: string,
+  rawInputFilterConfig: unknown,
+): Promise<InputFilterConfig | null> {
+  const bot = await getBot(botId, tenantId);
+  if (!bot) return null;
+
+  const config = asConfigRecord(bot.config);
+  const inputFilterConfig = normalizeInputFilterConfig(rawInputFilterConfig);
+  config[INPUT_FILTER_CONFIG_KEY] = inputFilterConfig;
+
+  await query(
+    `UPDATE chatbots SET config = $1, updated_at = now()
+     WHERE id = $2 AND tenant_id = $3`,
+    [JSON.stringify(config), botId, tenantId],
+  );
+  await invalidateBotConfigCaches(tenantId, botId);
+
+  return inputFilterConfig;
 }
 
 /**
@@ -191,6 +271,7 @@ export async function uploadBotAvatar(
      WHERE id = $2 AND tenant_id = $3 RETURNING *`,
     [storagePath, botId, tenantId],
   );
+  if (result.rows[0]) await invalidateBotConfigCaches(tenantId, botId);
   return result.rows[0] || null;
 }
 
@@ -239,6 +320,15 @@ async function autoAssignPersonas(botId: string): Promise<void> {
  * Validates bot belongs to tenant.
  */
 export async function listBotPersonas(botId: string, tenantId: string): Promise<BotPersona[]> {
+  const version = await getCacheVersion(...cacheVersions.bot(botId));
+  return cacheJson(
+    cacheKeys.botResource(tenantId, botId, 'personas', version),
+    CACHE_TTL.aiConfig,
+    () => listBotPersonasFromDb(botId, tenantId),
+  );
+}
+
+async function listBotPersonasFromDb(botId: string, tenantId: string): Promise<BotPersona[]> {
   const bot = await getBot(botId, tenantId);
   if (!bot) return [];
 
@@ -311,6 +401,7 @@ export async function updateBotPersona(
   );
   if (!result.rowCount || result.rowCount === 0) return null;
 
+  await invalidateBotConfigCaches(tenantId, botId);
   const personas = await listBotPersonas(botId, tenantId);
   return personas.find(p => p.id === personaId) || null;
 }
@@ -335,6 +426,7 @@ export async function resetBotPersona(
   );
   if (!result.rowCount || result.rowCount === 0) return null;
 
+  await invalidateBotConfigCaches(tenantId, botId);
   const personas = await listBotPersonas(botId, tenantId);
   return personas.find(p => p.id === personaId) || null;
 }
@@ -378,6 +470,7 @@ export async function addBotPersona(
     [botId, templateId, tplCheck.rows[0].sort_order],
   );
 
+  await invalidateBotConfigCaches(tenantId, botId);
   const personas = await listBotPersonas(botId, tenantId);
   return personas.find(p => p.template_id === templateId) || null;
 }
@@ -399,5 +492,6 @@ export async function removeBotPersona(
     `DELETE FROM bot_personas WHERE id = $1 AND bot_id = $2`,
     [personaId, botId],
   );
+  if ((result.rowCount || 0) > 0) await invalidateBotConfigCaches(tenantId, botId);
   return (result.rowCount || 0) > 0;
 }

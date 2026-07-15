@@ -82,6 +82,7 @@ export async function assignGroupsController(req: Request, res: Response, next: 
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
     await usersService.assignPermissionGroups(req.params.id, parsed.data.permission_group_ids);
+    invalidatePermissionCache(req.params.id);
     auditFromReq(req, 'UPDATE', 'user_permission_groups', req.params.id, undefined, 'Gán permission groups');
     sendSuccess(res, null, 'Gán nhóm quyền thành công');
   } catch (err) { next(err); }
@@ -159,4 +160,3 @@ export async function changePasswordController(req: Request, res: Response, next
     sendSuccess(res, null, 'Đổi mật khẩu thành công');
   } catch (err) { next(err); }
 }
-

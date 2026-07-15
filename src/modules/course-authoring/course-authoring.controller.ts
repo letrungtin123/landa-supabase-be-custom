@@ -498,7 +498,7 @@ export async function createCourse(req: Request, res: Response) {
   );
 
   // Initialize course structure with root block
-  await svc.initializeCourseStructure(courseId, safeDisplayName);
+  await svc.initializeCourseStructure(courseId, safeDisplayName, tenantId);
 
   sendSuccess(res, {
     id: courseId,

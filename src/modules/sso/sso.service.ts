@@ -1,4 +1,7 @@
 import { query } from '../../config/database.js';
+import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { issueSessionForUserId } from '../auth/auth.service.js';
 import { randomBytes } from 'crypto';
@@ -195,6 +198,7 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
   );
 
   clearSsoPublicCache();
+  await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
   return {
     ...compactConfig(result.rows[0]),
     provider,
@@ -205,13 +209,20 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
 export async function deleteConfig(tenantId: string, provider: SsoProvider): Promise<void> {
   await query('DELETE FROM tenant_sso_configs WHERE tenant_id = $1 AND provider = $2', [tenantId, provider]);
   clearSsoPublicCache();
+  await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
 }
 
 export async function getPublicConfigByDomain(domain: string): Promise<PublicSsoResponse> {
   const normalizedDomain = normalizeDomain(domain);
-  const cached = publicConfigCache.get(normalizedDomain);
-  if (cached && cached.expires > Date.now()) return cached.data;
+  const version = await getCacheVersion(...cacheVersions.publicDomain(normalizedDomain, 'sso-public'));
+  return cacheJson(
+    cacheKeys.publicDomain(normalizedDomain, 'sso-public', version),
+    CACHE_TTL.ssoPublic,
+    () => getPublicConfigByDomainFromDb(normalizedDomain),
+  );
+}
 
+async function getPublicConfigByDomainFromDb(normalizedDomain: string): Promise<PublicSsoResponse> {
   const tenantResult = await query<{ id: string; name: string }>(
     `SELECT id, name FROM tenants
      WHERE (
@@ -238,7 +249,6 @@ export async function getPublicConfigByDomain(domain: string): Promise<PublicSso
     .filter((item): item is PublicSsoProvider => !!item);
 
   const data = { tenant_id: tenant.id, tenant_name: tenant.name, providers };
-  publicConfigCache.set(normalizedDomain, { data, expires: Date.now() + PUBLIC_CACHE_TTL_MS });
   return data;
 }
 

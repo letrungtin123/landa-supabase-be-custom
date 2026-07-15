@@ -1,10 +1,16 @@
 import { query, getClient } from '../../config/database.js';
+import {
+  invalidateBlockReadCaches,
+  invalidateCourseReadCaches,
+  invalidateTenantCourseCaches,
+} from '../../config/cache-invalidation.js';
 import { deleteFile, deleteFileByUrl, extractStoragePath } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { AppError } from '../../middleware/error-handler.js';
 
 const DELETE_BATCH_SIZE = 500;
 const ASSET_BATCH_SIZE = 100;
+const CACHE_INVALIDATION_BATCH_SIZE = 500;
 
 type DeleteTargetType = 'course' | 'block';
 type DeleteJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -51,6 +57,38 @@ function addStats(total: PurgeStats, next: Partial<PurgeStats>): void {
   for (const key of Object.keys(next) as (keyof PurgeStats)[]) {
     total[key] += next[key] ?? 0;
   }
+}
+
+async function invalidateBlockReadCachesInBatches(blockIds: readonly string[]): Promise<void> {
+  for (let index = 0; index < blockIds.length; index += CACHE_INVALIDATION_BATCH_SIZE) {
+    await invalidateBlockReadCaches(blockIds.slice(index, index + CACHE_INVALIDATION_BATCH_SIZE));
+  }
+}
+
+async function getCourseBlockIds(courseId: string): Promise<string[]> {
+  const result = await query<{ id: string }>(
+    'SELECT id FROM course_blocks WHERE course_id = $1',
+    [courseId],
+  );
+  return result.rows.map((row) => row.id);
+}
+
+async function getBlockSubtreeIds(blockId: string, courseId: string): Promise<string[]> {
+  const result = await query<{ id: string }>(
+    `WITH RECURSIVE subtree AS (
+       SELECT id
+       FROM course_blocks
+       WHERE id = $1 AND course_id = $2
+       UNION ALL
+       SELECT child.id
+       FROM course_blocks child
+       JOIN subtree s ON child.parent_id = s.id
+       WHERE child.course_id = $2
+     )
+     SELECT id FROM subtree`,
+    [blockId, courseId],
+  );
+  return result.rows.map((row) => row.id);
 }
 
 function normalizeCourseStoragePath(value: unknown, tenantId: string, courseId: string): string | null {
@@ -163,6 +201,12 @@ export async function requestCourseDeletion(
     client.release();
   }
 
+  const blockIds = await getCourseBlockIds(courseId);
+  await Promise.all([
+    invalidateTenantCourseCaches(tenantId),
+    invalidateCourseReadCaches(courseId, tenantId),
+    invalidateBlockReadCachesInBatches(blockIds),
+  ]);
   await publishDeleteJob(jobId);
   return { jobId };
 }
@@ -225,6 +269,11 @@ export async function requestBlockDeletion(
     client.release();
   }
 
+  const blockIds = await getBlockSubtreeIds(blockId, courseId);
+  await Promise.all([
+    invalidateCourseReadCaches(courseId, tenantId),
+    invalidateBlockReadCachesInBatches(blockIds),
+  ]);
   await publishDeleteJob(jobId);
   return { jobId, courseId };
 }
@@ -596,11 +645,29 @@ export async function runDeletionJob(jobId: string): Promise<void> {
   const job = await markJobRunning(jobId);
   if (!job) return;
 
+  const blockIdsToInvalidate = job.target_type === 'course'
+    ? await getCourseBlockIds(job.course_id)
+    : job.root_block_id
+      ? await getBlockSubtreeIds(job.root_block_id, job.course_id)
+      : [];
+
   const stats = job.target_type === 'course'
     ? await purgeCourse(job)
     : await purgeBlock(job);
 
   await markJobSucceeded(job.id, stats);
+  if (job.target_type === 'course') {
+    await Promise.all([
+      invalidateTenantCourseCaches(job.tenant_id),
+      invalidateCourseReadCaches(job.course_id, job.tenant_id),
+      invalidateBlockReadCachesInBatches(blockIdsToInvalidate),
+    ]);
+  } else {
+    await Promise.all([
+      invalidateCourseReadCaches(job.course_id, job.tenant_id),
+      invalidateBlockReadCachesInBatches(blockIdsToInvalidate),
+    ]);
+  }
 }
 
 export async function requeuePendingDeletionJobs(limit = 100): Promise<void> {

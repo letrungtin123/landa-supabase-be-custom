@@ -4,9 +4,26 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query, getClient } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import {
+  invalidatePublicDomainCachesForDomains,
+  invalidateUserMembershipCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
+
+const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
+
+async function getTenantPublicDomains(tenantId: string): Promise<string[]> {
+  const result = await query<{ domain_admin: string | null; domain_learner: string | null }>(
+    'SELECT domain_admin, domain_learner FROM tenants WHERE id = $1',
+    [tenantId],
+  );
+  const row = result.rows[0];
+  return [row?.domain_admin ?? null, row?.domain_learner ?? null].filter((domain): domain is string => !!domain);
+}
 
 /**
  * Danh sách tenants — phân trang + search.
@@ -86,6 +103,13 @@ export async function createTenant(input: CreateTenantInput) {
     );
 
     await client.query('COMMIT');
+    await Promise.all([
+      bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
+      invalidatePublicDomainCachesForDomains(
+        [tenant.domain_admin, tenant.domain_learner],
+        TENANT_PUBLIC_CACHE_RESOURCES,
+      ),
+    ]);
     return tenant;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -99,6 +123,21 @@ export async function createTenant(input: CreateTenantInput) {
  * Cập nhật tenant.
  */
 export async function updateTenant(id: string, input: UpdateTenantInput) {
+  const oldDomains = await getTenantPublicDomains(id);
+  const tenant = await updateTenantFromDb(id, input);
+  await Promise.all([
+    bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
+    bumpCacheVersion(...cacheVersions.tenantResource(id, 'branding')),
+    bumpCacheVersion(...cacheVersions.tenantResource(id, 'dashboard-content')),
+    invalidatePublicDomainCachesForDomains(
+      [...oldDomains, tenant.domain_admin, tenant.domain_learner],
+      TENANT_PUBLIC_CACHE_RESOURCES,
+    ),
+  ]);
+  return tenant;
+}
+
+async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
   // Build SET clause động
   const sets: string[] = [];
   const params: unknown[] = [];
@@ -129,6 +168,15 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
  * Xóa tenant.
  */
 export async function deleteTenant(id: string) {
+  const oldDomains = await getTenantPublicDomains(id);
+  await deleteTenantFromDb(id);
+  await Promise.all([
+    bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
+    invalidatePublicDomainCachesForDomains(oldDomains, TENANT_PUBLIC_CACHE_RESOURCES),
+  ]);
+}
+
+async function deleteTenantFromDb(id: string) {
   const result = await query('DELETE FROM tenants WHERE id = $1 RETURNING id', [id]);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
 }
@@ -180,6 +228,18 @@ export async function updateTenantModules(tenantId: string, modules: { module_id
  * Trả ALL tenants cho superadmin, chỉ assigned tenants cho superuser.
  */
 export async function listSimpleTenants(userId: string, role: string) {
+  const [systemVersion, userVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
+    getCacheVersion(...cacheVersions.userMembership(userId)),
+  ]);
+  return cacheJson(
+    cacheKeys.tenantResource('system', 'tenants-simple', `${systemVersion}:${userVersion}`, { userId, role }),
+    CACHE_TTL.tenantList,
+    () => listSimpleTenantsFromDb(userId, role),
+  );
+}
+
+async function listSimpleTenantsFromDb(userId: string, role: string) {
   if (role === 'superadmin') {
     const result = await query<{ id: string; name: string }>(
       'SELECT id, name FROM tenants WHERE is_active = true ORDER BY name ASC',
@@ -235,6 +295,7 @@ export async function setUserTenants(userId: string, tenantIds: string[]) {
     }
 
     await client.query('COMMIT');
+    await invalidateUserMembershipCaches([userId]);
     return { updated: tenantIds.length };
   } catch (err) {
     await client.query('ROLLBACK');

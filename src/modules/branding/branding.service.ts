@@ -5,6 +5,9 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
+import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
+import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFile, buildFileName } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { SINGLE_IMAGE_KEYS, IMAGE_SIZE_HINTS, MAX_CAROUSEL } from './branding.validator.js';
@@ -65,27 +68,44 @@ async function writeBrandingSettings(tenantId: string, branding: BrandingConfig)
  * FE 5173 gọi trước khi user login.
  */
 export async function getBrandingByDomain(domain: string): Promise<BrandingResponse | null> {
-  const result = await query<{ id: string; name: string; domain_admin: string | null; domain_learner: string | null; settings: Record<string, unknown> }>(
-    `SELECT id, name, domain_admin, domain_learner, settings FROM tenants
-     WHERE (
-       regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
-       OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
-     ) AND is_active = true`,
-    [domain],
+  const normalizedDomain = normalizeCacheDomain(domain);
+  const version = await getCacheVersion(...cacheVersions.publicDomain(normalizedDomain, 'branding'));
+  return cacheJson(
+    cacheKeys.publicDomain(normalizedDomain, 'branding', version),
+    CACHE_TTL.publicConfig,
+    async () => {
+      const result = await query<{ id: string; name: string; domain_admin: string | null; domain_learner: string | null; settings: Record<string, unknown> }>(
+        `SELECT id, name, domain_admin, domain_learner, settings FROM tenants
+         WHERE (
+           regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
+           OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
+         ) AND is_active = true`,
+        [normalizedDomain],
+      );
+
+      if (result.rowCount === 0) return null;
+
+      const tenant = result.rows[0];
+      const branding: BrandingConfig = (tenant.settings as any)?.branding || {};
+
+      return formatBrandingResponse(tenant.id, tenant.name, branding, tenant.domain_admin, tenant.domain_learner);
+    },
   );
-
-  if (result.rowCount === 0) return null;
-
-  const tenant = result.rows[0];
-  const branding: BrandingConfig = (tenant.settings as any)?.branding || {};
-
-  return formatBrandingResponse(tenant.id, tenant.name, branding, tenant.domain_admin, tenant.domain_learner);
 }
 
 /**
  * Lấy branding theo tenant ID — PROTECTED (admin dashboard).
  */
 export async function getBrandingByTenantId(tenantId: string): Promise<BrandingResponse> {
+  const version = await getCacheVersion(...cacheVersions.tenantResource(tenantId, 'branding'));
+  return cacheJson(
+    cacheKeys.tenantResource(tenantId, 'branding', version),
+    CACHE_TTL.publicConfig,
+    () => getBrandingByTenantIdFromDb(tenantId),
+  );
+}
+
+async function getBrandingByTenantIdFromDb(tenantId: string): Promise<BrandingResponse> {
   const result = await query<{ id: string; name: string; domain_admin: string | null; domain_learner: string | null; settings: Record<string, unknown> }>(
     'SELECT id, name, domain_admin, domain_learner, settings FROM tenants WHERE id = $1',
     [tenantId],
@@ -143,6 +163,10 @@ export async function uploadBrandingImage(
   }
 
   await writeBrandingSettings(tenantId, branding);
+  await Promise.all([
+    bumpCacheVersion(...cacheVersions.tenantResource(tenantId, 'branding')),
+    invalidateTenantPublicDomainCaches(tenantId, ['branding']),
+  ]);
 
   return {
     storage_path: storagePath,
@@ -174,6 +198,10 @@ export async function deleteBrandingImage(tenantId: string, imageKey: string): P
   }
 
   await writeBrandingSettings(tenantId, branding);
+  await Promise.all([
+    bumpCacheVersion(...cacheVersions.tenantResource(tenantId, 'branding')),
+    invalidateTenantPublicDomainCaches(tenantId, ['branding']),
+  ]);
 }
 
 // ── Helpers ──

@@ -5,6 +5,11 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getClient, query } from '../../config/database.js';
+import {
+  invalidateBlockReadCaches,
+  invalidateCourseReadCaches,
+  invalidateTenantCourseCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { deleteFile, extractStoragePath } from '../../config/storage.js';
 
@@ -270,6 +275,10 @@ export async function createBlock(
     await markAncestorsDirty(result.rows[0].id);
   }
 
+  await Promise.all([
+    invalidateCourseReadCaches(courseId),
+    invalidateBlockReadCaches([result.rows[0].id]),
+  ]);
   return { id: result.rows[0].id };
 }
 
@@ -429,14 +438,18 @@ export async function updateBlock(
   if (result.rowCount === 0) throw new Error('Block not found');
 
   const block = result.rows[0];
+  let tenantCourseInvalidation: Promise<void> | null = null;
 
   if (updates.display_name !== undefined && block.block_type === 'course' && block.parent_id === null) {
-    await query(
+    const courseResult = await query<{ tenant_id: string }>(
       `UPDATE courses
        SET display_name = $1, updated_at = now()
-       WHERE id = $2 AND deleted_at IS NULL`,
+       WHERE id = $2 AND deleted_at IS NULL
+       RETURNING tenant_id`,
       [updates.display_name, block.course_id],
     );
+    const tenantId = courseResult.rows[0]?.tenant_id;
+    if (tenantId) tenantCourseInvalidation = invalidateTenantCourseCaches(tenantId);
   }
 
   // Propagate has_draft_changes lên toàn bộ ancestor chain (giống edX)
@@ -445,6 +458,11 @@ export async function updateBlock(
     await markAncestorsDirty(block.id);
   }
 
+  await Promise.all([
+    invalidateCourseReadCaches(block.course_id),
+    invalidateBlockReadCaches([block.id]),
+    tenantCourseInvalidation ?? Promise.resolve(),
+  ]);
   return block;
 }
 
@@ -525,6 +543,22 @@ async function recalculateAncestorDraftFlags(blockId: string): Promise<void> {
   }
 }
 
+async function getDescendantBlockIds(blockId: string): Promise<string[]> {
+  const result = await query<{ id: string }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id
+       FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT id FROM descendants`,
+    [blockId],
+  );
+  return result.rows.map((row) => row.id);
+}
+
 export async function renameBlock(blockId: string, displayName: string): Promise<BlockInfo> {
   return updateBlock(blockId, { display_name: displayName });
 }
@@ -589,6 +623,11 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
   // Propagate clean state upward: if no siblings/cousins remain dirty, clear ancestor flags
   await recalculateAncestorDraftFlags(blockId);
   await cleanupStoragePathsNoLongerReferenced(block.course_id, previousPublishedPaths);
+  const descendantIds = await getDescendantBlockIds(blockId);
+  await Promise.all([
+    invalidateCourseReadCaches(block.course_id),
+    invalidateBlockReadCaches(descendantIds),
+  ]);
 
   return getBlockInfo(blockId);
 }
@@ -627,6 +666,10 @@ export async function discardDraft(blockId: string): Promise<BlockInfo> {
 
   // Propagate clean state upward: if no siblings remain dirty, clear ancestor flags
   await recalculateAncestorDraftFlags(blockId);
+  await Promise.all([
+    invalidateCourseReadCaches(block.course_id),
+    invalidateBlockReadCaches([blockId]),
+  ]);
 
   return getBlockInfo(blockId);
 }
@@ -709,6 +752,11 @@ export async function discardDraftCascade(blockId: string): Promise<BlockInfo> {
 
   await recalculateAncestorDraftFlags(blockId);
   await cleanupStoragePathsNoLongerReferenced(block.course_id, previousDraftPaths);
+  const descendantIds = await getDescendantBlockIds(blockId);
+  await Promise.all([
+    invalidateCourseReadCaches(block.course_id),
+    invalidateBlockReadCaches(descendantIds),
+  ]);
 
   return getBlockInfo(blockId);
 }
@@ -723,7 +771,7 @@ export async function reorderChildren(
   childIds: string[],
 ): Promise<void> {
   if (childIds.length === 0) return;
-  await getBlockInfo(parentId);
+  const parent = await getBlockInfo(parentId);
 
   // Validate UUID format — chống SQL injection
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -746,6 +794,10 @@ export async function reorderChildren(
      WHERE cb.id = v.block_id AND cb.parent_id = $1 AND cb.deleted_at IS NULL`,
     params,
   );
+  await Promise.all([
+    invalidateCourseReadCaches(parent.course_id),
+    invalidateBlockReadCaches([parentId, ...childIds]),
+  ]);
 }
 
 // ── Unit Children ──
@@ -871,6 +923,10 @@ export async function studioSubmit(
     await cleanupStoragePathsNoLongerReferenced(block.course_id, previousPublishedPaths);
   }
 
+  await Promise.all([
+    invalidateCourseReadCaches(block.course_id),
+    invalidateBlockReadCaches([blockId]),
+  ]);
   return { success: true, block: updated };
 }
 
@@ -988,6 +1044,7 @@ export async function createAssetRecord(
      RETURNING id, course_id, display_name, content_type, file_size, url, thumbnail_url, is_locked, created_at AS date_added`,
     [courseId, tenantId, displayName, contentType, fileSize, storagePath, url, uploadedBy],
   );
+  await invalidateCourseReadCaches(courseId, tenantId);
   return result.rows[0];
 }
 
@@ -1296,6 +1353,7 @@ export async function deleteAsset(assetId: string, courseId: string, tenantId: s
     `DELETE FROM course_assets WHERE id = $1 AND course_id = $2 AND tenant_id = $3 RETURNING *`,
     [assetId, courseId, tenantId],
   );
+  await invalidateCourseReadCaches(courseId, tenantId);
 
   return {
     asset: deleted.rows[0],
@@ -1330,6 +1388,7 @@ export async function deleteAssetByStoragePath(
      RETURNING storage_path`,
     [courseId, tenantId, storagePath],
   );
+  if (result.rowCount && result.rowCount > 0) await invalidateCourseReadCaches(courseId, tenantId);
 
   return {
     deletedRows: result.rows,
@@ -1752,6 +1811,10 @@ export async function applyLessonAuthorProposalToCourse(
       updated_count: updatedBlockIds.length,
       updated_block_ids: updatedBlockIds,
     });
+    await Promise.all([
+      invalidateCourseReadCaches(input.courseId, input.tenantId),
+      invalidateBlockReadCaches([rootId, ...createdBlockIds, ...updatedBlockIds]),
+    ]);
     return { created_block_ids: createdBlockIds, updated_block_ids: updatedBlockIds };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1769,6 +1832,7 @@ export async function applyLessonAuthorProposalToCourse(
 export async function initializeCourseStructure(
   courseId: string,
   displayName: string,
+  tenantId?: string,
 ): Promise<void> {
   // Create the root 'course' block
   await query(
@@ -1777,6 +1841,10 @@ export async function initializeCourseStructure(
      ON CONFLICT DO NOTHING`,
     [courseId, displayName],
   );
+  await Promise.all([
+    invalidateCourseReadCaches(courseId, tenantId),
+    tenantId ? invalidateTenantCourseCaches(tenantId) : Promise.resolve(),
+  ]);
 }
 
 export async function updateCourseAssetReference(
@@ -1791,4 +1859,5 @@ export async function updateCourseAssetReference(
      WHERE course_id = $1 AND tenant_id = $4 AND id = ANY($2)`,
     [courseId, assetIds, isReference, tenantId],
   );
+  await invalidateCourseReadCaches(courseId, tenantId);
 }
