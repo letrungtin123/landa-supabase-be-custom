@@ -8,8 +8,10 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { env } from './env.js';
+import { createReadStream } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
+import { COURSE_ASSET_MAX_UPLOAD_BYTES } from './upload-limits.js';
 
 // ── Supabase admin client (service_role — bypass RLS) ──
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
@@ -31,7 +33,7 @@ export async function ensureBucket(): Promise<void> {
   // Try to create
   const { error: createErr } = await supabase.storage.createBucket(STORAGE_BUCKET, {
     public: true,
-    fileSizeLimit: 104_857_600, // 100MB
+    fileSizeLimit: COURSE_ASSET_MAX_UPLOAD_BYTES,
   });
   if (createErr && !createErr.message.includes('already exists')) {
     throw new Error(`[Storage] Cannot create bucket: ${createErr.message}`);
@@ -69,6 +71,33 @@ export async function uploadFile(
   }
 
   // Trả về PATH, không phải full URL — DB chỉ lưu path để không lộ infra
+  return storagePath;
+}
+
+/**
+ * Upload a local temp file to Supabase Storage without loading the full file into RAM.
+ */
+export async function uploadFileFromPath(
+  storagePath: string,
+  filePath: string,
+  contentType: string,
+  upsert = false,
+): Promise<string> {
+  await ensureBucket();
+
+  const { error } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(storagePath, createReadStream(filePath), {
+      contentType,
+      upsert,
+      cacheControl: '3600',
+      duplex: 'half',
+    });
+
+  if (error) {
+    throw new Error(`[Storage] Upload failed (${storagePath}): ${error.message}`);
+  }
+
   return storagePath;
 }
 

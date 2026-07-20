@@ -13,7 +13,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
   enqueueTeamMemberAddedEmails,
-  processEmailOutboxBatch,
+  wakeEmailOutboxWorker,
 } from '../assignments/email-outbox.service.js';
 import { getCourseNotificationSmtpStatus } from '../notifications/notifications.service.js';
 import {
@@ -25,7 +25,6 @@ import {
 interface AddTeamMembersOptions {
   tenantId: string;
   actorUserId: string;
-  sendEmail?: boolean;
 }
 
 interface CourseCategorySummary {
@@ -294,7 +293,9 @@ export async function addTeamMembers(
       .map(uid => uid.trim())
       .filter(Boolean),
   ));
-  const sendEmail = Boolean(options.sendEmail);
+  const smtpStatus = await getCourseNotificationSmtpStatus(options.tenantId);
+  const sendEmail = smtpStatus.can_send_email;
+  const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
   const groupLabels = await getTenantGroupLabels(options.tenantId);
   const labels = getGroupLabelSet(groupLabels);
   const groupLabelLower = lowerGroupLabel(labels.group);
@@ -309,14 +310,8 @@ export async function addTeamMembers(
       notification_id: null,
       email_requested: sendEmail,
       email_queued: 0,
+      email_skipped_reason: emailSkippedReason,
     };
-  }
-
-  if (sendEmail) {
-    const smtpStatus = await getCourseNotificationSmtpStatus(options.tenantId);
-    if (!smtpStatus.can_send_email) {
-      throw new AppError(smtpStatus.reason || 'Tenant chưa cấu hình SMTP Google.', 400);
-    }
   }
 
   const client = await getClient();
@@ -471,12 +466,7 @@ export async function addTeamMembers(
   }
 
   if (emailQueued > 0) {
-    setImmediate(() => {
-      processEmailOutboxBatch(options.tenantId)
-        .catch(err => {
-          console.error('[Groups] Email outbox error:', err instanceof Error ? err.message : err);
-      });
-    });
+    wakeEmailOutboxWorker('team-member-added');
   }
   await invalidateUserMembershipCaches(normalizedUserIds);
 
@@ -487,6 +477,7 @@ export async function addTeamMembers(
     notification_id: notificationId,
     email_requested: sendEmail,
     email_queued: emailQueued,
+    email_skipped_reason: emailSkippedReason,
   };
 }
 

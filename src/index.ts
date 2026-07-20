@@ -8,6 +8,7 @@ import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/ra
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
+import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import fs from 'fs/promises';
 
 /**
@@ -31,12 +32,16 @@ async function initRabbitMQ(): Promise<void> {
     await assertQueue(QUEUES.GEMINI_UPLOAD);
     await assertQueue(QUEUES.GEMINI_DELETE);
     await assertQueue(QUEUES.COURSE_DELETE);
-    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.COURSE_DELETE}`);
+    await assertQueue(QUEUES.EMAIL_OUTBOX);
+    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.COURSE_DELETE}, ${QUEUES.EMAIL_OUTBOX}`);
 
     // Start consumers (workers)
     await startUploadWorker();
     await startDeleteWorker();
     await startCourseDeletionWorker();
+    if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
+      await startEmailOutboxRabbitConsumer();
+    }
     console.log('[RabbitMQ] All workers started');
   } catch (err: any) {
     console.error(`[RabbitMQ] FATAL: ${err.message}`);

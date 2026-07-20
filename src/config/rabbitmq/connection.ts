@@ -73,6 +73,13 @@ export function getChannel(): Channel {
   return channel;
 }
 
+export async function createRabbitChannel(): Promise<Channel> {
+  if (!connection) {
+    throw new Error('[RabbitMQ] Connection not available - not connected');
+  }
+  return connection.createChannel();
+}
+
 /**
  * Assert (tạo nếu chưa có) một durable queue.
  */

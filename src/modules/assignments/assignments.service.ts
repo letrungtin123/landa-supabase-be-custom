@@ -21,9 +21,9 @@ import type {
 } from './assignments.validator.js';
 import type { AssignmentFileMeta } from './assignments.types.js';
 import {
-  enqueueAssignmentCreatedEmailsForNotification,
+  enqueueCourseNotificationEmailJob,
   enqueueFeedbackEmails,
-  processEmailOutboxBatch,
+  wakeEmailOutboxWorker,
 } from './email-outbox.service.js';
 import {
   getEnrollmentContentCompletion,
@@ -361,20 +361,7 @@ export async function createAssignment(
   const assignmentId = uuidv4();
   const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId, userId);
   const client = await getClient();
-  let assignmentCreatedEmailContext: {
-    tenantId: string;
-    notificationId: string;
-    courseId: string;
-    courseName: string;
-    assignmentTitle: string;
-    assignmentQuestion: string;
-    deadlineEnabled: boolean;
-    deadlineAt: string | Date | null;
-    deadlineMode: AssignmentDeadlineMode;
-    deadlineAfterDays: number | null;
-    assignmentCreatedAt: string | Date | null;
-    submissionUnlockMode: AssignmentSubmissionUnlockMode;
-  } | null = null;
+  let assignmentCreatedEmailJobQueued = false;
   const deadline = normalizeDeadlineForWrite(input);
   const submissionUnlockMode = normalizeSubmissionUnlockMode(input.submission_unlock_mode);
 
@@ -489,20 +476,12 @@ export async function createAssignment(
 
       const recipientCount = Number(recipientResult.rows[0]?.recipient_count || 0);
       if (recipientCount > 0) {
-        assignmentCreatedEmailContext = {
+        const emailJobCount = await enqueueCourseNotificationEmailJob(client, {
           tenantId,
           notificationId,
           courseId,
-          courseName: course.display_name,
-          assignmentTitle: assignment.title,
-          assignmentQuestion: assignment.question,
-          deadlineEnabled: assignment.deadline_enabled,
-          deadlineAt: assignment.deadline_at,
-          deadlineMode: assignment.deadline_mode,
-          deadlineAfterDays: assignment.deadline_after_days,
-          assignmentCreatedAt: assignment.created_at,
-          submissionUnlockMode: assignment.submission_unlock_mode,
-        };
+        });
+        assignmentCreatedEmailJobQueued = emailJobCount > 0;
       } else {
         await client.query('DELETE FROM notifications WHERE id = $1::uuid', [notificationId]);
       }
@@ -510,13 +489,8 @@ export async function createAssignment(
 
     await client.query('COMMIT');
 
-    if (assignmentCreatedEmailContext) {
-      enqueueAssignmentCreatedEmailsForNotification(assignmentCreatedEmailContext).then(emailCount => {
-        if (emailCount > 0) return processEmailOutboxBatch(tenantId);
-        return 0;
-      }).catch(err => {
-        console.error('[AssignmentCreated] Email enqueue error:', err instanceof Error ? err.message : err);
-      });
+    if (assignmentCreatedEmailJobQueued) {
+      wakeEmailOutboxWorker('assignment-created');
     }
 
     return normalizeAssignmentRow(assignment);
@@ -1419,9 +1393,7 @@ export async function feedbackSubmission(
     client.release();
   }
 
-  processEmailOutboxBatch(ctx.tenant_id).catch(err => {
-    console.error('[AssignmentFeedback] Email outbox error:', err instanceof Error ? err.message : err);
-  });
+  wakeEmailOutboxWorker('assignment-feedback');
 
   return listCourseSubmissions(ctx.course_id, tenantId, { page: '1', page_size: '1', assignment_id: ctx.assignment_id });
 }

@@ -4,12 +4,17 @@
 // Retry up to 3 times via x-retries header
 // ═══════════════════════════════════════════════════════════════
 
-import { getChannel } from './connection.js';
+import { createRabbitChannel, getChannel } from './connection.js';
 
 const MAX_RETRIES = 3;
 
 type ConsumeCallback = (data: Record<string, any>) => Promise<void>;
 type FailCallback = (queue: string, rawMessage: string) => Promise<void>;
+
+interface ConsumeOptions {
+  prefetch?: number;
+  isolatedChannel?: boolean;
+}
 
 /**
  * Start consuming messages from a durable queue.
@@ -22,9 +27,11 @@ export async function consume(
   queue: string,
   callback: ConsumeCallback,
   onFail?: FailCallback,
+  options: ConsumeOptions = {},
 ): Promise<void> {
-  const channel = getChannel();
-  await channel.prefetch(1); // Process 1 message at a time
+  const channel = options.isolatedChannel === false ? getChannel() : await createRabbitChannel();
+  const prefetch = Math.max(1, options.prefetch ?? 1);
+  await channel.prefetch(prefetch);
 
   await channel.consume(queue, async function onMessage(msg) {
     if (!msg) return;
@@ -68,5 +75,5 @@ export async function consume(
     }
   });
 
-  console.log(`[RabbitMQ] Consumer started on queue: ${queue}`);
+  console.log(`[RabbitMQ] Consumer started on queue: ${queue} prefetch=${prefetch}`);
 }

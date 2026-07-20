@@ -3,11 +3,13 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
+import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
-import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import { uploadFile, uploadFileFromPath, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 
 function extractYoutubeId(input: unknown): string {
   const value = typeof input === 'string' ? input.trim() : '';
@@ -43,6 +45,11 @@ function isSafeCourseAssetPath(src: unknown): src is string {
   ) return false;
   if (!value.includes('/courses/')) return false;
   return !/[<>"'`\\]/.test(value);
+}
+
+async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
+  if (!file.path) return;
+  await fs.unlink(file.path).catch(() => {});
 }
 
 function sanitizeProblemMedia(raw: any) {
@@ -402,27 +409,43 @@ export async function uploadAsset(req: Request, res: Response) {
   if (!req.file) return sendError(res, 'No file uploaded', 400);
 
   const file = req.file;
+  let storagePath = '';
+  let storageUploaded = false;
 
-  // Server-side file size validation (100MB)
-  const MAX_FILE_SIZE = 100 * 1024 * 1024;
-  if (file.size > MAX_FILE_SIZE) {
-    return sendError(res, `File quá lớn (${(file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tối đa 100MB.`, 413);
+  try {
+    if (file.size > COURSE_ASSET_MAX_UPLOAD_BYTES) {
+      return sendError(res, `File quá lớn (${(file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tối đa ${COURSE_ASSET_MAX_UPLOAD_LABEL}.`, 413);
+    }
+
+    const originalName = fixMulterFilename(file.originalname);
+    const fileName = buildFileName(originalName);
+    storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
+
+    // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
+    if (file.path) {
+      await uploadFileFromPath(storagePath, file.path, file.mimetype);
+    } else if (file.buffer) {
+      await uploadFile(storagePath, file.buffer, file.mimetype);
+    } else {
+      return sendError(res, 'Uploaded file is not readable', 400);
+    }
+    storageUploaded = true;
+
+    // DB lưu storagePath cho cả storage_path VÀ url columns
+    const asset = await svc.createAssetRecord(
+      courseId, tenantId, originalName, file.mimetype,
+      file.size, storagePath, storagePath, userId,
+    );
+
+    sendSuccess(res, asset, undefined, 201);
+  } catch (err) {
+    if (storageUploaded && storagePath) {
+      await deleteFile(storagePath);
+    }
+    throw err;
+  } finally {
+    await cleanupTempUpload(file);
   }
-
-  const originalName = fixMulterFilename(file.originalname);
-  const fileName = buildFileName(originalName);
-  const storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
-
-  // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
-  await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  // DB lưu storagePath cho cả storage_path VÀ url columns
-  const asset = await svc.createAssetRecord(
-    courseId, tenantId, originalName, file.mimetype,
-    file.size, storagePath, storagePath, userId,
-  );
-
-  sendSuccess(res, asset, undefined, 201);
 }
 
 /** DELETE /api/course-authoring/assets/:courseId/:assetId */

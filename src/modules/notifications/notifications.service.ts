@@ -9,8 +9,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
   enqueueCourseNotificationEmailJob,
-  processCourseNotificationEmailFanoutBatch,
-  processEmailOutboxBatch,
+  wakeEmailOutboxWorker,
 } from '../assignments/email-outbox.service.js';
 
 export interface SmtpStatus {
@@ -21,10 +20,6 @@ export interface SmtpStatus {
   host: string | null;
   from_email: string | null;
   reason: string | null;
-}
-
-interface SendCourseNotificationOptions {
-  sendEmail?: boolean;
 }
 
 export async function getCourseNotificationSmtpStatus(tenantId: string): Promise<SmtpStatus> {
@@ -79,21 +74,17 @@ export async function sendCourseNotification(
   title: string,
   message: string,
   sentBy: string,
-  options: SendCourseNotificationOptions = {},
 ): Promise<{
   success: boolean;
   notification_id: string;
   recipients: number;
   email_requested: boolean;
   email_job_queued: boolean;
+  email_skipped_reason: string | null;
 }> {
-  const sendEmail = Boolean(options.sendEmail);
-  if (sendEmail) {
-    const smtpStatus = await getCourseNotificationSmtpStatus(tenantId);
-    if (!smtpStatus.can_send_email) {
-      throw new AppError(smtpStatus.reason || 'Tenant chưa cấu hình SMTP Google.', 400);
-    }
-  }
+  const smtpStatus = await getCourseNotificationSmtpStatus(tenantId);
+  const sendEmail = smtpStatus.can_send_email;
+  const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
 
   const courseCheck = await query<{ visible_to_staff_only: boolean }>(
     `SELECT visible_to_staff_only
@@ -192,13 +183,7 @@ export async function sendCourseNotification(
   }
 
   if (emailJobQueued) {
-    setImmediate(() => {
-      processCourseNotificationEmailFanoutBatch(tenantId, 1)
-        .then(() => processEmailOutboxBatch(tenantId))
-        .catch(err => {
-          console.error('[Notifications] Email fanout error:', err instanceof Error ? err.message : err);
-        });
-    });
+    wakeEmailOutboxWorker('course-notification');
   }
 
   return {
@@ -207,6 +192,7 @@ export async function sendCourseNotification(
     recipients: recipientCount,
     email_requested: sendEmail,
     email_job_queued: emailJobQueued,
+    email_skipped_reason: emailSkippedReason,
   };
 }
 

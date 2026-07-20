@@ -88,6 +88,8 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses c ${where}`, params),
     query(
       `SELECT c.*,
+              creator.id AS creator_id,
+              NULLIF(creator.full_name, '') AS creator_display_name,
               mentor.id AS mentor_id,
               mentor.username AS mentor_username,
               mentor.full_name AS mentor_full_name,
@@ -97,6 +99,7 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
               mentor.role AS mentor_role,
               mentor.bio AS mentor_bio
        FROM courses c
+       LEFT JOIN users creator ON creator.id = c.created_by
        LEFT JOIN users mentor ON mentor.id = c.mentor_id
        ${where}
        ORDER BY c.updated_at DESC

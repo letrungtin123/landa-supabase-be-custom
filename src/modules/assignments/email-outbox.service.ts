@@ -1,7 +1,9 @@
 import type { PoolClient } from 'pg';
 import { getClient, query } from '../../config/database.js';
+import { env } from '../../config/env.js';
+import { consume, publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { decryptSecret } from '../../utils/secret-crypto.js';
-import { sendSmtpMail } from '../../utils/smtp-client.js';
+import { sendSmtpMailBatch, type SmtpBatchMail, type SmtpConfig } from '../../utils/smtp-client.js';
 import { getTenantSmtpConfigForSend } from '../tenants/tenant-smtp.service.js';
 import {
   DEFAULT_GROUP_LABELS,
@@ -102,6 +104,23 @@ const OWNER_FEEDBACK_DIGEST_SUBJECT = 'Tổng hợp phản hồi bài tập mớ
 const OWNER_FEEDBACK_DIGEST_DELAY_MINUTES = 5;
 const OWNER_FEEDBACK_HTML_MARKER = '<!-- LANDA_OWNER_FEEDBACK_ITEMS -->';
 const OWNER_FEEDBACK_TEXT_MARKER = '[LANDA_OWNER_FEEDBACK_ITEMS]';
+const EMAIL_OUTBOX_STALE_SENDING_MINUTES = 5;
+const EMAIL_OUTBOX_INTERVAL_MS = Math.max(5_000, env.EMAIL_OUTBOX_INTERVAL_MS);
+const EMAIL_OUTBOX_BATCH_SIZE = Math.max(1, env.EMAIL_OUTBOX_BATCH_SIZE);
+const EMAIL_OUTBOX_CLAIM_BATCH_SIZE = Math.max(1, Math.min(env.EMAIL_OUTBOX_CLAIM_BATCH_SIZE, EMAIL_OUTBOX_BATCH_SIZE));
+const EMAIL_OUTBOX_CONCURRENCY = Math.max(1, Math.min(env.EMAIL_OUTBOX_CONCURRENCY, EMAIL_OUTBOX_BATCH_SIZE));
+const EMAIL_OUTBOX_TENANT_CONCURRENCY = Math.max(1, Math.min(env.EMAIL_OUTBOX_TENANT_CONCURRENCY, EMAIL_OUTBOX_CONCURRENCY));
+const EMAIL_OUTBOX_TICK_BUDGET_MS = Math.max(10_000, env.EMAIL_OUTBOX_TICK_BUDGET_MS);
+const EMAIL_OUTBOX_SESSION_MAX_MESSAGES = Math.max(1, env.EMAIL_OUTBOX_SESSION_MAX_MESSAGES);
+const EMAIL_OUTBOX_SENT_RETENTION_DAYS = Math.max(0, env.EMAIL_OUTBOX_SENT_RETENTION_DAYS);
+const EMAIL_OUTBOX_RETENTION_BATCH_SIZE = Math.max(1, env.EMAIL_OUTBOX_RETENTION_BATCH_SIZE);
+const EMAIL_OUTBOX_WAKE_DEBOUNCE_MS = Math.max(0, env.EMAIL_OUTBOX_WAKE_DEBOUNCE_MS);
+const EMAIL_OUTBOX_RABBIT_PREFETCH = Math.max(1, env.EMAIL_OUTBOX_RABBIT_PREFETCH);
+const EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD = Math.max(1, env.EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD);
+const EMAIL_OUTBOX_TENANT_COOLDOWN_MS = Math.max(1_000, env.EMAIL_OUTBOX_TENANT_COOLDOWN_MS);
+const EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS = Math.max(EMAIL_OUTBOX_TENANT_COOLDOWN_MS, env.EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS);
+const EMAIL_OUTBOX_RETENTION_LOCK_KEY = 'landa:email-outbox-retention:v1';
+const EMAIL_OUTBOX_RETENTION_INTERVAL_MS = 60 * 60 * 1000;
 const EMAIL_FONT_FAMILY = "'Google Sans'";
 const EMAIL_FONT_STYLE = `font-family:${EMAIL_FONT_FAMILY};`;
 
@@ -1410,6 +1429,118 @@ export async function enqueueCourseNotificationEmailJob(
   return result.rowCount || 0;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function readText(value: unknown, fallback = ''): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function readBoolean(value: unknown): boolean {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function readDeadlineMode(value: unknown): DeadlineMode | undefined {
+  return value === 'absolute' || value === 'relative_to_enrollment' || value === 'none'
+    ? value
+    : undefined;
+}
+
+function readSubmissionUnlockMode(value: unknown): SubmissionUnlockMode | undefined {
+  return value === 'after_content_complete' || value === 'anytime'
+    ? value
+    : undefined;
+}
+
+function buildAssignmentContextFromNotification(
+  tenantId: string,
+  notificationId: string,
+  courseId: string,
+  courseName: string,
+  metadata: Record<string, unknown>,
+  learnerName?: string,
+): AssignmentCreatedEmailContext {
+  return {
+    tenantId,
+    notificationId,
+    courseId,
+    courseName,
+    learnerName,
+    assignmentTitle: readText(metadata.assignment_title, 'Bài tập mới'),
+    assignmentQuestion: readText(metadata.assignment_question, ''),
+    deadlineEnabled: readBoolean(metadata.deadline_enabled),
+    deadlineAt: metadata.deadline_at as string | Date | null | undefined,
+    deadlineMode: readDeadlineMode(metadata.deadline_mode),
+    deadlineAfterDays: readNumber(metadata.deadline_after_days),
+    assignmentCreatedAt: metadata.created_at as string | Date | null | undefined,
+    submissionUnlockMode: readSubmissionUnlockMode(metadata.submission_unlock_mode),
+  };
+}
+
+async function enqueueAssignmentCreatedOwnerCopyForFanoutJob(
+  client: PoolClient,
+  ctx: AssignmentCreatedEmailContext,
+  branding: EmailBranding,
+  totalCount: number,
+  recipients: Array<{ name: string; email: string }>,
+): Promise<void> {
+  const smtp = await client.query<{
+    username: string;
+    copy_to_sender: boolean;
+    copy_to_email: string | null;
+  }>(
+    `SELECT username, copy_to_sender, copy_to_email
+     FROM tenant_smtp_configs
+     WHERE tenant_id = $1::uuid AND is_enabled = true
+     LIMIT 1`,
+    [ctx.tenantId],
+  );
+
+  const row = smtp.rows[0];
+  if (!row?.copy_to_sender || totalCount <= 0) return;
+
+  const copyEmail = (row.copy_to_email || row.username || '').trim();
+  if (!copyEmail) return;
+
+  const summary: RecipientSummary = {
+    totalCount,
+    recipients: normalizeRecipients(recipients).slice(0, 50),
+  };
+  const ownerEmail = buildAssignmentCreatedOwnerEmail(ctx, branding, summary);
+  await client.query(
+    `INSERT INTO email_outbox (
+       tenant_id, related_submission_id, related_notification_id, recipient_user_id,
+       recipient_email, recipient_name, subject, html_body, text_body
+     )
+     VALUES (
+       $1::uuid, NULL::uuid, $2::uuid, NULL::uuid,
+       $3::varchar, $4::varchar, LEFT($5::text, 255), $6::text, $7::text
+     )
+     ON CONFLICT DO NOTHING`,
+    [
+      ctx.tenantId,
+      ctx.notificationId,
+      copyEmail,
+      'Owner doanh nghiệp',
+      ownerEmail.subject,
+      ownerEmail.html,
+      ownerEmail.text,
+    ],
+  );
+}
+
 async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize: number): Promise<number> {
   const client = await getClient();
   try {
@@ -1436,13 +1567,19 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     }
 
     const notification = await client.query<{
+      type: string;
       title: string;
       message: string | null;
+      metadata: Record<string, unknown> | null;
       course_name: string;
+      recipient_count: number;
     }>(
-      `SELECT n.title,
+      `SELECT n.type,
+              n.title,
               n.message,
-              COALESCE(NULLIF(c.display_name, ''), n.course_id)::text AS course_name
+              n.metadata,
+              COALESCE(NULLIF(c.display_name, ''), n.course_id)::text AS course_name,
+              n.recipient_count::int AS recipient_count
        FROM notifications n
        LEFT JOIN courses c ON c.id = n.course_id AND c.tenant_id = n.tenant_id
        WHERE n.id = $1::uuid
@@ -1470,19 +1607,26 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
       user_id: string;
       email: string;
       name: string;
+      enrolled_at: string | Date | null;
     }>(
       `SELECT nr.user_id,
               BTRIM(u.email)::text AS email,
-              COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name
+              COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name,
+              e.enrolled_at
        FROM notification_recipients nr
        JOIN users u ON u.id = nr.user_id
+       LEFT JOIN enrollments e
+         ON e.user_id = nr.user_id
+        AND e.course_id = $3::varchar
+        AND e.tenant_id = $4::uuid
+        AND e.is_active = true
        WHERE nr.notification_id = $1::uuid
-         AND ($2::uuid IS NULL OR nr.user_id > $2::uuid)
-         AND u.email IS NOT NULL
+          AND ($2::uuid IS NULL OR nr.user_id > $2::uuid)
+          AND u.email IS NOT NULL
          AND BTRIM(u.email) <> ''
        ORDER BY nr.user_id ASC
-       LIMIT $3::int`,
-      [row.notification_id, row.last_user_id, batchSize],
+       LIMIT $5::int`,
+      [row.notification_id, row.last_user_id, row.course_id, row.tenant_id, batchSize],
     );
 
     if (recipients.rowCount === 0) {
@@ -1499,17 +1643,51 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     }
 
     const branding = await getEmailBranding(row.tenant_id, client);
+    const notificationMetadata = asRecord(notificationRow.metadata);
+    const isAssignmentCreated = notificationRow.type === 'assignment_created';
+    const assignmentBaseContext = isAssignmentCreated
+      ? buildAssignmentContextFromNotification(
+          row.tenant_id,
+          row.notification_id,
+          row.course_id,
+          notificationRow.course_name,
+          notificationMetadata,
+        )
+      : null;
     const renderedEmails: Array<{ subject: string; html: string; text: string }> = [];
     for (const recipient of recipients.rows) {
-      renderedEmails.push(await renderCourseNotificationEmail(client, {
-        tenantId: row.tenant_id,
-        notificationId: row.notification_id,
-        courseId: row.course_id,
-        courseName: notificationRow.course_name,
-        learnerName: recipient.name,
-        title: notificationRow.title,
-        message: notificationRow.message || '',
-      }, branding));
+      if (assignmentBaseContext) {
+        const ctx = {
+          ...assignmentBaseContext,
+          learnerName: recipient.name,
+        };
+        renderedEmails.push(await renderAssignmentCreatedEmail(
+          client,
+          ctx,
+          branding,
+          learnerDeadlineLabel(ctx, recipient.enrolled_at),
+        ));
+      } else {
+        renderedEmails.push(await renderCourseNotificationEmail(client, {
+          tenantId: row.tenant_id,
+          notificationId: row.notification_id,
+          courseId: row.course_id,
+          courseName: notificationRow.course_name,
+          learnerName: recipient.name,
+          title: notificationRow.title,
+          message: notificationRow.message || '',
+        }, branding));
+      }
+    }
+
+    if (assignmentBaseContext && !row.last_user_id) {
+      await enqueueAssignmentCreatedOwnerCopyForFanoutJob(
+        client,
+        assignmentBaseContext,
+        branding,
+        notificationRow.recipient_count,
+        recipients.rows,
+      );
     }
 
     const insertResult = await client.query(
@@ -1582,7 +1760,6 @@ export async function processCourseNotificationEmailFanoutBatch(
 ): Promise<number> {
   const client = await getClient();
   try {
-    await client.query('BEGIN');
     const params: unknown[] = [jobsLimit];
     let tenantFilter = '';
     if (tenantId) {
@@ -1590,161 +1767,746 @@ export async function processCourseNotificationEmailFanoutBatch(
       tenantFilter = `AND tenant_id = $${params.length}::uuid`;
     }
 
-    const jobs = await client.query<{ id: string }>(
-      `SELECT id
-       FROM notification_email_jobs
-       WHERE (
-           (status IN ('pending', 'failed') AND next_attempt_at <= now())
-           OR (status = 'running' AND updated_at < now() - interval '5 minutes')
-         )
-         ${tenantFilter}
-       ORDER BY next_attempt_at ASC, created_at ASC
-       LIMIT $1::int
-       FOR UPDATE SKIP LOCKED`,
+    const dueJobs = await client.query<{ id: string }>(
+      `WITH picked AS (
+         SELECT id
+         FROM notification_email_jobs
+         WHERE status IN ('pending', 'failed')
+           AND next_attempt_at <= now()
+           ${tenantFilter}
+         ORDER BY next_attempt_at ASC, created_at ASC
+         LIMIT $1::int
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE notification_email_jobs nej
+       SET status = 'running',
+           updated_at = now()
+       FROM picked
+       WHERE nej.id = picked.id
+       RETURNING nej.id`,
       params,
     );
 
-    if (jobs.rowCount === 0) {
-      await client.query('COMMIT');
-      return 0;
+    const jobs = dueJobs.rows.map(job => job.id);
+    const remaining = jobsLimit - jobs.length;
+    if (remaining > 0) {
+      const staleParams: unknown[] = [remaining];
+      let staleTenantFilter = '';
+      if (tenantId) {
+        staleParams.push(tenantId);
+        staleTenantFilter = `AND tenant_id = $${staleParams.length}::uuid`;
+      }
+      const staleJobs = await client.query<{ id: string }>(
+        `WITH picked AS (
+           SELECT id
+           FROM notification_email_jobs
+           WHERE status = 'running'
+             AND updated_at < now() - interval '5 minutes'
+             ${staleTenantFilter}
+           ORDER BY updated_at ASC, created_at ASC
+           LIMIT $1::int
+           FOR UPDATE SKIP LOCKED
+         )
+         UPDATE notification_email_jobs nej
+         SET updated_at = now()
+         FROM picked
+         WHERE nej.id = picked.id
+         RETURNING nej.id`,
+        staleParams,
+      );
+      jobs.push(...staleJobs.rows.map(job => job.id));
     }
 
-    await client.query(
-      `UPDATE notification_email_jobs
-       SET status = 'running',
-           updated_at = now()
-       WHERE id = ANY($1::uuid[])`,
-      [jobs.rows.map(job => job.id)],
-    );
-    await client.query('COMMIT');
+    if (jobs.length === 0) return 0;
 
     let queued = 0;
-    for (const job of jobs.rows) {
-      queued += await processCourseNotificationEmailFanoutJob(job.id, batchSize);
+    for (const jobId of jobs) {
+      queued += await processCourseNotificationEmailFanoutJob(jobId, batchSize);
     }
     return queued;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
     client.release();
   }
 }
 
-export async function processEmailOutboxBatch(tenantId?: string, limit = 10): Promise<number> {
+interface ClaimedEmailOutboxJob {
+  id: string;
+  tenant_id: string;
+  status: string;
+  previous_status: string;
+  recipient_email: string;
+  subject: string;
+  html_body: string;
+  text_body: string;
+  attempts: number;
+  max_attempts: number;
+}
+
+async function claimEmailOutboxJobs(tenantId: string | undefined, limit: number): Promise<ClaimedEmailOutboxJob[]> {
   const client = await getClient();
   try {
-    await client.query('BEGIN');
     const params: unknown[] = [limit];
     let tenantFilter = '';
     if (tenantId) {
       params.push(tenantId);
-      tenantFilter = `AND tenant_id = $${params.length}`;
+      tenantFilter = `AND tenant_id = $${params.length}::uuid`;
     }
 
-    const jobs = await client.query<{
-      id: string;
-      tenant_id: string;
-      recipient_email: string;
-      subject: string;
-      html_body: string;
-      text_body: string;
-      attempts: number;
-      max_attempts: number;
-    }>(
-      `SELECT id, tenant_id, recipient_email, subject, html_body, text_body, attempts, max_attempts
-       FROM email_outbox
-       WHERE status IN ('pending', 'failed')
-         AND next_attempt_at <= now()
-         ${tenantFilter}
-       ORDER BY next_attempt_at ASC, created_at ASC
-       LIMIT $1
-       FOR UPDATE SKIP LOCKED`,
+    const runnable = await client.query<ClaimedEmailOutboxJob>(
+      `WITH picked AS (
+         SELECT id, status AS previous_status
+         FROM email_outbox
+         WHERE status IN ('pending', 'failed')
+           AND next_attempt_at <= now()
+           AND (status = 'pending' OR attempts < max_attempts)
+           ${tenantFilter}
+         ORDER BY next_attempt_at ASC, created_at ASC
+         LIMIT $1::int
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE email_outbox eo
+       SET status = 'sending',
+           updated_at = now()
+       FROM picked
+       WHERE eo.id = picked.id
+       RETURNING eo.id, eo.tenant_id, eo.status, picked.previous_status,
+                 eo.recipient_email, eo.subject, eo.html_body, eo.text_body,
+                 eo.attempts, eo.max_attempts`,
       params,
     );
 
-    await client.query(
-      `UPDATE email_outbox
-       SET status = 'sending'
-       WHERE id = ANY($1::uuid[])`,
-      [jobs.rows.map(job => job.id)],
-    );
-    await client.query('COMMIT');
+    const jobs = [...runnable.rows];
+    const remaining = limit - jobs.length;
+    if (remaining <= 0) return jobs;
 
-    let processed = 0;
-    for (const job of jobs.rows) {
-      try {
-        const smtp = await getTenantSmtpConfigForSend(job.tenant_id);
-        if (!smtp || !smtp.password_ciphertext || !smtp.password_iv || !smtp.password_auth_tag) {
-          throw new Error('SMTP config is disabled or missing password');
-        }
-
-        const password = decryptSecret({
-          ciphertext: smtp.password_ciphertext,
-          iv: smtp.password_iv,
-          authTag: smtp.password_auth_tag,
-        });
-
-        await sendSmtpMail(
-          {
-            host: smtp.host,
-            port: smtp.port,
-            secure: smtp.secure,
-            username: smtp.username,
-            password,
-            fromEmail: smtp.from_email,
-            fromName: smtp.from_name,
-            replyToEmail: smtp.reply_to_email,
-          },
-          {
-            to: job.recipient_email,
-            subject: job.subject,
-            html: cleanEmailBody(job.html_body),
-            text: cleanEmailBody(job.text_body),
-          },
-        );
-
-        await query(
-          `UPDATE email_outbox
-           SET status = 'sent', sent_at = now(), last_error = NULL
-           WHERE id = $1`,
-          [job.id],
-        );
-        processed += 1;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const nextAttempts = job.attempts + 1;
-        const nextStatus = nextAttempts >= job.max_attempts ? 'failed' : 'pending';
-        await query(
-          `UPDATE email_outbox
-           SET status = $2,
-               attempts = attempts + 1,
-               last_error = $3,
-               next_attempt_at = now() + (($4 * $4) || ' minutes')::interval
-           WHERE id = $1`,
-          [job.id, nextStatus, message.slice(0, 2000), nextAttempts],
-        );
-      }
+    const staleParams: unknown[] = [remaining, EMAIL_OUTBOX_STALE_SENDING_MINUTES];
+    let staleTenantFilter = '';
+    if (tenantId) {
+      staleParams.push(tenantId);
+      staleTenantFilter = `AND tenant_id = $${staleParams.length}::uuid`;
     }
 
-    return processed;
+    const stale = await client.query<ClaimedEmailOutboxJob>(
+      `WITH picked AS (
+         SELECT id, status AS previous_status
+         FROM email_outbox
+         WHERE status = 'sending'
+           AND updated_at < now() - (($2::int || ' minutes')::interval)
+           ${staleTenantFilter}
+         ORDER BY updated_at ASC, created_at ASC
+         LIMIT $1::int
+         FOR UPDATE SKIP LOCKED
+       )
+       UPDATE email_outbox eo
+       SET status = 'sending',
+           updated_at = now()
+       FROM picked
+       WHERE eo.id = picked.id
+       RETURNING eo.id, eo.tenant_id, eo.status, picked.previous_status,
+                 eo.recipient_email, eo.subject, eo.html_body, eo.text_body,
+                 eo.attempts, eo.max_attempts`,
+      staleParams,
+    );
+    if (stale.rowCount) {
+      console.warn(`[EmailOutbox] Reclaiming ${stale.rowCount} stale sending job(s)`);
+      jobs.push(...stale.rows);
+    }
+    return jobs;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
     throw err;
+  } finally {
+    client.release();
+  }
+}
+
+interface EmailOutboxBatchStats {
+  claimed: number;
+  reclaimed: number;
+  sent: number;
+  retried: number;
+  failed: number;
+  errors: number;
+  cooldownSkipped: number;
+  circuitOpened: number;
+}
+
+function createEmailOutboxBatchStats(): EmailOutboxBatchStats {
+  return {
+    claimed: 0,
+    reclaimed: 0,
+    sent: 0,
+    retried: 0,
+    failed: 0,
+    errors: 0,
+    cooldownSkipped: 0,
+    circuitOpened: 0,
+  };
+}
+
+function mergeEmailOutboxBatchStats(target: EmailOutboxBatchStats, source: EmailOutboxBatchStats): void {
+  target.claimed += source.claimed;
+  target.reclaimed += source.reclaimed;
+  target.sent += source.sent;
+  target.retried += source.retried;
+  target.failed += source.failed;
+  target.errors += source.errors;
+  target.cooldownSkipped += source.cooldownSkipped;
+  target.circuitOpened += source.circuitOpened;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+interface TenantSmtpCircuitState {
+  failures: number;
+  cooldownUntil: number;
+  cooldownMs: number;
+  lastError: string;
+}
+
+const tenantSmtpCircuits = new Map<string, TenantSmtpCircuitState>();
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTenantSmtpInfrastructureError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return [
+    'timeout',
+    'connection',
+    'socket',
+    'auth',
+    'starttls',
+    'certificate',
+    'econnrefused',
+    'econnreset',
+    'enotfound',
+    'etimedout',
+    'smtp config',
+  ].some(token => message.includes(token));
+}
+
+function getTenantCircuitCooldownUntil(tenantId: string): number {
+  const state = tenantSmtpCircuits.get(tenantId);
+  if (!state) return 0;
+  if (state.cooldownUntil <= Date.now()) return 0;
+  return state.cooldownUntil;
+}
+
+function markTenantSmtpSuccess(tenantId: string): void {
+  const state = tenantSmtpCircuits.get(tenantId);
+  if (!state) return;
+  tenantSmtpCircuits.delete(tenantId);
+  console.log(`[EmailOutbox] SMTP circuit recovered tenant=${tenantId}`);
+}
+
+function markTenantSmtpFailure(tenantId: string, error: unknown, stats: EmailOutboxBatchStats): void {
+  if (!isTenantSmtpInfrastructureError(error)) return;
+
+  const now = Date.now();
+  const current = tenantSmtpCircuits.get(tenantId);
+  const failures = (current?.failures || 0) + 1;
+  const previousCooldownMs = current?.cooldownMs || EMAIL_OUTBOX_TENANT_COOLDOWN_MS;
+  const shouldOpen = failures >= EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD;
+  const cooldownMs = shouldOpen
+    ? Math.min(
+        current?.cooldownUntil && current.cooldownUntil > now
+          ? previousCooldownMs * 2
+          : previousCooldownMs,
+        EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS,
+      )
+    : previousCooldownMs;
+  const cooldownUntil = shouldOpen ? now + cooldownMs : 0;
+
+  tenantSmtpCircuits.set(tenantId, {
+    failures,
+    cooldownUntil,
+    cooldownMs,
+    lastError: getErrorMessage(error).slice(0, 300),
+  });
+
+  if (shouldOpen) {
+    stats.circuitOpened += 1;
+    console.warn(
+      `[EmailOutbox] SMTP circuit open tenant=${tenantId} failures=${failures} cooldown_ms=${cooldownMs} error=${getErrorMessage(error).slice(0, 200)}`,
+    );
+  }
+}
+
+async function queryOutboxStatusWithRetry(sql: string, params: unknown[], label: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await query(sql, params);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (attempt < 3) await sleep(200 * attempt);
+    }
+  }
+
+  throw new Error(`${label} failed after retries: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+async function markEmailOutboxJobSent(job: ClaimedEmailOutboxJob, stats: EmailOutboxBatchStats): Promise<void> {
+  await queryOutboxStatusWithRetry(
+    `UPDATE email_outbox
+     SET status = 'sent',
+         sent_at = now(),
+         last_error = NULL,
+         updated_at = now()
+     WHERE id = $1`,
+    [job.id],
+    'mark email outbox sent',
+  );
+  stats.sent += 1;
+}
+
+async function markEmailOutboxJobRetry(
+  job: ClaimedEmailOutboxJob,
+  error: unknown,
+  stats: EmailOutboxBatchStats,
+): Promise<void> {
+  const message = getErrorMessage(error);
+  const nextAttempts = job.attempts + 1;
+  const nextStatus = nextAttempts >= job.max_attempts ? 'failed' : 'pending';
+  await queryOutboxStatusWithRetry(
+    `UPDATE email_outbox
+     SET status = $2,
+         attempts = attempts + 1,
+         last_error = $3,
+         next_attempt_at = now() + ((($4::int * $4::int) || ' minutes')::interval),
+         updated_at = now()
+     WHERE id = $1`,
+    [job.id, nextStatus, message.slice(0, 2000), nextAttempts],
+    'mark email outbox retry',
+  );
+  if (nextStatus === 'failed') {
+    stats.failed += 1;
+  } else {
+    stats.retried += 1;
+  }
+}
+
+async function releaseEmailOutboxJobForCooldown(
+  job: ClaimedEmailOutboxJob,
+  cooldownUntil: number,
+  reason: string,
+  stats: EmailOutboxBatchStats,
+): Promise<void> {
+  await queryOutboxStatusWithRetry(
+    `UPDATE email_outbox
+     SET status = 'pending',
+         last_error = $2,
+         next_attempt_at = to_timestamp($3::double precision / 1000.0),
+         updated_at = now()
+     WHERE id = $1`,
+    [job.id, reason.slice(0, 2000), cooldownUntil],
+    'release email outbox cooldown',
+  );
+  stats.cooldownSkipped += 1;
+}
+
+function toSmtpBatchMail(job: ClaimedEmailOutboxJob): SmtpBatchMail {
+  return {
+    id: job.id,
+    to: job.recipient_email,
+    subject: job.subject,
+    html: cleanEmailBody(job.html_body),
+    text: cleanEmailBody(job.text_body),
+  };
+}
+
+async function getTenantSmtpConfigOrThrow(tenantId: string): Promise<SmtpConfig> {
+  const smtp = await getTenantSmtpConfigForSend(tenantId);
+  if (!smtp || !smtp.password_ciphertext || !smtp.password_iv || !smtp.password_auth_tag) {
+    throw new Error('SMTP config is disabled or missing password');
+  }
+
+  const password = decryptSecret({
+    ciphertext: smtp.password_ciphertext,
+    iv: smtp.password_iv,
+    authTag: smtp.password_auth_tag,
+  });
+
+  return {
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    username: smtp.username,
+    password,
+    fromEmail: smtp.from_email,
+    fromName: smtp.from_name,
+    replyToEmail: smtp.reply_to_email,
+  };
+}
+
+async function sendClaimedEmailOutboxTenantGroup(
+  jobs: ClaimedEmailOutboxJob[],
+  stats: EmailOutboxBatchStats,
+): Promise<void> {
+  if (jobs.length === 0) return;
+  const tenantId = jobs[0].tenant_id;
+  const cooldownUntil = getTenantCircuitCooldownUntil(tenantId);
+  if (cooldownUntil > Date.now()) {
+    const waitMs = cooldownUntil - Date.now();
+    const reason = `SMTP tenant is cooling down; retry in ${Math.ceil(waitMs / 1000)}s`;
+    await Promise.all(jobs.map(job => releaseEmailOutboxJobForCooldown(job, cooldownUntil, reason, stats)));
+    return;
+  }
+
+  let smtpConfig: SmtpConfig;
+  try {
+    smtpConfig = await getTenantSmtpConfigOrThrow(tenantId);
+  } catch (err) {
+    markTenantSmtpFailure(tenantId, err, stats);
+    for (const job of jobs) await markEmailOutboxJobRetry(job, err, stats);
+    return;
+  }
+
+  const jobMap = new Map(jobs.map(job => [job.id, job]));
+  for (let start = 0; start < jobs.length; start += EMAIL_OUTBOX_SESSION_MAX_MESSAGES) {
+    const slice = jobs.slice(start, start + EMAIL_OUTBOX_SESSION_MAX_MESSAGES);
+    const seen = new Set<string>();
+    let sliceSuccessCount = 0;
+    let sliceInfrastructureError: unknown = null;
+    const markResult = async (result: { id: string; ok: boolean; error?: string }): Promise<void> => {
+      if (seen.has(result.id)) return;
+      const job = jobMap.get(result.id);
+      if (!job) return;
+      if (result.ok) {
+        await markEmailOutboxJobSent(job, stats);
+        sliceSuccessCount += 1;
+      } else {
+        if (isTenantSmtpInfrastructureError(result.error || 'SMTP send failed')) {
+          sliceInfrastructureError = result.error || 'SMTP send failed';
+        }
+        await markEmailOutboxJobRetry(job, result.error || 'SMTP send failed', stats);
+      }
+      seen.add(result.id);
+    };
+    const markUnseenRetry = async (error: unknown): Promise<void> => {
+      for (const job of slice) {
+        if (!seen.has(job.id)) await markEmailOutboxJobRetry(job, error, stats);
+      }
+    };
+
+    try {
+      await sendSmtpMailBatch(
+        smtpConfig,
+        slice.map(toSmtpBatchMail),
+        EMAIL_OUTBOX_SESSION_MAX_MESSAGES,
+        markResult,
+      );
+      await markUnseenRetry('SMTP send did not return a result');
+    } catch (err) {
+      sliceInfrastructureError = err;
+      await markUnseenRetry(err);
+    }
+
+    if (sliceSuccessCount > 0) {
+      markTenantSmtpSuccess(tenantId);
+    } else if (sliceInfrastructureError) {
+      markTenantSmtpFailure(tenantId, sliceInfrastructureError, stats);
+    }
+  }
+}
+
+async function processEmailOutboxBatchStats(
+  tenantId: string | undefined,
+  limit: number,
+  concurrency: number,
+  deadlineMs: number,
+): Promise<EmailOutboxBatchStats> {
+  const stats = createEmailOutboxBatchStats();
+  if (Date.now() >= deadlineMs) return stats;
+
+  let jobs: ClaimedEmailOutboxJob[] = [];
+  try {
+    jobs = await claimEmailOutboxJobs(
+      tenantId,
+      Math.min(Math.max(1, limit), EMAIL_OUTBOX_CLAIM_BATCH_SIZE),
+    );
+  } catch (err) {
+    stats.errors += 1;
+    console.error('[EmailOutbox] Claim error:', err instanceof Error ? err.message : err);
+    return stats;
+  }
+
+  stats.claimed += jobs.length;
+  stats.reclaimed += jobs.filter(job => job.previous_status === 'sending').length;
+  if (jobs.length === 0) return stats;
+
+  const groups = new Map<string, ClaimedEmailOutboxJob[]>();
+  for (const job of jobs) {
+    const group = groups.get(job.tenant_id) || [];
+    group.push(job);
+    groups.set(job.tenant_id, group);
+  }
+
+  const groupQueue = Array.from(groups.values());
+  let cursor = 0;
+  const groupConcurrency = Math.max(1, Math.min(concurrency, EMAIL_OUTBOX_TENANT_CONCURRENCY, groupQueue.length));
+  const worker = async () => {
+    while (cursor < groupQueue.length && Date.now() < deadlineMs) {
+      const group = groupQueue[cursor];
+      cursor += 1;
+      try {
+        await sendClaimedEmailOutboxTenantGroup(group, stats);
+      } catch (err) {
+        stats.errors += 1;
+        console.error('[EmailOutbox] Group error:', err instanceof Error ? err.message : err);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: groupConcurrency }, () => worker()));
+
+  return stats;
+}
+
+export async function processEmailOutboxBatch(tenantId?: string, limit = EMAIL_OUTBOX_BATCH_SIZE): Promise<number> {
+  const stats = await processEmailOutboxBatchStats(
+    tenantId,
+    limit,
+    EMAIL_OUTBOX_CONCURRENCY,
+    Date.now() + EMAIL_OUTBOX_TICK_BUDGET_MS,
+  );
+  return stats.sent;
+}
+
+async function cleanupSentEmailOutboxBatch(): Promise<number> {
+  if (EMAIL_OUTBOX_SENT_RETENTION_DAYS <= 0) return 0;
+  const result = await query(
+    `WITH doomed AS (
+       SELECT id
+       FROM email_outbox
+       WHERE status = 'sent'
+         AND sent_at < now() - (($1::int || ' days')::interval)
+       ORDER BY sent_at ASC, id ASC
+       LIMIT $2::int
+     )
+     DELETE FROM email_outbox eo
+     USING doomed
+     WHERE eo.id = doomed.id`,
+    [EMAIL_OUTBOX_SENT_RETENTION_DAYS, EMAIL_OUTBOX_RETENTION_BATCH_SIZE],
+  );
+  return result.rowCount || 0;
+}
+
+async function withEmailOutboxRetentionLock(fn: () => Promise<void>): Promise<boolean> {
+  const client = await getClient();
+  try {
+    const lock = await client.query<{ locked: boolean }>(
+      'SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS locked',
+      [EMAIL_OUTBOX_RETENTION_LOCK_KEY],
+    );
+    if (!lock.rows[0]?.locked) return false;
+
+    try {
+      await fn();
+    } finally {
+      await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [EMAIL_OUTBOX_RETENTION_LOCK_KEY])
+        .catch(() => undefined);
+    }
+    return true;
   } finally {
     client.release();
   }
 }
 
 let workerStarted = false;
-export function startEmailOutboxWorker(): void {
-  if (workerStarted) return;
-  workerStarted = true;
-  setInterval(() => {
-    processCourseNotificationEmailFanoutBatch()
-      .then(() => processEmailOutboxBatch())
-      .catch(err => {
-        console.error('[EmailOutbox] Worker error:', err instanceof Error ? err.message : err);
+let workerRunning = false;
+let workerWakePending = false;
+let workerWakeTimer: NodeJS.Timeout | null = null;
+let workerImmediateScheduled = false;
+let pendingWakeReason = 'manual';
+let workerInterval: NodeJS.Timeout | null = null;
+let nextRetentionCleanupAt = 0;
+let emailOutboxRabbitConsumerStarted = false;
+
+async function drainEmailOutboxWorker(reason: string): Promise<void> {
+  const startedAt = Date.now();
+  const deadlineMs = startedAt + EMAIL_OUTBOX_TICK_BUDGET_MS;
+  const totalStats = createEmailOutboxBatchStats();
+  let fanoutQueued = 0;
+  let retentionDeleted = 0;
+  let loops = 0;
+
+  while (Date.now() < deadlineMs) {
+    loops += 1;
+    let queued = 0;
+    try {
+      queued = await processCourseNotificationEmailFanoutBatch();
+      fanoutQueued += queued;
+    } catch (err) {
+      totalStats.errors += 1;
+      console.error('[EmailOutbox] Fanout error:', err instanceof Error ? err.message : err);
+    }
+
+    const batchStats = await processEmailOutboxBatchStats(
+      undefined,
+      EMAIL_OUTBOX_BATCH_SIZE,
+      EMAIL_OUTBOX_CONCURRENCY,
+      deadlineMs,
+    );
+    mergeEmailOutboxBatchStats(totalStats, batchStats);
+
+    if (queued === 0 && batchStats.claimed === 0) {
+      break;
+    }
+  }
+
+  if (Date.now() >= nextRetentionCleanupAt) {
+    nextRetentionCleanupAt = Date.now() + EMAIL_OUTBOX_RETENTION_INTERVAL_MS;
+    try {
+      await withEmailOutboxRetentionLock(async () => {
+        retentionDeleted = await cleanupSentEmailOutboxBatch();
       });
-  }, 60_000).unref();
+    } catch (err) {
+      totalStats.errors += 1;
+      console.error('[EmailOutbox] Retention cleanup error:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  const hasActivity = fanoutQueued > 0
+    || totalStats.claimed > 0
+    || totalStats.reclaimed > 0
+    || totalStats.sent > 0
+    || totalStats.retried > 0
+    || totalStats.failed > 0
+    || totalStats.cooldownSkipped > 0
+    || totalStats.circuitOpened > 0
+    || retentionDeleted > 0
+    || totalStats.errors > 0;
+  const shouldLogIdleTick = reason === 'startup'
+    || reason.startsWith('rabbitmq')
+    || reason.startsWith('pending-wake');
+
+  if (hasActivity || shouldLogIdleTick) {
+    console.log(
+      `[EmailOutbox] tick done reason=${reason} loops=${loops} fanout_queued=${fanoutQueued} claimed=${totalStats.claimed} reclaimed=${totalStats.reclaimed} sent=${totalStats.sent} retried=${totalStats.retried} failed=${totalStats.failed} cooldown_skipped=${totalStats.cooldownSkipped} circuit_opened=${totalStats.circuitOpened} retention_deleted=${retentionDeleted} errors=${totalStats.errors} elapsed_ms=${elapsedMs}`,
+    );
+  }
+}
+
+async function runEmailOutboxWorkerTick(reason: string): Promise<void> {
+  if (!workerStarted || !env.EMAIL_OUTBOX_WORKER_ENABLED) return;
+  if (workerRunning) {
+    workerWakePending = true;
+    return;
+  }
+
+  workerRunning = true;
+  try {
+    do {
+      workerWakePending = false;
+      await drainEmailOutboxWorker(reason);
+      reason = pendingWakeReason === 'manual' ? 'pending-wake' : `pending-wake:${pendingWakeReason}`;
+      pendingWakeReason = 'manual';
+    } while (workerWakePending);
+  } finally {
+    workerRunning = false;
+  }
+}
+
+async function publishEmailOutboxWake(reason: string): Promise<void> {
+  try {
+    await publish(QUEUES.EMAIL_OUTBOX, {
+      type: 'email_outbox_wake',
+      reason,
+      emittedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('[EmailOutbox] RabbitMQ wake publish failed; DB polling fallback remains active:', err instanceof Error ? err.message : err);
+  }
+}
+
+export function wakeEmailOutboxWorker(reason = 'manual'): void {
+  triggerEmailOutboxWorker(reason);
+  publishEmailOutboxWake(reason).catch(err => {
+    console.warn('[EmailOutbox] RabbitMQ wake publish failed; DB polling fallback remains active:', err instanceof Error ? err.message : err);
+  });
+}
+
+export function triggerEmailOutboxWorker(reason = 'manual'): void {
+  if (!workerStarted || !env.EMAIL_OUTBOX_WORKER_ENABLED) return;
+  pendingWakeReason = reason;
+  if (workerRunning) {
+    workerWakePending = true;
+    return;
+  }
+  if (workerWakeTimer) return;
+  if (workerImmediateScheduled) return;
+
+  const run = () => {
+    workerWakeTimer = null;
+    workerImmediateScheduled = false;
+    const runReason = pendingWakeReason;
+    pendingWakeReason = 'manual';
+    runEmailOutboxWorkerTick(runReason).catch(err => {
+      console.error('[EmailOutbox] Worker error:', err instanceof Error ? err.message : err);
+    });
+  };
+
+  if (EMAIL_OUTBOX_WAKE_DEBOUNCE_MS > 0) {
+    workerWakeTimer = setTimeout(run, EMAIL_OUTBOX_WAKE_DEBOUNCE_MS);
+    workerWakeTimer.unref();
+  } else {
+    workerImmediateScheduled = true;
+    setImmediate(run);
+  }
+}
+
+export async function startEmailOutboxRabbitConsumer(): Promise<void> {
+  if (emailOutboxRabbitConsumerStarted) return;
+  emailOutboxRabbitConsumerStarted = true;
+  await consume(
+    QUEUES.EMAIL_OUTBOX,
+    async function processEmailWake(data: Record<string, any>) {
+      const reason = typeof data.reason === 'string' && data.reason.trim()
+        ? `rabbitmq:${data.reason.trim()}`
+        : 'rabbitmq';
+      triggerEmailOutboxWorker(reason);
+    },
+    async function onMaxRetry(_queue: string, rawMessage: string) {
+      console.error('[EmailOutbox] RabbitMQ wake max retries reached; DB polling fallback remains active:', rawMessage.substring(0, 200));
+    },
+    { prefetch: EMAIL_OUTBOX_RABBIT_PREFETCH, isolatedChannel: true },
+  );
+}
+
+export function startEmailOutboxWorker(options: { keepAlive?: boolean; source?: string } = {}): void {
+  if (workerStarted) return;
+  if (!env.EMAIL_OUTBOX_WORKER_ENABLED) {
+    console.log('[EmailOutbox] Worker disabled by EMAIL_OUTBOX_WORKER_ENABLED=false');
+    return;
+  }
+  workerStarted = true;
+  console.log(
+    `[EmailOutbox] Worker started source=${options.source || 'default'} interval_ms=${EMAIL_OUTBOX_INTERVAL_MS} batch_size=${EMAIL_OUTBOX_BATCH_SIZE} claim_batch_size=${EMAIL_OUTBOX_CLAIM_BATCH_SIZE} concurrency=${EMAIL_OUTBOX_CONCURRENCY} tenant_concurrency=${EMAIL_OUTBOX_TENANT_CONCURRENCY} session_max_messages=${EMAIL_OUTBOX_SESSION_MAX_MESSAGES} retention_days=${EMAIL_OUTBOX_SENT_RETENTION_DAYS} tick_budget_ms=${EMAIL_OUTBOX_TICK_BUDGET_MS} wake_debounce_ms=${EMAIL_OUTBOX_WAKE_DEBOUNCE_MS} rabbit_prefetch=${EMAIL_OUTBOX_RABBIT_PREFETCH} tenant_failure_threshold=${EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD} tenant_cooldown_ms=${EMAIL_OUTBOX_TENANT_COOLDOWN_MS}`,
+  );
+  triggerEmailOutboxWorker('startup');
+  workerInterval = setInterval(() => {
+    triggerEmailOutboxWorker('interval');
+  }, EMAIL_OUTBOX_INTERVAL_MS);
+  if (!options.keepAlive) workerInterval.unref();
+}
+
+export function stopEmailOutboxWorker(): void {
+  if (workerInterval) {
+    clearInterval(workerInterval);
+    workerInterval = null;
+  }
+  if (workerWakeTimer) {
+    clearTimeout(workerWakeTimer);
+    workerWakeTimer = null;
+  }
+  workerImmediateScheduled = false;
+  workerStarted = false;
 }

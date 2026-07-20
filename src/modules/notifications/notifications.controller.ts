@@ -7,7 +7,7 @@ import * as svc from './notifications.service.js';
 
 export async function send(req: Request, res: Response, next: NextFunction) {
   try {
-    const { course_id, title, message, send_email } = req.body;
+    const { course_id, title, message } = req.body;
     const tenantId = req.user!.tenantId!;
     const userId = req.user!.id;
 
@@ -16,9 +16,7 @@ export async function send(req: Request, res: Response, next: NextFunction) {
       return;
     }
 
-    const result = await svc.sendCourseNotification(course_id, tenantId, title, message || '', userId, {
-      sendEmail: send_email === true,
-    });
+    const result = await svc.sendCourseNotification(course_id, tenantId, title, message || '', userId);
     auditFromReq(req, 'CREATE', 'notification', course_id, title, `Gửi cho ${result.recipients} learners`);
     sendSuccess(res, result);
   } catch (err) {

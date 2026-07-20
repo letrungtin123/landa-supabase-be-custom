@@ -56,6 +56,14 @@ function optionalInt(key: string, fallback: number): number {
   return num;
 }
 
+function optionalBoolean(key: string, fallback: boolean): boolean {
+  const raw = process.env[key]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+  throw new Error(`[ENV] ${key} must be a boolean, received: "${raw}"`);
+}
+
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
@@ -90,6 +98,23 @@ export const env = {
 
   // SMTP config encryption (optional until tenant SMTP is configured)
   SMTP_CONFIG_ENCRYPTION_KEY: process.env.SMTP_CONFIG_ENCRYPTION_KEY?.trim() || '',
+  SMTP_TLS_REJECT_UNAUTHORIZED: optionalBoolean('SMTP_TLS_REJECT_UNAUTHORIZED', true),
+  EMAIL_OUTBOX_WORKER_ENABLED: optionalBoolean('EMAIL_OUTBOX_WORKER_ENABLED', true),
+  EMAIL_OUTBOX_INLINE_WORKER_ENABLED: optionalBoolean('EMAIL_OUTBOX_INLINE_WORKER_ENABLED', true),
+  EMAIL_OUTBOX_INTERVAL_MS: optionalInt('EMAIL_OUTBOX_INTERVAL_MS', 15_000),
+  EMAIL_OUTBOX_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_BATCH_SIZE', 25),
+  EMAIL_OUTBOX_CLAIM_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_CLAIM_BATCH_SIZE', 25),
+  EMAIL_OUTBOX_CONCURRENCY: optionalInt('EMAIL_OUTBOX_CONCURRENCY', 3),
+  EMAIL_OUTBOX_TENANT_CONCURRENCY: optionalInt('EMAIL_OUTBOX_TENANT_CONCURRENCY', 2),
+  EMAIL_OUTBOX_TICK_BUDGET_MS: optionalInt('EMAIL_OUTBOX_TICK_BUDGET_MS', 45_000),
+  EMAIL_OUTBOX_SESSION_MAX_MESSAGES: optionalInt('EMAIL_OUTBOX_SESSION_MAX_MESSAGES', 20),
+  EMAIL_OUTBOX_SENT_RETENTION_DAYS: optionalInt('EMAIL_OUTBOX_SENT_RETENTION_DAYS', 30),
+  EMAIL_OUTBOX_RETENTION_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_RETENTION_BATCH_SIZE', 1000),
+  EMAIL_OUTBOX_WAKE_DEBOUNCE_MS: optionalInt('EMAIL_OUTBOX_WAKE_DEBOUNCE_MS', 500),
+  EMAIL_OUTBOX_RABBIT_PREFETCH: optionalInt('EMAIL_OUTBOX_RABBIT_PREFETCH', 50),
+  EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD: optionalInt('EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD', 3),
+  EMAIL_OUTBOX_TENANT_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_COOLDOWN_MS', 300_000),
+  EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS', 1_800_000),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',

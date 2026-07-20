@@ -41,7 +41,11 @@ import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
-startEmailOutboxWorker();
+if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
+  startEmailOutboxWorker({ keepAlive: false, source: 'inline' });
+} else {
+  console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
+}
 
 // ── Security Headers ──
 app.use(helmet({
