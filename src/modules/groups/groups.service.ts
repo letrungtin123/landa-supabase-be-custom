@@ -36,7 +36,7 @@ async function getTeamTenantId(teamId: string): Promise<string | null> {
   const result = await query<{ tenant_id: string }>(
     `SELECT og.tenant_id
      FROM teams t
-     JOIN sub_groups sg ON sg.id = t.subgroup_id
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
      JOIN org_groups og ON og.id = sg.org_group_id
      WHERE t.id = $1`,
     [teamId],
