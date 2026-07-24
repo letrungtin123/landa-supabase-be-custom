@@ -28,6 +28,7 @@ router.get('/kb', checkPermission('ai_chatbot', 'can_view'), kbCtrl.listKbs);
 router.get('/kb/:id', checkPermission('ai_chatbot', 'can_view'), kbCtrl.getKb);
 router.post('/kb', checkPermission('ai_chatbot', 'can_add'), kbCtrl.createKb);
 router.put('/kb/:id', checkPermission('ai_chatbot', 'can_edit'), kbCtrl.updateKb);
+router.post('/kb/:kbId/restore', checkPermission('ai_chatbot', 'can_edit'), kbCtrl.restoreKb);
 router.delete('/kb/:id', checkPermission('ai_chatbot', 'can_delete'), kbCtrl.deleteKb);
 
 // ── Document CRUD — Files tab ──
@@ -74,6 +75,7 @@ router.post('/bots/:id/personas/:personaId/reset', checkPermission('ai_chatbot',
 router.delete('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'can_delete'), botCtrl.removePersona);
 
 // ── Chat — conversations + messages (SSE stream) ──
+router.get('/chat/demo-iframe-preview', chatCtrl.getDemoIframePreview);
 router.get('/chat/active-bot', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getActiveBot);
 router.get('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.listConversations);
 router.post('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.createConversation);

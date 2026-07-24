@@ -9,6 +9,7 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 
 /** GET /api/users */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -104,6 +105,10 @@ export async function getProfileController(req: Request, res: Response, next: Ne
 export async function updateProfileController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.id;
+    if (isDemoIframeSession(req.user)) {
+      sendError(res, 'Phiên demo iframe không thể cập nhật hồ sơ', 403);
+      return;
+    }
     const result = await usersService.updateProfile(userId, req.body);
     sendSuccess(res, result);
   } catch (err) { next(err); }
@@ -114,8 +119,12 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
   try {
     const userId = req.user!.id;
     const tenantId = req.user!.tenantId || 'default';
+    if (isDemoIframeSession(req.user)) {
+      sendError(res, 'Phiên demo iframe không thể cập nhật avatar', 403);
+      return;
+    }
 
-    if (!req.file) { sendError(res, 'No file uploaded', 400); return; }
+    if (!req.file) { sendError(res, 'Chưa upload file', 400); return; }
 
     // Delete old avatar from storage (if exists, may have different extension)
     const oldUser = await usersService.getUserById(userId);
@@ -146,9 +155,13 @@ export async function changePasswordController(req: Request, res: Response, next
   try {
     const userId = req.user!.id;
     const { current_password, new_password } = req.body;
+    if (isDemoIframeSession(req.user)) {
+      sendError(res, 'Phiên demo iframe không thể đổi mật khẩu', 403);
+      return;
+    }
 
     if (!current_password || !new_password) {
-      sendError(res, 'current_password and new_password are required', 400);
+      sendError(res, 'Thiếu current_password hoặc new_password', 400);
       return;
     }
     if (new_password.length < 8) {

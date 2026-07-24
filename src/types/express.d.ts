@@ -10,6 +10,7 @@ export interface AuthUser {
   tenantId: string | null;
   role: 'learner' | 'learner_plus' | 'staff' | 'superuser' | 'superadmin';
   username: string;
+  sessionMode: 'normal' | 'demo_iframe';
 }
 
 declare global {

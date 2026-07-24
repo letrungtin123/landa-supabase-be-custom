@@ -1,13 +1,18 @@
 import type { NextFunction, Request, Response } from 'express';
 import { auditFromReq } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
+import * as authService from '../auth/auth.service.js';
+import * as demoIframeService from './demo-iframe.service.js';
 import * as demoLoginService from './demo-login.service.js';
 import {
   deleteDemoLoginAccountParamSchema,
+  demoIframeBootstrapSchema,
+  demoIframeEmbedParamSchema,
   publicClaimSchema,
   publicDomainParamSchema,
   replaceDemoLoginAccountsSchema,
   tenantParamSchema,
+  updateDemoIframeConfigSchema,
   updateDemoLoginConfigSchema,
 } from './demo-login.validator.js';
 
@@ -117,6 +122,96 @@ export async function claimPublicAccountController(req: Request, res: Response, 
 
     const result = await demoLoginService.claimPublicDemoLoginAccount(params.data.domain, body.data.account_id);
     sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getAdminIframeConfigController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const params = tenantParamSchema.safeParse(req.params);
+    if (!params.success) { sendError(res, firstError(params), 400); return; }
+
+    const result = await demoIframeService.getDemoIframeConfig(params.data.tenantId);
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateAdminIframeConfigController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const params = tenantParamSchema.safeParse(req.params);
+    if (!params.success) { sendError(res, firstError(params), 400); return; }
+
+    const body = updateDemoIframeConfigSchema.safeParse(req.body);
+    if (!body.success) { sendError(res, firstError(body), 400); return; }
+
+    const result = await demoIframeService.updateDemoIframeConfig(
+      params.data.tenantId,
+      body.data,
+      req.user?.id || null,
+    );
+    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Cập nhật cấu hình demo iframe login');
+    sendSuccess(res, result, 'Đã lưu cấu hình demo iframe login');
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function regenerateAdminIframeEmbedController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const params = tenantParamSchema.safeParse(req.params);
+    if (!params.success) { sendError(res, firstError(params), 400); return; }
+
+    const result = await demoIframeService.regenerateDemoIframeEmbedId(params.data.tenantId, req.user?.id || null);
+    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Tạo lại mã nhúng demo iframe login');
+    sendSuccess(res, result, 'Đã tạo lại mã nhúng demo iframe');
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function searchEligibleIframeLearnersController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const params = tenantParamSchema.safeParse(req.params);
+    if (!params.success) { sendError(res, firstError(params), 400); return; }
+
+    const result = await demoIframeService.searchEligibleIframeLearners(
+      params.data.tenantId,
+      req.query as Record<string, unknown>,
+    );
+    sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function bootstrapPublicIframeController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const params = demoIframeEmbedParamSchema.safeParse(req.params);
+    if (!params.success) { sendError(res, firstError(params), 400); return; }
+
+    const body = demoIframeBootstrapSchema.safeParse(req.body);
+    if (!body.success) { sendError(res, firstError(body), 400); return; }
+
+    const bootstrap = await demoIframeService.resolveDemoIframeBootstrap(
+      params.data.embedId,
+      body.data.parent_origin,
+      req.get('origin'),
+    );
+    const session = await authService.issueSessionForUserId(bootstrap.user_id, {
+      sessionMode: 'demo_iframe',
+      updateLastLogin: false,
+    });
+    sendSuccess(res, {
+      ...session,
+      demo_iframe: {
+        tenant: bootstrap.tenant,
+        parent_origin: bootstrap.parent_origin,
+        learner_label: bootstrap.learner_label,
+      },
+    }, 'Đăng nhập demo iframe thành công');
   } catch (err) {
     next(err);
   }

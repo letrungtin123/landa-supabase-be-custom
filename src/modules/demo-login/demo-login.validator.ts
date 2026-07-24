@@ -33,3 +33,19 @@ export const publicClaimSchema = z.object({
 
 export type UpdateDemoLoginConfigInput = z.infer<typeof updateDemoLoginConfigSchema>;
 export type ReplaceDemoLoginAccountsInput = z.infer<typeof replaceDemoLoginAccountsSchema>;
+
+export const updateDemoIframeConfigSchema = z.object({
+  is_enabled: z.boolean().optional(),
+  allowed_origin: z.string().trim().max(255).nullable().optional(),
+  demo_user_id: z.string().uuid('Learner không hợp lệ').nullable().optional(),
+});
+
+export const demoIframeEmbedParamSchema = z.object({
+  embedId: z.string().uuid('Demo iframe không hợp lệ'),
+});
+
+export const demoIframeBootstrapSchema = z.object({
+  parent_origin: z.string().trim().min(1, 'Thiếu domain nhúng iframe').max(255),
+});
+
+export type UpdateDemoIframeConfigInput = z.infer<typeof updateDemoIframeConfigSchema>;

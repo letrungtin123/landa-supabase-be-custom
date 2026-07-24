@@ -5,6 +5,30 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as learnerService from './learner.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+
+function demoProgressState() {
+  return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
+}
+
+function maskEnrollmentProgress(rows: any[]) {
+  return rows.map((row) => ({
+    ...row,
+    progress: 0,
+    is_completed: false,
+    completed_at: null,
+    last_activity_at: null,
+  }));
+}
+
+function demoCourseModalState(courseId: string, updates?: { welcome_shown?: boolean; confirm_shown?: boolean; complete_shown?: boolean }) {
+  return {
+    course_id: courseId,
+    welcome_shown: updates?.welcome_shown ?? false,
+    confirm_shown: updates?.confirm_shown ?? false,
+    complete_shown: updates?.complete_shown ?? false,
+  };
+}
 
 /** GET /api/learner/courses */
 export async function listCourses(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -61,6 +85,7 @@ export async function getCourseBlocks(req: Request, res: Response, next: NextFun
       req.user.id,
       req.user.role,
       req.user.tenantId,
+      isDemoIframeSession(req.user),
     );
     sendSuccess(res, result);
   } catch (err) {
@@ -155,6 +180,10 @@ export async function listEnrollments(req: Request, res: Response, next: NextFun
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
     const result = await learnerService.getMyEnrollments(req.user.id, tenantId);
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, maskEnrollmentProgress(result));
+      return;
+    }
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -170,6 +199,11 @@ export async function enroll(req: Request, res: Response, next: NextFunction): P
 
     const { course_id } = req.body;
     if (!course_id) { sendError(res, 'Thiếu course_id', 400); return; }
+
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, { enrollment_id: null, already_enrolled: true, demo_iframe: true }, 'Demo iframe không lưu ghi danh');
+      return;
+    }
 
     const result = await learnerService.selfEnroll(req.user.id, course_id, tenantId);
     sendSuccess(res, result, result.already_enrolled ? 'Đã ghi danh trước đó' : 'Ghi danh thành công');
@@ -189,6 +223,11 @@ export async function completeBlocks(req: Request, res: Response, next: NextFunc
       return;
     }
 
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, { marked: block_ids.length, demo_iframe: true });
+      return;
+    }
+
     const result = await learnerService.markBlocksComplete(req.user.id, course_id, block_ids);
     sendSuccess(res, result);
   } catch (err) {
@@ -201,7 +240,9 @@ export async function getProgress(req: Request, res: Response, next: NextFunctio
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
 
-    const result = await learnerService.getMyProgress(req.user.id, req.params.courseId);
+    const result = isDemoIframeSession(req.user)
+      ? demoProgressState()
+      : await learnerService.getMyProgress(req.user.id, req.params.courseId);
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -222,6 +263,12 @@ export async function getBatchProgress(req: Request, res: Response, next: NextFu
     if (courseIds.length === 0) { sendSuccess(res, { progress: {} }); return; }
     if (courseIds.length > 50) { sendError(res, 'Tối đa 50 courses', 400); return; }
 
+    if (isDemoIframeSession(req.user)) {
+      const progress = Object.fromEntries(courseIds.map((courseId) => [courseId, demoProgressState()]));
+      sendSuccess(res, { progress });
+      return;
+    }
+
     const result = await learnerService.getBatchProgress(req.user.id, tenantId, courseIds);
     sendSuccess(res, result);
   } catch (err) {
@@ -233,7 +280,7 @@ export async function getBatchProgress(req: Request, res: Response, next: NextFu
 export async function listBadges(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    const result = await learnerService.getMyBadges(req.user.id);
+    const result = isDemoIframeSession(req.user) ? [] : await learnerService.getMyBadges(req.user.id);
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -260,6 +307,10 @@ export async function saveBadge(req: Request, res: Response, next: NextFunction)
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
     const { badge_id } = req.body;
     if (!badge_id) { sendError(res, 'Thiếu badge_id', 400); return; }
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, null, 'Demo iframe không lưu huy hiệu');
+      return;
+    }
     await learnerService.saveBadge(req.user.id, badge_id);
     sendSuccess(res, null, 'Lưu huy hiệu thành công');
   } catch (err) {
@@ -273,6 +324,10 @@ export async function updateBadge(req: Request, res: Response, next: NextFunctio
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
     const { badge_id, is_shown } = req.body;
     if (!badge_id) { sendError(res, 'Thiếu badge_id', 400); return; }
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, null);
+      return;
+    }
     await learnerService.updateBadgeShown(req.user.id, badge_id, is_shown ?? true);
     sendSuccess(res, null);
   } catch (err) {
@@ -319,7 +374,9 @@ export async function getUnreadCount(req: Request, res: Response, next: NextFunc
 export async function markRead(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    await learnerService.markNotificationRead(req.user.id, req.params.id);
+    if (!isDemoIframeSession(req.user)) {
+      await learnerService.markNotificationRead(req.user.id, req.params.id);
+    }
     sendSuccess(res, null);
   } catch (err) {
     next(err);
@@ -333,7 +390,9 @@ export async function markAllRead(req: Request, res: Response, next: NextFunctio
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
-    await learnerService.markAllNotificationsRead(req.user.id, tenantId);
+    if (!isDemoIframeSession(req.user)) {
+      await learnerService.markAllNotificationsRead(req.user.id, tenantId);
+    }
     sendSuccess(res, null);
   } catch (err) {
     next(err);
@@ -355,7 +414,9 @@ export async function getCourseModalConfig(req: Request, res: Response, next: Ne
 export async function getCourseModalState(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    const result = await learnerService.getCourseModalState(req.user.id, req.params.courseId);
+    const result = isDemoIframeSession(req.user)
+      ? demoCourseModalState(req.params.courseId)
+      : await learnerService.getCourseModalState(req.user.id, req.params.courseId);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -365,6 +426,10 @@ export async function updateCourseModalState(req: Request, res: Response, next: 
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
     const { welcome_shown, confirm_shown, complete_shown } = req.body;
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, demoCourseModalState(req.params.courseId, { welcome_shown, confirm_shown, complete_shown }));
+      return;
+    }
     const result = await learnerService.updateCourseModalState(req.user.id, req.params.courseId, {
       welcome_shown,
       confirm_shown,
@@ -389,7 +454,9 @@ export async function getSectionModalConfigs(req: Request, res: Response, next: 
 export async function getSectionModalShown(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    const result = await learnerService.getSectionModalShown(req.user.id, req.params.courseId);
+    const result = isDemoIframeSession(req.user)
+      ? { shown_sections: [] }
+      : await learnerService.getSectionModalShown(req.user.id, req.params.courseId);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -400,6 +467,10 @@ export async function markSectionModalShown(req: Request, res: Response, next: N
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
     const { section_id } = req.body;
     if (!section_id) { sendError(res, 'Thiếu section_id', 400); return; }
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, { success: true, demo_iframe: true });
+      return;
+    }
     const result = await learnerService.markSectionModalShown(req.user.id, req.params.courseId, section_id);
     sendSuccess(res, result);
   } catch (err) { next(err); }

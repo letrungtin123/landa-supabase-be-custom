@@ -7,7 +7,7 @@ import fs from 'fs/promises';
 import { consume, QUEUES } from '../../config/rabbitmq/index.js';
 import { downloadToTempFile } from '../../config/storage.js';
 import { env } from '../../config/env.js';
-import { getGeminiClient, ensureStore, uploadToStore } from './gemini.service.js';
+import { getGeminiClient, ensureStore, uploadToStore, deleteFromStore } from './gemini.service.js';
 import { updateDocumentStatus, linkDocumentGemini, getDocument } from './kb.service.js';
 import { query } from '../../config/database.js';
 
@@ -60,8 +60,18 @@ async function processUploadJob(data: Record<string, any>): Promise<void> {
     const displayName = doc.name || `doc-${documentId}`;
     const geminiPath = await uploadToStore(storeName, tempPath, displayName, aiClient);
 
-    // 7. Link mapping
-    await linkDocumentGemini(documentId, storeId, geminiPath);
+    // 7. Link mapping. If DB mapping cannot be created, remove the Gemini doc
+    // immediately so File Search never keeps an untracked document.
+    try {
+      const linked = await linkDocumentGemini(documentId, storeId, geminiPath);
+      if (!linked) {
+        await deleteFromStore([geminiPath], aiClient);
+        console.log(`[UploadWorker] Duplicate mapping detected for ${documentId}, cleaned uploaded Gemini doc`);
+      }
+    } catch (linkErr) {
+      await deleteFromStore([geminiPath], aiClient);
+      throw linkErr;
+    }
 
     // 8. Mark as learned
     await updateDocumentStatus(documentId, 'learned');

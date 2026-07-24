@@ -6,6 +6,7 @@
 
 import { createHash } from 'crypto';
 import { query } from '../../config/database.js';
+import { env } from '../../config/env.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
@@ -28,7 +29,7 @@ import type { FilterResult } from './input-filter/core/index.js';
 const MAX_CONVERSATIONS_PER_USER = 10;
 const HISTORY_CONTEXT_LIMIT = 20;         // Last N messages sent to Gemini
 const MAX_USER_MESSAGE_LENGTH = 5000;
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = env.GEMINI_CHAT_MODEL;
 const MESSAGES_PAGE_SIZE = 50;            // Cursor-based pagination
 const RATE_LIMIT_MS = 3_000;              // 1 message per 3 seconds per user
 const GEMINI_MAX_RETRIES = 3;
@@ -80,6 +81,14 @@ const streamLocks = new Set<string>();
 // ── Store name cache (per-kb, rarely changes) ──
 const storeNameCache = new Map<string, { name: string; ts: number }>();
 const STORE_CACHE_TTL = 10 * 60_000; // 10 minutes
+
+export function invalidateGeminiStoreNameCache(kbId?: string): void {
+  if (kbId) {
+    storeNameCache.delete(kbId);
+    return;
+  }
+  storeNameCache.clear();
+}
 
 async function getCachedStoreName(kbId: string): Promise<string | null> {
   const cached = storeNameCache.get(kbId);
@@ -651,7 +660,7 @@ export async function assignLessonAuthorKb(tenantId: string, kbId: string): Prom
     [tenantId, LESSON_AUTHOR_TARGET, kbId],
   );
 
-  storeNameCache.delete(kbId);
+  invalidateGeminiStoreNameCache(kbId);
   await invalidateTenantAiCaches(tenantId);
 }
 
@@ -1013,8 +1022,13 @@ function parseRetryDelay(err: any): number | null {
 }
 
 /** Sanitize Gemini errors → short Vietnamese messages for UI */
+function redactGeminiApiKeys(value: string): string {
+  return value.replace(/\b(?:AIza[0-9A-Za-z_-]{20,}|AQ\.[0-9A-Za-z_-]{8,})\b/g, '[redacted]');
+}
+
 function sanitizeGeminiError(err: any): Error {
-  const msg = err?.message || err?.toString() || '';
+  const rawMsg = err?.message || err?.toString() || '';
+  const msg = redactGeminiApiKeys(rawMsg);
   const status = err?.status || err?.code || 0;
 
   // 429 — quota exceeded
@@ -1043,6 +1057,7 @@ function sanitizeGeminiError(err: any): Error {
   if (msg.length > 200 || msg.includes('{')) {
     return new Error('Đã xảy ra lỗi khi xử lý tin nhắn. Vui lòng thử lại.');
   }
+  if (msg !== rawMsg) return new Error(msg);
   return err;
 }
 
@@ -2666,9 +2681,7 @@ function constrainAdditiveComponentProposal(
 
 function sanitizeInternalErrorReason(err: any): string {
   const msg = err?.message || err?.toString?.() || 'Unknown lesson author error';
-  return String(msg)
-    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted]')
-    .slice(0, 2000);
+  return redactGeminiApiKeys(String(msg)).slice(0, 2000);
 }
 
 function formatLessonAuthorFailurePreview(err: any, jobId?: string): string {
@@ -4450,7 +4463,7 @@ export async function sendMessageStream(
   } catch (err: any) {
     logLessonAuthorFlow('stream_error', {
       conversation_id: conversationId,
-      error: err?.message || 'Unknown stream error',
+      error: redactGeminiApiKeys(err?.message || 'Unknown stream error'),
     });
     onError(sanitizeGeminiError(err));
   } finally {

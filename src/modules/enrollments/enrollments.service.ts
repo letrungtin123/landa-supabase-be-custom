@@ -5,6 +5,10 @@
 
 import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+import {
+  assertUserNotActiveDemoIframeAccount,
+  getActiveDemoIframeUserIds,
+} from '../demo-login/demo-iframe.service.js';
 
 // ── Types ──
 
@@ -157,6 +161,8 @@ export async function enrollUser(
   courseId: string,
   tenantId: string,
 ): Promise<{ enrollment_id: string; already_enrolled: boolean }> {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể ghi danh learner demo iframe đang hoạt động');
+
   // Guard: course must exist and not be soft-deleted
   const courseCheck = await query<{ id: string }>(
     `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
@@ -201,6 +207,10 @@ export async function bulkEnroll(
   tenantId: string,
 ): Promise<{ enrolled: number; skipped: number }> {
   if (userIds.length === 0) return { enrolled: 0, skipped: 0 };
+  const lockedDemoUsers = await getActiveDemoIframeUserIds(userIds);
+  if (lockedDemoUsers.size > 0) {
+    throw new AppError('Không thể ghi danh learner demo iframe đang hoạt động', 403);
+  }
 
   // Guard: course must exist and not be soft-deleted
   const courseCheck = await query<{ id: string }>(
@@ -231,6 +241,8 @@ export async function bulkEnroll(
 }
 
 export async function unenrollUser(userId: string, courseId: string): Promise<boolean> {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể hủy ghi danh learner demo iframe đang hoạt động');
+
   const result = await query(
     `UPDATE enrollments SET is_active = false WHERE user_id = $1 AND course_id = $2 AND is_active = true`,
     [userId, courseId],
@@ -245,6 +257,8 @@ export async function updateProgress(
   courseId: string,
   progress: number,
 ): Promise<void> {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật tiến độ cho learner demo iframe đang hoạt động');
+
   const isCompleted = progress >= 100;
 
   await query(
@@ -269,6 +283,8 @@ export async function recordStudySession(
   durationMinutes: number,
   startedAt?: string,
 ): Promise<void> {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể ghi thời gian học cho learner demo iframe đang hoạt động');
+
   const start = startedAt ? new Date(startedAt) : new Date();
   // duration_minutes là GENERATED column (tự tính từ ended_at - started_at)
   // → tính ended_at = started_at + duration
@@ -292,6 +308,8 @@ export async function recordStudySessionEntries(
   tenantId: string,
   entries: StudyTimeSyncEntry[],
 ): Promise<{ synced: number }> {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể ghi thời gian học cho learner demo iframe đang hoạt động');
+
   const normalized = entries
     .filter(entry => entry.minutes > 0)
     .map(entry => ({

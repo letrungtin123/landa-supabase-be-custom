@@ -5,7 +5,9 @@
 
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as chatService from './chat.service.js';
+import * as botService from './bot.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -17,6 +19,33 @@ function resolveTarget(req: Request): chatService.ChatTarget {
 function resolveCourseId(req: Request): string | undefined {
   const raw = (req.query.courseId as string) || (req.body?.courseId as string);
   return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+type DemoIframePersonaPreview = Pick<
+  botService.BotPersona,
+  | 'id'
+  | 'bot_id'
+  | 'template_id'
+  | 'template_name'
+  | 'template_description'
+  | 'template_avatar_url'
+  | 'template_fullbody_url'
+  | 'custom_name'
+  | 'custom_description'
+>;
+
+function toDemoIframePersonaPreview(persona: botService.BotPersona): DemoIframePersonaPreview {
+  return {
+    id: persona.id,
+    bot_id: persona.bot_id,
+    template_id: persona.template_id,
+    template_name: persona.template_name,
+    template_description: persona.template_description,
+    template_avatar_url: persona.template_avatar_url,
+    template_fullbody_url: persona.template_fullbody_url,
+    custom_name: persona.custom_name,
+    custom_description: persona.custom_description,
+  };
 }
 
 // ── Bot Assignments ──
@@ -118,11 +147,44 @@ export async function getActiveBot(req: Request, res: Response): Promise<void> {
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
+export async function getDemoIframePreview(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user?.tenantId;
+  const target = resolveTarget(req);
+
+  if (!req.user || req.user.role !== 'learner' || !isDemoIframeSession(req.user) || !tenantId) {
+    sendError(res, 'Không có quyền xem preview demo iframe', 403);
+    return;
+  }
+
+  if (target !== 'learner') {
+    sendError(res, 'Demo iframe chỉ hỗ trợ target learner', 400);
+    return;
+  }
+
+  try {
+    const bot = await chatService.getActiveBot(tenantId, 'learner');
+    if (!bot) {
+      sendSuccess(res, { bot: null, personas: [] });
+      return;
+    }
+
+    const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
+    sendSuccess(res, {
+      bot,
+      personas: personas.map(toDemoIframePersonaPreview),
+    });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
 // ── Conversations ──
 
 export async function listConversations(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
+  if (isDemoIframeSession(req.user)) {
+    sendSuccess(res, []);
+    return;
+  }
 
   try {
     const target = resolveTarget(req);
@@ -138,6 +200,10 @@ export async function listConversations(req: Request, res: Response): Promise<vo
 export async function createConversation(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể tạo hội thoại', 403);
+    return;
+  }
   const { persona_id } = req.body ?? {};
   const target = resolveTarget(req);
 
@@ -166,6 +232,10 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id } = req.params;
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể xóa hội thoại', 403);
+    return;
+  }
 
   if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
@@ -183,6 +253,10 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const { id } = req.params;
   const cursor = req.query.cursor as string | undefined;
+  if (isDemoIframeSession(req.user)) {
+    sendSuccess(res, { messages: [], has_more: false, next_cursor: null });
+    return;
+  }
 
   if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
@@ -208,6 +282,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const { content, mode, outline_mentions, source_documents } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể gửi tin nhắn', 403);
+    return;
+  }
 
   if (!UUID_REGEX.test(conversationId)) {
     sendError(res, 'ID không hợp lệ', 400); return;

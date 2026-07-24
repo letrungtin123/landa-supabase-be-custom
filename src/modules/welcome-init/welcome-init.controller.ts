@@ -13,7 +13,10 @@ export async function getWelcomeInitStateController(
       return;
     }
 
-    const result = await welcomeInitService.getWelcomeInitState(req.user.id);
+    const result = await welcomeInitService.getWelcomeInitState(
+      req.user.id,
+      req.user.sessionMode === 'demo_iframe',
+    );
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -31,7 +34,11 @@ export async function markWelcomeInitSeenController(
       return;
     }
 
-    const result = await welcomeInitService.markWelcomeInitSeen(req.user.id, req.user.tenantId || null);
+    const result = await welcomeInitService.markWelcomeInitSeen(
+      req.user.id,
+      req.user.tenantId || null,
+      req.user.sessionMode === 'demo_iframe',
+    );
     sendSuccess(res, result, 'Đã ghi nhận welcome_init');
   } catch (err) {
     next(err);

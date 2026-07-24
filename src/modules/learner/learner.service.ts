@@ -10,6 +10,7 @@ import { invalidateUserCourseProgressCache } from '../../config/cache-invalidati
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
+import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 
 // ── Courses ──
 
@@ -264,17 +265,18 @@ export async function getCourseBlocks(
   userId: string,
   role = 'learner',
   tenantId?: string | null,
+  isDemoIframe = false,
 ) {
   const [courseVersion, progressVersion, coursesVersion, categoriesVersion] = await Promise.all([
     getCacheVersion(...cacheVersions.courseContent(courseId)),
-    getCacheVersion(...cacheVersions.userCourseProgress(userId, courseId)),
+    isDemoIframe ? Promise.resolve('demo-iframe') : getCacheVersion(...cacheVersions.userCourseProgress(userId, courseId)),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
   return cacheJson(
-    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role }),
+    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe }),
     CACHE_TTL.courseBlocks,
-    () => getCourseBlocksFromDb(courseId, userId, role),
+    () => getCourseBlocksFromDb(courseId, userId, role, isDemoIframe),
   );
 }
 
@@ -282,6 +284,7 @@ async function getCourseBlocksFromDb(
   courseId: string,
   userId: string,
   role = 'learner',
+  isDemoIframe = false,
 ) {
   const courseCheck = await query<{ id: string }>(
     `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
@@ -290,10 +293,12 @@ async function getCourseBlocksFromDb(
   if (courseCheck.rowCount === 0) throw new AppError('KhÃ³a há»c khÃ´ng tá»“n táº¡i', 404);
 
   // Lấy enrollment_id (nếu có) để join block_completions
-  const enrollResult = await query<{ id: string }>(
-    `SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1`,
-    [courseId, userId],
-  );
+  const enrollResult = isDemoIframe
+    ? { rows: [] as Array<{ id: string }> }
+    : await query<{ id: string }>(
+      `SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1`,
+      [courseId, userId],
+    );
   const enrollmentId = enrollResult.rows[0]?.id ?? null;
 
   // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
@@ -1096,6 +1101,8 @@ export async function getMyEnrollments(userId: string, tenantId: string) {
  * Kiểm tra: course thuộc tenant + learner có quyền truy cập (qua team).
  */
 export async function selfEnroll(userId: string, courseId: string, tenantId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi danh');
+
   // Kiểm tra course tồn tại trong tenant
   const course = await query<any>(
     'SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
@@ -1146,6 +1153,8 @@ export async function markBlocksComplete(
   courseId: string,
   blockIds: string[],
 ) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi tiến độ');
+
   if (blockIds.length === 0) return { marked: 0 };
 
   // Lấy enrollment
@@ -1334,6 +1343,7 @@ async function getActiveBadgesFromDb(tenantId: string) {
 
 
 export async function saveBadge(userId: string, badgeId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể lưu huy hiệu');
   await query(
     `INSERT INTO user_badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
     [userId, badgeId],
@@ -1341,6 +1351,7 @@ export async function saveBadge(userId: string, badgeId: string) {
 }
 
 export async function updateBadgeShown(userId: string, badgeId: string, isShown: boolean) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật huy hiệu');
   await query(
     'UPDATE user_badges SET is_shown = $1 WHERE user_id = $2 AND badge_id = $3',
     [isShown, userId, badgeId],
@@ -1399,6 +1410,7 @@ export async function getUnreadCount(userId: string, tenantId: string) {
 }
 
 export async function markNotificationRead(userId: string, notificationId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
   await query(
     `UPDATE notification_recipients SET is_read = true, read_at = now()
      WHERE user_id = $1 AND notification_id = $2`,
@@ -1407,6 +1419,7 @@ export async function markNotificationRead(userId: string, notificationId: strin
 }
 
 export async function markAllNotificationsRead(userId: string, tenantId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
   await query(
     `UPDATE notification_recipients nr SET is_read = true, read_at = now()
      FROM notifications n
@@ -1465,6 +1478,7 @@ async function getCourseModalConfigFromDb(courseId: string) {
  * Tạo row mặc định nếu chưa có.
  */
 export async function getCourseModalState(userId: string, courseId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
   const result = await query<any>(
     `INSERT INTO course_modal_states (user_id, course_id)
      VALUES ($1, $2)
@@ -1490,6 +1504,8 @@ export async function updateCourseModalState(
   courseId: string,
   updates: { welcome_shown?: boolean; confirm_shown?: boolean; complete_shown?: boolean },
 ) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
+
   const sets: string[] = [];
   const params: unknown[] = [userId, courseId];
   let idx = 3;
@@ -1561,6 +1577,7 @@ export async function getSectionModalShown(userId: string, courseId: string) {
  * Đánh dấu section đã xem popup.
  */
 export async function markSectionModalShown(userId: string, courseId: string, sectionId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
   await query(
     `INSERT INTO section_modal_shown (user_id, course_id, section_id)
      VALUES ($1, $2, $3)

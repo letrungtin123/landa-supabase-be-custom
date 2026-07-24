@@ -56,6 +56,14 @@ function optionalInt(key: string, fallback: number): number {
   return num;
 }
 
+function optionalNonNegativeInt(key: string, fallback: number): number {
+  const num = optionalInt(key, fallback);
+  if (num < 0) {
+    throw new Error(`[ENV] ${key} must be a non-negative integer, received: "${num}"`);
+  }
+  return num;
+}
+
 function optionalBoolean(key: string, fallback: boolean): boolean {
   const raw = process.env[key]?.trim().toLowerCase();
   if (!raw) return fallback;
@@ -67,6 +75,7 @@ function optionalBoolean(key: string, fallback: boolean): boolean {
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
+  TRUST_PROXY_HOPS: optionalNonNegativeInt('TRUST_PROXY_HOPS', 0),
 
   // Database
   DATABASE_URL: required('DATABASE_URL'),
@@ -96,6 +105,9 @@ export const env = {
   // SSO config encryption (optional until SSO secrets are configured)
   SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',
 
+  // Demo iframe public origin override (optional; use tenant.domain_learner when empty)
+  DEMO_IFRAME_PUBLIC_ORIGIN: process.env.DEMO_IFRAME_PUBLIC_ORIGIN?.trim() || '',
+
   // SMTP config encryption (optional until tenant SMTP is configured)
   SMTP_CONFIG_ENCRYPTION_KEY: process.env.SMTP_CONFIG_ENCRYPTION_KEY?.trim() || '',
   SMTP_TLS_REJECT_UNAUTHORIZED: optionalBoolean('SMTP_TLS_REJECT_UNAUTHORIZED', true),
@@ -117,6 +129,7 @@ export const env = {
   EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS', 1_800_000),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
+  GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 
   /** Kiểm tra môi trường production */

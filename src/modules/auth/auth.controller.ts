@@ -78,6 +78,7 @@ export async function getMeController(req: Request, res: Response, next: NextFun
     }
 
     const result = await authService.getMe(req.user.id, req.user.tenantId);
+    (result as { session_mode?: string }).session_mode = req.user.sessionMode;
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -134,6 +135,11 @@ export async function changePasswordController(req: Request, res: Response, next
       return;
     }
 
+    if (req.user.sessionMode === 'demo_iframe') {
+      sendError(res, 'Phiên demo iframe không thể đổi mật khẩu', 403);
+      return;
+    }
+
     await authService.changePassword(req.user.id, current_password, new_password);
     sendSuccess(res, null, 'Đổi mật khẩu thành công');
   } catch (err) {
@@ -148,6 +154,11 @@ export async function changePasswordController(req: Request, res: Response, next
 export async function updateProfileController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+
+    if (req.user.sessionMode === 'demo_iframe') {
+      sendError(res, 'Phiên demo iframe không thể cập nhật hồ sơ', 403);
+      return;
+    }
 
     const result = await authService.updateProfile(req.user.id, req.body);
     sendSuccess(res, result, 'Cập nhật thông tin thành công');

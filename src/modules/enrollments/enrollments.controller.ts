@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
 import { bulkEnrollSchema } from './enrollments.validator.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 
 const VALID_GRANULARITIES = new Set(['day', 'month', 'year']);
 
@@ -58,9 +59,13 @@ export async function recordStudySession(req: Request, res: Response) {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
 
+  if (isDemoIframeSession(req.user)) {
+    return sendSuccess(res, { success: true, synced: Array.isArray(entries) ? 0 : undefined, demo_iframe: true });
+  }
+
   if (Array.isArray(entries)) {
     if (entries.length > 370) {
-      return sendError(res, 'entries must contain 370 items or fewer', 400);
+      return sendError(res, 'Danh sách entries không được vượt quá 370 mục', 400);
     }
 
     const normalized = entries.map((entry: any) => ({

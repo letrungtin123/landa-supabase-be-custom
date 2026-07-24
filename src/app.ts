@@ -41,6 +41,11 @@ import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
+if (env.TRUST_PROXY_HOPS > 0) {
+  app.set('trust proxy', env.TRUST_PROXY_HOPS);
+  console.log(`[Server] Trust proxy enabled: ${env.TRUST_PROXY_HOPS} hop(s)`);
+}
+
 if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
   startEmailOutboxWorker({ keepAlive: false, source: 'inline' });
 } else {

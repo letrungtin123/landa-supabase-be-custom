@@ -8,12 +8,8 @@ import type { Channel } from 'amqplib';
 
 type AmqpConnection = Awaited<ReturnType<typeof amqp.connect>>;
 
-const RECONNECT_DELAY = 5_000;  // 5 seconds
-const MAX_RECONNECT_ATTEMPTS = 10;
-
 let connection: AmqpConnection | null = null;
 let channel: Channel | null = null;
-let reconnectAttempts = 0;
 let isShuttingDown = false;
 
 /**
@@ -26,16 +22,17 @@ export async function connectRabbitMQ(url: string): Promise<void> {
     const conn = await amqp.connect(url);
     connection = conn;
     channel = await conn.createChannel();
-    reconnectAttempts = 0;
     console.log('[RabbitMQ] Connected successfully');
 
-    // Auto-reconnect on unexpected close
+    // Crash on unexpected close so the process manager restarts the full
+    // bootstrap and re-registers every consumer. Reconnecting only the AMQP
+    // socket would leave worker queues without consumers.
     conn.on('close', function onClose() {
       if (isShuttingDown) return;
       console.error('[RabbitMQ] Connection closed unexpectedly');
       channel = null;
       connection = null;
-      scheduleReconnect(url);
+      process.exit(1);
     });
 
     conn.on('error', function onError(err: Error) {
@@ -45,22 +42,6 @@ export async function connectRabbitMQ(url: string): Promise<void> {
     console.error(`[RabbitMQ] FATAL: Cannot connect: ${err.message}`);
     throw err; // Caller (index.ts) will catch and process.exit(1)
   }
-}
-
-function scheduleReconnect(url: string): void {
-  reconnectAttempts++;
-  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-    console.error(`[RabbitMQ] FATAL: Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Exiting.`);
-    process.exit(1);
-  }
-  console.log(`[RabbitMQ] Reconnecting in ${RECONNECT_DELAY / 1000}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-  setTimeout(async () => {
-    try {
-      await connectRabbitMQ(url);
-    } catch {
-      // connectRabbitMQ already logs
-    }
-  }, RECONNECT_DELAY);
 }
 
 /**

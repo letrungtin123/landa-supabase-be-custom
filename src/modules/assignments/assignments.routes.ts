@@ -1,8 +1,11 @@
 import { Router } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
+import { sendError } from '../../utils/response.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as ctrl from './assignments.controller.js';
 
 const router = Router();
@@ -15,6 +18,14 @@ const upload = multer({
   },
 });
 
+function blockDemoIframeAssignmentSubmit(req: Request, res: Response, next: NextFunction): void {
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể nộp assignment', 403);
+    return;
+  }
+  next();
+}
+
 router.use(authenticate);
 
 // Private assignment files. Authorization is checked per file in the service.
@@ -23,7 +34,7 @@ router.get('/files/:fileId', ctrl.downloadFile);
 // Learner-facing APIs.
 router.get('/learner/courses/:courseId', ctrl.listLearnerCourseAssignments);
 router.get('/learner/:assignmentId', ctrl.getLearnerAssignment);
-router.post('/learner/:assignmentId/submit', upload.array('files', 5), ctrl.submitAssignment);
+router.post('/learner/:assignmentId/submit', blockDemoIframeAssignmentSubmit, upload.array('files', 5), ctrl.submitAssignment);
 
 // Admin-facing APIs.
 router.use(tenantContext);

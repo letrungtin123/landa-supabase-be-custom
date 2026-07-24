@@ -11,6 +11,7 @@ export interface JwtPayload {
   tid: string | null; // tenant_id (null cho superadmin)
   role: string;       // user.role
   username: string;
+  session_mode?: 'normal' | 'demo_iframe';
 }
 
 /**

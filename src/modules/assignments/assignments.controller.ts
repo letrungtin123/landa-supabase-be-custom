@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { AppError } from '../../middleware/error-handler.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
+import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as service from './assignments.service.js';
 import {
   createAssignmentSchema,
@@ -114,6 +115,10 @@ export async function getLearnerAssignment(req: Request, res: Response, next: Ne
 
 export async function submitAssignment(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    if (isDemoIframeSession(req.user)) {
+      sendError(res, 'Phiên demo iframe không thể nộp assignment', 403);
+      return;
+    }
     const parsed = submitAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const result = await service.submitAssignment(req.params.assignmentId, req.user!, parsed.data, files(req));

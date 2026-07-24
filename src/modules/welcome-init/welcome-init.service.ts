@@ -35,7 +35,17 @@ async function isDemoAccount(userId: string): Promise<boolean> {
   }
 }
 
-export async function getWelcomeInitState(userId: string) {
+export async function getWelcomeInitState(userId: string, isDemoIframe = false) {
+  if (isDemoIframe) {
+    return {
+      should_show: true,
+      has_seen: false,
+      is_demo_account: true,
+      shown_at: null,
+      setup_required: false,
+    };
+  }
+
   const demoAccount = await isDemoAccount(userId);
   if (demoAccount) {
     return {
@@ -75,7 +85,17 @@ export async function getWelcomeInitState(userId: string) {
   }
 }
 
-export async function markWelcomeInitSeen(userId: string, tenantId: string | null) {
+export async function markWelcomeInitSeen(userId: string, tenantId: string | null, isDemoIframe = false) {
+  if (isDemoIframe) {
+    return {
+      should_show: false,
+      has_seen: false,
+      is_demo_account: true,
+      shown_at: null,
+      setup_required: false,
+    };
+  }
+
   const demoAccount = await isDemoAccount(userId);
   if (demoAccount) {
     return {

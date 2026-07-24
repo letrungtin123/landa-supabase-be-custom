@@ -11,6 +11,7 @@ import { blacklistUser } from '../../middleware/authenticate.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 import { isLearnerRole } from '../../types/index.js';
 import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
+import { assertUserNotActiveDemoIframeAccount, getActiveDemoIframeUserIds } from '../demo-login/demo-iframe.service.js';
 
 /**
  * Danh sách users — phân trang, search, filter role.
@@ -86,9 +87,13 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
   ]);
 
   const total = parseInt(countResult.rows[0].count, 10);
+  const activeDemoIframeUserIds = await getActiveDemoIframeUserIds(dataResult.rows.map((row: any) => row.id));
 
   return {
-    data: dataResult.rows,
+    data: dataResult.rows.map((row: any) => ({
+      ...row,
+      is_demo_iframe_active: activeDemoIframeUserIds.has(row.id),
+    })),
     total,
     page,
     pageSize,
@@ -122,8 +127,11 @@ export async function getUserById(userId: string) {
 
   if (userResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
+  const activeDemoIframeUserIds = await getActiveDemoIframeUserIds([userId]);
+
   return {
     ...userResult.rows[0],
+    is_demo_iframe_active: activeDemoIframeUserIds.has(userId),
     permission_groups: groupsResult.rows,
   };
 }
@@ -166,6 +174,8 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
  * Cập nhật user — partial update.
  */
 export async function updateUser(userId: string, input: UpdateUserInput) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật');
+
   // Check if role is changing FROM learner → remove from teams
   let oldRole: string | null = null;
   if (input.role !== undefined) {
@@ -253,6 +263,7 @@ export async function hardDeleteUser(
   );
   if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
   const target = targetResult.rows[0];
+  await assertUserNotActiveDemoIframeAccount(targetId, 'Tài khoản learner demo iframe đang được khóa, không thể xóa');
 
   // Guard 2: tenant isolation (trừ superadmin)
   if (callerRole !== 'superadmin' && callerTenantId && target.tenant_id !== callerTenantId) {
@@ -291,6 +302,8 @@ export async function hardDeleteUser(
  * Gán user vào permission groups (replace toàn bộ).
  */
 export async function assignPermissionGroups(userId: string, groupIds: string[]) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật quyền');
+
   // Enforce max 1 group per staff/superuser
   if (groupIds.length > 1) {
     throw new AppError('Mỗi staff chỉ được gán tối đa 1 nhóm quyền', 400);
@@ -357,6 +370,8 @@ export async function updateProfile(
     phone_number?: string;
   },
 ) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật hồ sơ');
+
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
@@ -406,6 +421,7 @@ export async function updateProfile(
  * Update avatar URL.
  */
 export async function updateAvatar(userId: string, avatarUrl: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật avatar');
   await query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, userId]);
 }
 
@@ -413,6 +429,8 @@ export async function updateAvatar(userId: string, avatarUrl: string) {
  * Change password — verify current password first.
  */
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể đổi mật khẩu');
+
   const { comparePassword } = await import('../../utils/password.js');
 
   const result = await query<{ password_hash: string }>(

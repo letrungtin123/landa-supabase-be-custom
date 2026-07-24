@@ -11,6 +11,7 @@ import {
 } from './kb.validator.js';
 import * as kbService from './kb.service.js';
 import { getGeminiApiKey } from './gemini.service.js';
+import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { fixMulterFilename } from '../../config/storage.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 
@@ -62,6 +63,7 @@ export async function deleteKb(req: Request, res: Response): Promise<void> {
     if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
     const deleted = await kbService.deleteKnowledgebase(req.params.id, tenantId);
     if (!deleted) { sendError(res, 'Lỗi xoá KB', 500); return; }
+    invalidateGeminiStoreNameCache(req.params.id);
     auditFromReq(req, 'DELETE', 'knowledgebase', req.params.id, kb.name);
     sendSuccess(res, { deleted: true });
   } catch (err: any) {
@@ -70,6 +72,23 @@ export async function deleteKb(req: Request, res: Response): Promise<void> {
 }
 
 // ── Document CRUD (Files tab) ──
+
+export async function restoreKb(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const kbId = req.params.kbId;
+
+  try {
+    const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    if (!kb) { sendError(res, 'Knowledge Base khong ton tai', 404); return; }
+
+    const result = await kbService.enqueueKnowledgebaseRestore(kbId, tenantId);
+    invalidateGeminiStoreNameCache(kbId);
+    auditFromReq(req, 'UPDATE', 'knowledgebase', kbId, kb.name, 'Khoi phuc lai kho tri thuc');
+    sendSuccess(res, result, 'Da dua kho tri thuc vao hang doi khoi phuc', 202);
+  } catch (err: any) {
+    sendError(res, err.message, 400);
+  }
+}
 
 export async function listDocuments(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
@@ -134,12 +153,16 @@ export async function uploadDocuments(req: Request, res: Response): Promise<void
 export async function deleteDocument(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const { kbId, docId } = req.params;
-  // Fetch doc name before deleting for audit
-  const doc = await kbService.getDocument(docId, tenantId);
-  const deleted = await kbService.deleteDocument(docId, kbId, tenantId);
-  if (!deleted) { sendError(res, 'Document không tồn tại', 404); return; }
-  auditFromReq(req, 'DELETE', 'kb_document', docId, doc?.name || docId);
-  sendSuccess(res, { deleted: true });
+  try {
+    // Fetch doc name before deleting for audit
+    const doc = await kbService.getDocument(docId, tenantId);
+    const deleted = await kbService.deleteDocument(docId, kbId, tenantId);
+    if (!deleted) { sendError(res, 'Document không tồn tại', 404); return; }
+    auditFromReq(req, 'DELETE', 'kb_document', docId, doc?.name || docId);
+    sendSuccess(res, { deleted: true });
+  } catch (err: any) {
+    sendError(res, err.message, 400);
+  }
 }
 
 export async function bulkDeleteDocuments(req: Request, res: Response): Promise<void> {

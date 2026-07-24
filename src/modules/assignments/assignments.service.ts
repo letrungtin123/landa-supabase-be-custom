@@ -30,6 +30,7 @@ import {
   recalculateCourseProgressForActiveEnrollments,
   recalculateEnrollmentProgress,
 } from '../learner/progress-calculation.service.js';
+import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 
 const MAX_ASSIGNMENT_FILES = 5;
 const MAX_ASSIGNMENT_FILE_SIZE_BYTES = 25 * 1024 * 1024;
@@ -1030,6 +1031,7 @@ export async function submitAssignment(
   files?: Express.Multer.File[],
 ) {
   if (!user.tenantId) throw new AppError('Thieu tenant', 400);
+  await assertUserNotActiveDemoIframeAccount(user.id, 'Phiên demo iframe không thể nộp assignment');
   if (user.role !== 'learner' && user.role !== 'learner_plus') {
     throw new AppError('Chỉ học viên mới có thể nộp bài tập', 403);
   }

@@ -21,6 +21,10 @@ import {
   getTenantGroupLabels,
   lowerGroupLabel,
 } from '../tenants/tenant-group-labels.service.js';
+import {
+  assertUserNotActiveDemoIframeAccount,
+  getActiveDemoIframeUserIds,
+} from '../demo-login/demo-iframe.service.js';
 
 interface AddTeamMembersOptions {
   tenantId: string;
@@ -293,6 +297,10 @@ export async function addTeamMembers(
       .map(uid => uid.trim())
       .filter(Boolean),
   ));
+  const lockedDemoUsers = await getActiveDemoIframeUserIds(normalizedUserIds);
+  if (lockedDemoUsers.size > 0) {
+    throw new AppError('Không thể cập nhật team membership cho learner demo iframe đang hoạt động', 403);
+  }
   const smtpStatus = await getCourseNotificationSmtpStatus(options.tenantId);
   const sendEmail = smtpStatus.can_send_email;
   const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
@@ -482,6 +490,7 @@ export async function addTeamMembers(
 }
 
 export async function removeTeamMember(teamId: string, userId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật team membership cho learner demo iframe đang hoạt động');
   const result = await removeTeamMemberFromDb(teamId, userId);
   await invalidateUserMembershipCaches([userId]);
   return result;

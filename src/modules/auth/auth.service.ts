@@ -14,6 +14,12 @@ import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
+import {
+  isActiveDemoIframeAccount,
+  normalizeSessionMode,
+  revokeNormalSessionsForDemoIframeAccount,
+  type DemoIframeSessionMode,
+} from '../demo-login/demo-iframe.service.js';
 
 /** Hash refresh token bằng SHA-256 trước khi lưu DB */
 function hashToken(token: string): string {
@@ -28,6 +34,7 @@ function hashToken(token: string): string {
  * Nếu revoked trước GRACE_MS → khả năng token theft, nuclear revoke ALL.
  */
 const RACE_CONDITION_GRACE_MS = 10_000; // 10 giây
+const NORMAL_SESSION_MODE: DemoIframeSessionMode = 'normal';
 
 function resolveRoleLabelTenantId(
   role: string,
@@ -156,11 +163,16 @@ export async function login(username: string, password: string, clientApp?: 'adm
   }
 
   // Tạo token pair
+  if (user.role === 'learner' && await isActiveDemoIframeAccount(user.id)) {
+    throw new AppError('Tài khoản đang được khóa cho demo iframe', 403);
+  }
+
   const accessToken = signAccessToken({
     sub: user.id,
     tid: user.tenant_id,
     role: user.role,
     username: user.username,
+    session_mode: NORMAL_SESSION_MODE,
   });
 
   const refreshToken = uuidv4();
@@ -169,8 +181,8 @@ export async function login(username: string, password: string, clientApp?: 'adm
 
   // Lưu refresh token hash vào DB
   await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-    [user.id, refreshHash, refreshExpiresAt],
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)`,
+    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE],
   );
 
   // Cập nhật last_login_at
@@ -199,6 +211,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
     access_token: accessToken,
     refresh_token: refreshToken,
     expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    session_mode: NORMAL_SESSION_MODE,
     user: {
       id: user.id,
       username: user.username,
@@ -228,6 +241,7 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   // Tìm và validate refresh token (1 query JOIN user)
   const result = await query(
     `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at, rt.revoked_at,
+            COALESCE(rt.session_mode, 'normal') AS session_mode,
             u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id,
             t.name AS tenant_name, t.is_active AS tenant_active
@@ -279,6 +293,19 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   }
 
   // Revoke token cũ — ghi timestamp để grace period detection
+  const sessionMode = normalizeSessionMode(row.session_mode);
+  const isActiveIframeLearner = row.role === 'learner'
+    ? await isActiveDemoIframeAccount(row.user_id)
+    : false;
+  if (isActiveIframeLearner && sessionMode !== 'demo_iframe') {
+    await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
+    throw new AppError('Tài khoản đang được khóa cho demo iframe', 403);
+  }
+  if (sessionMode === 'demo_iframe' && !isActiveIframeLearner) {
+    await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
+    throw new AppError('Phiên demo iframe không còn khả dụng', 401);
+  }
+
   await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE id = $1', [row.rt_id]);
 
   // Tạo token pair mới (rotation)
@@ -287,6 +314,7 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     tid: row.tenant_id,
     role: row.role,
     username: row.username,
+    session_mode: sessionMode,
   });
 
   const newRefreshToken = uuidv4();
@@ -294,8 +322,8 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   const newRefreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-    [row.user_id, newRefreshHash, newRefreshExpiresAt],
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
+    [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode],
   );
 
   // Lấy permissions + tenant modules mới
@@ -320,6 +348,7 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     access_token: newAccessToken,
     refresh_token: newRefreshToken,
     expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    session_mode: sessionMode,
     user: {
       id: row.user_id,
       username: row.username,
@@ -351,7 +380,11 @@ export async function logout(refreshToken: string): Promise<void> {
 /**
  * Lấy thông tin user hiện tại + permissions.
  */
-export async function issueSessionForUserId(userId: string) {
+export async function issueSessionForUserId(
+  userId: string,
+  options?: { sessionMode?: DemoIframeSessionMode; updateLastLogin?: boolean },
+) {
+  const sessionMode = options?.sessionMode ?? NORMAL_SESSION_MODE;
   const userResult = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id,
@@ -369,11 +402,22 @@ export async function issueSessionForUserId(userId: string) {
     throw new AppError('Tổ chức đã bị vô hiệu hóa', 403);
   }
 
+  if (sessionMode !== 'demo_iframe' && user.role === 'learner' && await isActiveDemoIframeAccount(user.id)) {
+    throw new AppError('Tài khoản đang được khóa cho demo iframe', 403);
+  }
+  if (sessionMode === 'demo_iframe') {
+    if (user.role !== 'learner') {
+      throw new AppError('Demo iframe chỉ hỗ trợ tài khoản learner', 403);
+    }
+    await revokeNormalSessionsForDemoIframeAccount(user.id);
+  }
+
   const accessToken = signAccessToken({
     sub: user.id,
     tid: user.tenant_id,
     role: user.role,
     username: user.username,
+    session_mode: sessionMode,
   });
 
   const refreshToken = uuidv4();
@@ -381,10 +425,12 @@ export async function issueSessionForUserId(userId: string) {
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-    [user.id, refreshHash, refreshExpiresAt],
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
+    [user.id, refreshHash, refreshExpiresAt, sessionMode],
   );
-  await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+  if (options?.updateLastLogin !== false) {
+    await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
+  }
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
   const tenantModules = await resolveTenantModules(user.tenant_id);
@@ -402,6 +448,7 @@ export async function issueSessionForUserId(userId: string) {
     access_token: accessToken,
     refresh_token: refreshToken,
     expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    session_mode: sessionMode,
     user: {
       id: user.id,
       username: user.username,
@@ -715,6 +762,7 @@ export async function exchangeOTT(token: string) {
     tid: user.tenant_id,
     role: user.role,
     username: user.username,
+    session_mode: NORMAL_SESSION_MODE,
   });
 
   const refreshToken = uuidv4();
@@ -722,8 +770,8 @@ export async function exchangeOTT(token: string) {
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-    [user.id, refreshHash, refreshExpiresAt],
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
+    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE],
   );
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
@@ -739,6 +787,7 @@ export async function exchangeOTT(token: string) {
     access_token: accessToken,
     refresh_token: refreshToken,
     expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    session_mode: NORMAL_SESSION_MODE,
     user: {
       id: user.id,
       username: user.username,

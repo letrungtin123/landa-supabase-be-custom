@@ -8,13 +8,21 @@ import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import {
   invalidatePublicDomainCachesForDomains,
+  invalidateTenantAiCaches,
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
+import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
+
+function getGeminiKeyFromSettings(settings: unknown): string | null {
+  if (!settings || typeof settings !== 'object') return null;
+  const value = (settings as Record<string, unknown>).gemini_api_key;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
 
 async function getTenantPublicDomains(tenantId: string): Promise<string[]> {
   const result = await query<{ domain_admin: string | null; domain_learner: string | null }>(
@@ -124,11 +132,28 @@ export async function createTenant(input: CreateTenantInput) {
  */
 export async function updateTenant(id: string, input: UpdateTenantInput) {
   const oldDomains = await getTenantPublicDomains(id);
+  let geminiKeyChanged = false;
+  let nextGeminiFingerprint: string | null = null;
+
+  if (input.settings !== undefined) {
+    const currentSettings = await query<{ settings: unknown }>(
+      'SELECT settings FROM tenants WHERE id = $1',
+      [id],
+    );
+    if (currentSettings.rowCount === 0) throw new AppError('Tenant khong ton tai', 404);
+    const oldKey = getGeminiKeyFromSettings(currentSettings.rows[0]?.settings);
+    const nextKey = getGeminiKeyFromSettings(input.settings);
+    geminiKeyChanged = oldKey !== nextKey;
+    nextGeminiFingerprint = nextKey ? fingerprintGeminiApiKey(nextKey) : null;
+  }
+
   const tenant = await updateTenantFromDb(id, input);
   await Promise.all([
     bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
     bumpCacheVersion(...cacheVersions.tenantResource(id, 'branding')),
     bumpCacheVersion(...cacheVersions.tenantResource(id, 'dashboard-content')),
+    ...(input.settings !== undefined ? [invalidateTenantAiCaches(id)] : []),
+    ...(geminiKeyChanged ? [markTenantGeminiStoresKeyChanged(id, nextGeminiFingerprint)] : []),
     invalidatePublicDomainCachesForDomains(
       [...oldDomains, tenant.domain_admin, tenant.domain_learner],
       TENANT_PUBLIC_CACHE_RESOURCES,

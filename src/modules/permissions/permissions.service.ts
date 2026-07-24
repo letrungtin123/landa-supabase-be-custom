@@ -7,6 +7,10 @@ import { query, getClient } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreatePermGroupInput, UpdatePermGroupInput } from './permissions.validator.js';
+import {
+  assertUserNotActiveDemoIframeAccount,
+  getActiveDemoIframeUserIds,
+} from '../demo-login/demo-iframe.service.js';
 
 /**
  * Danh sách permission groups của tenant — phân trang + search.
@@ -203,6 +207,11 @@ export async function updatePermissionsMatrix(
  * Skip user đã có trong group (ON CONFLICT DO NOTHING).
  */
 export async function addMembersToGroup(groupId: string, userIds: string[]) {
+  const lockedDemoUsers = await getActiveDemoIframeUserIds(userIds);
+  if (lockedDemoUsers.size > 0) {
+    throw new AppError('Không thể cập nhật permission group cho learner demo iframe đang hoạt động', 403);
+  }
+
   // Verify group tồn tại
   const groupCheck = await query('SELECT id FROM permission_groups WHERE id = $1', [groupId]);
   if (groupCheck.rowCount === 0) throw new AppError('Nhóm quyền không tồn tại', 404);
@@ -241,6 +250,8 @@ export async function addMembersToGroup(groupId: string, userIds: string[]) {
  * Xóa user khỏi permission group.
  */
 export async function removeMemberFromGroup(groupId: string, userId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật permission group cho learner demo iframe đang hoạt động');
+
   const result = await query(
     'DELETE FROM user_permission_groups WHERE permission_group_id = $1 AND user_id = $2 RETURNING user_id',
     [groupId, userId],
