@@ -20,8 +20,6 @@ import {
   getGeminiApiKeyFingerprint,
   getGeminiClient,
   getOptionalGeminiApiKeyFingerprint,
-  isGeminiPermissionDeniedError,
-  markKbGeminiStoreRemoteProblem,
 } from './gemini.service.js';
 
 const LOCAL_SOURCE_CONTENT_EXTENSIONS = new Set(['.txt', '.md', '.csv']);
@@ -255,7 +253,7 @@ function mapKnowledgebaseRow<T extends Record<string, any>>(row: T): Knowledgeba
         }
       : null;
   return {
-    ...(rest as Knowledgebase),
+    ...(rest as unknown as Knowledgebase),
     restore_required: Boolean(rest.restore_required),
     restore_reason: rest.restore_reason ?? null,
     restore_progress: progress,
@@ -1280,142 +1278,15 @@ export async function enqueueKnowledgebaseRestore(
 }
 
 /**
- * Restore a whole KB against the tenant's current Gemini key.
- * Remote File Search cleanup is completed before DB mappings are removed.
+ * Restore a KB through the tracked restore job flow.
  */
 export async function restoreKnowledgebase(
   kbId: string,
   tenantId: string,
-  jobId?: string,
+  jobId: string,
 ): Promise<RestoreKnowledgebaseResult> {
-  if (!jobId) throw new Error('Restore job id is required');
   return restoreKnowledgebaseTracked(kbId, tenantId, jobId);
-
-  const kb = await getKnowledgebase(kbId, tenantId);
-  if (!kb) throw new Error('Knowledge Base khÃ´ng tá»“n táº¡i');
-
-  // Fail early if the tenant has no usable Gemini key.
-  await getGeminiClient(tenantId);
-
-  const activeLearning = await query<{ cnt: number }>(
-    `SELECT COUNT(*)::int AS cnt
-     FROM kb_documents
-     WHERE kb_id = $1 AND tenant_id = $2 AND status = 'learning'`,
-    [kbId, tenantId],
-  );
-  if ((activeLearning.rows[0]?.cnt ?? 0) > 0) {
-    throw new Error('Kho tri thá»©c Ä‘ang cÃ³ tÃ i liá»‡u Ä‘ang há»c. Vui lÃ²ng chá» xong rá»“i khÃ´i phá»¥c láº¡i.');
-  }
-
-  const remoteCleanup = await deleteKbGeminiRemoteResources(kbId, tenantId);
-
-  const client = await getClient();
-  let restoreIds: string[] = [];
-  let skippedNoFile = 0;
-
-  try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kb-restore:${tenantId}:${kbId}`]);
-
-    const docs = await client.query<{ id: string; file_path: string | null; status: string }>(
-      `SELECT id, file_path, status
-       FROM kb_documents
-       WHERE kb_id = $1 AND tenant_id = $2
-       FOR UPDATE`,
-      [kbId, tenantId],
-    );
-
-    if (docs.rows.some(doc => doc.status === 'learning')) {
-      throw new Error('Kho tri thá»©c vá»«a phÃ¡t sinh tÃ i liá»‡u Ä‘ang há»c. Vui lÃ²ng thá»­ láº¡i sau.');
-    }
-
-    const docIds = docs.rows.map(doc => doc.id);
-    restoreIds = docs.rows.filter(doc => Boolean(doc.file_path)).map(doc => doc.id);
-    const skippedIds = docs.rows.filter(doc => !doc.file_path).map(doc => doc.id);
-    skippedNoFile = skippedIds.length;
-
-    if (docIds.length > 0) {
-      await client.query(
-        `DELETE FROM kb_doc_gemini_mapping WHERE document_id = ANY($1)`,
-        [docIds],
-      );
-    }
-
-    await client.query(
-      `DELETE FROM kb_google_store WHERE kb_id = $1`,
-      [kbId],
-    );
-
-    if (restoreIds.length > 0) {
-      await client.query(
-        `UPDATE kb_documents
-         SET status = 'learning', error_reason = NULL, updated_at = now()
-         WHERE id = ANY($1)`,
-        [restoreIds],
-      );
-    }
-
-    if (skippedIds.length > 0) {
-      await client.query(
-        `UPDATE kb_documents
-         SET status = 'error',
-             error_reason = 'KhÃ´ng cÃ³ file gá»‘c Ä‘á»ƒ khÃ´i phá»¥c láº¡i kho tri thá»©c',
-             updated_at = now()
-         WHERE id = ANY($1) AND status <> 'draft'`,
-        [skippedIds],
-      );
-    }
-
-    await client.query('COMMIT');
-  } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  const enqueuedIds: string[] = [];
-  let uploadPublishFailed = false;
-  try {
-    for (const documentId of restoreIds) {
-      await publish(QUEUES.GEMINI_UPLOAD, {
-        documentId,
-        kbId,
-        tenantId,
-        mode: 'file',
-      });
-      enqueuedIds.push(documentId);
-    }
-  } catch (err) {
-    const notEnqueuedIds = restoreIds.filter(id => !enqueuedIds.includes(id));
-    if (notEnqueuedIds.length > 0) {
-      await query(
-        `UPDATE kb_documents
-         SET status = 'error',
-             error_reason = 'KhÃ´ng thá»ƒ Ä‘Æ°a tÃ i liá»‡u vÃ o hÃ ng Ä‘á»£i há»c láº¡i',
-             updated_at = now()
-         WHERE id = ANY($1)`,
-        [notEnqueuedIds],
-      );
-    }
-      await invalidateTenantAiCaches(tenantId);
-    uploadPublishFailed = true;
-    console.error('[KB Restore] Failed to publish some upload jobs:', err instanceof Error ? err.message : String(err));
-  }
-
-  await invalidateTenantAiCaches(tenantId);
-  return {
-    restored: restoreIds.length,
-    enqueued: enqueuedIds.length,
-    failed_to_enqueue: restoreIds.length - enqueuedIds.length,
-    skipped_no_file: skippedNoFile,
-    deleted_stores: remoteCleanup.deletedStores,
-    deleted_mappings: remoteCleanup.deletedMappings,
-    orphaned_stores: 0,
-    upload_publish_failed: uploadPublishFailed,
-  };
 }
-
 /**
  * Update document status (used by workers).
  */

@@ -4,6 +4,7 @@
 
 import { consume, QUEUES } from '../../config/rabbitmq/index.js';
 import {
+  markKnowledgebaseRestoreFailed,
   releaseKnowledgebaseRestoreLock,
   restoreKnowledgebase,
 } from './kb.service.js';
@@ -41,10 +42,10 @@ async function processRestoreJob(data: Record<string, any>): Promise<void> {
 
   console.log(`[RestoreWorker] Restoring KB ${job.kbId} for tenant ${job.tenantId}`);
   try {
-    const result = await restoreKnowledgebase(job.kbId, job.tenantId);
+    const result = await restoreKnowledgebase(job.kbId, job.tenantId, job.jobId);
     invalidateGeminiStoreNameCache(job.kbId);
     console.log(
-      `[RestoreWorker] KB ${job.kbId} restored: enqueued=${result.enqueued}, failed_to_enqueue=${result.failed_to_enqueue}, stores=${result.deleted_stores}, mappings=${result.deleted_mappings}`,
+      `[RestoreWorker] KB ${job.kbId} restored: enqueued=${result.enqueued}, failed_to_enqueue=${result.failed_to_enqueue}, orphaned_stores=${result.orphaned_stores}, mappings=${result.deleted_mappings}`,
     );
     await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
   } catch (err: any) {
@@ -65,6 +66,7 @@ export async function startRestoreWorker(): Promise<void> {
         const data = JSON.parse(rawMessage);
         const job = parseRestoreJob(data);
         if (job) {
+          await markKnowledgebaseRestoreFailed(job.jobId, job.kbId, job.tenantId, 'Restore worker reached max retries');
           await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
           console.error(`[RestoreWorker] Max retries reached for KB ${job.kbId}, lock released`);
         }

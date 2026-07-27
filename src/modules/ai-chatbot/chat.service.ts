@@ -20,7 +20,12 @@ import {
   type LessonAuthorProposal,
   type LessonAuthorUnitProposal,
 } from '../course-authoring/course-authoring.service.js';
-import { getGeminiClient } from './gemini.service.js';
+import {
+  getGeminiClient,
+  getOptionalGeminiApiKeyFingerprint,
+  isGeminiPermissionDeniedError,
+  markKbGeminiStoreRemoteProblem,
+} from './gemini.service.js';
 import { runStoredInputFilter } from './input-filter/input-filter.service.js';
 import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
 import type { FilterResult } from './input-filter/core/index.js';
@@ -81,27 +86,67 @@ const streamLocks = new Set<string>();
 // ── Store name cache (per-kb, rarely changes) ──
 const storeNameCache = new Map<string, { name: string; ts: number }>();
 const STORE_CACHE_TTL = 10 * 60_000; // 10 minutes
+const ACTIVE_KB_RESTORE_STATES = new Set(['queued', 'restoring', 'uploading']);
+const RESTORE_REQUIRED_STORE_STATUSES = new Set(['key_changed', 'permission_denied', 'not_found']);
 
 export function invalidateGeminiStoreNameCache(kbId?: string): void {
   if (kbId) {
-    storeNameCache.delete(kbId);
+    for (const key of storeNameCache.keys()) {
+      if (key.startsWith(`${kbId}:`)) storeNameCache.delete(key);
+    }
     return;
   }
   storeNameCache.clear();
 }
 
-async function getCachedStoreName(kbId: string): Promise<string | null> {
-  const cached = storeNameCache.get(kbId);
+async function getCachedStoreName(kbId: string, tenantId: string): Promise<string | null> {
+  const currentFingerprint = await getOptionalGeminiApiKeyFingerprint(tenantId);
+  const cacheKey = `${kbId}:${currentFingerprint ?? 'no-key'}`;
+  const cached = storeNameCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < STORE_CACHE_TTL) return cached.name;
 
-  const result = await query<{ store_name: string }>(
-    `SELECT store_name FROM kb_google_store WHERE kb_id = $1`,
-    [kbId],
+  const result = await query<{
+    restore_state: string | null;
+    store_name: string | null;
+    api_key_fingerprint: string | null;
+    remote_status: string | null;
+    remote_error_reason: string | null;
+  }>(
+    `SELECT kb.restore_state,
+            kgs.store_name,
+            kgs.api_key_fingerprint,
+            kgs.remote_status,
+            kgs.remote_error_reason
+     FROM knowledgebases kb
+     LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
+     WHERE kb.id = $1 AND kb.tenant_id = $2
+     LIMIT 1`,
+    [kbId, tenantId],
   );
   if (!result.rowCount || result.rowCount === 0) return null;
-  const name = result.rows[0].store_name;
-  storeNameCache.set(kbId, { name, ts: Date.now() });
-  return name;
+
+  const row = result.rows[0];
+  if (ACTIVE_KB_RESTORE_STATES.has(row.restore_state || '')) {
+    throw new Error('Kho tri thuc dang khoi phuc. Vui long cho hoan tat roi chat lai.');
+  }
+  if (!row.store_name) return null;
+  if (RESTORE_REQUIRED_STORE_STATUSES.has(row.remote_status || '')) {
+    throw new Error(row.remote_error_reason || 'Kho tri thuc can khoi phuc lai truoc khi chat.');
+  }
+  if (row.remote_status && row.remote_status !== 'active') return null;
+  if (row.api_key_fingerprint && currentFingerprint && row.api_key_fingerprint !== currentFingerprint) {
+    await markKbGeminiStoreRemoteProblem(
+      kbId,
+      'key_changed',
+      'KEY_CHANGED',
+      'Gemini API key changed; restore this KB to rebuild File Search store for the current key.',
+    );
+    invalidateGeminiStoreNameCache(kbId);
+    throw new Error('Kho tri thuc can khoi phuc lai truoc khi chat vi Google/Gemini key da thay doi.');
+  }
+
+  storeNameCache.set(cacheKey, { name: row.store_name, ts: Date.now() });
+  return row.store_name;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -896,6 +941,22 @@ interface ConversationContext {
   inputFilterConfig: unknown;
 }
 
+async function markKbStorePermissionProblemFromChat(ctx: ConversationContext | null, err: unknown): Promise<void> {
+  if (!ctx?.botKbId || !isGeminiPermissionDeniedError(err)) return;
+  try {
+    await markKbGeminiStoreRemoteProblem(
+      ctx.botKbId,
+      'permission_denied',
+      'PERMISSION_DENIED',
+      'Gemini File Search store cannot be accessed with the current tenant API key. Restore this KB to rebuild the store.',
+    );
+    invalidateGeminiStoreNameCache(ctx.botKbId);
+    await invalidateTenantAiCaches(ctx.tenantId);
+  } catch (markErr: any) {
+    console.error('[AI Chatbot] Failed to mark KB store permission problem:', markErr?.message || String(markErr));
+  }
+}
+
 function getInputFilterConfigFromBotConfig(botConfig: unknown): unknown {
   if (typeof botConfig !== 'object' || botConfig === null || Array.isArray(botConfig)) return null;
   return (botConfig as Record<string, unknown>)[INPUT_FILTER_CONFIG_KEY] ?? null;
@@ -1040,6 +1101,9 @@ function sanitizeGeminiError(err: any): Error {
     return new Error('Dịch vụ AI tạm thời không khả dụng. Vui lòng thử lại sau.');
   }
   // 400 — bad request (prompt blocked, safety, etc.)
+  if (isGeminiPermissionDeniedError(err)) {
+    return new Error('Kho tri thuc can khoi phuc lai voi Google/Gemini key hien tai truoc khi chat.');
+  }
   if (status === 400 || msg.includes('INVALID_ARGUMENT')) {
     if (msg.includes('safety') || msg.includes('blocked')) {
       return new Error('Tin nhắn bị từ chối do vi phạm chính sách an toàn.');
@@ -3187,7 +3251,7 @@ async function generateLessonAuthorProposal(
     target_scope_chars: targetScopeInstruction.length,
   });
 
-  const storeName = await getCachedStoreName(kbId);
+  const storeName = await getCachedStoreName(kbId, ctx.tenantId);
   logLessonAuthorFlow('proposal_store_resolved', {
     conversation_id: ctx.conversationId,
     kb_id: kbId,
@@ -3337,7 +3401,7 @@ async function generateProposalSkeleton(
   sourceDocuments: LessonAuthorSourceDocument[],
 ): Promise<LessonAuthorProposal> {
   const aiClient = await getGeminiClient(ctx.tenantId);
-  const storeName = await getCachedStoreName(kbId);
+  const storeName = await getCachedStoreName(kbId, ctx.tenantId);
   if (!storeName) throw new Error('KB active chưa có Gemini File Search store.');
 
   const scopedOutlineMentions = outlineMentions.slice(0, 1);
@@ -3403,7 +3467,7 @@ async function generateUnitContentBatch(
   sourceDocuments: LessonAuthorSourceDocument[],
 ): Promise<LessonAuthorUnitProposal[]> {
   const aiClient = await getGeminiClient(ctx.tenantId);
-  const storeName = await getCachedStoreName(kbId);
+  const storeName = await getCachedStoreName(kbId, ctx.tenantId);
   if (!storeName) throw new Error('KB store not found');
 
   const unitDescriptions = batch.map((item, i) =>
@@ -3941,9 +4005,11 @@ export async function sendMessageStream(
   }
   streamLocks.add(conversationId);
 
+  let ctxForError: ConversationContext | null = null;
   try {
     // 1. Load context (CTE: 1 query for conversation + persona + prompt + msg count)
     const ctx = await loadConversationContext(conversationId, userId, tenantId);
+    ctxForError = ctx;
     logLessonAuthorFlow('stream_context_loaded', {
       conversation_id: conversationId,
       tenant_id: tenantId,
@@ -4195,7 +4261,7 @@ export async function sendMessageStream(
     // Build fileSearch tools — separate from function calling (Gemini doesn't allow combining)
     const fileSearchTools: any[] = [];
     if (ctx.botKbId) {
-      const storeName = await getCachedStoreName(ctx.botKbId);
+      const storeName = await getCachedStoreName(ctx.botKbId, ctx.tenantId);
       logLessonAuthorFlow('chat_branch_store_resolved', {
         conversation_id: conversationId,
         target: ctx.target,
@@ -4461,6 +4527,7 @@ export async function sendMessageStream(
     });
     onDone();
   } catch (err: any) {
+    await markKbStorePermissionProblemFromChat(ctxForError, err);
     logLessonAuthorFlow('stream_error', {
       conversation_id: conversationId,
       error: redactGeminiApiKeys(err?.message || 'Unknown stream error'),
