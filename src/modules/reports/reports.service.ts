@@ -39,6 +39,30 @@ export interface ReportTopCourse {
   enrollments: number;
 }
 
+export type ReportCourseCompletionStatus = 'all' | 'not_started' | 'learning' | 'completed';
+
+export interface ReportCourseCompletionRanking {
+  course_id: string;
+  name: string;
+  visible_learners: number;
+  learning_count: number;
+  completed_count: number;
+  not_started_count: number;
+  completion_rate: number;
+}
+
+export interface ReportCourseCompletionLearner {
+  user_id: string;
+  username: string;
+  email: string;
+  full_name: string;
+  avatar: string | null;
+  enrolled_at: string | null;
+  completed_at: string | null;
+  progress: number | null;
+  status: Exclude<ReportCourseCompletionStatus, 'all'>;
+}
+
 export interface ReportLearner {
   username: string;
   email: string;
@@ -54,8 +78,10 @@ export interface LearnerDetailResult {
   course_id: string;
   course_name: string;
   enrolled_at: string | null;
+  completed_at: string | null;
   progress: number;
   is_completed: boolean;
+  status: Exclude<ReportCourseCompletionStatus, 'all'>;
 }
 
 export interface LearnerDetailResponse {
@@ -80,12 +106,22 @@ function getMonthRange(year: number, month: number): { startDate: Date; endDate:
   return { startDate, endDate };
 }
 
-function buildGroupFilter(groupId?: string, subgroupId?: string): { joins: string; conditions: string[]; params: any[] } {
+function getSnapshotEndDate(month?: number, year?: number): Date {
+  if (month && year) return getMonthRange(year, month).endDate;
+  if (year) return new Date(year, 11, 31, 23, 59, 59, 999);
+  return new Date();
+}
+
+function buildGroupFilter(groupId?: string, subgroupId?: string, teamId?: string): { joins: string; conditions: string[]; params: any[] } {
   const joins: string[] = [];
   const conditions: string[] = [];
   const params: any[] = [];
 
-  if (subgroupId) {
+  if (teamId) {
+    joins.push('JOIN team_members tm ON tm.user_id = e.user_id');
+    conditions.push(`tm.team_id = $PARAM`);
+    params.push(teamId);
+  } else if (subgroupId) {
     joins.push('JOIN team_members tm ON tm.user_id = e.user_id');
     joins.push('JOIN teams t ON t.id = tm.team_id');
     conditions.push(`t.sub_group_id = $PARAM`);
@@ -101,12 +137,16 @@ function buildGroupFilter(groupId?: string, subgroupId?: string): { joins: strin
   return { joins: joins.join(' '), conditions, params };
 }
 
-function buildUserGroupFilter(groupId?: string, subgroupId?: string): { joins: string; conditions: string[]; params: any[] } {
+function buildUserGroupFilter(groupId?: string, subgroupId?: string, teamId?: string): { joins: string; conditions: string[]; params: any[] } {
   const joins: string[] = [];
   const conditions: string[] = [];
   const params: any[] = [];
 
-  if (subgroupId) {
+  if (teamId) {
+    joins.push('JOIN team_members tm ON tm.user_id = u.id');
+    conditions.push(`tm.team_id = $PARAM`);
+    params.push(teamId);
+  } else if (subgroupId) {
     joins.push('JOIN team_members tm ON tm.user_id = u.id');
     joins.push('JOIN teams t ON t.id = tm.team_id');
     conditions.push(`t.sub_group_id = $PARAM`);
@@ -120,6 +160,53 @@ function buildUserGroupFilter(groupId?: string, subgroupId?: string): { joins: s
   }
 
   return { joins: joins.join(' '), conditions, params };
+}
+
+function buildVisibleCourseUsersCte(options: {
+  tenantParam: string;
+  snapshotParam: string;
+  extraFilterSql?: string;
+}): string {
+  const { tenantParam, snapshotParam, extraFilterSql = '' } = options;
+  const commonWhere = `
+    u.tenant_id = ${tenantParam}
+    AND u.is_active = true
+    AND u.role IN ('learner', 'learner_plus')
+    AND u.created_at <= ${snapshotParam}
+    AND og.tenant_id = ${tenantParam}
+    AND c.tenant_id = ${tenantParam}
+    AND c.deleted_at IS NULL
+    AND c.visible_to_staff_only = false
+    AND c.created_at <= ${snapshotParam}
+    ${extraFilterSql}
+  `;
+
+  return `
+    visible_course_users AS (
+      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
+      FROM users u
+      JOIN team_members tm ON tm.user_id = u.id
+      JOIN teams t ON t.id = tm.team_id
+      JOIN sub_groups sg ON sg.id = t.sub_group_id
+      JOIN org_groups og ON og.id = sg.org_group_id
+      JOIN team_courses tc ON tc.team_id = t.id
+      JOIN courses c ON c.id = tc.course_id
+      WHERE ${commonWhere}
+
+      UNION
+
+      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
+      FROM users u
+      JOIN team_members tm ON tm.user_id = u.id
+      JOIN teams t ON t.id = tm.team_id
+      JOIN sub_groups sg ON sg.id = t.sub_group_id
+      JOIN org_groups og ON og.id = sg.org_group_id
+      JOIN team_course_categories tcc ON tcc.team_id = t.id
+      JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+      JOIN courses c ON c.id = ccc.course_id
+      WHERE ${commonWhere}
+    )
+  `;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -132,6 +219,7 @@ export async function getReportSummary(
   year?: number,
   groupId?: string,
   subgroupId?: string,
+  teamId?: string,
 ): Promise<ReportSummary> {
   const now = new Date();
   const targetMonth = month ?? (now.getMonth() + 1);
@@ -139,8 +227,8 @@ export async function getReportSummary(
   const isCurrentMonth = targetMonth === now.getMonth() + 1 && targetYear === now.getFullYear();
   const { startDate, endDate } = getMonthRange(targetYear, targetMonth);
 
-  const ugf = buildUserGroupFilter(groupId, subgroupId);
-  const egf = buildGroupFilter(groupId, subgroupId);
+  const ugf = buildUserGroupFilter(groupId, subgroupId, teamId);
+  const egf = buildGroupFilter(groupId, subgroupId, teamId);
 
   // ── Single query: total_learners + active_learners ──
   let uParamIdx = 2;
@@ -198,6 +286,7 @@ export async function getReportChart(
   metric: string,
   groupId?: string,
   subgroupId?: string,
+  teamId?: string,
   groupByOrg = false,
   grouped = true,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
@@ -206,6 +295,9 @@ export async function getReportChart(
     : year === now.getFullYear() ? now.getMonth() + 1
     : 12;
 
+  if (teamId) {
+    return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
+  }
   if (groupByOrg) {
     return chartGroupedByOrg(tenantId, year, metric, maxMonth, groupId);
   }
@@ -216,7 +308,7 @@ export async function getReportChart(
     return chartGroupedBySubGroup(tenantId, year, metric, maxMonth, groupId);
   }
 
-  return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId);
+  return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
 }
 
 /**
@@ -225,12 +317,14 @@ export async function getReportChart(
  */
 async function chartSimple(
   tenantId: string, year: number, metric: string, maxMonth: number,
-  groupId?: string, subgroupId?: string,
+  groupId?: string, subgroupId?: string, teamId?: string,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
   const yearStart = new Date(year, 0, 1);
   const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
 
-  const monthValues = await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, groupId, subgroupId);
+  const monthValues = teamId
+    ? await batchMetricByMonthTeam(tenantId, metric, yearStart, yearEnd, year, teamId)
+    : await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, groupId, subgroupId);
 
   const data: ReportChartPoint[] = [];
   for (let m = 1; m <= 12; m++) {
@@ -518,8 +612,243 @@ async function batchMetricByMonthTeam(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Top Courses
+// Course Completion Ranking + Top Courses
 // ═══════════════════════════════════════════════════════════════
+
+export async function getReportCourseCompletionRanking(
+  tenantId: string,
+  page = 1,
+  pageSize = 10,
+  month?: number,
+  year?: number,
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+): Promise<{ count: number; total_pages: number; current_page: number; results: ReportCourseCompletionRanking[] }> {
+  const safePage = Math.max(page, 1);
+  const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+  const offset = (safePage - 1) * safePageSize;
+  const snapshotEndDate = getSnapshotEndDate(month, year);
+  const params: any[] = [tenantId, snapshotEndDate];
+  let paramIdx = 3;
+  const visibilityFilters: string[] = [];
+
+  if (teamId) {
+    visibilityFilters.push(`AND t.id = $${paramIdx}`);
+    params.push(teamId);
+    paramIdx++;
+  } else if (subgroupId) {
+    visibilityFilters.push(`AND t.sub_group_id = $${paramIdx}`);
+    params.push(subgroupId);
+    paramIdx++;
+  } else if (groupId) {
+    visibilityFilters.push(`AND sg.org_group_id = $${paramIdx}`);
+    params.push(groupId);
+    paramIdx++;
+  }
+
+  params.push(safePageSize, offset);
+  const result = await query<ReportCourseCompletionRanking & { full_count: string }>(
+    `WITH
+      ${buildVisibleCourseUsersCte({
+        tenantParam: '$1',
+        snapshotParam: '$2',
+        extraFilterSql: visibilityFilters.join('\n'),
+      })},
+      learner_status AS (
+        SELECT
+          v.course_id,
+          v.name,
+          v.user_id,
+          CASE
+            WHEN e.id IS NULL THEN 'not_started'
+            WHEN (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
+            ELSE 'learning'
+          END AS status
+        FROM visible_course_users v
+        LEFT JOIN enrollments e
+          ON e.tenant_id = $1
+         AND e.course_id = v.course_id
+         AND e.user_id = v.user_id
+         AND e.is_active = true
+         AND e.enrolled_at <= $2
+        LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
+      ),
+      aggregated AS (
+        SELECT
+          course_id,
+          name,
+          COUNT(*)::bigint AS visible_learners,
+          COUNT(*) FILTER (WHERE status = 'learning')::bigint AS learning_count,
+          COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_count,
+          COUNT(*) FILTER (WHERE status = 'not_started')::bigint AS not_started_count,
+          ROUND(
+            (COUNT(*) FILTER (WHERE status = 'completed')::numeric * 100)
+            / NULLIF(COUNT(*), 0),
+            1
+          ) AS completion_rate
+        FROM learner_status
+        GROUP BY course_id, name
+      )
+     SELECT aggregated.*, COUNT(*) OVER() AS full_count
+     FROM aggregated
+     ORDER BY completion_rate DESC NULLS LAST, completed_count DESC, visible_learners DESC, name ASC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    params,
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0');
+
+  return {
+    count: total,
+    total_pages: Math.ceil(total / safePageSize),
+    current_page: safePage,
+    results: result.rows.map(r => ({
+      course_id: r.course_id,
+      name: r.name,
+      visible_learners: Number(r.visible_learners) || 0,
+      learning_count: Number(r.learning_count) || 0,
+      completed_count: Number(r.completed_count) || 0,
+      not_started_count: Number(r.not_started_count) || 0,
+      completion_rate: Number(r.completion_rate) || 0,
+    })),
+  };
+}
+
+export async function getReportCourseCompletionLearners(
+  tenantId: string,
+  courseId: string,
+  page = 1,
+  pageSize = 20,
+  search?: string,
+  month?: number,
+  year?: number,
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+  status: ReportCourseCompletionStatus = 'all',
+): Promise<{ count: number; total_pages: number; current_page: number; results: ReportCourseCompletionLearner[] }> {
+  const safePage = Math.max(page, 1);
+  const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+  const offset = (safePage - 1) * safePageSize;
+  const snapshotEndDate = getSnapshotEndDate(month, year);
+  const params: any[] = [tenantId, snapshotEndDate, courseId];
+  let paramIdx = 4;
+  const visibilityFilters: string[] = ['AND c.id = $3'];
+
+  if (teamId) {
+    visibilityFilters.push(`AND t.id = $${paramIdx}`);
+    params.push(teamId);
+    paramIdx++;
+  } else if (subgroupId) {
+    visibilityFilters.push(`AND t.sub_group_id = $${paramIdx}`);
+    params.push(subgroupId);
+    paramIdx++;
+  } else if (groupId) {
+    visibilityFilters.push(`AND sg.org_group_id = $${paramIdx}`);
+    params.push(groupId);
+    paramIdx++;
+  }
+
+  const searchConditions: string[] = [];
+  if (search?.trim()) {
+    searchConditions.push(`(
+      u.username ILIKE '%' || $${paramIdx} || '%'
+      OR u.email ILIKE '%' || $${paramIdx} || '%'
+      OR u.full_name ILIKE '%' || $${paramIdx} || '%'
+    )`);
+    params.push(search.trim());
+    paramIdx++;
+  }
+
+  const safeStatus: ReportCourseCompletionStatus = ['all', 'not_started', 'learning', 'completed'].includes(status)
+    ? status
+    : 'all';
+  const statusFilter = safeStatus !== 'all' ? `WHERE sub.status = '${safeStatus}'` : '';
+  const searchFilter = searchConditions.length ? `WHERE ${searchConditions.join(' AND ')}` : '';
+
+  params.push(safePageSize, offset);
+  const result = await query<ReportCourseCompletionLearner & { full_count: string }>(
+    `WITH
+      ${buildVisibleCourseUsersCte({
+        tenantParam: '$1',
+        snapshotParam: '$2',
+        extraFilterSql: visibilityFilters.join('\n'),
+      })},
+      visible_learners AS (
+        SELECT
+          v.user_id,
+          v.course_id,
+          u.username,
+          u.email,
+          u.full_name,
+          u.avatar_url AS avatar,
+          e.enrolled_at,
+          cp.completed_at,
+          CASE
+            WHEN e.id IS NULL THEN 'not_started'
+            WHEN (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
+            ELSE 'learning'
+          END AS status,
+          CASE
+            WHEN e.id IS NULL THEN NULL
+            WHEN (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 100
+            ELSE LEAST(COALESCE(cp.progress, 0), 99.99)
+          END AS progress
+        FROM visible_course_users v
+        JOIN users u ON u.id = v.user_id
+        LEFT JOIN enrollments e
+          ON e.tenant_id = $1
+         AND e.course_id = v.course_id
+         AND e.user_id = v.user_id
+         AND e.is_active = true
+         AND e.enrolled_at <= $2
+        LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
+        ${searchFilter}
+      )
+     SELECT sub.*, COUNT(*) OVER() AS full_count
+     FROM visible_learners sub
+     ${statusFilter}
+     ORDER BY
+       CASE sub.status
+         WHEN 'completed' THEN 1
+         WHEN 'learning' THEN 2
+         ELSE 3
+       END,
+       COALESCE(NULLIF(sub.full_name, ''), sub.username) ASC,
+       sub.username ASC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    params,
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0');
+
+  return {
+    count: total,
+    total_pages: Math.ceil(total / safePageSize),
+    current_page: safePage,
+    results: result.rows.map(r => ({
+      user_id: r.user_id,
+      username: r.username,
+      email: r.email,
+      full_name: r.full_name || '',
+      avatar: r.avatar,
+      enrolled_at: r.enrolled_at,
+      completed_at: r.completed_at,
+      progress: r.progress === null || r.progress === undefined ? null : Number(r.progress),
+      status: r.status,
+    })),
+  };
+}
 
 export async function getReportTopCourses(
   tenantId: string,
@@ -529,6 +858,7 @@ export async function getReportTopCourses(
   year?: number,
   groupId?: string,
   subgroupId?: string,
+  teamId?: string,
 ): Promise<{ count: number; total_pages: number; current_page: number; results: ReportTopCourse[] }> {
   const offset = (page - 1) * pageSize;
   const conditions: string[] = ['e.tenant_id = $1', 'e.is_active = true'];
@@ -546,7 +876,7 @@ export async function getReportTopCourses(
     paramIdx++;
   }
 
-  const gf = buildGroupFilter(groupId, subgroupId);
+  const gf = buildGroupFilter(groupId, subgroupId, teamId);
   const gfConditions = gf.conditions.map(c => c.replace('$PARAM', `$${paramIdx++}`));
   params.push(...gf.params);
 
@@ -592,6 +922,7 @@ export async function getReportLearners(
   year?: number,
   groupId?: string,
   subgroupId?: string,
+  teamId?: string,
   status?: 'all' | 'not_started' | 'learning' | 'completed',
 ): Promise<{ count: number; total_pages: number; current_page: number; results: ReportLearner[] }> {
   const offset = (page - 1) * pageSize;
@@ -605,7 +936,7 @@ export async function getReportLearners(
     paramIdx++;
   }
 
-  const ugf = buildUserGroupFilter(groupId, subgroupId);
+  const ugf = buildUserGroupFilter(groupId, subgroupId, teamId);
   const ugfConditions = ugf.conditions.map(c => c.replace('$PARAM', `$${paramIdx++}`));
   params.push(...ugf.params);
 
@@ -683,48 +1014,146 @@ export async function getLearnerDetail(
   page = 1,
   pageSize = 10,
   search = '',
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+  status: ReportCourseCompletionStatus = 'all',
 ): Promise<LearnerDetailResponse> {
+  const safePage = Math.max(page, 1);
+  const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+  const offset = (safePage - 1) * safePageSize;
+  const snapshotEndDate = new Date();
+
   const userResult = await query<{ id: string }>(
-    `SELECT id FROM users WHERE username = $1 AND tenant_id = $2`,
+    `SELECT id
+     FROM users
+     WHERE username = $1
+       AND tenant_id = $2
+       AND is_active = true
+       AND role IN ('learner', 'learner_plus')
+     LIMIT 1`,
     [username, tenantId],
   );
   if (userResult.rowCount === 0) {
-    return { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: page };
+    return { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: safePage };
   }
   const userId = userResult.rows[0].id;
 
   // Groups
   const groupsResult = await query<{ group_name: string; subgroup_name: string }>(
-    `SELECT og.name AS group_name, sg.name AS subgroup_name
+    `SELECT DISTINCT og.name AS group_name, sg.name AS subgroup_name
      FROM team_members tm
      JOIN teams t ON t.id = tm.team_id
      JOIN sub_groups sg ON sg.id = t.sub_group_id
      JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1`,
-    [userId],
+     WHERE tm.user_id = $1
+       AND og.tenant_id = $2
+     ORDER BY og.name, sg.name`,
+    [userId, tenantId],
   );
 
-  // Single query: count + data with window function
-  const searchFilter = search ? `AND c.display_name ILIKE '%' || $3 || '%'` : '';
-  const offset = (page - 1) * pageSize;
-  const dataParams: any[] = [userId, tenantId];
-  if (search) dataParams.push(search);
-  dataParams.push(pageSize, offset);
+  const params: any[] = [tenantId, snapshotEndDate, userId];
+  let paramIdx = 4;
+  const visibilityFilters: string[] = ['AND u.id = $3'];
 
-  const paramOff = search ? 4 : 3;
+  if (teamId) {
+    visibilityFilters.push(`AND t.id = $${paramIdx}`);
+    params.push(teamId);
+    paramIdx++;
+  } else if (subgroupId) {
+    visibilityFilters.push(`AND t.sub_group_id = $${paramIdx}`);
+    params.push(subgroupId);
+    paramIdx++;
+  } else if (groupId) {
+    visibilityFilters.push(`AND sg.org_group_id = $${paramIdx}`);
+    params.push(groupId);
+    paramIdx++;
+  }
+
+  if (search.trim()) {
+    visibilityFilters.push(`AND c.display_name ILIKE '%' || $${paramIdx} || '%'`);
+    params.push(search.trim());
+    paramIdx++;
+  }
+
+  const safeStatus: ReportCourseCompletionStatus = ['all', 'not_started', 'learning', 'completed'].includes(status)
+    ? status
+    : 'all';
+  let statusFilter = '';
+  if (safeStatus !== 'all') {
+    statusFilter = `WHERE sub.status = $${paramIdx}`;
+    params.push(safeStatus);
+    paramIdx++;
+  }
+
+  params.push(safePageSize, offset);
   const result = await query<LearnerDetailResult & { full_count: string }>(
-    `SELECT e.course_id, c.display_name AS course_name,
-            e.enrolled_at,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            COUNT(*) OVER() AS full_count
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}
-     ORDER BY e.enrolled_at DESC
-     LIMIT $${paramOff} OFFSET $${paramOff + 1}`,
-    dataParams,
+    `WITH
+      ${buildVisibleCourseUsersCte({
+        tenantParam: '$1',
+        snapshotParam: '$2',
+        extraFilterSql: visibilityFilters.join('\n'),
+      })},
+      active_enrollments AS (
+        SELECT DISTINCT ON (e.course_id)
+          e.id,
+          e.course_id,
+          e.enrolled_at
+        FROM enrollments e
+        WHERE e.tenant_id = $1
+          AND e.user_id = $3
+          AND e.is_active = true
+          AND e.enrolled_at <= $2
+        ORDER BY e.course_id, e.enrolled_at DESC, e.id DESC
+      ),
+      learner_courses AS (
+        SELECT
+          v.course_id,
+          v.name AS course_name,
+          ae.enrolled_at,
+          cp.completed_at,
+          (
+            ae.id IS NOT NULL
+            AND (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            )
+            AND (cp.completed_at IS NULL OR cp.completed_at <= $2)
+          ) AS is_completed,
+          CASE
+            WHEN ae.id IS NULL THEN 'not_started'
+            WHEN (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
+            ELSE 'learning'
+          END AS status,
+          CASE
+            WHEN ae.id IS NULL THEN 0
+            WHEN (
+              COALESCE(cp.progress, 0) >= 100
+              OR COALESCE(cp.is_completed, false) = true
+            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 100
+            ELSE LEAST(COALESCE(cp.progress, 0), 99.99)
+          END AS progress
+        FROM visible_course_users v
+        LEFT JOIN active_enrollments ae ON ae.course_id = v.course_id
+        LEFT JOIN course_progress cp ON cp.enrollment_id = ae.id
+      )
+     SELECT sub.*, COUNT(*) OVER() AS full_count
+     FROM learner_courses sub
+     ${statusFilter}
+     ORDER BY
+       CASE sub.status
+         WHEN 'completed' THEN 1
+         WHEN 'learning' THEN 2
+         ELSE 3
+       END,
+       sub.enrolled_at DESC NULLS LAST,
+       sub.course_name ASC,
+       sub.course_id ASC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    params,
   );
 
   const total = parseInt(result.rows[0]?.full_count ?? '0');
@@ -736,12 +1165,14 @@ export async function getLearnerDetail(
       course_id: r.course_id,
       course_name: r.course_name,
       enrolled_at: r.enrolled_at,
-      progress: parseFloat(r.progress as any) || 0,
-      is_completed: r.is_completed,
+      completed_at: r.completed_at,
+      progress: Number(r.progress) || 0,
+      is_completed: Boolean(r.is_completed),
+      status: r.status,
     })),
     total_count: total,
-    total_pages: Math.ceil(total / pageSize),
-    current_page: page,
+    total_pages: Math.ceil(total / safePageSize),
+    current_page: safePage,
   };
 }
 

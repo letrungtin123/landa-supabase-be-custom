@@ -7,6 +7,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "pm2:prod": "pm2 startOrReload ecosystem.config.cjs --env production --update-env",
+    "pm2:save": "pm2 save",
+    "deploy:prod": "npm run build && npm run pm2:prod && npm run pm2:save",
     "seed": "tsx src/scripts/seed.ts"
   },
   "dependencies": {
@@ -18,6 +21,7 @@
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
