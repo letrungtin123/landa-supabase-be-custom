@@ -3,7 +3,96 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { extractStoragePath } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
+
+interface HelpDocMutationResult {
+  id: string;
+  title: string;
+  storagePathsToDelete: string[];
+}
+
+const STORAGE_PROXY_PREFIX = '/api/storage/';
+
+function uniqueStrings(values: Iterable<string>): string[] {
+  return [...new Set([...values].filter(Boolean))];
+}
+
+function extractProxyStoragePath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith(STORAGE_PROXY_PREFIX)) {
+    return decodeURIComponent(trimmed.slice(STORAGE_PROXY_PREFIX.length));
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.pathname.startsWith(STORAGE_PROXY_PREFIX)) {
+      return decodeURIComponent(url.pathname.slice(STORAGE_PROXY_PREFIX.length));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeHelpDocImagePath(value: string | null | undefined, tenantId: string): string | null {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+
+  const path = extractStoragePath(extractProxyStoragePath(raw) || raw)?.trim();
+  if (!path) return null;
+
+  const expectedPrefix = `${tenantId}/help-docs/`;
+  if (!path.startsWith(expectedPrefix)) return null;
+  if (path.includes('..') || path.includes('//') || /[<>"|?*]/.test(path)) return null;
+
+  return path;
+}
+
+function extractHelpDocImagePaths(html: string | null | undefined, tenantId: string): string[] {
+  if (!html) return [];
+
+  const paths = new Set<string>();
+  const imgSrcPattern = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = imgSrcPattern.exec(html)) !== null) {
+    const rawSrc = match[1] || match[2] || match[3] || '';
+    const storagePath = normalizeHelpDocImagePath(rawSrc, tenantId);
+    if (storagePath) paths.add(storagePath);
+  }
+
+  return [...paths];
+}
+
+async function getReferencedHelpDocImagePaths(tenantId: string): Promise<Set<string>> {
+  const result = await query<{ content: string | null }>(
+    `SELECT hp.content
+     FROM help_pages hp
+     JOIN help_folders hf ON hf.id = hp.folder_id
+     WHERE hf.tenant_id = $1`,
+    [tenantId],
+  );
+
+  const referenced = new Set<string>();
+  for (const row of result.rows) {
+    for (const path of extractHelpDocImagePaths(row.content, tenantId)) {
+      referenced.add(path);
+    }
+  }
+  return referenced;
+}
+
+async function getUnreferencedHelpDocImagePaths(tenantId: string, candidatePaths: string[]): Promise<string[]> {
+  const candidates = uniqueStrings(candidatePaths);
+  if (candidates.length === 0) return [];
+
+  const referenced = await getReferencedHelpDocImagePaths(tenantId);
+  return candidates.filter((path) => !referenced.has(path));
+}
 
 // ═══ Folders ═══
 
@@ -42,10 +131,25 @@ export async function updateFolder(folderId: string, input: { title?: string; ic
   return result.rows[0];
 }
 
-export async function deleteFolder(folderId: string) {
-  const result = await query('DELETE FROM help_folders WHERE id = $1 RETURNING id, title', [folderId]);
-  if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
-  return result.rows[0];
+export async function deleteFolder(folderId: string, tenantId: string): Promise<HelpDocMutationResult> {
+  const folder = await query<{ id: string; title: string }>(
+    'SELECT id, title FROM help_folders WHERE id = $1 AND tenant_id = $2',
+    [folderId, tenantId],
+  );
+  if (folder.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
+
+  const pages = await query<{ content: string | null }>(
+    'SELECT content FROM help_pages WHERE folder_id = $1',
+    [folderId],
+  );
+  const candidatePaths = pages.rows.flatMap((row) => extractHelpDocImagePaths(row.content, tenantId));
+
+  await query('DELETE FROM help_folders WHERE id = $1 AND tenant_id = $2', [folderId, tenantId]);
+
+  return {
+    ...folder.rows[0],
+    storagePathsToDelete: await getUnreferencedHelpDocImagePaths(tenantId, candidatePaths),
+  };
 }
 
 export async function reorderFolders(orderedIds: string[]) {
@@ -99,23 +203,81 @@ export async function createPage(input: { folder_id: string; title: string; cont
   return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
 
-export async function updatePage(pageId: string, input: { title?: string; content?: string; is_published?: boolean }, userId: string) {
-  const sets: string[] = ['updated_at = NOW()', `updated_by = '${userId}'`];
-  const params: unknown[] = [];
-  let idx = 1;
+export async function updatePage(
+  pageId: string,
+  tenantId: string,
+  input: { title?: string; content?: string; is_published?: boolean },
+  userId: string,
+): Promise<HelpDocMutationResult> {
+  const current = await query<{ id: string; title: string; content: string | null }>(
+    `SELECT hp.id, hp.title, hp.content
+     FROM help_pages hp
+     JOIN help_folders hf ON hf.id = hp.folder_id
+     WHERE hp.id = $1 AND hf.tenant_id = $2`,
+    [pageId, tenantId],
+  );
+  if (current.rowCount === 0) throw new AppError('Page không tồn tại', 404);
+
+  const sets: string[] = ['updated_at = NOW()', 'updated_by = $1'];
+  const params: unknown[] = [userId];
+  let idx = 2;
   if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); sets.push(`slug = $${idx++}`); params.push(input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }
   if (input.content !== undefined) { sets.push(`content = $${idx++}`); params.push(input.content); }
   if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}`); params.push(input.is_published); }
-  params.push(pageId);
-  const result = await query(`UPDATE help_pages SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, title`, params);
+  params.push(pageId, tenantId);
+
+  const result = await query<{ id: string; title: string }>(
+    `UPDATE help_pages hp
+     SET ${sets.join(', ')}
+     FROM help_folders hf
+     WHERE hp.folder_id = hf.id
+       AND hp.id = $${idx++}
+       AND hf.tenant_id = $${idx}
+     RETURNING hp.id, hp.title`,
+    params,
+  );
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
-  return result.rows[0];
+
+  const removedPaths = input.content === undefined
+    ? []
+    : extractHelpDocImagePaths(current.rows[0].content, tenantId)
+        .filter((path) => !extractHelpDocImagePaths(input.content, tenantId).includes(path));
+
+  return {
+    ...result.rows[0],
+    storagePathsToDelete: await getUnreferencedHelpDocImagePaths(tenantId, removedPaths),
+  };
 }
 
-export async function deletePage(pageId: string) {
-  const result = await query('DELETE FROM help_pages WHERE id = $1 RETURNING id, title', [pageId]);
+export async function deletePage(pageId: string, tenantId: string): Promise<HelpDocMutationResult> {
+  const result = await query<{ id: string; title: string; content: string | null }>(
+    `DELETE FROM help_pages hp
+     USING help_folders hf
+     WHERE hp.folder_id = hf.id
+       AND hp.id = $1
+       AND hf.tenant_id = $2
+     RETURNING hp.id, hp.title, hp.content`,
+    [pageId, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
-  return result.rows[0];
+
+  const candidatePaths = extractHelpDocImagePaths(result.rows[0].content, tenantId);
+  return {
+    id: result.rows[0].id,
+    title: result.rows[0].title,
+    storagePathsToDelete: await getUnreferencedHelpDocImagePaths(tenantId, candidatePaths),
+  };
+}
+
+export async function deleteImage(tenantId: string, rawPath: string): Promise<HelpDocMutationResult> {
+  const storagePath = normalizeHelpDocImagePath(rawPath, tenantId);
+  if (!storagePath) throw new AppError('Đường dẫn ảnh không hợp lệ', 400);
+
+  return {
+    id: storagePath,
+    title: storagePath.split('/').pop() || storagePath,
+    storagePathsToDelete: await getUnreferencedHelpDocImagePaths(tenantId, [storagePath]),
+  };
 }
 
 export async function reorderPages(folderId: string, orderedIds: string[]) {

@@ -2,7 +2,11 @@ import type { Request, Response, NextFunction } from 'express';
 import * as svc from './help-docs.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
-import { uploadFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import { uploadFile, buildFileName, buildStoragePath, fixMulterFilename, deleteFile } from '../../config/storage.js';
+
+async function deleteStoragePaths(paths: string[]): Promise<void> {
+  await Promise.allSettled(paths.map((path) => deleteFile(path)));
+}
 
 // ═══ Folders ═══
 
@@ -33,9 +37,12 @@ export async function updateFolderController(req: Request, res: Response, next: 
 
 export async function deleteFolderController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const deleted = await svc.deleteFolder(req.params.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const deleted = await svc.deleteFolder(req.params.id, tenantId);
+    await deleteStoragePaths(deleted.storagePathsToDelete);
     auditFromReq(req, 'DELETE', 'help_folder', req.params.id, deleted.title);
-    sendSuccess(res, { success: true });
+    sendSuccess(res, { success: true, deleted_images: deleted.storagePathsToDelete.length });
   } catch (err) { next(err); }
 }
 
@@ -70,17 +77,23 @@ export async function createPageController(req: Request, res: Response, next: Ne
 
 export async function updatePageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const page = await svc.updatePage(req.params.id, req.body, req.user!.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const page = await svc.updatePage(req.params.id, tenantId, req.body, req.user!.id);
+    await deleteStoragePaths(page.storagePathsToDelete);
     auditFromReq(req, 'UPDATE', 'help_page', req.params.id, page.title);
-    sendSuccess(res, { success: true });
+    sendSuccess(res, { success: true, deleted_images: page.storagePathsToDelete.length });
   } catch (err) { next(err); }
 }
 
 export async function deletePageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const deleted = await svc.deletePage(req.params.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const deleted = await svc.deletePage(req.params.id, tenantId);
+    await deleteStoragePaths(deleted.storagePathsToDelete);
     auditFromReq(req, 'DELETE', 'help_page', req.params.id, deleted.title);
-    sendSuccess(res, { success: true });
+    sendSuccess(res, { success: true, deleted_images: deleted.storagePathsToDelete.length });
   } catch (err) { next(err); }
 }
 
@@ -98,17 +111,41 @@ export async function reorderPagesController(req: Request, res: Response, next: 
 /** POST /api/help-docs/upload-image */
 export async function uploadImageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const tenantId = req.user!.tenantId || 'default';
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     if (!req.file) { sendError(res, 'No file uploaded', 400); return; }
 
     const file = req.file;
+    if (!file.mimetype.startsWith('image/')) {
+      sendError(res, 'File upload phải là ảnh', 400);
+      return;
+    }
+
     const originalName = fixMulterFilename(file.originalname);
     const fileName = buildFileName(originalName);
     const storagePath = buildStoragePath(tenantId, 'help-docs', fileName);
 
-    // uploadFile trả về path, sendSuccess auto-resolve thành URL
     const path = await uploadFile(storagePath, file.buffer, file.mimetype);
 
     sendSuccess(res, { url: path, filename: originalName, size: file.size });
+  } catch (err) { next(err); }
+}
+
+/** POST /api/help-docs/delete-image */
+export async function deleteImageController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+
+    const storagePath = typeof req.body?.storage_path === 'string'
+      ? req.body.storage_path.trim()
+      : typeof req.body?.path === 'string'
+        ? req.body.path.trim()
+        : '';
+    if (!storagePath) { sendError(res, 'storage_path là bắt buộc', 400); return; }
+
+    const result = await svc.deleteImage(tenantId, storagePath);
+    await deleteStoragePaths(result.storagePathsToDelete);
+    sendSuccess(res, { success: true, deleted_images: result.storagePathsToDelete.length });
   } catch (err) { next(err); }
 }

@@ -8,7 +8,7 @@ import {
   deleteFolderController, reorderFoldersController,
   listPagesController, getPageController, createPageController,
   updatePageController, deletePageController, reorderPagesController,
-  uploadImageController,
+  uploadImageController, deleteImageController,
 } from './help-docs.controller.js';
 
 const router = Router();
@@ -36,5 +36,6 @@ router.patch('/pages/reorder', checkPermission('help_docs', 'can_edit'), reorder
 
 // Image upload
 router.post('/upload-image', checkPermission('help_docs', 'can_edit'), upload.single('image'), uploadImageController);
+router.post('/delete-image', checkPermission('help_docs', 'can_edit'), deleteImageController);
 
 export default router;
