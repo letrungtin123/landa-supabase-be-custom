@@ -26,6 +26,7 @@ export const updateCourseSchema = z.object({
   display_name: requiredTrimmedString('display_name is required', 500).optional(),
   description: requiredTrimmedString('description is required', 5000).optional(),
   visible_to_staff_only: z.boolean().optional(),
+  is_public: z.boolean().optional(),
   image_url: z.string().max(1000).optional(),
   is_active: z.boolean().optional(),
   cover_url: z.string().max(1000).optional(),

@@ -98,7 +98,7 @@ export async function getCourseFiles(req: Request, res: Response, next: NextFunc
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
 
-    const result = await learnerService.getCourseFiles(req.params.courseId, req.user.role, req.user.tenantId);
+    const result = await learnerService.getCourseFiles(req.params.courseId, req.user.id, req.user.role, req.user.tenantId);
     sendSuccess(res, result);
   } catch (err) {
     next(err);
@@ -148,7 +148,9 @@ export async function getBlockDetail(req: Request, res: Response, next: NextFunc
 
     const result = await learnerService.getBlockDetail(
       req.params.blockId,
+      req.user.id,
       req.user.role,
+      req.user.tenantId,
     );
     sendSuccess(res, result);
   } catch (err) {
@@ -165,6 +167,7 @@ export async function submitBlockAnswer(req: Request, res: Response, next: NextF
       req.params.blockId,
       req.user.id,
       req.user.role,
+      req.user.tenantId,
       req.body,
     );
     sendSuccess(res, result);
@@ -205,7 +208,7 @@ export async function enroll(req: Request, res: Response, next: NextFunction): P
       return;
     }
 
-    const result = await learnerService.selfEnroll(req.user.id, course_id, tenantId);
+    const result = await learnerService.selfEnroll(req.user.id, course_id, tenantId, req.user.role);
     sendSuccess(res, result, result.already_enrolled ? 'Đã ghi danh trước đó' : 'Ghi danh thành công');
   } catch (err) {
     next(err);

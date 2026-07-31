@@ -2,7 +2,7 @@
 // Courses Service — CRUD courses + modal configs
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
 import {
   invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
@@ -37,6 +37,14 @@ interface CourseMentorSection {
   logo_dark: string | null;
   updated_at: string | null;
 }
+
+type CourseUpdateInput = {
+  display_name?: string;
+  description?: string;
+  visible_to_staff_only?: boolean;
+  image_url?: string;
+  is_public?: boolean;
+};
 
 function mapMentor(row: any): CourseMentor | null {
   if (!row?.mentor_id) return null;
@@ -177,30 +185,104 @@ export async function createCourse(tenantId: string, createdBy: string, input: {
   return result.rows[0];
 }
 
-export async function updateCourse(courseId: string, input: { display_name?: string; description?: string; visible_to_staff_only?: boolean; image_url?: string }) {
-  const course = await updateCourseFromDb(courseId, input);
-  await invalidateCourseReadCaches(courseId, course.tenant_id);
+export async function updateCourse(courseId: string, tenantId: string, input: CourseUpdateInput) {
+  const course = await updateCourseFromDb(courseId, tenantId, input);
+  await Promise.all([
+    invalidateCourseReadCaches(courseId, course.tenant_id),
+    invalidateTenantCourseCaches(course.tenant_id),
+  ]);
   return course;
 }
 
-async function updateCourseFromDb(courseId: string, input: { display_name?: string; description?: string; visible_to_staff_only?: boolean; image_url?: string }) {
-  const sets: string[] = ['updated_at = NOW()'];
-  const params: unknown[] = [];
-  let idx = 1;
-  if (input.display_name !== undefined) { sets.push(`display_name = $${idx++}`); params.push(input.display_name); }
-  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-  if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
-  if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
-  params.push(courseId);
-  const result = await query(`UPDATE courses SET ${sets.join(', ')} WHERE id = $${idx} AND deleted_at IS NULL RETURNING *`, params);
-  if (result.rowCount === 0) throw new AppError('Course không tồn tại', 404);
-  return result.rows[0];
+async function updateCourseFromDb(courseId: string, tenantId: string, input: CourseUpdateInput) {
+  if (input.is_public === true && input.visible_to_staff_only === true) {
+    throw new AppError('Khóa học công khai không thể đang lưu trữ', 400);
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const current = await client.query<{ id: string; tenant_id: string; is_public: boolean }>(
+      `SELECT id, tenant_id, COALESCE(is_public, false) AS is_public
+       FROM courses
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+       FOR UPDATE`,
+      [courseId, tenantId],
+    );
+    if (current.rowCount === 0) throw new AppError('Course không tồn tại', 404);
+
+    const sets: string[] = ['updated_at = NOW()'];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (input.display_name !== undefined) { sets.push(`display_name = $${idx++}`); params.push(input.display_name); }
+    if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
+    if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
+    if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
+    if (input.is_public !== undefined) { sets.push(`is_public = $${idx++}`); params.push(input.is_public); }
+    if (input.is_public === true && input.visible_to_staff_only === undefined) {
+      sets.push('visible_to_staff_only = false');
+    }
+    if (input.visible_to_staff_only === true && input.is_public === undefined) {
+      sets.push('is_public = false');
+    }
+
+    params.push(courseId, tenantId);
+    const result = await client.query(
+      `UPDATE courses
+       SET ${sets.join(', ')}
+       WHERE id = $${idx++} AND tenant_id = $${idx} AND deleted_at IS NULL
+       RETURNING *`,
+      params,
+    );
+
+    if (input.is_public === true && current.rows[0].is_public !== true) {
+      await client.query(
+        `DELETE FROM team_courses tc
+         USING teams t
+         JOIN sub_groups sg ON sg.id = t.sub_group_id
+         JOIN org_groups og ON og.id = sg.org_group_id
+         WHERE tc.team_id = t.id
+           AND tc.course_id = $1
+           AND og.tenant_id = $2::uuid`,
+        [courseId, tenantId],
+      );
+
+      await client.query(
+        `DELETE FROM course_category_courses ccc
+         WHERE ccc.course_id = $1
+           AND EXISTS (
+             SELECT 1
+             FROM team_course_categories tcc
+             JOIN teams t ON t.id = tcc.team_id
+             JOIN sub_groups sg ON sg.id = t.sub_group_id
+             JOIN org_groups og ON og.id = sg.org_group_id
+             WHERE tcc.category_id = ccc.category_id
+               AND og.tenant_id = $2::uuid
+           )`,
+        [courseId, tenantId],
+      );
+    }
+
+    await client.query('COMMIT');
+    return result.rows[0];
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function bulkCourseAction(ids: string[], action: string) {
   const staffOnly = action === 'staff_only';
   const r = await query(
-    'UPDATE courses SET visible_to_staff_only = $1, updated_at = NOW() WHERE id = ANY($2) AND deleted_at IS NULL RETURNING id, tenant_id',
+    `UPDATE courses
+     SET visible_to_staff_only = $1,
+         is_public = CASE WHEN $1::boolean THEN false ELSE is_public END,
+         updated_at = NOW()
+     WHERE id = ANY($2) AND deleted_at IS NULL
+     RETURNING id, tenant_id`,
     [staffOnly, ids],
   );
   await Promise.all((r.rows as Array<{ id: string; tenant_id: string }>).map((row) => invalidateCourseReadCaches(row.id, row.tenant_id)));

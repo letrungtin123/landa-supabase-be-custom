@@ -31,6 +31,7 @@ import {
   recalculateEnrollmentProgress,
 } from '../learner/progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
+import { learnerCourseAccessCondition } from '../courses/course-access.js';
 
 const MAX_ASSIGNMENT_FILES = 5;
 const MAX_ASSIGNMENT_FILE_SIZE_BYTES = 25 * 1024 * 1024;
@@ -45,6 +46,7 @@ interface CourseRow {
   display_name: string;
   tenant_id: string;
   visible_to_staff_only: boolean;
+  is_public: boolean;
 }
 
 interface UploadedAssignmentFile extends AssignmentFileMeta {
@@ -167,7 +169,8 @@ function effectiveDeadlineExpression(alias = 'ca', enrollmentAlias = 'e'): strin
 
 async function ensureCourseForAdmin(courseId: string, tenantId: string): Promise<CourseRow> {
   const result = await query<CourseRow>(
-    `SELECT id, display_name, tenant_id, COALESCE(visible_to_staff_only, false) AS visible_to_staff_only
+    `SELECT id, display_name, tenant_id, COALESCE(visible_to_staff_only, false) AS visible_to_staff_only,
+            COALESCE(is_public, false) AS is_public
      FROM courses
      WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
     [courseId, tenantId],
@@ -430,6 +433,7 @@ export async function createAssignment(
             grading_enabled: assignment.grading_enabled,
             submission_unlock_mode: assignment.submission_unlock_mode,
             created_at: assignment.created_at,
+            recipient_rule: course.is_public ? 'all_active_learners' : 'course_assignments',
           }),
           'Bài tập mới',
           assignment.deadline_mode === 'relative_to_enrollment' && assignment.deadline_after_days
@@ -441,30 +445,33 @@ export async function createAssignment(
       const notificationId = notification.rows[0].id;
 
       const recipientResult = await client.query<{ recipient_count: number }>(
-        `WITH assigned_learners AS (
+        `WITH eligible_learners AS (
            SELECT DISTINCT u.id AS user_id
            FROM users u
-           JOIN team_members tm ON tm.user_id = u.id
+           LEFT JOIN team_members tm ON tm.user_id = u.id
            WHERE u.tenant_id = $1::uuid
              AND u.is_active = true
              AND u.role IN ('learner'::user_role, 'learner_plus'::user_role)
-             AND EXISTS (
-               SELECT 1
-               FROM team_courses tc
-               WHERE tc.team_id = tm.team_id
-                 AND tc.course_id = $2::varchar
-               UNION ALL
-               SELECT 1
-               FROM team_course_categories tcc
-               JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-               WHERE tcc.team_id = tm.team_id
-                 AND ccc.course_id = $2::varchar
+             AND (
+               $4::boolean = true
+               OR EXISTS (
+                 SELECT 1
+                 FROM team_courses tc
+                 WHERE tc.team_id = tm.team_id
+                   AND tc.course_id = $2::varchar
+                 UNION ALL
+                 SELECT 1
+                 FROM team_course_categories tcc
+                 JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+                 WHERE tcc.team_id = tm.team_id
+                   AND ccc.course_id = $2::varchar
+               )
              )
          ),
          inserted AS (
            INSERT INTO notification_recipients (notification_id, user_id)
            SELECT $3::uuid, user_id
-           FROM assigned_learners
+           FROM eligible_learners
            ON CONFLICT DO NOTHING
            RETURNING user_id
          )
@@ -472,7 +479,7 @@ export async function createAssignment(
          SET recipient_count = (SELECT COUNT(*)::int FROM inserted)
          WHERE id = $3::uuid
          RETURNING recipient_count`,
-        [tenantId, courseId, notificationId],
+        [tenantId, courseId, notificationId, course.is_public],
       );
 
       const recipientCount = Number(recipientResult.rows[0]?.recipient_count || 0);
@@ -682,7 +689,7 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
     : undefined;
 
   if (!status || status === 'not_submitted') {
-    const params: unknown[] = [tenantId, courseId, course.visible_to_staff_only];
+    const params: unknown[] = [tenantId, courseId, course.visible_to_staff_only, course.is_public];
     const assignmentConditions = [
       'ca.tenant_id = $1::uuid',
       'ca.course_id = $2::varchar',
@@ -714,22 +721,25 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
       WITH eligible_learners AS (
         SELECT DISTINCT u.id, u.username, u.full_name, u.email, u.role::text AS learner_role
         FROM users u
-        JOIN team_members tm ON tm.user_id = u.id
+        LEFT JOIN team_members tm ON tm.user_id = u.id
         WHERE $3::boolean = false
           AND u.tenant_id = $1::uuid
           AND u.is_active = true
           AND u.role IN ('learner'::user_role, 'learner_plus'::user_role)
-          AND EXISTS (
-            SELECT 1
-            FROM team_courses tc
-            WHERE tc.team_id = tm.team_id
-              AND tc.course_id = $2::varchar
-            UNION ALL
-            SELECT 1
-            FROM team_course_categories tcc
-            JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-            WHERE tcc.team_id = tm.team_id
-              AND ccc.course_id = $2::varchar
+          AND (
+            $4::boolean = true
+            OR EXISTS (
+              SELECT 1
+              FROM team_courses tc
+              WHERE tc.team_id = tm.team_id
+                AND tc.course_id = $2::varchar
+              UNION ALL
+              SELECT 1
+              FROM team_course_categories tcc
+              JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+              WHERE tcc.team_id = tm.team_id
+                AND ccc.course_id = $2::varchar
+            )
           )
       ),
       filtered_assignments AS (
@@ -891,21 +901,7 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
 export async function listLearnerCourseAssignments(courseId: string, user: AuthUser) {
   if (!user.tenantId) throw new AppError('Thieu tenant', 400);
   const learnerVisibilityFilter = isLearnerRole(user.role)
-    ? `AND c.visible_to_staff_only = false
-       AND EXISTS (
-         SELECT 1 FROM (
-           SELECT 1
-           FROM team_course_categories tcc
-           JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-           JOIN team_members tm ON tm.team_id = tcc.team_id
-           WHERE ccc.course_id = c.id AND tm.user_id = $2
-           UNION ALL
-           SELECT 1
-           FROM team_courses tc
-           JOIN team_members tm ON tm.team_id = tc.team_id
-           WHERE tc.course_id = c.id AND tm.user_id = $2
-         ) AS access_check
-       )`
+    ? `AND ${learnerCourseAccessCondition('c', '$2')}`
     : '';
 
   const access = await query<{ enrollment_id: string | null }>(
@@ -1066,21 +1062,7 @@ export async function submitAssignment(
        AND ca.deleted_at IS NULL
        AND ca.is_published = true
        AND c.deleted_at IS NULL
-       AND c.visible_to_staff_only = false
-       AND EXISTS (
-         SELECT 1 FROM (
-           SELECT 1
-           FROM team_course_categories tcc
-           JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-           JOIN team_members tm ON tm.team_id = tcc.team_id
-           WHERE ccc.course_id = ca.course_id AND tm.user_id = e.user_id
-           UNION ALL
-           SELECT 1
-           FROM team_courses tc
-           JOIN team_members tm ON tm.team_id = tc.team_id
-           WHERE tc.course_id = ca.course_id AND tm.user_id = e.user_id
-         ) AS access_check
-       )`,
+       AND ${learnerCourseAccessCondition('c', 'e.user_id')}`,
     [assignmentId, user.tenantId, user.id],
   );
   if (access.rowCount === 0) throw new AppError('Assignment khong ton tai hoac khong co quyen', 404);
@@ -1464,21 +1446,7 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
          WHERE c.id = $1::varchar
            AND c.tenant_id = $2::uuid
            AND c.deleted_at IS NULL
-           AND c.visible_to_staff_only = false
-           AND EXISTS (
-             SELECT 1 FROM (
-               SELECT 1
-               FROM team_course_categories tcc
-               JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-               JOIN team_members tm ON tm.team_id = tcc.team_id
-               WHERE ccc.course_id = c.id AND tm.user_id = $3::uuid
-               UNION ALL
-               SELECT 1
-               FROM team_courses tc
-               JOIN team_members tm ON tm.team_id = tc.team_id
-               WHERE tc.course_id = c.id AND tm.user_id = $3::uuid
-             ) AS access_check
-           )
+           AND ${learnerCourseAccessCondition('c', '$3::uuid')}
          LIMIT 1`,
         [file.course_id, user.tenantId, user.id],
       );

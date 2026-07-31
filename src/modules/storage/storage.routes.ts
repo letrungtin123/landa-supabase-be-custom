@@ -58,6 +58,36 @@ function getMimeType(filePath: string): string {
 // Files ≤ 2MB: buffer (nhanh hơn cho ảnh nhỏ, avatars)
 // Files > 2MB: streaming (video, PDF lớn)
 const STREAM_THRESHOLD = 2 * 1024 * 1024;
+const MAX_RANGE_HEADER_LENGTH = 128;
+const MAX_IF_RANGE_HEADER_LENGTH = 256;
+const SINGLE_BYTE_RANGE_RE = /^bytes=(?:\d+-\d*|\d*-\d+)$/;
+
+function normalizeSingleRangeHeader(value: string | undefined): string | null {
+  const range = value?.trim();
+  if (!range || range.length > MAX_RANGE_HEADER_LENGTH) return null;
+  if (!SINGLE_BYTE_RANGE_RE.test(range)) return null;
+  return range;
+}
+
+function normalizeIfRangeHeader(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return null;
+  const ifRange = value?.trim();
+  if (!ifRange || ifRange.length > MAX_IF_RANGE_HEADER_LENGTH) return null;
+  return ifRange;
+}
+
+function rejectInvalidRange(res: Response, contentRange = 'bytes */*'): void {
+  res.status(416);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Content-Range', contentRange);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end();
+}
+
+function forwardOptionalHeader(upstreamRes: globalThis.Response, res: Response, headerName: string): void {
+  const value = upstreamRes.headers.get(headerName.toLowerCase());
+  if (value) res.setHeader(headerName, value);
+}
 
 /**
  * Pipe a web ReadableStream to Express response (Node stream).
@@ -109,12 +139,27 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
     const publicUrl = urlData.publicUrl;
 
-    // ── Range Request (video seek) → forward Range sang Supabase ──
-    const rangeHeader = req.headers.range;
+    // ── Range Request (video seek) -> forward one safe Range to Supabase ──
+    const rawRangeHeader = req.headers.range;
+    const rangeHeader = normalizeSingleRangeHeader(rawRangeHeader);
+    if (rawRangeHeader && !rangeHeader) {
+      rejectInvalidRange(res);
+      return;
+    }
+
     if (rangeHeader && isMedia) {
+      const upstreamHeaders: Record<string, string> = { Range: rangeHeader };
+      const ifRangeHeader = normalizeIfRangeHeader(req.headers['if-range']);
+      if (ifRangeHeader) upstreamHeaders['If-Range'] = ifRangeHeader;
+
       const upstreamRes = await fetch(publicUrl, {
-        headers: { Range: rangeHeader },
+        headers: upstreamHeaders,
       });
+
+      if (upstreamRes.status === 416) {
+        rejectInvalidRange(res, upstreamRes.headers.get('content-range') || 'bytes */*');
+        return;
+      }
 
       if (!upstreamRes.ok && upstreamRes.status !== 206) {
         res.status(upstreamRes.status === 404 ? 404 : 502).json({
@@ -132,8 +177,15 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
       if (contentRange) res.setHeader('Content-Range', contentRange);
       const cl = upstreamRes.headers.get('content-length');
       if (cl) res.setHeader('Content-Length', cl);
+      forwardOptionalHeader(upstreamRes, res, 'ETag');
+      forwardOptionalHeader(upstreamRes, res, 'Last-Modified');
       res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
       res.setHeader('X-Content-Type-Options', 'nosniff');
+
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
 
       // Pipe upstream body → client (streaming, no buffer)
       if (upstreamRes.body) {
@@ -177,6 +229,8 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     if (contentLength) {
       res.setHeader('Content-Length', contentLength);
     }
+    forwardOptionalHeader(upstreamRes, res, 'ETag');
+    forwardOptionalHeader(upstreamRes, res, 'Last-Modified');
 
     // Content-Disposition cho file download
     const forceDownload = req.query.download === '1';
@@ -184,6 +238,11 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
       const filename = storagePath.split('/').pop() || 'file';
       const dispositionType = forceDownload ? 'attachment' : 'inline';
       res.setHeader('Content-Disposition', `${dispositionType}; filename="${encodeURIComponent(filename)}"`);
+    }
+
+    if (req.method === 'HEAD') {
+      res.status(200).end();
+      return;
     }
 
     // Quyết định buffer vs stream dựa trên file size

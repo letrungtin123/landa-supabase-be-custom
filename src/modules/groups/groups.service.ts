@@ -5,6 +5,7 @@
 
 import { query, getClient } from '../../config/database.js';
 import {
+  invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
   invalidateTenantLibraryCaches,
   invalidateUserMembershipCaches,
@@ -508,7 +509,23 @@ export async function assignTeamCourses(teamId: string, courseIds: string[]) {
   const tenantId = await getTeamTenantId(teamId);
   let assigned = 0, skipped = 0;
   for (const cid of courseIds) {
-    const r = await query('INSERT INTO team_courses (team_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
+    const r = await query(
+      `INSERT INTO team_courses (team_id, course_id)
+       SELECT $1, c.id
+       FROM courses c
+       WHERE c.id = $2
+         AND c.deleted_at IS NULL
+         AND COALESCE(c.is_public, false) = false
+         AND c.tenant_id = (
+           SELECT og.tenant_id
+           FROM teams t
+           JOIN sub_groups sg ON sg.id = t.sub_group_id
+           JOIN org_groups og ON og.id = sg.org_group_id
+           WHERE t.id = $1
+         )
+       ON CONFLICT DO NOTHING`,
+      [teamId, cid],
+    );
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
   if (tenantId) await invalidateTenantCourseCaches(tenantId);
@@ -563,7 +580,34 @@ export async function assignTeamCourseCategories(teamId: string, categoryIds: st
     const r = await query('INSERT INTO team_course_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
-  if (tenantId) await invalidateTenantCourseCaches(tenantId);
+  if (tenantId) {
+    const removed = await query<{ course_id: string }>(
+      `DELETE FROM course_category_courses ccc
+       USING course_categories cc, courses c
+       WHERE cc.id = ccc.category_id
+         AND c.id = ccc.course_id
+         AND cc.tenant_id = $1::uuid
+         AND c.tenant_id = $1::uuid
+         AND COALESCE(c.is_public, false) = true
+         AND ccc.category_id = ANY($2::uuid[])
+         AND EXISTS (
+           SELECT 1
+           FROM team_course_categories tcc
+           JOIN teams t ON t.id = tcc.team_id
+           JOIN sub_groups sg ON sg.id = t.sub_group_id
+           JOIN org_groups og ON og.id = sg.org_group_id
+           WHERE tcc.category_id = ccc.category_id
+             AND og.tenant_id = $1::uuid
+         )
+       RETURNING ccc.course_id`,
+      [tenantId, categoryIds],
+    );
+    const publicCourseIds = [...new Set(removed.rows.map((row) => row.course_id))];
+    await Promise.all([
+      invalidateTenantCourseCaches(tenantId),
+      ...publicCourseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
+    ]);
+  }
   return { success: true, assigned, skipped };
 }
 

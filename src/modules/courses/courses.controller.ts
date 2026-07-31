@@ -64,7 +64,9 @@ export async function updateController(req: Request, res: Response, next: NextFu
   try {
     const parsed = updateCourseSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    const course = await svc.updateCourse(req.params.id, parsed.data);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    const course = await svc.updateCourse(req.params.id, tenantId, parsed.data);
     auditFromReq(req, 'UPDATE', 'course', course.id, course.display_name);
     sendSuccess(res, course);
   } catch (err) { next(err); }

@@ -11,6 +11,33 @@ import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
+import { learnerCourseAccessCondition } from '../courses/course-access.js';
+
+async function assertLearnerCourseAccess(
+  courseId: string,
+  userId: string,
+  tenantId: string | null | undefined,
+  role: string,
+  message = 'Bạn không có quyền truy cập khóa học này',
+): Promise<void> {
+  if (!tenantId) throw new AppError('Thiếu tenant', 400);
+
+  const params: unknown[] = [courseId, tenantId];
+  const conditions = ['c.id = $1', 'c.tenant_id = $2', 'c.deleted_at IS NULL'];
+  if (isLearnerRole(role)) {
+    params.push(userId);
+    conditions.push(learnerCourseAccessCondition('c', `$${params.length}`));
+  }
+
+  const result = await query<{ id: string }>(
+    `SELECT c.id
+     FROM courses c
+     WHERE ${conditions.join(' AND ')}
+     LIMIT 1`,
+    params,
+  );
+  if (result.rowCount === 0) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
+}
 
 // ── Courses ──
 
@@ -52,21 +79,8 @@ async function getMyVisibleCoursesFromDb(
   // Path: team_members → team_course_categories → course_category_courses
   // Fallback: team_courses (direct assignment, backward compat)
   if (isLearnerRole(role)) {
-    // Learner không thấy courses bị ẩn (visible_to_staff_only = true)
-    where += ' AND c.visible_to_staff_only = false';
     sqlParams.push(userId);
-    where += ` AND c.id IN (
-      SELECT DISTINCT ccc.course_id
-      FROM team_course_categories tcc
-      JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-      JOIN team_members tm ON tm.team_id = tcc.team_id
-      WHERE tm.user_id = $${sqlParams.length}
-      UNION
-      SELECT DISTINCT tc.course_id
-      FROM team_courses tc
-      JOIN team_members tm ON tm.team_id = tc.team_id
-      WHERE tm.user_id = $${sqlParams.length}
-    )`;
+    where += ` AND ${learnerCourseAccessCondition('c', `$${sqlParams.length}`)}`;
   }
 
   // Filter theo category_id
@@ -83,7 +97,7 @@ async function getMyVisibleCoursesFromDb(
   sqlParams.push(page_size, offset);
   const result = await query<any>(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, c.created_at,
+            c.visible_to_staff_only, COALESCE(c.is_public, false) AS is_public, c.created_at,
             COUNT(*) OVER() AS full_count
      FROM courses c
      ${where}
@@ -164,7 +178,7 @@ async function getCourseDetailFromDb(
 ) {
   const result = await query<any>(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, c.created_at,
+            c.visible_to_staff_only, COALESCE(c.is_public, false) AS is_public, c.created_at,
             mentor.id AS mentor_id,
             mentor.full_name AS mentor_full_name,
             mentor.email AS mentor_email,
@@ -184,31 +198,8 @@ async function getCourseDetailFromDb(
 
   if (result.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
 
-  const course = result.rows[0];
-
-  // Learner không được xem course bị ẩn (visible_to_staff_only)
-  if (isLearnerRole(role) && course.visible_to_staff_only) {
-    throw new AppError('Khóa học không tồn tại', 404);
-  }
-
-  // learner: kiểm tra quyền truy cập qua team → category → course
   if (isLearnerRole(role)) {
-    const access = await query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM (
-        SELECT 1 FROM team_course_categories tcc
-        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-        JOIN team_members tm ON tm.team_id = tcc.team_id
-        WHERE ccc.course_id = $1 AND tm.user_id = $2
-        UNION ALL
-        SELECT 1 FROM team_courses tc
-        JOIN team_members tm ON tm.team_id = tc.team_id
-        WHERE tc.course_id = $1 AND tm.user_id = $2
-      ) AS access_check`,
-      [courseId, userId],
-    );
-    if (parseInt(access.rows[0].count) === 0) {
-      throw new AppError('Bạn không có quyền truy cập khóa học này', 403);
-    }
+    await assertLearnerCourseAccess(courseId, userId, tenantId, role);
   }
 
   const {
@@ -276,7 +267,7 @@ export async function getCourseBlocks(
   return cacheJson(
     cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe }),
     CACHE_TTL.courseBlocks,
-    () => getCourseBlocksFromDb(courseId, userId, role, isDemoIframe),
+    () => getCourseBlocksFromDb(courseId, userId, role, tenantId, isDemoIframe),
   );
 }
 
@@ -284,13 +275,10 @@ async function getCourseBlocksFromDb(
   courseId: string,
   userId: string,
   role = 'learner',
+  tenantId?: string | null,
   isDemoIframe = false,
 ) {
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
-    [courseId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('KhÃ³a há»c khÃ´ng tá»“n táº¡i', 404);
+  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
 
   // Lấy enrollment_id (nếu có) để join block_completions
   const enrollResult = isDemoIframe
@@ -381,16 +369,26 @@ async function getCourseBlocksFromDb(
  * Lấy chi tiết 1 block đơn lẻ.
  * Learner route → LUÔN trả published_data, bất kể role.
  */
-export async function getBlockDetail(blockId: string, role = 'learner') {
+export async function getBlockDetail(
+  blockId: string,
+  userId: string,
+  role = 'learner',
+  tenantId?: string | null,
+) {
   const version = await getCacheVersion(...cacheVersions.blockContent(blockId));
   return cacheJson(
-    cacheKeys.blockResource(blockId, `${version}:${role}`),
+    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}`),
     CACHE_TTL.blockDetail,
-    () => getBlockDetailFromDb(blockId, role),
+    () => getBlockDetailFromDb(blockId, userId, role, tenantId),
   );
 }
 
-async function getBlockDetailFromDb(blockId: string, role = 'learner') {
+async function getBlockDetailFromDb(
+  blockId: string,
+  userId: string,
+  role = 'learner',
+  tenantId?: string | null,
+) {
   // Learner route: luôn chỉ trả published data
   const isLearner = true;
   // Learner: chỉ đọc published data (KHÔNG fallback draft)
@@ -407,7 +405,7 @@ async function getBlockDetailFromDb(blockId: string, role = 'learner') {
        FROM course_blocks parent
        JOIN ancestors a ON parent.id = a.parent_id
      )
-     SELECT b.id, b.parent_id, b.block_type, b.display_name,
+     SELECT b.id, b.course_id, b.parent_id, b.block_type, b.display_name,
             ${dataCol} AS data, ${metaCol} AS metadata,
             b.sort_order, b.is_published
      FROM course_blocks b
@@ -420,6 +418,7 @@ async function getBlockDetailFromDb(blockId: string, role = 'learner') {
   );
 
   if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
+  await assertLearnerCourseAccess(result.rows[0].course_id, userId, tenantId, role);
   return toLearnerBlockRow(result.rows[0]);
 }
 
@@ -485,6 +484,7 @@ export async function submitBlockAnswer(
   blockId: string,
   userId: string,
   role: string,
+  tenantId: string | null | undefined,
   body: any,
 ) {
   // Lấy block data — luôn dùng published data để grading (tránh learner exploit draft)
@@ -514,6 +514,7 @@ export async function submitBlockAnswer(
 
   if (blockResult.rowCount === 0) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
   const block = blockResult.rows[0];
+  await assertLearnerCourseAccess(block.course_id, userId, tenantId, role);
 
   switch (block.block_type) {
     case 'problem':
@@ -831,20 +832,21 @@ function gradeSortable(block: any, userOrder: number[]) {
  * Lấy danh sách file/tài liệu đính kèm của course.
  * Learner chỉ thấy file chưa bị khóa (is_locked = false).
  */
-export async function getCourseFiles(courseId: string, role = 'learner', tenantId?: string | null) {
+export async function getCourseFiles(courseId: string, userId: string, role = 'learner', tenantId?: string | null) {
   const [version, coursesVersion, categoriesVersion] = await Promise.all([
     getCacheVersion(...cacheVersions.courseAssets(courseId)),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
   return cacheJson(
-    cacheKeys.courseResource(courseId, 'files', `${version}:${coursesVersion}:${categoriesVersion}`, { role }),
+    cacheKeys.courseResource(courseId, 'files', `${version}:${coursesVersion}:${categoriesVersion}`, { userId, role }),
     CACHE_TTL.courseFiles,
-    () => getCourseFilesFromDb(courseId, role),
+    () => getCourseFilesFromDb(courseId, userId, role, tenantId),
   );
 }
 
-async function getCourseFilesFromDb(courseId: string, role = 'learner') {
+async function getCourseFilesFromDb(courseId: string, userId: string, role = 'learner', tenantId?: string | null) {
+  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
   const lockedFilter = isLearnerRole(role) ? 'AND is_locked = false' : '';
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
@@ -1100,15 +1102,10 @@ export async function getMyEnrollments(userId: string, tenantId: string) {
  * Learner tự ghi danh vào khóa học.
  * Kiểm tra: course thuộc tenant + learner có quyền truy cập (qua team).
  */
-export async function selfEnroll(userId: string, courseId: string, tenantId: string) {
+export async function selfEnroll(userId: string, courseId: string, tenantId: string, role = 'learner') {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi danh');
 
-  // Kiểm tra course tồn tại trong tenant
-  const course = await query<any>(
-    'SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
-    [courseId, tenantId],
-  );
-  if (course.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
+  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
 
   // Kiểm tra đã enroll chưa
   const existing = await query<any>(
@@ -1330,7 +1327,12 @@ export async function getActiveBadges(tenantId: string) {
 
 async function getActiveBadgesFromDb(tenantId: string) {
   const result = await query<any>(
-    `SELECT b.id, b.name, b.description, b.image_key,
+    `SELECT b.id,
+            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name,
+            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS title,
+            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS description,
+            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS desc,
+            b.image_key,
             tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url
      FROM badge_definitions b
      LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1

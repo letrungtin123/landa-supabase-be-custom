@@ -68,8 +68,9 @@ app.use(cors({
     callback(null, false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id'],
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id', 'Range', 'If-Range'],
+  exposedHeaders: ['Accept-Ranges', 'Content-Range', 'Content-Length', 'Content-Type', 'Content-Disposition', 'ETag', 'Last-Modified', 'Cache-Control'],
 }));
 
 app.use(express.json({ limit: '10mb' }));

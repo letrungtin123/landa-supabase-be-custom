@@ -86,8 +86,8 @@ export async function sendCourseNotification(
   const sendEmail = smtpStatus.can_send_email;
   const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
 
-  const courseCheck = await query<{ visible_to_staff_only: boolean }>(
-    `SELECT visible_to_staff_only
+  const courseCheck = await query<{ visible_to_staff_only: boolean; is_public: boolean }>(
+    `SELECT visible_to_staff_only, COALESCE(is_public, false) AS is_public
      FROM courses
      WHERE id = $1
        AND tenant_id = $2::uuid
@@ -115,43 +115,53 @@ export async function sendCourseNotification(
          $1::uuid,
          $2::varchar,
          'course_manual_notification',
-         jsonb_build_object('send_email', $6::boolean, 'recipient_rule', 'team_course_categories'),
+         jsonb_build_object('send_email', $6::boolean, 'recipient_rule', $7::varchar),
          $3::varchar,
          $4::text,
          $5::uuid,
          0
        )
        RETURNING id`,
-      [tenantId, courseId, title, message, sentBy, sendEmail],
+      [tenantId, courseId, title, message, sentBy, sendEmail, courseCheck.rows[0].is_public ? 'all_active_learners' : 'course_assignments'],
     );
     notificationId = notifResult.rows[0].id;
 
     const insertResult = await client.query(
-      `INSERT INTO notification_recipients (notification_id, user_id)
-       SELECT DISTINCT $1::uuid, u.id
-       FROM courses c
-       JOIN course_category_courses ccc
-         ON ccc.course_id = c.id
-       JOIN team_course_categories tcc
-         ON tcc.category_id = ccc.category_id
-       JOIN teams t
-         ON t.id = tcc.team_id
-       JOIN sub_groups sg
-         ON sg.id = t.sub_group_id
-       JOIN org_groups og
-         ON og.id = sg.org_group_id
-        AND og.tenant_id = c.tenant_id
-       JOIN team_members tm
-         ON tm.team_id = t.id
-       JOIN users u
-         ON u.id = tm.user_id
-        AND u.tenant_id = c.tenant_id
-       WHERE c.id = $2::varchar
-         AND c.tenant_id = $3::uuid
-         AND c.deleted_at IS NULL
-         AND c.visible_to_staff_only = false
-         AND u.role IN ('learner', 'learner_plus')
-         AND u.is_active = true
+      `WITH course_scope AS (
+         SELECT c.id, c.tenant_id, COALESCE(c.is_public, false) AS is_public
+         FROM courses c
+         WHERE c.id = $2::varchar
+           AND c.tenant_id = $3::uuid
+           AND c.deleted_at IS NULL
+           AND c.visible_to_staff_only = false
+       ),
+       eligible_learners AS (
+         SELECT DISTINCT u.id AS user_id
+         FROM users u
+         LEFT JOIN team_members tm ON tm.user_id = u.id
+         CROSS JOIN course_scope cs
+         WHERE u.tenant_id = cs.tenant_id
+           AND u.role IN ('learner', 'learner_plus')
+           AND u.is_active = true
+           AND (
+             cs.is_public = true
+             OR EXISTS (
+               SELECT 1
+               FROM team_courses tc
+               WHERE tc.team_id = tm.team_id
+                 AND tc.course_id = cs.id
+               UNION ALL
+               SELECT 1
+               FROM team_course_categories tcc
+               JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+               WHERE tcc.team_id = tm.team_id
+                 AND ccc.course_id = cs.id
+             )
+           )
+       )
+       INSERT INTO notification_recipients (notification_id, user_id)
+       SELECT $1::uuid, user_id
+       FROM eligible_learners
        ON CONFLICT (notification_id, user_id) DO NOTHING`,
       [notificationId, courseId, tenantId],
     );

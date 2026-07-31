@@ -84,7 +84,26 @@ export async function addCoursesToCategory(catId: string, courseIds: string[]) {
   let skipped = 0;
   for (const courseId of courseIds) {
     const r = await query(
-      'INSERT INTO course_category_courses (category_id, course_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      `INSERT INTO course_category_courses (category_id, course_id)
+       SELECT cc.id, c.id
+       FROM course_categories cc
+       JOIN courses c ON c.id = $2
+        AND c.tenant_id = cc.tenant_id
+        AND c.deleted_at IS NULL
+       WHERE cc.id = $1
+         AND NOT (
+           COALESCE(c.is_public, false) = true
+           AND EXISTS (
+             SELECT 1
+             FROM team_course_categories tcc
+             JOIN teams t ON t.id = tcc.team_id
+             JOIN sub_groups sg ON sg.id = t.sub_group_id
+             JOIN org_groups og ON og.id = sg.org_group_id
+             WHERE tcc.category_id = cc.id
+               AND og.tenant_id = cc.tenant_id
+           )
+         )
+       ON CONFLICT DO NOTHING`,
       [catId, courseId],
     );
     if (r.rowCount! > 0) assigned++; else skipped++;

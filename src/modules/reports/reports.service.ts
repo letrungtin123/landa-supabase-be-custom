@@ -168,17 +168,28 @@ function buildVisibleCourseUsersCte(options: {
   extraFilterSql?: string;
 }): string {
   const { tenantParam, snapshotParam, extraFilterSql = '' } = options;
-  const commonWhere = `
+  const learnerWhere = `
     u.tenant_id = ${tenantParam}
     AND u.is_active = true
     AND u.role IN ('learner', 'learner_plus')
     AND u.created_at <= ${snapshotParam}
-    AND og.tenant_id = ${tenantParam}
-    AND c.tenant_id = ${tenantParam}
+  `;
+  const courseWhere = `
+    c.tenant_id = ${tenantParam}
     AND c.deleted_at IS NULL
     AND c.visible_to_staff_only = false
     AND c.created_at <= ${snapshotParam}
     ${extraFilterSql}
+  `;
+  const assignedWhere = `
+    ${learnerWhere}
+    AND og.tenant_id = ${tenantParam}
+    AND ${courseWhere}
+  `;
+  const publicWhere = `
+    ${learnerWhere}
+    AND ${courseWhere}
+    AND COALESCE(c.is_public, false) = true
   `;
 
   return `
@@ -191,7 +202,7 @@ function buildVisibleCourseUsersCte(options: {
       JOIN org_groups og ON og.id = sg.org_group_id
       JOIN team_courses tc ON tc.team_id = t.id
       JOIN courses c ON c.id = tc.course_id
-      WHERE ${commonWhere}
+      WHERE ${assignedWhere}
 
       UNION
 
@@ -204,7 +215,18 @@ function buildVisibleCourseUsersCte(options: {
       JOIN team_course_categories tcc ON tcc.team_id = t.id
       JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
       JOIN courses c ON c.id = ccc.course_id
-      WHERE ${commonWhere}
+      WHERE ${assignedWhere}
+
+      UNION
+
+      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
+      FROM users u
+      LEFT JOIN team_members tm ON tm.user_id = u.id
+      LEFT JOIN teams t ON t.id = tm.team_id
+      LEFT JOIN sub_groups sg ON sg.id = t.sub_group_id
+      LEFT JOIN org_groups og ON og.id = sg.org_group_id
+      JOIN courses c ON c.tenant_id = ${tenantParam}
+      WHERE ${publicWhere}
     )
   `;
 }

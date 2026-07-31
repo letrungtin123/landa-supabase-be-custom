@@ -202,17 +202,28 @@ function buildVisibleCourseUsersCte(options: {
   extraFilterSql?: string;
 }): string {
   const { tenantParam, snapshotParam, extraFilterSql = '' } = options;
-  const commonWhere = `
+  const learnerWhere = `
     u.tenant_id = ${tenantParam}
     AND u.is_active = true
     AND u.role IN ('learner', 'learner_plus')
     AND u.created_at <= ${snapshotParam}
-    AND og.tenant_id = ${tenantParam}
-    AND c.tenant_id = ${tenantParam}
+  `;
+  const courseWhere = `
+    c.tenant_id = ${tenantParam}
     AND c.deleted_at IS NULL
     AND c.visible_to_staff_only = false
     AND c.created_at <= ${snapshotParam}
     ${extraFilterSql}
+  `;
+  const assignedWhere = `
+    ${learnerWhere}
+    AND og.tenant_id = ${tenantParam}
+    AND ${courseWhere}
+  `;
+  const publicWhere = `
+    ${learnerWhere}
+    AND ${courseWhere}
+    AND COALESCE(c.is_public, false) = true
   `;
 
   return `
@@ -225,7 +236,7 @@ function buildVisibleCourseUsersCte(options: {
       JOIN org_groups og ON og.id = sg.org_group_id
       JOIN team_courses tc ON tc.team_id = t.id
       JOIN courses c ON c.id = tc.course_id
-      WHERE ${commonWhere}
+      WHERE ${assignedWhere}
 
       UNION
 
@@ -238,7 +249,18 @@ function buildVisibleCourseUsersCte(options: {
       JOIN team_course_categories tcc ON tcc.team_id = t.id
       JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
       JOIN courses c ON c.id = ccc.course_id
-      WHERE ${commonWhere}
+      WHERE ${assignedWhere}
+
+      UNION
+
+      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
+      FROM users u
+      LEFT JOIN team_members tm ON tm.user_id = u.id
+      LEFT JOIN teams t ON t.id = tm.team_id
+      LEFT JOIN sub_groups sg ON sg.id = t.sub_group_id
+      LEFT JOIN org_groups og ON og.id = sg.org_group_id
+      JOIN courses c ON c.tenant_id = ${tenantParam}
+      WHERE ${publicWhere}
     )
   `;
 }
@@ -681,18 +703,28 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
         AND u.created_at <= $2
        GROUP BY st.team_id
      ),
-     visible_courses AS (
-       SELECT st.team_id, tc.course_id
-       FROM scoped_teams st
-       JOIN team_courses tc ON tc.team_id = st.team_id
+      visible_courses AS (
+        SELECT st.team_id, tc.course_id
+        FROM scoped_teams st
+        JOIN team_courses tc ON tc.team_id = st.team_id
 
-       UNION
+        UNION
 
-       SELECT st.team_id, ccc.course_id
-       FROM scoped_teams st
-       JOIN team_course_categories tcc ON tcc.team_id = st.team_id
-       JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-     ),
+        SELECT st.team_id, ccc.course_id
+        FROM scoped_teams st
+        JOIN team_course_categories tcc ON tcc.team_id = st.team_id
+        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+
+        UNION
+
+        SELECT st.team_id, c.id AS course_id
+        FROM scoped_teams st
+        JOIN courses c ON c.tenant_id = $1
+         AND c.deleted_at IS NULL
+         AND c.visible_to_staff_only = false
+         AND COALESCE(c.is_public, false) = true
+         AND c.created_at <= $2
+      ),
      status_rows AS (
        SELECT
          st.team_id,
@@ -979,40 +1011,50 @@ async function fetchLearnerSummaryBatch(
        ${scopeFilter}
        GROUP BY tm.user_id
      ),
-     visible_course_users AS (
-       SELECT su.id AS user_id, c.id AS course_id
-       FROM scoped_users su
-       JOIN team_members tm ON tm.user_id = su.id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       JOIN team_courses tc ON tc.team_id = t.id
-       JOIN courses c ON c.id = tc.course_id
-       WHERE og.tenant_id = $1
-         AND c.tenant_id = $1
-         AND c.deleted_at IS NULL
-         AND c.visible_to_staff_only = false
-         AND c.created_at <= $4
-         ${scopeFilter}
+      visible_course_users AS (
+        SELECT su.id AS user_id, c.id AS course_id
+        FROM scoped_users su
+        JOIN team_members tm ON tm.user_id = su.id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        JOIN team_courses tc ON tc.team_id = t.id
+        JOIN courses c ON c.id = tc.course_id
+        WHERE og.tenant_id = $1
+          AND c.tenant_id = $1
+          AND c.deleted_at IS NULL
+          AND c.visible_to_staff_only = false
+          AND c.created_at <= $4
+          ${scopeFilter}
 
-       UNION
+        UNION
 
-       SELECT su.id AS user_id, c.id AS course_id
-       FROM scoped_users su
-       JOIN team_members tm ON tm.user_id = su.id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       JOIN team_course_categories tcc ON tcc.team_id = t.id
-       JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-       JOIN courses c ON c.id = ccc.course_id
-       WHERE og.tenant_id = $1
-         AND c.tenant_id = $1
-         AND c.deleted_at IS NULL
-         AND c.visible_to_staff_only = false
-         AND c.created_at <= $4
-         ${scopeFilter}
-     ),
+        SELECT su.id AS user_id, c.id AS course_id
+        FROM scoped_users su
+        JOIN team_members tm ON tm.user_id = su.id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        JOIN team_course_categories tcc ON tcc.team_id = t.id
+        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
+        JOIN courses c ON c.id = ccc.course_id
+        WHERE og.tenant_id = $1
+          AND c.tenant_id = $1
+          AND c.deleted_at IS NULL
+          AND c.visible_to_staff_only = false
+          AND c.created_at <= $4
+          ${scopeFilter}
+
+        UNION
+
+        SELECT su.id AS user_id, c.id AS course_id
+        FROM scoped_users su
+        JOIN courses c ON c.tenant_id = $1
+        WHERE c.deleted_at IS NULL
+          AND c.visible_to_staff_only = false
+          AND COALESCE(c.is_public, false) = true
+          AND c.created_at <= $4
+      ),
      learner_status AS (
        SELECT
          v.user_id,

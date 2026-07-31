@@ -1,8 +1,54 @@
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFileByUrl, buildStoragePath } from '../../config/storage.js';
+import { AppError } from '../../middleware/error-handler.js';
+
+type TenantBadgeStatusUpdate = {
+  badge_id: string;
+  is_active: boolean;
+  name?: unknown;
+  title?: unknown;
+  description?: unknown;
+  desc?: unknown;
+  name_override?: unknown;
+  description_override?: unknown;
+};
+
+type BadgeDefaults = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+const MAX_BADGE_NAME_LENGTH = 200;
+const MAX_BADGE_DESCRIPTION_LENGTH = 2000;
+
+function hasOwn(input: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(input, key);
+}
+
+function normalizeBadgeTextOverride(
+  rawValue: unknown,
+  defaultValue: string | null | undefined,
+  fieldName: string,
+  maxLength: number,
+): string | null {
+  if (rawValue == null) return null;
+  if (typeof rawValue !== 'string') {
+    throw new AppError(`${fieldName} phai la chuoi`, 400);
+  }
+
+  const value = rawValue.trim();
+  if (!value) return null;
+  if (value.length > maxLength) {
+    throw new AppError(`${fieldName} toi da ${maxLength} ky tu`, 400);
+  }
+
+  const defaultText = (defaultValue || '').trim();
+  return value === defaultText ? null : value;
+}
 
 export async function getTenantBadgeSettings(tenantId: string) {
   const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
@@ -15,7 +61,16 @@ export async function getTenantBadgeSettings(tenantId: string) {
 
 async function getTenantBadgeSettingsFromDb(tenantId: string) {
   const result = await query<any>(
-    `SELECT b.id, b.name, b.description, b.image_key,
+    `SELECT b.id,
+            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name,
+            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS title,
+            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS description,
+            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS desc,
+            b.name AS default_name,
+            b.description AS default_description,
+            tbs.name_override,
+            tbs.description_override,
+            b.image_key,
             tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url,
             COALESCE(tbs.is_active, true) AS is_active
      FROM badge_definitions b
@@ -37,22 +92,83 @@ export async function updateTenantBadgeSetting(tenantId: string, badgeId: string
   await invalidateTenantBadgeCaches(tenantId);
 }
 
-export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatuses: { badge_id: string; is_active: boolean }[]) {
+export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatuses: TenantBadgeStatusUpdate[]) {
   if (badgeStatuses.length === 0) return;
 
-  const values = badgeStatuses.map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3})`).join(', ');
-  const params: unknown[] = [tenantId];
-  for (const status of badgeStatuses) {
-    params.push(status.badge_id, status.is_active);
+  const badgeIds = [...new Set(badgeStatuses.map((status) => status.badge_id).filter(Boolean))];
+  if (badgeIds.length !== badgeStatuses.length) {
+    throw new AppError('Danh sach badge khong hop le', 400);
   }
 
-  await query(
-    `INSERT INTO tenant_badge_settings (tenant_id, badge_id, is_active)
-     VALUES ${values}
-     ON CONFLICT (tenant_id, badge_id)
-     DO UPDATE SET is_active = EXCLUDED.is_active, updated_at = now()`,
-    params
+  const defaultsResult = await query<BadgeDefaults>(
+    `SELECT id, name, description FROM badge_definitions WHERE id = ANY($1::varchar[])`,
+    [badgeIds],
   );
+  const defaultMap = new Map(defaultsResult.rows.map((row) => [row.id, row]));
+  const missingBadgeIds = badgeIds.filter((id) => !defaultMap.has(id));
+  if (missingBadgeIds.length > 0) {
+    throw new AppError(`Badge khong ton tai: ${missingBadgeIds.join(', ')}`, 400);
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    for (const status of badgeStatuses) {
+      if (typeof status.is_active !== 'boolean') {
+        throw new AppError('Trang thai badge khong hop le', 400);
+      }
+
+      const defaults = defaultMap.get(status.badge_id)!;
+      const shouldUpdateName = hasOwn(status, 'name') || hasOwn(status, 'title') || hasOwn(status, 'name_override');
+      const shouldUpdateDescription = hasOwn(status, 'description') || hasOwn(status, 'desc') || hasOwn(status, 'description_override');
+      const nameInput = hasOwn(status, 'name_override')
+        ? status.name_override
+        : hasOwn(status, 'title')
+          ? status.title
+          : status.name;
+      const descriptionInput = hasOwn(status, 'description_override')
+        ? status.description_override
+        : hasOwn(status, 'desc')
+          ? status.desc
+          : status.description;
+
+      const columns = ['tenant_id', 'badge_id', 'is_active'];
+      const placeholders = ['$1', '$2', '$3'];
+      const params: unknown[] = [tenantId, status.badge_id, status.is_active];
+      const updateSets = ['is_active = EXCLUDED.is_active'];
+
+      if (shouldUpdateName) {
+        params.push(normalizeBadgeTextOverride(nameInput, defaults.name, 'Ten badge', MAX_BADGE_NAME_LENGTH));
+        columns.push('name_override');
+        placeholders.push(`$${params.length}`);
+        updateSets.push('name_override = EXCLUDED.name_override');
+      }
+
+      if (shouldUpdateDescription) {
+        params.push(normalizeBadgeTextOverride(descriptionInput, defaults.description, 'Mo ta badge', MAX_BADGE_DESCRIPTION_LENGTH));
+        columns.push('description_override');
+        placeholders.push(`$${params.length}`);
+        updateSets.push('description_override = EXCLUDED.description_override');
+      }
+
+      await client.query(
+        `INSERT INTO tenant_badge_settings (${columns.join(', ')})
+         VALUES (${placeholders.join(', ')})
+         ON CONFLICT (tenant_id, badge_id)
+         DO UPDATE SET ${updateSets.join(', ')}, updated_at = now()`,
+        params,
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
   await invalidateTenantBadgeCaches(tenantId);
 }
 
