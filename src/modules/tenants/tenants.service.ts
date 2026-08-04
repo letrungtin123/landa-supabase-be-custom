@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Tenants Service — CRUD tenants + toggle modules
 // Chỉ superadmin mới gọi được
 // ═══════════════════════════════════════════════════════════════
@@ -194,16 +194,18 @@ async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
  */
 export async function deleteTenant(id: string) {
   const oldDomains = await getTenantPublicDomains(id);
-  await deleteTenantFromDb(id);
+  const deletedTenant = await deleteTenantFromDb(id);
   await Promise.all([
     bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
     invalidatePublicDomainCachesForDomains(oldDomains, TENANT_PUBLIC_CACHE_RESOURCES),
   ]);
+  return deletedTenant;
 }
 
 async function deleteTenantFromDb(id: string) {
-  const result = await query('DELETE FROM tenants WHERE id = $1 RETURNING id', [id]);
+  const result = await query<{ id: string; name: string }>('DELETE FROM tenants WHERE id = $1 RETURNING id, name', [id]);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+  return result.rows[0];
 }
 
 /**

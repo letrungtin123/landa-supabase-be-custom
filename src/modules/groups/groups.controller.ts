@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Groups Controller — All endpoints for 3-level hierarchy
 // ═══════════════════════════════════════════════════════════════
 
@@ -134,7 +134,7 @@ export async function addTeamMembersController(req: Request, res: Response, next
       tenantId,
       actorUserId,
     });
-    auditFromReq(req, 'UPDATE', 'team_member', req.params.teamId, '', `Thêm ${result.added} thành viên`);
+    auditFromReq(req, 'UPDATE', 'team_member', req.params.teamId, result.teamName, `Thêm ${result.added} thành viên`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -149,8 +149,8 @@ export async function groupSmtpStatusController(req: Request, res: Response, nex
 
 export async function removeTeamMemberController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.removeTeamMember(req.params.teamId, req.params.userId);
-    auditFromReq(req, 'DELETE', 'team_member', req.params.teamId);
+    const result = await svc.removeTeamMember(req.params.teamId, req.params.userId);
+    auditFromReq(req, 'DELETE', 'team_member', req.params.teamId, result.teamName, `Xóa thành viên ${result.username}`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -162,15 +162,15 @@ export async function assignTeamCoursesController(req: Request, res: Response, n
     const { course_ids } = req.body;
     if (!Array.isArray(course_ids)) { sendError(res, 'course_ids phải là mảng', 400); return; }
     const result = await svc.assignTeamCourses(req.params.teamId, course_ids);
-    auditFromReq(req, 'UPDATE', 'team_course', req.params.teamId, '', `Gán ${result.assigned} courses`);
+    auditFromReq(req, 'UPDATE', 'team_course', req.params.teamId, result.teamName, `Gán ${result.assigned} courses`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
 
 export async function revokeTeamCourseController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.revokeTeamCourse(req.params.teamId, decodeURIComponent(req.params.courseId));
-    auditFromReq(req, 'DELETE', 'team_course', req.params.teamId);
+    const result = await svc.revokeTeamCourse(req.params.teamId, decodeURIComponent(req.params.courseId));
+    auditFromReq(req, 'DELETE', 'team_course', req.params.teamId, result.teamName, `Gỡ course ${result.courseName}`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -182,13 +182,15 @@ export async function assignTeamDocCategoriesController(req: Request, res: Respo
     const { category_ids } = req.body;
     if (!Array.isArray(category_ids)) { sendError(res, 'category_ids phải là mảng', 400); return; }
     const result = await svc.assignTeamDocCategories(req.params.teamId, category_ids);
+    auditFromReq(req, 'UPDATE', 'team_category', req.params.teamId, result.teamName, `Gán ${result.assigned} danh mục tài liệu`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
 
 export async function revokeTeamDocCategoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.revokeTeamDocCategory(req.params.teamId, req.params.categoryId);
+    const result = await svc.revokeTeamDocCategory(req.params.teamId, req.params.categoryId);
+    auditFromReq(req, 'DELETE', 'team_category', req.params.teamId, result.teamName, `Gỡ danh mục tài liệu ${result.categoryName}`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -200,13 +202,15 @@ export async function assignTeamCourseCategoriesController(req: Request, res: Re
     const { category_ids } = req.body;
     if (!Array.isArray(category_ids)) { sendError(res, 'category_ids phải là mảng', 400); return; }
     const result = await svc.assignTeamCourseCategories(req.params.teamId, category_ids);
+    auditFromReq(req, 'UPDATE', 'team_course_category', req.params.teamId, result.teamName, `Gán ${result.assigned} danh mục khóa học`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
 
 export async function revokeTeamCourseCategoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await svc.revokeTeamCourseCategory(req.params.teamId, req.params.categoryId);
+    const result = await svc.revokeTeamCourseCategory(req.params.teamId, req.params.categoryId);
+    auditFromReq(req, 'DELETE', 'team_course_category', req.params.teamId, result.teamName, `Gỡ danh mục khóa học ${result.categoryName}`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }

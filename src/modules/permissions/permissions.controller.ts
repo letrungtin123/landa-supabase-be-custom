@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Permissions Controller — CRUD groups + ma trận tick
 // ═══════════════════════════════════════════════════════════════
 
@@ -58,8 +58,8 @@ export async function updateController(req: Request, res: Response, next: NextFu
 /** DELETE /api/permission-groups/:id */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await permService.deletePermGroup(req.params.id);
-    auditFromReq(req, 'DELETE', 'permission_group', req.params.id);
+    const group = await permService.deletePermGroup(req.params.id);
+    auditFromReq(req, 'DELETE', 'permission_group', req.params.id, group.name);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
@@ -88,7 +88,7 @@ export async function addMembersController(req: Request, res: Response, next: Ne
 
     const result = await permService.addMembersToGroup(req.params.id, userIds);
     for (const uid of userIds) invalidatePermissionCache(uid);
-    auditFromReq(req, 'UPDATE', 'permission_group_members', req.params.id, undefined, `Thêm ${result.added} thành viên`);
+    auditFromReq(req, 'UPDATE', 'permission_group_members', req.params.id, result.groupName, `Thêm ${result.added} thành viên`);
     sendSuccess(res, result, `Đã thêm ${result.added} thành viên`);
   } catch (err) { next(err); }
 }
@@ -96,9 +96,9 @@ export async function addMembersController(req: Request, res: Response, next: Ne
 /** DELETE /api/permission-groups/:id/members/:userId — Xóa user khỏi group */
 export async function removeMemberController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await permService.removeMemberFromGroup(req.params.id, req.params.userId);
+    const result = await permService.removeMemberFromGroup(req.params.id, req.params.userId);
     invalidatePermissionCache(req.params.userId);
-    auditFromReq(req, 'DELETE', 'permission_group_members', req.params.id, undefined, `Xóa thành viên ${req.params.userId}`);
+    auditFromReq(req, 'DELETE', 'permission_group_members', req.params.id, result.groupName, `Xóa thành viên ${result.username}`);
     sendSuccess(res, null, 'Đã xóa thành viên');
   } catch (err) { next(err); }
 }

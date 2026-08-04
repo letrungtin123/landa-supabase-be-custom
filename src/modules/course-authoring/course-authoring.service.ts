@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Course Authoring Service — Replaces OpenEdX Studio CMS
 // Course content tree stored as JSONB in course_blocks table
 // Structure: course → chapter → sequential → vertical → components
@@ -91,7 +91,7 @@ export interface AssetDeleteResult {
 }
 
 export interface DeleteAssetByStoragePathResult {
-  deletedRows: { storage_path: string }[];
+  deletedRows: { storage_path: string; display_name: string | null }[];
   pendingPublishedReferences: boolean;
   publishedReferenceCount: number;
   storagePathsToDelete: string[];
@@ -1380,12 +1380,12 @@ export async function deleteAssetByStoragePath(
     };
   }
 
-  const result = await query<{ storage_path: string }>(
+  const result = await query<{ storage_path: string; display_name: string | null }>(
     `DELETE FROM course_assets
      WHERE course_id = $1
        AND tenant_id = $2
        AND (storage_path = $3 OR url = $3)
-     RETURNING storage_path`,
+     RETURNING storage_path, display_name`,
     [courseId, tenantId, storagePath],
   );
   if (result.rowCount && result.rowCount > 0) await invalidateCourseReadCaches(courseId, tenantId);

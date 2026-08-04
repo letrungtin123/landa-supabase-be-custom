@@ -1,8 +1,9 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Reports Controller — HTTP handlers for analytics
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
@@ -374,6 +375,7 @@ export async function getUserStudyTime(req: Request, res: Response) {
 /** POST /api/reports/refresh — Manually refresh materialized view */
 export async function refreshSummary(req: Request, res: Response) {
   await svc.refreshReportSummary();
+  auditFromReq(req, 'UPDATE', 'tenant', req.user!.tenantId || undefined, undefined, 'Refresh report summary');
   sendSuccess(res, { message: 'Report summary refreshed' });
 }
 
@@ -507,3 +509,4 @@ export async function getReportTeams(req: Request, res: Response) {
   );
   sendSuccess(res, { teams: result.rows, total: result.rows.length });
 }
+

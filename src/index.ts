@@ -1,4 +1,4 @@
-import app from './app.js';
+﻿import app from './app.js';
 import { env } from './config/env.js';
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
@@ -12,15 +12,33 @@ import { startCourseDeletionWorker } from './modules/course-deletion/course-dele
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import fs from 'fs/promises';
 
+const AUDIT_LOG_RETENTION_DAYS = 30;
+const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
+const AUDIT_LOG_RETENTION_MAX_BATCHES = 5;
+
 /**
- * Xóa audit logs cũ hơn 30 ngày — tránh phình DB.
+ * Xóa audit logs cũ hơn 30 ngày theo batch nhỏ để tránh lock/bloat khi bảng có hàng triệu dòng.
  * Chạy 1 lần khi start + mỗi 24 giờ.
  */
 async function cleanupOldAuditLogs(): Promise<number> {
-  const result = await query(
-    `DELETE FROM audit_logs WHERE created_at < (now() AT TIME ZONE 'Asia/Ho_Chi_Minh' - INTERVAL '30 days')`,
-  );
-  return result.rowCount || 0;
+  let totalDeleted = 0;
+  for (let batch = 0; batch < AUDIT_LOG_RETENTION_MAX_BATCHES; batch += 1) {
+    const result = await query(
+      `DELETE FROM audit_logs
+       WHERE ctid IN (
+         SELECT ctid
+         FROM audit_logs
+         WHERE created_at < now() - ($1::int * interval '1 day')
+         ORDER BY created_at ASC
+         LIMIT $2::int
+       )`,
+      [AUDIT_LOG_RETENTION_DAYS, AUDIT_LOG_RETENTION_BATCH_SIZE],
+    );
+    const deleted = result.rowCount || 0;
+    totalDeleted += deleted;
+    if (deleted < AUDIT_LOG_RETENTION_BATCH_SIZE) break;
+  }
+  return totalDeleted;
 }
 
 /**

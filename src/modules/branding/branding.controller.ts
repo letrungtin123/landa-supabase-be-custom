@@ -1,8 +1,9 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Branding Controller — Express request handlers
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response, NextFunction } from 'express';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import * as brandingService from './branding.service.js';
 import { uploadBrandingSchema, ACCEPTED_MIME_TYPES, MAX_FILE_SIZE } from './branding.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
@@ -78,6 +79,7 @@ export async function uploadController(req: Request, res: Response, next: NextFu
       file.mimetype,
     );
 
+    auditFromReq(req, 'UPDATE', 'branding_image', tenantId, undefined, `Upload ${parsed.data.image_key}: ${result.storage_path}`);
     sendSuccess(res, result, 'Upload thành công');
   } catch (err) { next(err); }
 }
@@ -95,6 +97,9 @@ export async function deleteController(req: Request, res: Response, next: NextFu
     if (!imageKey) { sendError(res, 'imageKey không được để trống', 400); return; }
 
     await brandingService.deleteBrandingImage(tenantId, imageKey);
+    auditFromReq(req, 'DELETE', 'branding_image', tenantId, undefined, `Xóa ảnh branding ${imageKey}`);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
+
+

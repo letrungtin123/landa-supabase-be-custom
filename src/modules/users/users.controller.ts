@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Users Controller — CRUD + assign permission groups
 // ═══════════════════════════════════════════════════════════════
 
@@ -56,7 +56,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
 /** DELETE /api/users/:id — Hard delete user + cascade */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { avatarUrl } = await usersService.hardDeleteUser(
+    const { avatarUrl, deletedUserName } = await usersService.hardDeleteUser(
       req.params.id,
       req.user!.id,
       req.user!.role,
@@ -71,7 +71,7 @@ export async function deleteController(req: Request, res: Response, next: NextFu
     // Invalidate caches
     invalidatePermissionCache(req.params.id);
 
-    auditFromReq(req, 'DELETE', 'user', req.params.id, undefined, 'Hard delete');
+    auditFromReq(req, 'DELETE', 'user', req.params.id, deletedUserName, 'Hard delete');
     sendSuccess(res, null, 'Xóa user thành công');
   } catch (err) { next(err); }
 }
@@ -82,9 +82,10 @@ export async function assignGroupsController(req: Request, res: Response, next: 
     const parsed = assignGroupsSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
+    const user = await usersService.getUserById(req.params.id);
     await usersService.assignPermissionGroups(req.params.id, parsed.data.permission_group_ids);
     invalidatePermissionCache(req.params.id);
-    auditFromReq(req, 'UPDATE', 'user_permission_groups', req.params.id, undefined, 'Gán permission groups');
+    auditFromReq(req, 'UPDATE', 'user_permission_groups', req.params.id, user.username, 'Gán permission groups');
     sendSuccess(res, null, 'Gán nhóm quyền thành công');
   } catch (err) { next(err); }
 }

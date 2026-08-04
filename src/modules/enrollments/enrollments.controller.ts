@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Enrollments Controller — HTTP handlers
 // ═══════════════════════════════════════════════════════════════
 
@@ -7,6 +7,7 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
 import { bulkEnrollSchema } from './enrollments.validator.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+import { auditFromReq } from '../../middleware/audit-log.js';
 
 const VALID_GRANULARITIES = new Set(['day', 'month', 'year']);
 
@@ -22,6 +23,8 @@ export async function enroll(req: Request, res: Response) {
     const parsed = bulkEnrollSchema.safeParse({ user_ids, course_id });
     if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
     const result = await svc.bulkEnroll(parsed.data.user_ids, parsed.data.course_id, tenantId);
+    const courseName = await svc.getCourseAuditName(parsed.data.course_id, tenantId);
+    auditFromReq(req, 'CREATE', 'enrollment', parsed.data.course_id, courseName, `Bulk enroll: ${result.enrolled} learner, skipped ${result.skipped}`);
     return sendSuccess(res, result, undefined, 201);
   }
 
@@ -29,6 +32,8 @@ export async function enroll(req: Request, res: Response) {
   if (!user_id) return sendError(res, 'user_id or user_ids is required', 400);
 
   const result = await svc.enrollUser(user_id, course_id, tenantId);
+  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
+  auditFromReq(req, result.already_enrolled ? 'UPDATE' : 'CREATE', 'enrollment', result.enrollment_id, auditContext.course_name, `Ghi danh ${auditContext.username}`);
   sendSuccess(res, result, undefined, result.already_enrolled ? 200 : 201);
 }
 
@@ -39,6 +44,8 @@ export async function unenroll(req: Request, res: Response) {
 
   const success = await svc.unenrollUser(user_id, course_id);
   if (!success) return sendError(res, 'Enrollment not found', 404);
+  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, req.user!.tenantId!);
+  auditFromReq(req, 'DELETE', 'enrollment', `${user_id}:${course_id}`, auditContext.course_name, `Hủy ghi danh ${auditContext.username}`);
   sendSuccess(res, { success: true });
 }
 
@@ -50,6 +57,8 @@ export async function updateProgress(req: Request, res: Response) {
   }
 
   await svc.updateProgress(user_id, course_id, progress);
+  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, req.user!.tenantId!);
+  auditFromReq(req, 'UPDATE', 'enrollment', `${user_id}:${course_id}`, auditContext.course_name, `Cập nhật tiến độ ${auditContext.username}: ${progress}%`);
   sendSuccess(res, { success: true });
 }
 

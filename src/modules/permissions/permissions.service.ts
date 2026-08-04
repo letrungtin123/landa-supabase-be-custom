@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Permissions Service — CRUD permission groups + ma trận tick
 // Tenant-scoped: mỗi tenant có bộ permission groups riêng
 // ═══════════════════════════════════════════════════════════════
@@ -157,8 +157,9 @@ export async function updatePermGroup(groupId: string, input: UpdatePermGroupInp
  * Xóa permission group.
  */
 export async function deletePermGroup(groupId: string) {
-  const result = await query('DELETE FROM permission_groups WHERE id = $1 RETURNING id', [groupId]);
+  const result = await query<{ id: string; name: string }>('DELETE FROM permission_groups WHERE id = $1 RETURNING id, name', [groupId]);
   if (result.rowCount === 0) throw new AppError('Nhóm quyền không tồn tại', 404);
+  return result.rows[0];
 }
 
 /**
@@ -213,7 +214,7 @@ export async function addMembersToGroup(groupId: string, userIds: string[]) {
   }
 
   // Verify group tồn tại
-  const groupCheck = await query('SELECT id FROM permission_groups WHERE id = $1', [groupId]);
+  const groupCheck = await query<{ id: string; name: string }>('SELECT id, name FROM permission_groups WHERE id = $1', [groupId]);
   if (groupCheck.rowCount === 0) throw new AppError('Nhóm quyền không tồn tại', 404);
 
   const client = await getClient();
@@ -237,7 +238,7 @@ export async function addMembersToGroup(groupId: string, userIds: string[]) {
     }
 
     await client.query('COMMIT');
-    return { added: addedCount, total: userIds.length };
+    return { added: addedCount, total: userIds.length, groupName: groupCheck.rows[0].name };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -252,9 +253,20 @@ export async function addMembersToGroup(groupId: string, userIds: string[]) {
 export async function removeMemberFromGroup(groupId: string, userId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật permission group cho learner demo iframe đang hoạt động');
 
+  const context = await query<{ group_name: string; username: string }>(
+    `SELECT pg.name AS group_name, u.username
+     FROM permission_groups pg
+     JOIN users u ON u.id = $2
+     WHERE pg.id = $1`,
+    [groupId, userId],
+  );
   const result = await query(
     'DELETE FROM user_permission_groups WHERE permission_group_id = $1 AND user_id = $2 RETURNING user_id',
     [groupId, userId],
   );
   if (result.rowCount === 0) throw new AppError('User không thuộc nhóm quyền này', 404);
+  return {
+    groupName: context.rows[0]?.group_name || groupId,
+    username: context.rows[0]?.username || userId,
+  };
 }

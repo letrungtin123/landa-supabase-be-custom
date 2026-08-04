@@ -1,5 +1,6 @@
-import type { Request, Response, NextFunction } from 'express';
+﻿import type { Request, Response, NextFunction } from 'express';
 import { AppError } from '../../middleware/error-handler.js';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as service from './assignments.service.js';
@@ -37,6 +38,7 @@ export async function createAssignment(req: Request, res: Response, next: NextFu
     const parsed = createAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const result = await service.createAssignment(req.params.courseId, tenantId(req), req.user!.id, parsed.data, file(req));
+    auditFromReq(req, 'CREATE', 'assignment', result.id, result.title, `Khóa học ${req.params.courseId}`);
     sendSuccess(res, result, 'Tao assignment thanh cong', 201);
   } catch (err) { next(err); }
 }
@@ -46,13 +48,15 @@ export async function updateAssignment(req: Request, res: Response, next: NextFu
     const parsed = updateAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const result = await service.updateAssignment(req.params.assignmentId, tenantId(req), req.user!.id, parsed.data, file(req));
+    auditFromReq(req, 'UPDATE', 'assignment', result.id, result.title);
     sendSuccess(res, result, 'Cap nhat assignment thanh cong');
   } catch (err) { next(err); }
 }
 
 export async function deleteAssignment(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await service.deleteAssignment(req.params.assignmentId, tenantId(req));
+    const deleted = await service.deleteAssignment(req.params.assignmentId, tenantId(req));
+    auditFromReq(req, 'DELETE', 'assignment', req.params.assignmentId, deleted.title, `Khóa học ${deleted.course_name}`);
     sendSuccess(res, null, 'Xoa assignment thanh cong');
   } catch (err) { next(err); }
 }
@@ -62,6 +66,7 @@ export async function reorderAssignments(req: Request, res: Response, next: Next
     const parsed = reorderAssignmentsSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const result = await service.reorderAssignments(req.params.courseId, tenantId(req), parsed.data.assignment_ids);
+    auditFromReq(req, 'UPDATE', 'assignment', req.params.courseId, result.course_name, `Sắp xếp ${parsed.data.assignment_ids.length} bài tập`);
     sendSuccess(res, result, 'Sap xep assignment thanh cong');
   } catch (err) { next(err); }
 }
@@ -81,6 +86,7 @@ export async function feedbackSubmission(req: Request, res: Response, next: Next
   try {
     const parsed = feedbackAssignmentSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+    const auditContext = await service.getSubmissionAuditContext(req.params.submissionId, tenantId(req));
     const result = await service.feedbackSubmission(
       req.params.submissionId,
       tenantId(req),
@@ -88,6 +94,7 @@ export async function feedbackSubmission(req: Request, res: Response, next: Next
       parsed.data,
       files(req),
     );
+    auditFromReq(req, 'UPDATE', 'assignment_submission', req.params.submissionId, auditContext.assignment_title, `Feedback ${auditContext.learner_name} - ${auditContext.course_name}`);
     sendSuccess(res, result, 'Gui feedback thanh cong');
   } catch (err) { next(err); }
 }

@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Enrollments Service — Quản lý đăng ký khóa học + tiến độ
 // Tối ưu cho hàng triệu users: pagination, indexed queries
 // ═══════════════════════════════════════════════════════════════
@@ -154,6 +154,31 @@ function normalizeStudyTimeOptions(options: StudyTimeSeriesOptions = {}): StudyT
   };
 }
 
+export async function getEnrollmentAuditContext(userId: string, courseId: string, tenantId: string) {
+  const result = await query<{
+    username: string;
+    course_name: string;
+  }>(
+    `SELECT COALESCE(NULLIF(u.full_name, ''), u.username, u.email, u.id::text) AS username,
+            c.display_name AS course_name
+     FROM users u
+     JOIN courses c ON c.id = $2 AND c.tenant_id = $3 AND c.deleted_at IS NULL
+     WHERE u.id = $1 AND u.tenant_id = $3`,
+    [userId, courseId, tenantId],
+  );
+  return {
+    username: result.rows[0]?.username || userId,
+    course_name: result.rows[0]?.course_name || courseId,
+  };
+}
+
+export async function getCourseAuditName(courseId: string, tenantId: string): Promise<string> {
+  const result = await query<{ display_name: string }>(
+    `SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  return result.rows[0]?.display_name || courseId;
+}
 // ── Enroll / Unenroll ──
 
 export async function enrollUser(

@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Audit Log Middleware — Ghi log hành động tự động
 // Chạy async sau khi response đã gửi (không block request)
 // ═══════════════════════════════════════════════════════════════
@@ -45,9 +45,36 @@ const ENTITY_NAME_MAP: Record<string, { table: string; col: string }> = {
   sub_group: { table: 'sub_groups', col: 'name' },
   team: { table: 'teams', col: 'name' },
   module: { table: 'modules', col: 'name' },
-  help_folder: { table: 'help_folders', col: 'name' },
+  help_folder: { table: 'help_folders', col: 'title' },
   help_page: { table: 'help_pages', col: 'title' },
   course_category: { table: 'course_categories', col: 'name' },
+  course_block: { table: 'course_blocks', col: 'display_name' },
+  course_asset: { table: 'course_assets', col: 'display_name' },
+  knowledgebase: { table: 'knowledgebases', col: 'name' },
+  kb_document: { table: 'kb_documents', col: 'name' },
+  chatbot: { table: 'chatbots', col: 'name' },
+  assignment: { table: 'course_assignments', col: 'title' },
+  lesson_author_job: { table: 'courses', col: 'display_name' },
+  user_permission_groups: { table: 'users', col: 'username' },
+  user_tenants: { table: 'users', col: 'username' },
+  tenant_modules: { table: 'tenants', col: 'name' },
+  tenant_role_labels: { table: 'tenants', col: 'name' },
+  tenant_group_labels: { table: 'tenants', col: 'name' },
+  tenant_smtp_config: { table: 'tenants', col: 'name' },
+  sso_config: { table: 'tenants', col: 'name' },
+  branding_image: { table: 'tenants', col: 'name' },
+  dashboard_content: { table: 'tenants', col: 'name' },
+  badge_setting: { table: 'tenants', col: 'name' },
+  permission_matrix: { table: 'permission_groups', col: 'name' },
+  permission_group_members: { table: 'permission_groups', col: 'name' },
+  team_member: { table: 'teams', col: 'name' },
+  team_course: { table: 'teams', col: 'name' },
+  team_category: { table: 'teams', col: 'name' },
+  team_doc_category: { table: 'teams', col: 'name' },
+  team_course_category: { table: 'teams', col: 'name' },
+  course_mentor_section: { table: 'courses', col: 'display_name' },
+  course_modal_config: { table: 'courses', col: 'display_name' },
+  section_modal_config: { table: 'courses', col: 'display_name' },
 };
 
 /**
@@ -114,3 +141,5 @@ export function auditFromReq(req: Request, action: AuditAction, entityType: stri
     ipAddress: getClientIp(req),
   });
 }
+
+

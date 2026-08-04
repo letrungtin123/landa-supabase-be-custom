@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Course Categories Service — CRUD + assign courses to categories
 // ═══════════════════════════════════════════════════════════════
 
@@ -61,9 +61,10 @@ async function updateCourseCategoryFromDb(catId: string, input: { name?: string;
 }
 
 export async function deleteCourseCategory(catId: string) {
-  const result = await query('DELETE FROM course_categories WHERE id = $1 RETURNING id, tenant_id', [catId]);
+  const result = await query<{ id: string; tenant_id: string; name: string }>('DELETE FROM course_categories WHERE id = $1 RETURNING id, tenant_id, name', [catId]);
   if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
   await invalidateTenantCourseCaches(result.rows[0].tenant_id);
+  return result.rows[0];
 }
 
 export async function getCategoryCourses(catId: string) {
@@ -79,7 +80,9 @@ export async function getCategoryCourses(catId: string) {
 }
 
 export async function addCoursesToCategory(catId: string, courseIds: string[]) {
-  const tenantId = await getCategoryTenantId(catId);
+  const category = await query<{ tenant_id: string; name: string }>('SELECT tenant_id, name FROM course_categories WHERE id = $1', [catId]);
+  const tenantId = category.rows[0]?.tenant_id ?? null;
+  const categoryName = category.rows[0]?.name || catId;
   let assigned = 0;
   let skipped = 0;
   for (const courseId of courseIds) {
@@ -114,11 +117,20 @@ export async function addCoursesToCategory(catId: string, courseIds: string[]) {
       ...courseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
     ]);
   }
-  return { assigned, skipped };
+  return { assigned, skipped, categoryName };
 }
 
 export async function removeCourseFromCategory(catId: string, courseId: string) {
-  const tenantId = await getCategoryTenantId(catId);
+  const context = await query<{ tenant_id: string; category_name: string; course_name: string | null }>(
+    `SELECT cc.tenant_id,
+            cc.name AS category_name,
+            c.display_name AS course_name
+     FROM course_categories cc
+     LEFT JOIN courses c ON c.id = $2 AND c.tenant_id = cc.tenant_id
+     WHERE cc.id = $1`,
+    [catId, courseId],
+  );
+  const tenantId = context.rows[0]?.tenant_id ?? null;
   await removeCourseFromCategoryFromDb(catId, courseId);
   if (tenantId) {
     await Promise.all([
@@ -126,6 +138,11 @@ export async function removeCourseFromCategory(catId: string, courseId: string) 
       invalidateCourseReadCaches(courseId, tenantId),
     ]);
   }
+  return {
+    success: true,
+    categoryName: context.rows[0]?.category_name || catId,
+    courseName: context.rows[0]?.course_name || courseId,
+  };
 }
 
 async function removeCourseFromCategoryFromDb(catId: string, courseId: string) {

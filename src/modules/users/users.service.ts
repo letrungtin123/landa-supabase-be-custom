@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Users Service — CRUD users (tenant-scoped)
 // Tối ưu: parameterized queries, index trên tenant_id + role
 // ═══════════════════════════════════════════════════════════════
@@ -257,8 +257,8 @@ export async function hardDeleteUser(
   if (targetId === callerId) throw new AppError('Không thể xóa chính mình', 403);
 
   // Lấy thông tin target user
-  const targetResult = await query<{ id: string; role: string; tenant_id: string | null; avatar_url: string | null }>(
-    'SELECT id, role, tenant_id, avatar_url FROM users WHERE id = $1',
+  const targetResult = await query<{ id: string; username: string; email: string; role: string; tenant_id: string | null; avatar_url: string | null }>(
+    'SELECT id, username, email, role, tenant_id, avatar_url FROM users WHERE id = $1',
     [targetId],
   );
   if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
@@ -295,7 +295,7 @@ export async function hardDeleteUser(
   const result = await query('DELETE FROM users WHERE id = $1 RETURNING id', [targetId]);
   if (result.rowCount === 0) throw new AppError('Xóa user thất bại', 500);
 
-  return { avatarUrl: target.avatar_url };
+  return { avatarUrl: target.avatar_url, deletedUserName: target.username || target.email || target.id };
 }
 
 /**

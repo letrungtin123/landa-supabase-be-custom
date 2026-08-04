@@ -1,4 +1,5 @@
-import type { Request, Response, NextFunction } from 'express';
+﻿import type { Request, Response, NextFunction } from 'express';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import * as badgesService from './badges.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 
@@ -100,6 +101,7 @@ export async function updateTenantBadges(req: Request, res: Response, next: Next
     }
 
     await badgesService.updateAllTenantBadgeSettings(tenantId, badges);
+    auditFromReq(req, 'UPDATE', 'badge_setting', tenantId, undefined, `Cập nhật ${badges.length} danh hiệu`);
     sendSuccess(res, null, 'Cập nhật danh hiệu thành công');
   } catch (err) {
     next(err);
@@ -121,6 +123,7 @@ export async function uploadCardImage(req: Request, res: Response, next: NextFun
     if (!validateBadgeImageFile(file, res)) return;
 
     const result = await badgesService.uploadBadgeCardImage(tenantId, badgeId, file);
+    auditFromReq(req, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh card ${badgeId}`);
     sendSuccess(res, result, 'Upload ảnh card thành công');
   } catch (err) {
     next(err);
@@ -142,6 +145,7 @@ export async function uploadIconImage(req: Request, res: Response, next: NextFun
     if (!validateBadgeImageFile(file, res)) return;
 
     const result = await badgesService.uploadBadgeIconImage(tenantId, badgeId, file);
+    auditFromReq(req, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh icon ${badgeId}`);
     sendSuccess(res, result, 'Upload ảnh icon thành công');
   } catch (err) {
     next(err);
@@ -163,8 +167,10 @@ export async function uploadMobileCardImage(req: Request, res: Response, next: N
     if (!validateBadgeImageFile(file, res)) return;
 
     const result = await badgesService.uploadBadgeMobileCardImage(tenantId, badgeId, file);
+    auditFromReq(req, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh card mobile ${badgeId}`);
     sendSuccess(res, result, 'Upload ảnh card mobile thành công');
   } catch (err) {
     next(err);
   }
 }
+

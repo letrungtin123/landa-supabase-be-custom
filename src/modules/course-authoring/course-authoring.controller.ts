@@ -1,8 +1,9 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Course Authoring Controller
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
@@ -290,6 +291,7 @@ export async function createBlock(req: Request, res: Response) {
     boilerplate,
   );
 
+  auditFromReq(req, 'CREATE', 'course_block', result.id, display_name || resolvedType, `Khóa học ${finalCourseId}`);
   // Return edX-compatible response
   sendSuccess(res, { locator: result.id, courseKey: finalCourseId, ...result }, undefined, 201);
 }
@@ -302,12 +304,14 @@ export async function updateBlock(req: Request, res: Response) {
     // Handle publish action
     if (publish === 'make_public') {
       const result = await svc.publishBlock(req.params.blockId);
+      auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name, 'Publish block');
       return sendSuccess(res, result);
     }
 
     // Handle discard draft (rollback to published version)
     if (publish === 'discard_changes') {
       const result = await svc.discardDraftCascade(req.params.blockId);
+      auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name, 'Discard draft block');
       return sendSuccess(res, result);
     }
 
@@ -315,6 +319,7 @@ export async function updateBlock(req: Request, res: Response) {
     if (Array.isArray(children)) {
       await svc.reorderChildren(req.params.blockId, children);
       const block = await svc.getBlockInfo(req.params.blockId);
+      auditFromReq(req, 'UPDATE', 'course_block', block.id, block.display_name, `Sắp xếp ${children.length} block con`);
       return sendSuccess(res, block);
     }
 
@@ -339,6 +344,7 @@ export async function updateBlock(req: Request, res: Response) {
       data: sanitizedData,
       metadata: sanitizedMetadata,
     });
+    auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name);
     sendSuccess(res, result);
   } catch (err: any) {
     sendError(res, err.message, 404);
@@ -350,7 +356,9 @@ export async function deleteBlock(req: Request, res: Response) {
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) return sendError(res, 'tenant_id is required', 400);
+    const block = await svc.getBlockInfo(req.params.blockId);
     await requestBlockDeletion(req.params.blockId, tenantId, req.user!.id);
+    auditFromReq(req, 'DELETE', 'course_block', block.id, block.display_name, 'Delete requested');
     sendSuccess(res, { success: true });
   } catch (err: any) {
     sendError(res, err.message, 404);
@@ -363,6 +371,8 @@ export async function reorderChildren(req: Request, res: Response) {
   if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
 
   await svc.reorderChildren(req.params.blockId, parsed.data.children);
+  const block = await svc.getBlockInfo(req.params.blockId);
+  auditFromReq(req, 'UPDATE', 'course_block', block.id, block.display_name, `Sắp xếp ${parsed.data.children.length} block con`);
   sendSuccess(res, { success: true });
 }
 
@@ -382,6 +392,8 @@ export async function studioSubmit(req: Request, res: Response) {
       else delete req.body.problem_media;
     }
     const result = await svc.studioSubmit(req.params.blockId, req.body);
+    const block = result?.block;
+    auditFromReq(req, 'UPDATE', 'course_block', req.params.blockId, block?.display_name, 'Studio submit');
     sendSuccess(res, result);
   } catch (err: any) {
     sendError(res, err.message, 400);
@@ -437,6 +449,7 @@ export async function uploadAsset(req: Request, res: Response) {
       file.size, storagePath, storagePath, userId,
     );
 
+    auditFromReq(req, 'CREATE', 'course_asset', asset.id, asset.display_name, `Khóa học ${courseId}`);
     sendSuccess(res, asset, undefined, 201);
   } catch (err) {
     if (storageUploaded && storagePath) {
@@ -456,6 +469,9 @@ export async function deleteAsset(req: Request, res: Response) {
   if (!result) return sendError(res, 'Asset not found', 404);
 
   await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
+  if (result.deleted) {
+    auditFromReq(req, 'DELETE', 'course_asset', assetId, result.asset?.display_name, `Khóa học ${courseId}`);
+  }
 
   sendSuccess(res, {
     success: true,
@@ -481,6 +497,10 @@ export async function deleteAssetByPath(req: Request, res: Response) {
 
   const result = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
   await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
+  if (result.deletedRows.length > 0) {
+    const first = result.deletedRows[0];
+    auditFromReq(req, 'DELETE', 'course_asset', first.storage_path, first.display_name || first.storage_path, `Xóa ${result.deletedRows.length} asset theo path`);
+  }
 
   sendSuccess(res, {
     success: true,
@@ -523,6 +543,7 @@ export async function createCourse(req: Request, res: Response) {
   // Initialize course structure with root block
   await svc.initializeCourseStructure(courseId, safeDisplayName, tenantId);
 
+  auditFromReq(req, 'CREATE', 'course', courseId, safeDisplayName);
   sendSuccess(res, {
     id: courseId,
     display_name: safeDisplayName,
@@ -541,6 +562,7 @@ export async function updateAssetReference(req: Request, res: Response) {
     if (!Array.isArray(assetIds)) return sendError(res, 'assetIds must be an array', 400);
     
     await svc.updateCourseAssetReference(req.params.courseId, assetIds, Boolean(is_reference), tenantId);
+    auditFromReq(req, 'UPDATE', 'course_asset', req.params.courseId, undefined, `Cập nhật reference ${assetIds.length} asset`);
     sendSuccess(res, { success: true });
   } catch (err: any) {
     sendError(res, err.message, 400);

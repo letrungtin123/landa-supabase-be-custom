@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Groups Service — Org → SubGroup → Team hierarchy + assignments
 // Tenant-scoped, optimized for millions of users
 // ═══════════════════════════════════════════════════════════════
@@ -320,6 +320,7 @@ export async function addTeamMembers(
       email_requested: sendEmail,
       email_queued: 0,
       email_skipped_reason: emailSkippedReason,
+      teamName: teamId,
     };
   }
 
@@ -327,6 +328,7 @@ export async function addTeamMembers(
   let notificationId: string | null = null;
   let added = 0;
   let emailQueued = 0;
+  let teamName = teamId;
   try {
     await client.query('BEGIN');
 
@@ -353,6 +355,7 @@ export async function addTeamMembers(
     if (!team) {
       throw new AppError(`${labels.team} không tồn tại hoặc không thuộc tenant hiện tại.`, 404);
     }
+    teamName = team.team_name;
 
     const insertResult = await client.query<{ user_id: string }>(
       `WITH input_users AS (
@@ -487,14 +490,26 @@ export async function addTeamMembers(
     email_requested: sendEmail,
     email_queued: emailQueued,
     email_skipped_reason: emailSkippedReason,
+    teamName,
   };
 }
 
 export async function removeTeamMember(teamId: string, userId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật team membership cho learner demo iframe đang hoạt động');
+  const context = await query<{ team_name: string; username: string }>(
+    `SELECT t.name AS team_name, u.username
+     FROM teams t
+     JOIN users u ON u.id = $2
+     WHERE t.id = $1`,
+    [teamId, userId],
+  );
   const result = await removeTeamMemberFromDb(teamId, userId);
   await invalidateUserMembershipCaches([userId]);
-  return result;
+  return {
+    ...result,
+    teamName: context.rows[0]?.team_name || teamId,
+    username: context.rows[0]?.username || userId,
+  };
 }
 
 async function removeTeamMemberFromDb(teamId: string, userId: string) {
@@ -507,6 +522,8 @@ async function removeTeamMemberFromDb(teamId: string, userId: string) {
 
 export async function assignTeamCourses(teamId: string, courseIds: string[]) {
   const tenantId = await getTeamTenantId(teamId);
+  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
+  const teamName = teamResult.rows[0]?.name || teamId;
   let assigned = 0, skipped = 0;
   for (const cid of courseIds) {
     const r = await query(
@@ -529,14 +546,25 @@ export async function assignTeamCourses(teamId: string, courseIds: string[]) {
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
   if (tenantId) await invalidateTenantCourseCaches(tenantId);
-  return { success: true, assigned, skipped };
+  return { success: true, assigned, skipped, teamName };
 }
 
 export async function revokeTeamCourse(teamId: string, courseId: string) {
   const tenantId = await getTeamTenantId(teamId);
+  const context = await query<{ team_name: string; course_name: string | null }>(
+    `SELECT t.name AS team_name, c.display_name AS course_name
+     FROM teams t
+     LEFT JOIN courses c ON c.id = $2
+     WHERE t.id = $1`,
+    [teamId, courseId],
+  );
   const result = await revokeTeamCourseFromDb(teamId, courseId);
   if (tenantId) await invalidateTenantCourseCaches(tenantId);
-  return result;
+  return {
+    ...result,
+    teamName: context.rows[0]?.team_name || teamId,
+    courseName: context.rows[0]?.course_name || courseId,
+  };
 }
 
 async function revokeTeamCourseFromDb(teamId: string, courseId: string) {
@@ -549,20 +577,33 @@ async function revokeTeamCourseFromDb(teamId: string, courseId: string) {
 
 export async function assignTeamDocCategories(teamId: string, categoryIds: string[]) {
   const tenantId = await getTeamTenantId(teamId);
+  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
+  const teamName = teamResult.rows[0]?.name || teamId;
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
     const r = await query('INSERT INTO team_doc_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
   if (tenantId) await invalidateTenantLibraryCaches(tenantId);
-  return { success: true, assigned, skipped };
+  return { success: true, assigned, skipped, teamName };
 }
 
 export async function revokeTeamDocCategory(teamId: string, categoryId: string) {
   const tenantId = await getTeamTenantId(teamId);
+  const context = await query<{ team_name: string; category_name: string | null }>(
+    `SELECT t.name AS team_name, dc.name AS category_name
+     FROM teams t
+     LEFT JOIN document_categories dc ON dc.id = $2
+     WHERE t.id = $1`,
+    [teamId, categoryId],
+  );
   const result = await revokeTeamDocCategoryFromDb(teamId, categoryId);
   if (tenantId) await invalidateTenantLibraryCaches(tenantId);
-  return result;
+  return {
+    ...result,
+    teamName: context.rows[0]?.team_name || teamId,
+    categoryName: context.rows[0]?.category_name || categoryId,
+  };
 }
 
 async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string) {
@@ -575,6 +616,8 @@ async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string) {
 
 export async function assignTeamCourseCategories(teamId: string, categoryIds: string[]) {
   const tenantId = await getTeamTenantId(teamId);
+  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
+  const teamName = teamResult.rows[0]?.name || teamId;
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
     const r = await query('INSERT INTO team_course_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
@@ -608,14 +651,25 @@ export async function assignTeamCourseCategories(teamId: string, categoryIds: st
       ...publicCourseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
     ]);
   }
-  return { success: true, assigned, skipped };
+  return { success: true, assigned, skipped, teamName };
 }
 
 export async function revokeTeamCourseCategory(teamId: string, categoryId: string) {
   const tenantId = await getTeamTenantId(teamId);
+  const context = await query<{ team_name: string; category_name: string | null }>(
+    `SELECT t.name AS team_name, cc.name AS category_name
+     FROM teams t
+     LEFT JOIN course_categories cc ON cc.id = $2
+     WHERE t.id = $1`,
+    [teamId, categoryId],
+  );
   const result = await revokeTeamCourseCategoryFromDb(teamId, categoryId);
   if (tenantId) await invalidateTenantCourseCaches(tenantId);
-  return result;
+  return {
+    ...result,
+    teamName: context.rows[0]?.team_name || teamId,
+    categoryName: context.rows[0]?.category_name || categoryId,
+  };
 }
 
 async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string) {
@@ -633,14 +687,15 @@ export async function getGroupAuditLogs(tenantId: string | null, queryParams: Re
   const conditions: string[] = [];
 
   // Chỉ lấy audit logs liên quan đến groups
-  conditions.push(`a.entity_type IN ('org_group', 'sub_group', 'team', 'team_member', 'team_course', 'team_category')`);
+  conditions.push(`a.entity_type IN ('org_group', 'sub_group', 'team', 'team_member', 'team_course', 'team_category', 'team_course_category')`);
 
   if (tenantId) { params.push(tenantId); conditions.push(`a.tenant_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conditions.push(`(a.entity_name ILIKE $${params.length} OR a.actor_username ILIKE $${params.length})`); }
+  if (search && search.length >= 2) { params.push(`%${search}%`); conditions.push(`(a.entity_name ILIKE $${params.length} OR a.actor_username ILIKE $${params.length})`); }
   const actionFilter = queryParams.action as string;
   if (actionFilter && actionFilter !== 'all') { params.push(actionFilter); conditions.push(`a.action = $${params.length}`); }
   const dateFrom = queryParams.date_from as string;
   if (dateFrom) { params.push(dateFrom); conditions.push(`a.created_at >= $${params.length}::timestamptz`); }
+  else { conditions.push(`a.created_at >= now() - interval '30 days'`); }
   const dateTo = queryParams.date_to as string;
   if (dateTo) { params.push(dateTo); conditions.push(`a.created_at <= $${params.length}::timestamptz`); }
 
@@ -648,7 +703,7 @@ export async function getGroupAuditLogs(tenantId: string | null, queryParams: Re
   const [countR, dataR] = await Promise.all([
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM audit_logs a ${where}`, params),
     query(
-      `SELECT a.* FROM audit_logs a ${where} ORDER BY a.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      `SELECT a.* FROM audit_logs a ${where} ORDER BY a.created_at DESC, a.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, offset],
     ),
   ]);

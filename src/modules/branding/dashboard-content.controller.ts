@@ -1,9 +1,10 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Dashboard Content Controller — Express request handlers
 // CRUD nội dung Hero Card + Tips cho /dashboard FE 5173
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response, NextFunction } from 'express';
+import { auditFromReq } from '../../middleware/audit-log.js';
 import * as service from './dashboard-content.service.js';
 import { upsertDashboardContentSchema } from './dashboard-content.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
@@ -58,6 +59,7 @@ export async function upsertController(req: Request, res: Response, next: NextFu
     }
 
     const result = await service.upsertDashboardContent(tenantId, parsed.data);
+    auditFromReq(req, 'UPDATE', 'dashboard_content', tenantId, undefined, 'Cập nhật nội dung dashboard');
     sendSuccess(res, result, 'Cập nhật thành công');
   } catch (err) { next(err); }
 }

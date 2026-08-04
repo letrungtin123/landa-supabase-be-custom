@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Tenants Controller — CRUD + module toggle handlers
 // ═══════════════════════════════════════════════════════════════
 
@@ -57,9 +57,9 @@ export async function updateController(req: Request, res: Response, next: NextFu
 /** DELETE /api/tenants/:id */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await tenantsService.deleteTenant(req.params.id);
+    const tenant = await tenantsService.deleteTenant(req.params.id);
     invalidateTenantCache(req.params.id);
-    auditFromReq(req, 'DELETE', 'tenant', req.params.id);
+    auditFromReq(req, 'DELETE', 'tenant', req.params.id, tenant.name);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }

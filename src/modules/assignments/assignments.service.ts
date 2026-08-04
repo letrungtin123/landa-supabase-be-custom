@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+﻿import type { PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getClient, query } from '../../config/database.js';
 import {
@@ -637,6 +637,12 @@ export async function deleteAssignment(assignmentId: string, tenantId: string) {
       await recalculateCourseProgressForActiveEnrollments(current.course_id, client);
     }
     await client.query('COMMIT');
+    return {
+      id: current.id,
+      title: current.title,
+      course_id: current.course_id,
+      course_name: current.course_name,
+    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
@@ -646,7 +652,7 @@ export async function deleteAssignment(assignmentId: string, tenantId: string) {
 }
 
 export async function reorderAssignments(courseId: string, tenantId: string, assignmentIds: string[]) {
-  await ensureCourseForAdmin(courseId, tenantId);
+  const course = await ensureCourseForAdmin(courseId, tenantId);
   const existing = await query<{ id: string }>(
     `SELECT id
      FROM course_assignments
@@ -676,7 +682,7 @@ export async function reorderAssignments(courseId: string, tenantId: string, ass
   } finally {
     client.release();
   }
-  return listCourseAssignments(courseId, tenantId);
+  return { ...(await listCourseAssignments(courseId, tenantId)), course_name: course.display_name };
 }
 
 export async function listCourseSubmissions(courseId: string, tenantId: string, queryParams: Record<string, unknown>) {
@@ -1181,6 +1187,27 @@ export async function submitAssignment(
   return getLearnerAssignment(assignmentId, user);
 }
 
+export async function getSubmissionAuditContext(submissionId: string, tenantId: string) {
+  const result = await query<{
+    id: string;
+    assignment_title: string;
+    course_name: string;
+    learner_name: string;
+  }>(
+    `SELECT s.id,
+            ca.title AS assignment_title,
+            c.display_name AS course_name,
+            COALESCE(NULLIF(u.full_name, ''), u.username, u.email, s.learner_id::text) AS learner_name
+     FROM assignment_submissions s
+     JOIN course_assignments ca ON ca.id = s.assignment_id
+     JOIN courses c ON c.id = s.course_id
+     JOIN users u ON u.id = s.learner_id
+     WHERE s.id = $1 AND s.tenant_id = $2`,
+    [submissionId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
+  return result.rows[0];
+}
 export async function feedbackSubmission(
   submissionId: string,
   tenantId: string,
