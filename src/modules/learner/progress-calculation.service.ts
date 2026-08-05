@@ -77,7 +77,6 @@ export async function recalculateEnrollmentProgress(
        FROM course_assignments ca
        WHERE ca.course_id = $2
          AND ca.deleted_at IS NULL
-         AND ca.is_published = true
      ),
      assignment_completed AS (
        SELECT COUNT(DISTINCT ca.id)::int AS completed
@@ -88,7 +87,6 @@ export async function recalculateEnrollmentProgress(
         AND s.status IN ('submitted', 'feedback_given')
        WHERE ca.course_id = $2
          AND ca.deleted_at IS NULL
-         AND ca.is_published = true
      )
      SELECT
        (COUNT(lb.id) + (SELECT total FROM assignment_totals))::text AS total,
@@ -160,7 +158,6 @@ export async function recalculateCourseProgressForActiveEnrollments(
            FROM course_assignments ca
            WHERE ca.course_id = $1
              AND ca.deleted_at IS NULL
-             AND ca.is_published = true
          ) AS total
      ),
      completed_blocks AS (
@@ -178,7 +175,6 @@ export async function recalculateCourseProgressForActiveEnrollments(
          ON ca.id = s.assignment_id
         AND ca.course_id = $1
         AND ca.deleted_at IS NULL
-        AND ca.is_published = true
        WHERE s.status IN ('submitted', 'feedback_given')
        GROUP BY s.enrollment_id
      )

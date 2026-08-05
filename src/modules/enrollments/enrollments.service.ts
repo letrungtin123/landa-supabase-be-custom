@@ -1,14 +1,17 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Enrollments Service — Quản lý đăng ký khóa học + tiến độ
 // Tối ưu cho hàng triệu users: pagination, indexed queries
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
+import { invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
   assertUserNotActiveDemoIframeAccount,
   getActiveDemoIframeUserIds,
 } from '../demo-login/demo-iframe.service.js';
+import { recalculateEnrollmentProgress } from '../learner/progress-calculation.service.js';
+import { scheduleCourseProgressRecalculation } from '../learner/progress-recalculation-job.service.js';
 
 // ── Types ──
 
@@ -190,24 +193,28 @@ export async function enrollUser(
 
   // Guard: course must exist and not be soft-deleted
   const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
-    [courseId],
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
   );
   if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
 
   // Check if already enrolled
-  const existing = await query<{ id: string }>(
-    `SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2`,
-    [userId, courseId],
+  const existing = await query<{ id: string; is_active: boolean }>(
+    `SELECT id, is_active FROM enrollments WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3`,
+    [userId, courseId, tenantId],
   );
 
   if (existing.rowCount && existing.rowCount > 0) {
-    // Re-activate if was inactive
-    await query(
-      `UPDATE enrollments SET is_active = true WHERE id = $1 AND is_active = false`,
-      [existing.rows[0].id],
-    );
-    return { enrollment_id: existing.rows[0].id, already_enrolled: true };
+    const enrollment = existing.rows[0];
+    if (!enrollment.is_active) {
+      await query(
+        `UPDATE enrollments SET is_active = true WHERE id = $1 AND is_active = false`,
+        [enrollment.id],
+      );
+      await recalculateEnrollmentProgress(enrollment.id, courseId);
+      await invalidateUserCourseProgressCache(userId, courseId);
+    }
+    return { enrollment_id: enrollment.id, already_enrolled: true };
   }
 
   // Create enrollment + progress record in transaction
@@ -239,30 +246,64 @@ export async function bulkEnroll(
 
   // Guard: course must exist and not be soft-deleted
   const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
-    [courseId],
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
   );
   if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
 
-  // Batch insert using unnest, skip existing
-  const result = await query<{ id: string }>(
-    `WITH to_enroll AS (
-       INSERT INTO enrollments (user_id, course_id, tenant_id)
-       SELECT uid, $2, $3
+  const result = await query<{ inserted_count: number; reactivated_count: number }>(
+    `WITH requested_users AS (
+       SELECT DISTINCT uid
        FROM unnest($1::uuid[]) AS uid
+     ),
+     reactivated AS (
+       UPDATE enrollments e
+       SET is_active = true
+       FROM requested_users ru
+       WHERE e.user_id = ru.uid
+         AND e.course_id = $2
+         AND e.tenant_id = $3
+         AND e.is_active = false
+       RETURNING e.id
+     ),
+     to_enroll AS (
+       INSERT INTO enrollments (user_id, course_id, tenant_id)
+       SELECT ru.uid, $2, $3
+       FROM requested_users ru
        WHERE NOT EXISTS (
-         SELECT 1 FROM enrollments e WHERE e.user_id = uid AND e.course_id = $2
+         SELECT 1
+         FROM enrollments e
+         WHERE e.user_id = ru.uid
+           AND e.course_id = $2
+           AND e.tenant_id = $3
        )
        RETURNING id
+     ),
+     inserted_progress AS (
+       INSERT INTO course_progress (enrollment_id)
+       SELECT id FROM to_enroll
+       ON CONFLICT (enrollment_id) DO NOTHING
+       RETURNING enrollment_id
      )
-     INSERT INTO course_progress (enrollment_id)
-     SELECT id FROM to_enroll
-     RETURNING id`,
+     SELECT
+       (SELECT COUNT(*)::int FROM to_enroll) AS inserted_count,
+       (SELECT COUNT(*)::int FROM reactivated) AS reactivated_count`,
     [userIds, courseId, tenantId],
   );
 
-  const enrolled = result.rowCount ?? 0;
-  return { enrolled, skipped: userIds.length - enrolled };
+  const inserted = Number(result.rows[0]?.inserted_count ?? 0);
+  const reactivated = Number(result.rows[0]?.reactivated_count ?? 0);
+  if (reactivated > 0) {
+    await scheduleCourseProgressRecalculation({
+      tenantId,
+      courseId,
+      reason: 'enrollment_reactivated',
+    });
+  }
+
+  const uniqueRequested = new Set(userIds).size;
+  const enrolled = inserted + reactivated;
+  return { enrolled, skipped: uniqueRequested - enrolled };
 }
 
 export async function unenrollUser(userId: string, courseId: string): Promise<boolean> {

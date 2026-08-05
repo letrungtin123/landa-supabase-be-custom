@@ -1119,6 +1119,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
     }
     // Re-activate
     await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
+    await recalculateEnrollmentProgress(existing.rows[0].id, courseId);
     await invalidateUserCourseProgressCache(userId, courseId);
     return { enrollment_id: existing.rows[0].id, already_enrolled: false };
   }

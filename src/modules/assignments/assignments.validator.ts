@@ -37,7 +37,6 @@ const submissionUnlockModeSchema = z.enum(['after_content_complete', 'anytime'])
 export const createAssignmentSchema = z.object({
   title: z.string().trim().min(1).max(255),
   question: z.string().trim().min(1).max(20_000),
-  is_published: booleanSchema.optional().default(true),
   allow_resubmission: booleanSchema.optional().default(false),
   deadline_enabled: booleanSchema.optional().default(true),
   deadline_mode: optionalDeadlineModeSchema.default('relative_to_enrollment'),
@@ -65,7 +64,6 @@ export const createAssignmentSchema = z.object({
 export const updateAssignmentSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
   question: z.string().trim().min(1).max(20_000).optional(),
-  is_published: optionalBooleanSchema,
   allow_resubmission: optionalBooleanSchema,
   deadline_enabled: optionalBooleanSchema,
   deadline_mode: optionalDeadlineModeSchema,

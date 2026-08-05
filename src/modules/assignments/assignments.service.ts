@@ -1,4 +1,4 @@
-﻿import type { PoolClient } from 'pg';
+import type { PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getClient, query } from '../../config/database.js';
 import {
@@ -27,9 +27,9 @@ import {
 } from './email-outbox.service.js';
 import {
   getEnrollmentContentCompletion,
-  recalculateCourseProgressForActiveEnrollments,
   recalculateEnrollmentProgress,
 } from '../learner/progress-calculation.service.js';
+import { scheduleCourseProgressRecalculation } from '../learner/progress-recalculation-job.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 import { learnerCourseAccessCondition } from '../courses/course-access.js';
 
@@ -94,9 +94,11 @@ function attachmentStoragePath(value: unknown): string | null {
   return typeof storagePath === 'string' && storagePath ? storagePath : null;
 }
 
-function normalizeAssignmentRow<T extends Record<string, any>>(row: T): T & { attachment_file: AssignmentFileMeta | null } {
+function normalizeAssignmentRow<T extends Record<string, any>>(row: T): Omit<T, 'is_published'> & { attachment_file: AssignmentFileMeta | null } {
+  const rest = { ...row };
+  delete rest.is_published;
   return {
-    ...row,
+    ...rest,
     attachment_file: normalizeAttachmentFile(row.attachment_file),
   };
 }
@@ -322,7 +324,7 @@ export async function listCourseAssignments(courseId: string, tenantId: string) 
   await ensureCourseForAdmin(courseId, tenantId);
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
+            ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
             COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
             ca.deadline_after_days,
             ca.attachment_file,
@@ -374,16 +376,16 @@ export async function createAssignment(
 
     const result = await client.query(
       `INSERT INTO course_assignments (
-         id, tenant_id, course_id, title, question, is_published, allow_resubmission,
+         id, tenant_id, course_id, title, question, allow_resubmission,
          deadline_enabled, deadline_mode, deadline_at, deadline_after_days,
          submission_unlock_mode, grading_enabled, attachment_file, sort_order, created_by
        )
        VALUES (
          $1::uuid, $2::uuid, $3::varchar, $4::varchar, $5::text, $6::boolean, $7::boolean,
-         $8::boolean, $9::varchar, $10::timestamptz, $11::integer,
-         $12::varchar, $13::boolean, $14::jsonb,
+         $8::varchar, $9::timestamptz, $10::integer,
+         $11::varchar, $12::boolean, $13::jsonb,
          COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $2::uuid AND course_id = $3::varchar AND deleted_at IS NULL), 0),
-         $15::uuid
+         $14::uuid
        )
        RETURNING *`,
       [
@@ -392,7 +394,6 @@ export async function createAssignment(
         courseId,
         input.title,
         input.question,
-        input.is_published,
         input.allow_resubmission,
         deadline.deadlineEnabled,
         deadline.deadlineMode,
@@ -406,11 +407,7 @@ export async function createAssignment(
     );
     const assignment = result.rows[0];
 
-    if (assignment.is_published) {
-      await recalculateCourseProgressForActiveEnrollments(courseId, client);
-    }
-
-    if (assignment.is_published && !course.visible_to_staff_only) {
+    if (!course.visible_to_staff_only) {
       const notification = await client.query<{ id: string }>(
         `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
          VALUES ($1::uuid, $2::varchar, $3::varchar, $4::jsonb, $5::varchar, $6::text, $7::uuid, 0)
@@ -497,6 +494,13 @@ export async function createAssignment(
 
     await client.query('COMMIT');
 
+    await scheduleCourseProgressRecalculation({
+      tenantId,
+      courseId,
+      reason: 'assignment_created',
+      assignmentId: assignment.id,
+    });
+
     if (assignmentCreatedEmailJobQueued) {
       wakeEmailOutboxWorker('assignment-created');
     }
@@ -574,7 +578,6 @@ export async function updateAssignment(
 
   if (input.title !== undefined) { sets.push(`title = $${idx++}::varchar`); params.push(input.title); }
   if (input.question !== undefined) { sets.push(`question = $${idx++}::text`); params.push(input.question); }
-  if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}::boolean`); params.push(input.is_published); }
   if (input.allow_resubmission !== undefined) { sets.push(`allow_resubmission = $${idx++}::boolean`); params.push(input.allow_resubmission); }
   if (input.deadline_at !== undefined) {
     sets.push(`deadline_at = $${idx++}::timestamptz`);
@@ -586,8 +589,6 @@ export async function updateAssignment(
     params.push(uploadedAttachment ? JSON.stringify(uploadedAttachment) : null);
   }
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
-
-  const shouldRecalculateCourse = input.is_published !== undefined && input.is_published !== current.is_published;
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -600,9 +601,6 @@ export async function updateAssignment(
        RETURNING *`,
       params,
     );
-    if (shouldRecalculateCourse) {
-      await recalculateCourseProgressForActiveEnrollments(current.course_id, client);
-    }
 
     await client.query('COMMIT');
     if (oldAttachmentPath) {
@@ -627,16 +625,21 @@ export async function deleteAssignment(assignmentId: string, tenantId: string) {
     await client.query('BEGIN');
     const result = await client.query(
       `UPDATE course_assignments
-       SET deleted_at = now(), is_published = false
+       SET deleted_at = now()
        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
        RETURNING id`,
       [assignmentId, tenantId],
     );
     if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
-    if (current.is_published) {
-      await recalculateCourseProgressForActiveEnrollments(current.course_id, client);
-    }
     await client.query('COMMIT');
+
+    await scheduleCourseProgressRecalculation({
+      tenantId,
+      courseId: current.course_id,
+      reason: 'assignment_deleted',
+      assignmentId: current.id,
+    });
+
     return {
       id: current.id,
       title: current.title,
@@ -700,7 +703,6 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
       'ca.tenant_id = $1::uuid',
       'ca.course_id = $2::varchar',
       'ca.deleted_at IS NULL',
-      'ca.is_published = true',
     ];
     const stateConditions: string[] = [];
 
@@ -835,7 +837,7 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
   }
 
   const params: unknown[] = [tenantId, courseId];
-  const conditions = ['s.tenant_id = $1', 's.course_id = $2'];
+  const conditions = ['s.tenant_id = $1', 's.course_id = $2', 'ca.deleted_at IS NULL'];
 
   if (typeof queryParams.assignment_id === 'string' && queryParams.assignment_id) {
     params.push(queryParams.assignment_id);
@@ -862,7 +864,7 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
       `SELECT COUNT(*) AS count
        FROM assignment_submissions s
        JOIN users u ON u.id = s.learner_id
-       JOIN course_assignments ca ON ca.id = s.assignment_id
+       JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
        ${where}`,
       params,
     ),
@@ -881,7 +883,7 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
               $${params.length + 1}::text AS course_name
        FROM assignment_submissions s
        JOIN users u ON u.id = s.learner_id
-       JOIN course_assignments ca ON ca.id = s.assignment_id
+       JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
        LEFT JOIN users fb ON fb.id = s.feedback_by
        ${where}
        ORDER BY s.submitted_at DESC, s.id DESC
@@ -933,7 +935,7 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
   const effectiveDeadlineSql = effectiveDeadlineExpression('ca', 'e');
   const result = await query(
     `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.is_published, ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
+            ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
             COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
             ca.deadline_after_days,
             ${effectiveDeadlineSql} AS effective_deadline_at,
@@ -960,7 +962,6 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
      WHERE ca.course_id = $1
        AND ca.tenant_id = $2
        AND ca.deleted_at IS NULL
-       AND ca.is_published = true
      ORDER BY ca.sort_order ASC, ca.created_at ASC`,
     [courseId, user.tenantId, user.id],
   );
@@ -977,7 +978,6 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
     title: row.title,
     question: row.question,
     sort_order: row.sort_order,
-    is_published: row.is_published,
     allow_resubmission: row.allow_resubmission,
     deadline_enabled: row.deadline_enabled,
     deadline_mode: normalizeDeadlineMode(row.deadline_mode),
@@ -1016,7 +1016,7 @@ export async function getLearnerAssignment(assignmentId: string, user: AuthUser)
   const result = await query<{ course_id: string }>(
     `SELECT course_id
      FROM course_assignments
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND is_published = true`,
+     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
     [assignmentId, user.tenantId],
   );
   if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
@@ -1066,7 +1066,6 @@ export async function submitAssignment(
      WHERE ca.id = $1
        AND ca.tenant_id = $2
        AND ca.deleted_at IS NULL
-       AND ca.is_published = true
        AND c.deleted_at IS NULL
        AND ${learnerCourseAccessCondition('c', 'e.user_id')}`,
     [assignmentId, user.tenantId, user.id],
@@ -1199,7 +1198,7 @@ export async function getSubmissionAuditContext(submissionId: string, tenantId: 
             c.display_name AS course_name,
             COALESCE(NULLIF(u.full_name, ''), u.username, u.email, s.learner_id::text) AS learner_name
      FROM assignment_submissions s
-     JOIN course_assignments ca ON ca.id = s.assignment_id
+     JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
      JOIN courses c ON c.id = s.course_id
      JOIN users u ON u.id = s.learner_id
      WHERE s.id = $1 AND s.tenant_id = $2`,
@@ -1237,7 +1236,7 @@ export async function feedbackSubmission(
             COALESCE(NULLIF(u.full_name, ''), u.username) AS learner_name,
             u.email AS learner_email
      FROM assignment_submissions s
-     JOIN course_assignments ca ON ca.id = s.assignment_id
+     JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
      JOIN courses c ON c.id = s.course_id
      JOIN users u ON u.id = s.learner_id
      WHERE s.id = $1 AND s.tenant_id = $2`,
