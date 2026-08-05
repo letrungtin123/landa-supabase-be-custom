@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Course Authoring Service — Replaces OpenEdX Studio CMS
 // Course content tree stored as JSONB in course_blocks table
 // Structure: course → chapter → sequential → vertical → components
@@ -72,6 +72,17 @@ export interface AssetRecord {
   is_outline_media?: boolean;
   outline_reference_count?: number;
   date_added: string;
+}
+
+export interface CourseAssetsResponse {
+  start: number;
+  end: number;
+  page: number;
+  pageSize: number;
+  totalCount: number | null;
+  assets: AssetRecord[];
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 interface ReferencingBlockRow {
@@ -943,21 +954,68 @@ export async function getCourseAssets(
   page = 0,
   pageSize = 50,
   textSearch = '',
-): Promise<{ start: number; end: number; page: number; pageSize: number; totalCount: number; assets: AssetRecord[] }> {
-  const offset = page * pageSize;
-  const conditions: string[] = [
-    'ca.course_id = $1',
-    'ca.tenant_id = $2',
-    'EXISTS (SELECT 1 FROM courses c WHERE c.id = ca.course_id AND c.deleted_at IS NULL)',
-  ];
+  options: { cursor?: string | null; cursorPagination?: boolean } = {},
+): Promise<CourseAssetsResponse> {
+  const safePage = Math.max(0, page);
+  const safePageSize = Math.max(1, Math.min(pageSize, 100));
+  const courseCheck = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+
+  const conditions: string[] = ['ca.course_id = $1', 'ca.tenant_id = $2'];
   const params: any[] = [courseId, tenantId];
   let paramIdx = 3;
+  const normalizedSearch = textSearch.trim();
 
-  if (textSearch) {
+  if (normalizedSearch) {
     conditions.push(`ca.display_name ILIKE '%' || $${paramIdx++} || '%'`);
-    params.push(textSearch);
+    params.push(normalizedSearch);
   }
 
+  if (options.cursorPagination || options.cursor) {
+    const cursor = decodeAssetCursor(options.cursor);
+    if (cursor) {
+      conditions.push(`(ca.created_at < $${paramIdx} OR (ca.created_at = $${paramIdx} AND ca.id < $${paramIdx + 1}))`);
+      params.push(cursor.created_at, cursor.id);
+      paramIdx += 2;
+    }
+
+    const whereClause = conditions.join(' AND ');
+    params.push(safePageSize + 1);
+    const result = await query<any>(
+      `SELECT ca.id, ca.course_id, ca.display_name, ca.content_type,
+              ca.storage_path,
+              ca.file_size, ca.url, ca.thumbnail_url, ca.is_locked, ca.is_reference,
+              ca.created_at, ca.created_at AS date_added,
+              to_char(ca.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
+       FROM course_assets ca
+       WHERE ${whereClause}
+       ORDER BY ca.created_at DESC, ca.id DESC
+       LIMIT $${paramIdx}`,
+      params,
+    );
+
+    const rows = result.rows;
+    const hasMore = rows.length > safePageSize;
+    if (hasMore) rows.length = safePageSize;
+    const assets = await annotateAssetRowsWithOutlineReferences(courseId, rows);
+    const lastRow = rows[rows.length - 1];
+
+    return {
+      start: 0,
+      end: assets.length,
+      page: safePage,
+      pageSize: safePageSize,
+      totalCount: null,
+      assets,
+      hasMore,
+      nextCursor: hasMore && lastRow ? encodeAssetCursor(lastRow) : null,
+    };
+  }
+
+  const offset = safePage * safePageSize;
   const whereClause = conditions.join(' AND ');
 
   const countResult = await query<{ count: string }>(
@@ -966,20 +1024,81 @@ export async function getCourseAssets(
   );
   const total = parseInt(countResult.rows[0]?.count ?? '0');
 
-  params.push(pageSize, offset);
+  params.push(safePageSize, offset);
   const result = await query<any>(
     `SELECT ca.id, ca.course_id, ca.display_name, ca.content_type,
             ca.storage_path,
             ca.file_size, ca.url, ca.thumbnail_url, ca.is_locked, ca.is_reference,
-            ca.created_at AS date_added
+            ca.created_at, ca.created_at AS date_added,
+              to_char(ca.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
      FROM course_assets ca
      WHERE ${whereClause}
-     ORDER BY ca.created_at DESC
+     ORDER BY ca.created_at DESC, ca.id DESC
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     params,
   );
 
-  const storagePaths = result.rows
+  const assets = await annotateAssetRowsWithOutlineReferences(courseId, result.rows);
+  const hasMore = offset + assets.length < total;
+  const lastRow = result.rows[result.rows.length - 1];
+
+  return {
+    start: offset,
+    end: Math.min(offset + safePageSize, total),
+    page: safePage,
+    pageSize: safePageSize,
+    totalCount: total,
+    assets,
+    hasMore,
+    nextCursor: hasMore && lastRow ? encodeAssetCursor(lastRow) : null,
+  };
+}
+
+function encodeBase64Url(value: string): string {
+  return Buffer.from(value, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+  return Buffer.from(normalized + padding, 'base64').toString('utf8');
+}
+
+function encodeAssetCursor(row: { cursor_created_at?: string; created_at?: string | Date; date_added?: string | Date; id: string }): string {
+  const createdAt = row.cursor_created_at ?? row.created_at ?? row.date_added;
+  return encodeBase64Url(JSON.stringify({
+    created_at: createdAt instanceof Date ? createdAt.toISOString() : String(createdAt),
+    id: row.id,
+  }));
+}
+
+function decodeAssetCursor(cursor?: string | null): { created_at: string; id: string } | null {
+  const value = typeof cursor === 'string' ? cursor.trim() : '';
+  if (!value) return null;
+
+  try {
+    const parsed = JSON.parse(decodeBase64Url(value));
+    if (
+      !parsed ||
+      typeof parsed.created_at !== 'string' ||
+      Number.isNaN(Date.parse(parsed.created_at)) ||
+      typeof parsed.id !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id)
+    ) {
+      throw new Error('invalid cursor payload');
+    }
+    return { created_at: parsed.created_at, id: parsed.id };
+  } catch {
+    throw new AppError('Cursor không hợp lệ', 400);
+  }
+}
+
+async function annotateAssetRowsWithOutlineReferences(courseId: string, rows: any[]): Promise<AssetRecord[]> {
+  const storagePaths = rows
     .map((row) => (typeof row.storage_path === 'string' ? row.storage_path.trim() : ''))
     .filter(isCourseStoragePath);
   const outlineReferenceCountByPath = new Map<string, number>();
@@ -1004,30 +1123,21 @@ export async function getCourseAssets(
     );
 
     for (const row of referenceResult.rows) {
-      outlineReferenceCountByPath.set(row.storage_path, Number(row.reference_count) || 0);
+      if (row.storage_path) outlineReferenceCountByPath.set(row.storage_path, Number(row.reference_count) || 0);
     }
   }
 
-  const assets = result.rows.map((row) => {
+  return rows.map((row) => {
     const storagePath = typeof row.storage_path === 'string' ? row.storage_path : '';
     const outlineReferenceCount = outlineReferenceCountByPath.get(storagePath) ?? 0;
+    const { created_at: _createdAt, cursor_created_at: _cursorCreatedAt, ...assetRow } = row;
     return {
-      ...row,
+      ...assetRow,
       is_outline_media: outlineReferenceCount > 0,
       outline_reference_count: outlineReferenceCount,
     };
   });
-
-  return {
-    start: offset,
-    end: Math.min(offset + pageSize, total),
-    page,
-    pageSize,
-    totalCount: total,
-    assets,
-  };
 }
-
 export async function createAssetRecord(
   courseId: string,
   tenantId: string,

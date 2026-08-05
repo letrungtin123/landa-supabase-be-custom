@@ -118,9 +118,19 @@ export async function updateMentorController(req: Request, res: Response, next: 
         ? rawMentorId.trim() || null
         : undefined;
     if (mentorId === undefined) { sendError(res, 'mentor_id is required', 400); return; }
-    const mentor = await svc.updateCourseMentor(req.params.id, tenantId, mentorId);
-    auditFromReq(req, 'UPDATE', 'course', req.params.id, undefined, mentor ? `Update mentor: ${mentor.id}` : 'Remove mentor');
+    const mentor = await svc.updateCourseMentor(req.params.id, tenantId, mentorId, req.user!.id);
+    auditFromReq(req, 'UPDATE', 'course', req.params.id, undefined, mentor ? `Chỉ định người phụ trách: ${mentor.id}` : 'Gỡ người phụ trách');
     sendSuccess(res, { mentor });
+  } catch (err) { next(err); }
+}
+
+export async function listMentorHistoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
+    const result = await svc.listCourseMentorAssignmentHistory(req.params.id, tenantId, req.query as Record<string, unknown>);
+    sendSuccess(res, result);
   } catch (err) { next(err); }
 }
 

@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
+import { initializeCourseMentorSectionDefaults, recordCourseMentorAssignmentHistory } from '../courses/courses.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
 import { uploadFile, uploadFileFromPath, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
@@ -404,11 +405,19 @@ export async function studioSubmit(req: Request, res: Response) {
 export async function getAssets(req: Request, res: Response) {
   const { courseId } = req.params;
   const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 0;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 50, 100);
-  const textSearch = (req.query.text_search as string) || '';
+  const rawPage = parseInt(req.query.page as string, 10);
+  const rawPageSize = parseInt(req.query.page_size as string, 10);
+  const page = Number.isFinite(rawPage) ? Math.max(0, rawPage) : 0;
+  const pageSize = Number.isFinite(rawPageSize) ? Math.min(Math.max(rawPageSize, 1), 100) : 50;
+  const textSearch = typeof req.query.text_search === 'string' ? req.query.text_search : '';
+  const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : null;
+  const pagination = typeof req.query.pagination === 'string' ? req.query.pagination : '';
+  const cursorPagination = pagination === 'cursor' || req.query.cursor_pagination === '1' || Boolean(cursor);
 
-  const result = await svc.getCourseAssets(courseId, tenantId, page, pageSize, textSearch);
+  const result = await svc.getCourseAssets(courseId, tenantId, page, pageSize, textSearch, {
+    cursor,
+    cursorPagination,
+  });
   sendSuccess(res, result);
 }
 
@@ -539,6 +548,9 @@ export async function createCourse(req: Request, res: Response) {
      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
     [courseId, tenantId, safeDisplayName, safeDescription, safeOrg, start || '2020-01-01', req.user!.id],
   );
+
+  await initializeCourseMentorSectionDefaults(courseId, tenantId, req.user!.id);
+  await recordCourseMentorAssignmentHistory(courseId, tenantId, req.user!.id, req.user!.id, 'assign');
 
   // Initialize course structure with root block
   await svc.initializeCourseStructure(courseId, safeDisplayName, tenantId);

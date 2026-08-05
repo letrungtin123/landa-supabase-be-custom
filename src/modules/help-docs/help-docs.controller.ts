@@ -1,4 +1,4 @@
-﻿import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import * as svc from './help-docs.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
@@ -48,9 +48,11 @@ export async function deleteFolderController(req: Request, res: Response, next: 
 
 export async function reorderFoldersController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const { ordered_ids } = req.body;
     if (!Array.isArray(ordered_ids)) { sendError(res, 'ordered_ids phải là mảng', 400); return; }
-    await svc.reorderFolders(ordered_ids);
+    await svc.reorderFolders(tenantId, ordered_ids);
     auditFromReq(req, 'UPDATE', 'help_folder', undefined, undefined, `Sắp xếp ${ordered_ids.length} folder`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
@@ -100,9 +102,11 @@ export async function deletePageController(req: Request, res: Response, next: Ne
 
 export async function reorderPagesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const { folder_id, ordered_ids } = req.body;
     if (!folder_id || !Array.isArray(ordered_ids)) { sendError(res, 'folder_id và ordered_ids bắt buộc', 400); return; }
-    await svc.reorderPages(folder_id, ordered_ids);
+    await svc.reorderPages(tenantId, folder_id, ordered_ids);
     auditFromReq(req, 'UPDATE', 'help_page', folder_id, undefined, `Sắp xếp ${ordered_ids.length} trang`);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }

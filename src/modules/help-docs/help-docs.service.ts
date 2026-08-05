@@ -152,10 +152,25 @@ export async function deleteFolder(folderId: string, tenantId: string): Promise<
   };
 }
 
-export async function reorderFolders(orderedIds: string[]) {
-  for (let i = 0; i < orderedIds.length; i++) {
-    await query('UPDATE help_folders SET sort_order = $1 WHERE id = $2', [i, orderedIds[i]]);
+export async function reorderFolders(tenantId: string, orderedIds: string[]) {
+  if (orderedIds.length === 0) return { success: true };
+
+  const eligible = await query<{ count: string }>(
+    'SELECT COUNT(*)::int AS count FROM help_folders WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+    [tenantId, orderedIds],
+  );
+  if (Number(eligible.rows[0]?.count || 0) !== orderedIds.length) {
+    throw new AppError('Một hoặc nhiều folder không thuộc tenant hiện tại', 404);
   }
+
+  await query(
+    `UPDATE help_folders hf
+     SET sort_order = (ordered.sort_order - 1)::int, updated_at = NOW()
+     FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id, sort_order)
+     WHERE hf.id = ordered.id
+       AND hf.tenant_id = $1`,
+    [tenantId, orderedIds],
+  );
   return { success: true };
 }
 
@@ -280,9 +295,29 @@ export async function deleteImage(tenantId: string, rawPath: string): Promise<He
   };
 }
 
-export async function reorderPages(folderId: string, orderedIds: string[]) {
-  for (let i = 0; i < orderedIds.length; i++) {
-    await query('UPDATE help_pages SET sort_order = $1 WHERE id = $2 AND folder_id = $3', [i, orderedIds[i], folderId]);
+export async function reorderPages(tenantId: string, folderId: string, orderedIds: string[]) {
+  const folder = await query<{ id: string }>(
+    'SELECT id FROM help_folders WHERE id = $1 AND tenant_id = $2',
+    [folderId, tenantId],
+  );
+  if (folder.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
+  if (orderedIds.length === 0) return { success: true };
+
+  const eligible = await query<{ count: string }>(
+    'SELECT COUNT(*)::int AS count FROM help_pages WHERE folder_id = $1 AND id = ANY($2::uuid[])',
+    [folderId, orderedIds],
+  );
+  if (Number(eligible.rows[0]?.count || 0) !== orderedIds.length) {
+    throw new AppError('Một hoặc nhiều trang không thuộc folder hiện tại', 404);
   }
+
+  await query(
+    `UPDATE help_pages hp
+     SET sort_order = (ordered.sort_order - 1)::int, updated_at = NOW()
+     FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id, sort_order)
+     WHERE hp.id = ordered.id
+       AND hp.folder_id = $1`,
+    [folderId, orderedIds],
+  );
   return { success: true };
 }

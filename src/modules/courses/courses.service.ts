@@ -10,6 +10,7 @@ import {
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import { getTenantRoleLabels, type RoleLabelMap } from '../tenants/tenant-role-labels.service.js';
 import {
   buildCourseMarkdown,
   markdownFilename,
@@ -25,7 +26,24 @@ interface CourseMentor {
   phone: string | null;
   avatar: string | null;
   role: string;
+  role_label: string;
   bio: string | null;
+}
+
+type MentorAssignmentAction = 'assign' | 'remove';
+
+const MENTOR_HISTORY_DEFAULT_PAGE_SIZE = 5;
+const MENTOR_HISTORY_PAGE_SIZES = new Set([5, 10, 15, 20]);
+const MENTOR_HISTORY_MAX_SEARCH_LENGTH = 100;
+
+interface CourseMentorAssignmentHistoryItem {
+  id: string;
+  assigned_by_id: string | null;
+  assigned_by_name: string;
+  assigned_to_id: string | null;
+  assigned_to_name: string | null;
+  action: MentorAssignmentAction;
+  assigned_at: string;
 }
 
 type MentorSectionLogoMode = 'light' | 'dark';
@@ -46,7 +64,12 @@ type CourseUpdateInput = {
   is_public?: boolean;
 };
 
-function mapMentor(row: any): CourseMentor | null {
+function getRoleDisplayLabel(role: string | null | undefined, labels: RoleLabelMap = {}): string {
+  if (!role) return '';
+  return labels[role as keyof RoleLabelMap]?.trim() || role;
+}
+
+function mapMentor(row: any, roleLabels: RoleLabelMap = {}): CourseMentor | null {
   if (!row?.mentor_id) return null;
   return {
     id: row.mentor_id,
@@ -56,6 +79,7 @@ function mapMentor(row: any): CourseMentor | null {
     phone: row.mentor_phone,
     avatar: row.mentor_avatar,
     role: row.mentor_role,
+    role_label: row.mentor_role_label || getRoleDisplayLabel(row.mentor_role, roleLabels),
     bio: row.mentor_bio,
   };
 }
@@ -69,6 +93,90 @@ function mapMentorSection(row: any): CourseMentorSection | null {
     logo_dark: row.logo_dark_path ?? null,
     updated_at: row.updated_at ?? null,
   };
+}
+
+function mapMentorHistory(row: any): CourseMentorAssignmentHistoryItem {
+  return {
+    id: String(row.id),
+    assigned_by_id: row.assigned_by ?? null,
+    assigned_by_name: row.assigned_by_display_name || 'Không xác định',
+    assigned_to_id: row.assigned_to ?? null,
+    assigned_to_name: row.assigned_to_display_name ?? null,
+    action: row.action,
+    assigned_at: row.assigned_at,
+  };
+}
+
+
+function parseMentorHistoryPageSize(value: unknown): number {
+  const parsed = parseInt(String(value ?? MENTOR_HISTORY_DEFAULT_PAGE_SIZE), 10);
+  return MENTOR_HISTORY_PAGE_SIZES.has(parsed) ? parsed : MENTOR_HISTORY_DEFAULT_PAGE_SIZE;
+}
+
+function normalizeMentorHistorySearch(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const search = value.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (search.length < 2) return null;
+  return search.slice(0, MENTOR_HISTORY_MAX_SEARCH_LENGTH);
+}
+
+function escapeSqlLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
+function parseMentorHistoryDateBoundary(value: unknown, mode: 'from' | 'to'): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const raw = value.trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  let date: Date;
+
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const start = new Date(Date.UTC(year, month - 1, day));
+    if (start.getUTCFullYear() !== year || start.getUTCMonth() !== month - 1 || start.getUTCDate() !== day) {
+      throw new AppError(mode === 'from' ? 'date_from khong hop le' : 'date_to khong hop le', 400);
+    }
+    date = mode === 'to' ? new Date(Date.UTC(year, month - 1, day + 1)) : start;
+  } else {
+    date = new Date(raw);
+  }
+
+  if (Number.isNaN(date.getTime())) {
+    throw new AppError(mode === 'from' ? 'date_from khong hop le' : 'date_to khong hop le', 400);
+  }
+  return date.toISOString();
+}
+
+async function selectUserDisplayName(userId: string | null, client?: any): Promise<string | null> {
+  if (!userId) return null;
+  const sql = `SELECT COALESCE(NULLIF(full_name, ''), username, email, 'Không xác định') AS display_name
+               FROM users
+               WHERE id = $1
+               LIMIT 1`;
+  const result = client ? await client.query(sql, [userId]) : await query<{ display_name: string }>(sql, [userId]);
+  return result.rows[0]?.display_name || null;
+}
+
+async function insertMentorAssignmentHistory(
+  courseId: string,
+  tenantId: string,
+  assignedBy: string | null,
+  assignedTo: string | null,
+  action: MentorAssignmentAction,
+  client?: any,
+): Promise<void> {
+  const assignedByName = await selectUserDisplayName(assignedBy, client) || 'Không xác định';
+  const assignedToName = action === 'assign'
+    ? await selectUserDisplayName(assignedTo, client) || 'Không xác định'
+    : null;
+  const sql = `INSERT INTO course_mentor_assignment_history
+                 (tenant_id, course_id, assigned_by, assigned_to, assigned_by_display_name, assigned_to_display_name, action)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)`;
+  const params = [tenantId, courseId, assignedBy, assignedTo, assignedByName, assignedToName, action];
+  if (client) await client.query(sql, params);
+  else await query(sql, params);
 }
 
 async function ensureCourseInTenant(courseId: string, tenantId: string): Promise<void> {
@@ -92,7 +200,7 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
   else if (vis === 'public') conditions.push('c.visible_to_staff_only = false');
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const [countR, dataR] = await Promise.all([
+  const [countR, dataR, roleLabels] = await Promise.all([
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses c ${where}`, params),
     query(
       `SELECT c.*,
@@ -114,10 +222,11 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, offset],
     ),
+    getTenantRoleLabels(tenantId),
   ]);
   const total = parseInt(countR.rows[0].count, 10);
   return {
-    data: dataR.rows.map((row: any) => ({ ...row, mentor: mapMentor(row) })),
+    data: dataR.rows.map((row: any) => ({ ...row, mentor: mapMentor(row, roleLabels) })),
     total,
     page,
     pageSize,
@@ -178,6 +287,8 @@ export async function createCourse(tenantId: string, createdBy: string, input: {
      RETURNING *`,
     [input.id, tenantId, input.display_name, input.description, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
   );
+  await initializeCourseMentorSectionDefaults(result.rows[0].id, tenantId, createdBy);
+  await recordCourseMentorAssignmentHistory(result.rows[0].id, tenantId, createdBy, createdBy, 'assign');
   await Promise.all([
     invalidateTenantCourseCaches(tenantId),
     invalidateCourseReadCaches(result.rows[0].id, tenantId),
@@ -305,7 +416,8 @@ export async function getCourseMentor(courseId: string, tenantId: string): Promi
     [courseId, tenantId],
   );
   if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
-  return mapMentor(result.rows[0]);
+  const roleLabels = await getTenantRoleLabels(tenantId);
+  return mapMentor(result.rows[0], roleLabels);
 }
 
 export async function listMentorCandidates(
@@ -322,7 +434,7 @@ export async function listMentorCandidates(
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
   const params: unknown[] = [tenantId];
-  const conditions = ['u.tenant_id = $1', "u.role = 'staff'", 'u.is_active = true'];
+  const conditions = ['u.tenant_id = $1', "u.role IN ('staff', 'superuser')", 'u.is_active = true'];
 
   if (search) {
     params.push(`%${search.toLowerCase()}%`);
@@ -333,19 +445,25 @@ export async function listMentorCandidates(
     )`);
   }
 
-  const result = await query<any>(
-    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url AS avatar,
-            u.role, u.bio, COUNT(*) OVER() AS full_count
+  const [result, roleLabels] = await Promise.all([
+    query<any>(
+      `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url AS avatar,
+              u.role, u.bio, COUNT(*) OVER() AS full_count
      FROM users u
      WHERE ${conditions.join(' AND ')}
      ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username), u.id
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    [...params, pageSize, offset],
-  );
+      [...params, pageSize, offset],
+    ),
+    getTenantRoleLabels(tenantId),
+  ]);
 
   const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
   return {
-    data: result.rows.map(({ full_count, ...row }: any) => row),
+    data: result.rows.map(({ full_count, ...row }: any) => ({
+      ...row,
+      role_label: getRoleDisplayLabel(row.role, roleLabels),
+    })),
     total,
     page,
     pageSize,
@@ -353,40 +471,174 @@ export async function listMentorCandidates(
   };
 }
 
-export async function updateCourseMentor(courseId: string, tenantId: string, mentorId: string | null): Promise<CourseMentor | null> {
-  if (mentorId === null) {
-    const updateResult = await query(
-      `UPDATE courses
-       SET mentor_id = NULL, updated_at = NOW()
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+export async function updateCourseMentor(
+  courseId: string,
+  tenantId: string,
+  mentorId: string | null,
+  assignedBy: string,
+): Promise<CourseMentor | null> {
+  const client = await getClient();
+  let mentorRow: any = null;
+  let changed = false;
+
+  try {
+    await client.query('BEGIN');
+
+    const courseResult = await client.query<{ mentor_id: string | null }>(
+      `SELECT mentor_id
+       FROM courses
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+       FOR UPDATE`,
       [courseId, tenantId],
     );
-    if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
-    await invalidateCourseReadCaches(courseId, tenantId);
-    return null;
+    if (courseResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+
+    const currentMentorId = courseResult.rows[0].mentor_id ?? null;
+    if (mentorId !== null) {
+      const mentorResult = await client.query<any>(
+        `SELECT id, username, full_name, email, phone, avatar_url AS avatar, role, bio
+         FROM users
+         WHERE id = $1
+           AND tenant_id = $2
+           AND role IN ('staff', 'superuser')
+           AND is_active = true`,
+        [mentorId, tenantId],
+      );
+      if (mentorResult.rowCount === 0) throw new AppError('Người phụ trách không hợp lệ', 400);
+      mentorRow = mentorResult.rows[0];
+    }
+
+    if (currentMentorId !== mentorId) {
+      await client.query(
+        `UPDATE courses
+         SET mentor_id = $3, updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+        [courseId, tenantId, mentorId],
+      );
+      await insertMentorAssignmentHistory(
+        courseId,
+        tenantId,
+        assignedBy,
+        mentorId,
+        mentorId ? 'assign' : 'remove',
+        client,
+      );
+      changed = true;
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
 
-  const mentorResult = await query<CourseMentor>(
-    `SELECT id, username, full_name, email, phone, avatar_url AS avatar, role, bio
-     FROM users
-     WHERE id = $1
-       AND tenant_id = $2
-       AND role = 'staff'
-       AND is_active = true`,
-    [mentorId, tenantId],
-  );
-  if (mentorResult.rowCount === 0) throw new AppError('Mentor khong hop le', 400);
+  if (changed) await invalidateCourseReadCaches(courseId, tenantId);
+  if (!mentorRow) return null;
 
-  const updateResult = await query(
-    `UPDATE courses
-     SET mentor_id = $3, updated_at = NOW()
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId, mentorId],
-  );
-  if (updateResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
-  await invalidateCourseReadCaches(courseId, tenantId);
+  const roleLabels = await getTenantRoleLabels(tenantId);
+  return {
+    ...mentorRow,
+    role_label: getRoleDisplayLabel(mentorRow.role, roleLabels),
+  };
+}
 
-  return mentorResult.rows[0];
+export async function recordCourseMentorAssignmentHistory(
+  courseId: string,
+  tenantId: string,
+  assignedBy: string | null,
+  assignedTo: string | null,
+  action: MentorAssignmentAction,
+): Promise<void> {
+  await insertMentorAssignmentHistory(courseId, tenantId, assignedBy, assignedTo, action);
+}
+
+export async function listCourseMentorAssignmentHistory(
+  courseId: string,
+  tenantId: string,
+  queryParams: Record<string, unknown>,
+) {
+  await ensureCourseInTenant(courseId, tenantId);
+
+  const pageSize = parseMentorHistoryPageSize(queryParams.page_size);
+  const rawPage = parseInt(String(queryParams.page || '1'), 10) || 1;
+  const requestedPage = Math.max(rawPage, 1);
+  const search = normalizeMentorHistorySearch(queryParams.search);
+  const dateFrom = parseMentorHistoryDateBoundary(queryParams.date_from, 'from');
+  const dateTo = parseMentorHistoryDateBoundary(queryParams.date_to, 'to');
+  if (dateFrom && dateTo && new Date(dateFrom).getTime() >= new Date(dateTo).getTime()) {
+    throw new AppError('date_to phai lon hon hoac bang date_from', 400);
+  }
+
+  const params: unknown[] = [tenantId, courseId];
+  const conditions = ['tenant_id = $1', 'course_id = $2'];
+
+  if (dateFrom) {
+    params.push(dateFrom);
+    conditions.push(`assigned_at >= $${params.length}::timestamptz`);
+  }
+
+  if (dateTo) {
+    params.push(dateTo);
+    conditions.push(`assigned_at < $${params.length}::timestamptz`);
+  }
+
+  if (search) {
+    params.push(`%${escapeSqlLikePattern(search)}%`);
+    conditions.push(`lower(COALESCE(assigned_by_display_name, '') || ' ' || COALESCE(assigned_to_display_name, '')) LIKE $${params.length} ESCAPE '\\'`);
+  }
+
+  const where = conditions.join(' AND ');
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) AS count
+     FROM course_mentor_assignment_history
+     WHERE ${where}`,
+    params,
+  );
+  const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
+  const totalPages = calcTotalPages(total, pageSize);
+  const page = totalPages > 0 ? Math.min(requestedPage, totalPages) : 1;
+  const offset = calcOffset(page, pageSize);
+
+  const result = await query<any>(
+    `SELECT id::text, assigned_by, assigned_to, assigned_by_display_name,
+            assigned_to_display_name, action, assigned_at
+     FROM course_mentor_assignment_history
+     WHERE ${where}
+     ORDER BY assigned_at DESC, id DESC
+     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, pageSize, offset],
+  );
+
+  return {
+    data: result.rows.map(mapMentorHistory),
+    total,
+    page,
+    pageSize,
+    totalPages,
+  };
+}
+
+export async function initializeCourseMentorSectionDefaults(
+  courseId: string,
+  tenantId: string,
+  userId: string | null,
+): Promise<CourseMentorSection | null> {
+  const result = await query<any>(
+    `INSERT INTO course_mentor_sections (tenant_id, course_id, logo_light_path, logo_dark_path, updated_by)
+     SELECT t.id,
+            $2,
+            NULLIF(t.settings #>> '{branding,header_logo}', ''),
+            NULLIF(t.settings #>> '{branding,header_logo_dark}', ''),
+            $3
+     FROM tenants t
+     WHERE t.id = $1
+     ON CONFLICT (tenant_id, course_id) DO NOTHING
+     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+    [tenantId, courseId, userId],
+  );
+  return mapMentorSection(result.rows[0]);
 }
 
 export async function getCourseMentorSection(courseId: string, tenantId: string): Promise<CourseMentorSection | null> {

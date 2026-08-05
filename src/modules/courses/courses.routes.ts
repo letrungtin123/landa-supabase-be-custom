@@ -5,7 +5,7 @@ import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import {
   listController, exportMarkdownController, createController, updateController, bulkActionController,
-  getMentorController, listMentorCandidatesController, updateMentorController,
+  getMentorController, listMentorCandidatesController, updateMentorController, listMentorHistoryController,
   getMentorSectionController, updateMentorSectionController,
   uploadMentorSectionLogoController, deleteMentorSectionLogoController,
   getModalConfigController, updateModalConfigController,
@@ -29,6 +29,7 @@ router.post('/bulk', checkPermission('courses', 'can_edit'), bulkActionControlle
 router.get('/:id/mentor', checkPermission('courses', 'can_view'), getMentorController);
 router.patch('/:id/mentor', checkPermission('courses', 'can_edit'), updateMentorController);
 router.get('/:id/mentor-candidates', checkPermission('courses', 'can_edit'), listMentorCandidatesController);
+router.get('/:id/mentor-history', checkPermission('courses', 'can_edit'), listMentorHistoryController);
 router.get('/:id/mentor-section', checkPermission('courses', 'can_view'), getMentorSectionController);
 router.put('/:id/mentor-section', checkPermission('courses', 'can_edit'), updateMentorSectionController);
 router.post('/:id/mentor-section/logo', checkPermission('courses', 'can_edit'), upload.single('file'), uploadMentorSectionLogoController);

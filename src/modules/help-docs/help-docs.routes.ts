@@ -22,17 +22,17 @@ router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superad
 // Folders
 router.get('/folders', checkPermission('help_docs', 'can_view'), listFoldersController);
 router.post('/folders', checkPermission('help_docs', 'can_add'), createFolderController);
+router.patch('/folders/reorder', checkPermission('help_docs', 'can_edit'), reorderFoldersController);
 router.patch('/folders/:id', checkPermission('help_docs', 'can_edit'), updateFolderController);
 router.delete('/folders/:id', checkPermission('help_docs', 'can_delete'), deleteFolderController);
-router.patch('/folders/reorder', checkPermission('help_docs', 'can_edit'), reorderFoldersController);
 
 // Pages
 router.get('/pages', checkPermission('help_docs', 'can_view'), listPagesController);
-router.get('/pages/:id', checkPermission('help_docs', 'can_view'), getPageController);
 router.post('/pages', checkPermission('help_docs', 'can_add'), createPageController);
+router.patch('/pages/reorder', checkPermission('help_docs', 'can_edit'), reorderPagesController);
+router.get('/pages/:id', checkPermission('help_docs', 'can_view'), getPageController);
 router.patch('/pages/:id', checkPermission('help_docs', 'can_edit'), updatePageController);
 router.delete('/pages/:id', checkPermission('help_docs', 'can_delete'), deletePageController);
-router.patch('/pages/reorder', checkPermission('help_docs', 'can_edit'), reorderPagesController);
 
 // Image upload
 router.post('/upload-image', checkPermission('help_docs', 'can_edit'), upload.single('image'), uploadImageController);
