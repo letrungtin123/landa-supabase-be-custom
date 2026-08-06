@@ -1013,6 +1013,27 @@ async function loadConversationContext(conversationId: string, userId: string, t
   };
 }
 
+export async function getConversationVoicePrompt(
+  conversationId: string,
+  userId: string,
+  tenantId: string,
+): Promise<string | null> {
+  const result = await query<{ voice_prompt: string | null }>(
+    `SELECT NULLIF(BTRIM(spt.voice_prompt), '') AS voice_prompt
+     FROM chat_conversations cc
+     JOIN bot_personas bp ON bp.id = cc.persona_id
+     JOIN system_prompt_templates spt ON spt.id = bp.template_id
+     WHERE cc.id = $1
+       AND cc.user_id = $2
+       AND cc.tenant_id = $3`,
+    [conversationId, userId, tenantId],
+  );
+
+  if (!result.rowCount || result.rowCount === 0) {
+    throw new Error('Cuộc hội thoại không tồn tại');
+  }
+  return result.rows[0]?.voice_prompt ?? null;
+}
 async function saveInputFilterRejectedTurn(
   ctx: ConversationContext,
   userContent: string,
@@ -1142,6 +1163,7 @@ export interface ChatStreamOptions {
   mode?: 'chat' | 'draft_lesson' | 'auto';
   outlineMentions?: LessonAuthorOutlineMention[];
   sourceDocuments?: LessonAuthorSourceDocumentInput[];
+  inputMode?: 'text' | 'voice';
 }
 
 export interface LessonAuthorOutlineMention {
@@ -4010,6 +4032,8 @@ export async function sendMessageStream(
     // 1. Load context (CTE: 1 query for conversation + persona + prompt + msg count)
     const ctx = await loadConversationContext(conversationId, userId, tenantId);
     ctxForError = ctx;
+    const inputMode = options.inputMode === 'voice' ? 'voice' : 'text';
+    const isVoiceTurn = inputMode === 'voice';
     logLessonAuthorFlow('stream_context_loaded', {
       conversation_id: conversationId,
       tenant_id: tenantId,
@@ -4019,6 +4043,7 @@ export async function sendMessageStream(
       course_id: ctx.courseId,
       has_bot_kb: Boolean(ctx.botKbId),
       requested_mode: options.mode ?? 'auto',
+      input_mode: inputMode,
       message_chars: trimmed.length,
       message_count_before: ctx.messageCount,
     });
@@ -4126,6 +4151,7 @@ export async function sendMessageStream(
         conversationId,
         trimmed,
         {
+          ...(isVoiceTurn ? { input_mode: 'voice' } : {}),
           ...(outlineMentions.length > 0 ? { outline_mentions: outlineMentions, outline_mentions_source: outlineMentionSource } : {}),
           ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata), source_documents_source: sourceDocumentSource } : {}),
         },
@@ -4281,6 +4307,17 @@ export async function sendMessageStream(
     // 5b. Course context — inject outline + function calling tool
     let enrichedPrompt = ctx.systemPrompt;
     let hasCourseContext = false;
+    if (isVoiceTurn && ctx.target !== LESSON_AUTHOR_TARGET) {
+      enrichedPrompt += [
+        '',
+        '',
+        'VOICE CHAT RESPONSE RULES:',
+        '- User is in voice chat. Reply in Vietnamese with a short, natural spoken answer.',
+        '- Keep the answer to 2-4 concise sentences unless the user explicitly asks for more detail.',
+        '- Do not use markdown tables, code blocks, or long bullet lists in voice chat.',
+        '- If the full answer would be long, give the key point first and ask whether the user wants more detail.',
+      ].join('\n');
+    }
     if (ctx.target === LESSON_AUTHOR_TARGET) {
       enrichedPrompt += [
         '',
@@ -4373,11 +4410,13 @@ export async function sendMessageStream(
             },
           });
 
-          const fnCall = firstResponse.functionCalls?.[0];
+          const fnCallPart = firstResponse.candidates?.[0]?.content?.parts?.find((part: any) => part.functionCall) as any;
+          const fnCall = fnCallPart?.functionCall ?? firstResponse.functionCalls?.[0];
           logChatCourseFlow('function_router_chosen', {
             conversation_id: conversationId,
             function_name: fnCall?.name || 'none',
             args: fnCall?.args || {},
+            has_thought_signature: Boolean(fnCallPart?.thoughtSignature),
           });
 
           if (fnCall?.name === 'get_lesson_content' && fnCall.args?.lesson_id) {
@@ -4400,7 +4439,7 @@ export async function sendMessageStream(
               model: GEMINI_MODEL,
               contents: [
                 ...history,
-                { role: 'model', parts: [{ functionCall: fnCall }] },
+                { role: 'model', parts: [fnCallPart ?? { functionCall: fnCall }] },
                 { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
               ],
               config: { systemInstruction: enrichedPrompt },

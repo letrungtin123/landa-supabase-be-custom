@@ -137,6 +137,9 @@ export const env = {
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
+  GEMINI_TTS_MODEL: process.env.GEMINI_TTS_MODEL?.trim() || 'gemini-2.5-flash-preview-tts',
+  GEMINI_TTS_VOICE: process.env.GEMINI_TTS_VOICE?.trim() || 'Sulafat',
+  GEMINI_TTS_MAX_CHARS: optionalInt('GEMINI_TTS_MAX_CHARS', 4000),
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 
   /** Kiểm tra môi trường production */

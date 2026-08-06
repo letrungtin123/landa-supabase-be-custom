@@ -13,6 +13,7 @@ async function deleteStoragePaths(paths: string[]): Promise<void> {
 export async function listFoldersController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     sendSuccess(res, await svc.listFolders(tenantId));
   } catch (err) { next(err); }
 }
@@ -29,7 +30,9 @@ export async function createFolderController(req: Request, res: Response, next: 
 
 export async function updateFolderController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const folder = await svc.updateFolder(req.params.id, req.body);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const folder = await svc.updateFolder(req.params.id, tenantId, req.body);
     auditFromReq(req, 'UPDATE', 'help_folder', req.params.id, folder.title);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
@@ -61,18 +64,26 @@ export async function reorderFoldersController(req: Request, res: Response, next
 // ═══ Pages ═══
 
 export async function listPagesController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.listPages(req.query.folder_id as string)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.listPages(tenantId, req.query.folder_id as string | undefined));
+  } catch (err) { next(err); }
 }
 
 export async function getPageController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.getPage(req.params.id)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.getPage(req.params.id, tenantId));
+  } catch (err) { next(err); }
 }
 
 export async function createPageController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const result = await svc.createPage(req.body, req.user!.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const result = await svc.createPage(tenantId, req.body, req.user!.id);
     auditFromReq(req, 'CREATE', 'help_page', result.id, result.title);
     sendSuccess(res, result, 'Tạo trang thành công', 201);
   } catch (err) { next(err); }

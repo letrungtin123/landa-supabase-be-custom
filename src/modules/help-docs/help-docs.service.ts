@@ -96,16 +96,13 @@ async function getUnreferencedHelpDocImagePaths(tenantId: string, candidatePaths
 
 // ═══ Folders ═══
 
-export async function listFolders(tenantId: string | null) {
-  const params: unknown[] = [];
-  let where = '';
-  if (tenantId) { params.push(tenantId); where = 'WHERE hf.tenant_id = $1'; }
-
+export async function listFolders(tenantId: string) {
   const result = await query(
     `SELECT hf.*, (SELECT COUNT(*) FROM help_pages hp WHERE hp.folder_id = hf.id) AS page_count
-     FROM help_folders hf ${where}
+     FROM help_folders hf
+     WHERE hf.tenant_id = $1
      ORDER BY hf.sort_order, hf.title`,
-    params,
+    [tenantId],
   );
   return { folders: result.rows, total: result.rowCount || 0 };
 }
@@ -119,14 +116,14 @@ export async function createFolder(tenantId: string, input: { title: string; ico
   return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
 
-export async function updateFolder(folderId: string, input: { title?: string; icon?: string }) {
+export async function updateFolder(folderId: string, tenantId: string, input: { title?: string; icon?: string }) {
   const sets: string[] = ['updated_at = NOW()'];
   const params: unknown[] = [];
   let idx = 1;
   if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); sets.push(`slug = $${idx++}`); params.push(input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }
   if (input.icon !== undefined) { sets.push(`icon = $${idx++}`); params.push(input.icon); }
-  params.push(folderId);
-  const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, title`, params);
+  params.push(folderId, tenantId);
+  const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx} RETURNING id, title`, params);
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
   return result.rows[0];
 }
@@ -176,24 +173,24 @@ export async function reorderFolders(tenantId: string, orderedIds: string[]) {
 
 // ═══ Pages ═══
 
-export async function listPages(folderId?: string) {
-  let where = '';
-  const params: unknown[] = [];
-  if (folderId) { params.push(folderId); where = 'WHERE hp.folder_id = $1'; }
+export async function listPages(tenantId: string, folderId?: string) {
+  const params: unknown[] = [tenantId];
+  const conditions = ['hf.tenant_id = $1'];
+  if (folderId) { params.push(folderId); conditions.push(`hp.folder_id = $${params.length}`); }
 
   const result = await query(
     `SELECT hp.id, hp.folder_id, hf.title AS folder_title, hp.title, hp.slug,
             hp.sort_order, hp.is_published, hp.created_at, hp.updated_at
      FROM help_pages hp
      JOIN help_folders hf ON hf.id = hp.folder_id
-     ${where}
+     WHERE ${conditions.join(' AND ')}
      ORDER BY hp.sort_order, hp.title`,
     params,
   );
   return { pages: result.rows, total: result.rowCount || 0 };
 }
 
-export async function getPage(pageId: string) {
+export async function getPage(pageId: string, tenantId: string) {
   const result = await query(
     `SELECT hp.*, hf.title AS folder_title,
             cu.username AS created_by, uu.username AS updated_by
@@ -201,20 +198,26 @@ export async function getPage(pageId: string) {
      JOIN help_folders hf ON hf.id = hp.folder_id
      LEFT JOIN users cu ON cu.id = hp.created_by
      LEFT JOIN users uu ON uu.id = hp.updated_by
-     WHERE hp.id = $1`,
-    [pageId],
+     WHERE hp.id = $1
+       AND hf.tenant_id = $2`,
+    [pageId, tenantId],
   );
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
   return result.rows[0];
 }
 
-export async function createPage(input: { folder_id: string; title: string; content?: string }, userId: string) {
+export async function createPage(tenantId: string, input: { folder_id: string; title: string; content?: string }, userId: string) {
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const result = await query(
+  const result = await query<{ id: string; slug: string }>(
     `INSERT INTO help_pages (folder_id, title, slug, content, created_by, updated_by)
-     VALUES ($1, $2, $3, $4, $5, $5) RETURNING id, slug`,
-    [input.folder_id, input.title, slug, input.content || '', userId],
+     SELECT hf.id, $3, $4, $5, $6, $6
+     FROM help_folders hf
+     WHERE hf.id = $2
+       AND hf.tenant_id = $1
+     RETURNING id, slug`,
+    [tenantId, input.folder_id, input.title, slug, input.content ?? '', userId],
   );
+  if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
   return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
 

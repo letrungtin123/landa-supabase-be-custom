@@ -14,6 +14,7 @@ export interface PromptTemplate {
   name: string;
   description: string;
   prompt: string;
+  voice_prompt: string | null;
   avatar_url: string | null;
   fullbody_url: string | null;
   is_active: boolean;
@@ -164,13 +165,14 @@ export async function createTemplate(input: CreateTemplateInput, userId: string)
   }
 
   const result = await query<PromptTemplate>(
-    `INSERT INTO system_prompt_templates (name, description, prompt, is_active, sort_order, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO system_prompt_templates (name, description, prompt, voice_prompt, is_active, sort_order, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       input.name,
       input.description || '',
       input.prompt,
+      input.voice_prompt?.trim() || null,
       input.is_lesson_author ? false : (input.is_active || false),
       input.sort_order || 0,
       userId,
@@ -209,6 +211,7 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
   if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
   if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
   if (input.prompt !== undefined) { sets.push(`prompt = $${idx++}`); params.push(input.prompt); }
+  if (input.voice_prompt !== undefined) { sets.push(`voice_prompt = $${idx++}`); params.push(input.voice_prompt?.trim() || null); }
   if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
   if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
   sets.push('updated_at = now()');

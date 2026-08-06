@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Chat Controller — HTTP handlers + SSE streaming
 // Optimized: UUID validation, tenant isolation, cursor pagination
 // ═══════════════════════════════════════════════════════════════
@@ -10,6 +10,7 @@ import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as chatService from './chat.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
+import { generateSpeechForTenant } from './gemini.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -277,6 +278,39 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
+export async function generateSpeech(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { text, conversation_id } = req.body ?? {};
+
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không hỗ trợ giọng bot', 403);
+    return;
+  }
+  if (!text || typeof text !== 'string') {
+    sendError(res, 'text không hợp lệ', 400);
+    return;
+  }
+  if (conversation_id !== undefined && (typeof conversation_id !== 'string' || !UUID_REGEX.test(conversation_id))) {
+    sendError(res, 'conversation_id không hợp lệ', 400);
+    return;
+  }
+
+  try {
+    const voicePrompt = typeof conversation_id === 'string'
+      ? await chatService.getConversationVoicePrompt(conversation_id, userId, tenantId)
+      : null;
+    const speech = await generateSpeechForTenant(tenantId, text, { voicePrompt });
+    res.status(200);
+    res.setHeader('Content-Type', speech.mimeType);
+    res.setHeader('Content-Length', speech.audio.length.toString());
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(speech.audio);
+  } catch (err: any) {
+    sendError(res, err.message || 'Không tạo được giọng bot', 400);
+  }
+}
+
 /**
  * POST /conversations/:id/messages — SSE streaming
  * Sends user message, streams Gemini response as Server-Sent Events.
@@ -290,7 +324,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content, mode, outline_mentions, source_documents } = req.body ?? {};
+  const { content, mode, outline_mentions, source_documents, input_mode } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
   if (isDemoIframeSession(req.user)) {
@@ -304,6 +338,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   if (!content || typeof content !== 'string') {
     sendError(res, 'content không hợp lệ', 400); return;
   }
+  if (input_mode !== undefined && input_mode !== 'text' && input_mode !== 'voice') {
+    sendError(res, 'input_mode không hợp lệ', 400); return;
+  }
+  const inputMode = input_mode === 'voice' ? 'voice' : 'text';
 
   // Set SSE headers
   res.writeHead(200, {
@@ -341,6 +379,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
             : 'chat',
       outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
       sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
+      inputMode,
     },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });
