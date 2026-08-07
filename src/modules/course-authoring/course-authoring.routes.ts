@@ -30,12 +30,31 @@ const upload = multer({
   limits: { fileSize: COURSE_ASSET_MAX_UPLOAD_BYTES },
 });
 
+function isClientUploadAbort(req: Request, err: unknown): boolean {
+  const error = err as { code?: string; message?: string } | undefined;
+  return Boolean(
+    req.aborted ||
+    req.destroyed ||
+    error?.message === 'Request aborted' ||
+    error?.code === 'ECONNRESET' ||
+    error?.code === 'ECONNABORTED'
+  );
+}
+
 function uploadSingleCourseAsset(req: Request, res: Response, next: NextFunction): void {
   upload.single('file')(req, res, (err: unknown) => {
     if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
       sendError(res, `File quá lớn. Giới hạn tối đa ${COURSE_ASSET_MAX_UPLOAD_LABEL}.`, 413);
       return;
     }
+
+    if (err && isClientUploadAbort(req, err)) {
+      if (!res.headersSent && !res.writableEnded && !req.destroyed) {
+        sendError(res, 'Upload đã bị hủy bởi client.', 400);
+      }
+      return;
+    }
+
     next(err);
   });
 }

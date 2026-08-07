@@ -1151,7 +1151,7 @@ export async function createAssetRecord(
   const result = await query<AssetRecord>(
     `INSERT INTO course_assets (course_id, tenant_id, display_name, content_type, file_size, storage_path, url, uploaded_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, course_id, display_name, content_type, file_size, url, thumbnail_url, is_locked, created_at AS date_added`,
+     RETURNING id, course_id, display_name, content_type, file_size, storage_path, url, thumbnail_url, is_locked, created_at AS date_added`,
     [courseId, tenantId, displayName, contentType, fileSize, storagePath, url, uploadedBy],
   );
   await invalidateCourseReadCaches(courseId, tenantId);

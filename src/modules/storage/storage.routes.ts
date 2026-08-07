@@ -3,8 +3,8 @@
 // FE chỉ thấy URL dạng: BE_DOMAIN/api/storage/{path}
 // Không lộ Supabase URL khi inspect
 //
-// Video/Large files: Dùng fetch() + pipe stream thay vì buffer
-// toàn bộ file trong RAM. Hỗ trợ Range Request cho video seek.
+// Video/PDF/Large files: Dùng fetch() + pipe stream thay vì buffer
+// toàn bộ file trong RAM. Hỗ trợ Range Request cho video seek và PDF viewer.
 // ═══════════════════════════════════════════════════════════════
 
 import { Router, type Request, type Response } from 'express';
@@ -107,7 +107,7 @@ function pipeWebStream(webBody: ReadableStream, res: Response): void {
  * Không cần auth — tương tự public bucket, chỉ proxy qua BE để ẩn infra URL.
  *
  * Hỗ trợ:
- * - Range Request (206 Partial Content) — bắt buộc cho video seek
+ * - Range Request (206 Partial Content) — bắt buộc cho video seek và hữu ích cho PDF lớn
  * - Streaming cho files lớn — tránh buffer toàn bộ trong RAM
  * - Buffer cho files nhỏ (≤2MB) — tối ưu latency
  *
@@ -134,12 +134,14 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     // Xác định content type
     const contentType = getMimeType(storagePath);
     const isMedia = contentType.startsWith('video/') || contentType.startsWith('audio/');
+    const isPdf = contentType === 'application/pdf';
+    const supportsRange = isMedia || isPdf;
 
     // Lấy public URL từ Supabase (không download — chỉ resolve URL)
     const { data: urlData } = supabase.storage.from(BUCKET).getPublicUrl(storagePath);
     const publicUrl = urlData.publicUrl;
 
-    // ── Range Request (video seek) -> forward one safe Range to Supabase ──
+    // ── Range Request (video seek/PDF viewer) -> forward one safe Range to Supabase ──
     const rawRangeHeader = req.headers.range;
     const rangeHeader = normalizeSingleRangeHeader(rawRangeHeader);
     if (rawRangeHeader && !rangeHeader) {
@@ -147,7 +149,7 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    if (rangeHeader && isMedia) {
+    if (rangeHeader && supportsRange) {
       const upstreamHeaders: Record<string, string> = { Range: rangeHeader };
       const ifRangeHeader = normalizeIfRangeHeader(req.headers['if-range']);
       if (ifRangeHeader) upstreamHeaders['If-Range'] = ifRangeHeader;
@@ -181,6 +183,10 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
       forwardOptionalHeader(upstreamRes, res, 'Last-Modified');
       res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
       res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (isPdf) {
+        const filename = storagePath.split('/').pop() || 'file.pdf';
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
+      }
 
       if (req.method === 'HEAD') {
         res.end();
@@ -215,14 +221,14 @@ router.get('/*path', async (req: Request, res: Response): Promise<void> => {
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', needsRevalidate
       ? 'no-cache, must-revalidate'
-      : isMedia
+      : supportsRange
         ? 'public, max-age=86400, immutable'
         : 'public, max-age=3600, immutable',
     );
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
-    // Video/audio: advertise Range support
-    if (isMedia) {
+    // Video/audio/PDF: advertise Range support
+    if (supportsRange) {
       res.setHeader('Accept-Ranges', 'bytes');
     }
 
