@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'node:stream';
 import { query } from '../../config/database.js';
-import { getReportSummary, type ReportSummary } from './reports.service.js';
+import { getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
 type ExportScope = {
   groupId?: string;
@@ -20,6 +20,7 @@ export type ReportExcelExportOptions = {
   tenantId: string;
   year: number;
   month?: number;
+  dateRange?: ReportDateRange;
   scope: ExportScope;
   labels: ExportLabels;
   exporterName: string;
@@ -61,7 +62,7 @@ type TeamBreakdownRow = {
 };
 
 type HierarchyTrendRow = {
-  month: number;
+  period_label: string;
   group_name: string;
   subgroup_name: string;
   team_name: string;
@@ -153,6 +154,20 @@ function getPeriodRange(year: number, month?: number): { startDate: Date; endDat
 
 function getSnapshotEndDate(year: number, month?: number): Date {
   return getPeriodRange(year, month).endDate;
+}
+
+function getExportPeriodRange(options: ReportExcelExportOptions): { startDate: Date; endDate: Date } {
+  if (options.dateRange) return options.dateRange;
+  return getPeriodRange(options.year, options.month);
+}
+
+function getExportSnapshotEndDate(options: ReportExcelExportOptions): Date {
+  return getExportPeriodRange(options).endDate;
+}
+
+function getExportPeriodLabel(options: ReportExcelExportOptions): string {
+  if (options.dateRange) return `${options.dateRange.dateFrom} đến ${options.dateRange.dateTo}`;
+  return options.month ? `${MONTH_LABELS[options.month]}/${options.year}` : `Năm ${options.year}`;
 }
 
 function toNumber(value: unknown): number {
@@ -461,11 +476,11 @@ async function writeInfoSheet(
     { header: 'Giá trị', key: 'value', width: 78 },
   ];
   const worksheet = addWorksheetChrome(workbook, 'Thông tin', 'Thông tin file báo cáo', subtitle, columns);
-  const periodLabel = options.month ? `${MONTH_LABELS[options.month]}/${options.year}` : `Năm ${options.year}`;
+  const periodLabel = getExportPeriodLabel(options);
 
   const rows: Array<[string, unknown]> = [
     ['Kỳ dữ liệu', periodLabel],
-    ['Năm tổng hợp', options.year],
+    [options.dateRange ? 'Khoảng tổng hợp' : 'Năm tổng hợp', options.dateRange ? periodLabel : options.year],
     [options.labels.group, scopeNames.groupName],
     [options.labels.subgroup, scopeNames.subgroupName],
     [options.labels.team, scopeNames.teamName],
@@ -501,7 +516,7 @@ async function writeMonthlyOverviewSheet(
   subtitle: string,
 ): Promise<void> {
   const columns: ColumnDef[] = [
-    { header: 'Tháng', key: 'month', width: 14 },
+    { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
     { header: 'Tổng học viên', key: 'totalLearners', width: 18 },
     { header: 'Học viên hoạt động', key: 'activeLearners', width: 22 },
     { header: 'Lượt ghi danh', key: 'enrollments', width: 18 },
@@ -510,11 +525,46 @@ async function writeMonthlyOverviewSheet(
   ];
   const worksheet = addWorksheetChrome(
     workbook,
-    'Tổng quan tháng',
-    `Tổng quan theo tháng - năm ${options.year}`,
+    options.dateRange ? 'Tổng quan kỳ' : 'Tổng quan tháng',
+    options.dateRange ? 'Tổng quan theo khoảng ngày' : `Tổng quan theo tháng - năm ${options.year}`,
     subtitle,
     columns,
   );
+
+  if (options.dateRange) {
+    const summary = await getReportSummary(
+      options.tenantId,
+      undefined,
+      undefined,
+      options.scope.groupId,
+      options.scope.subgroupId,
+      options.scope.teamId,
+      options.dateRange,
+    );
+    const completionRate = roundPercent(summary.overview.completion_rate);
+    const row = worksheet.addRow([
+      getExportPeriodLabel(options),
+      summary.overview.total_learners,
+      summary.overview.active_learners,
+      summary.overview.total_enrollments,
+      completionRate / 100,
+      'Đã có dữ liệu',
+    ]);
+    row.height = 22;
+    for (let i = 1; i <= columns.length; i++) {
+      const cell = row.getCell(i);
+      cell.border = thinBorder;
+      cell.alignment = { vertical: 'middle', horizontal: i === 1 ? 'left' : 'center' };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.white } };
+      cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy }, bold: i === 1 };
+    }
+    row.getCell(5).numFmt = '0.0%';
+    addStyledRow(worksheet, [], columns.length, 'spacer');
+    addStyledRow(worksheet, ['Tổng lượt ghi danh trong khoảng', summary.overview.total_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, ['Tỉ lệ hoàn thành', `${completionRate.toFixed(1)}%`], columns.length, 'summary');
+    worksheet.commit();
+    return;
+  }
 
   const now = new Date();
   const maxMonth = options.year > now.getFullYear()
@@ -588,20 +638,21 @@ async function writeMonthlyOverviewSheet(
 }
 
 async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promise<HierarchyTrendRow[]> {
-  const { startDate, endDate } = getPeriodRange(options.year);
+  const { startDate, endDate } = getExportPeriodRange(options);
   const params: unknown[] = [options.tenantId, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
 
   const result = await query<HierarchyTrendRow>(
     `SELECT
-       EXTRACT(MONTH FROM e.enrolled_at)::int AS month,
+       'Tháng ' || EXTRACT(MONTH FROM date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh'))::int || '/' || EXTRACT(YEAR FROM date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh'))::int AS period_label,
+       date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS period_start,
        og.name AS group_name,
        sg.name AS subgroup_name,
        t.name AS team_name,
        COUNT(DISTINCT e.id)::bigint AS total_enrollments,
        COUNT(DISTINCT CASE
-         WHEN u.last_login_at >= date_trunc('month', e.enrolled_at)
-          AND u.last_login_at < date_trunc('month', e.enrolled_at) + INTERVAL '1 month'
+         WHEN u.last_login_at >= (date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh')
+          AND u.last_login_at < ((date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') + INTERVAL '1 month') AT TIME ZONE 'Asia/Ho_Chi_Minh')
          THEN u.id END)::bigint AS active_learners,
        ROUND(AVG(COALESCE(cp.progress, 0))::numeric, 1) AS completion_rate
      FROM enrollments e
@@ -617,8 +668,8 @@ async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promi
        AND e.enrolled_at <= $3
        AND og.tenant_id = $1
        ${scopeFilter}
-     GROUP BY month, og.name, sg.name, t.name
-     ORDER BY month, og.name, sg.name, t.name`,
+     GROUP BY period_start, period_label, og.name, sg.name, t.name
+     ORDER BY period_start, og.name, sg.name, t.name`,
     params,
   );
 
@@ -631,7 +682,7 @@ async function writeHierarchyTrendSheet(
   subtitle: string,
 ): Promise<void> {
   const columns: ColumnDef[] = [
-    { header: 'Tháng', key: 'month', width: 14 },
+    { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
     { header: options.labels.group, key: 'groupName', width: 24 },
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
@@ -642,7 +693,7 @@ async function writeHierarchyTrendSheet(
   const worksheet = addWorksheetChrome(
     workbook,
     `Xu hướng theo ${options.labels.team}`,
-    `Xu hướng theo ${lowerLabel(options.labels.team)} - năm ${options.year}`,
+    `Xu hướng theo ${lowerLabel(options.labels.team)} - ${getExportPeriodLabel(options)}`,
     subtitle,
     columns,
   );
@@ -650,7 +701,7 @@ async function writeHierarchyTrendSheet(
 
   rows.forEach((item, index) => {
     const row = worksheet.addRow([
-      MONTH_LABELS[item.month],
+      item.period_label,
       item.group_name,
       item.subgroup_name,
       item.team_name,
@@ -678,8 +729,8 @@ async function writeHierarchyTrendSheet(
 }
 
 async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promise<TeamBreakdownRow[]> {
-  const snapshotEndDate = getSnapshotEndDate(options.year, options.month);
-  const { startDate, endDate } = getPeriodRange(options.year);
+  const snapshotEndDate = getExportSnapshotEndDate(options);
+  const { startDate, endDate } = getExportPeriodRange(options);
   const params: unknown[] = [options.tenantId, snapshotEndDate, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
 
@@ -799,7 +850,7 @@ async function writeTeamBreakdownSheet(
     { header: options.labels.team, key: 'teamName', width: 28 },
     { header: 'Số học viên', key: 'memberCount', width: 15 },
     { header: 'Số khóa được phân', key: 'visibleCourses', width: 18 },
-    { header: 'Lượt ghi danh năm', key: 'enrollments', width: 18 },
+    { header: 'Lượt ghi danh kỳ', key: 'enrollments', width: 18 },
     { header: 'Đã học', key: 'completed', width: 12 },
     { header: 'Đang học', key: 'learning', width: 12 },
     { header: 'Chưa học', key: 'notStarted', width: 12 },
@@ -854,7 +905,7 @@ async function writeTeamBreakdownSheet(
 }
 
 async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promise<CourseRankingExportRow[]> {
-  const snapshotEndDate = getSnapshotEndDate(options.year, options.month);
+  const snapshotEndDate = getExportSnapshotEndDate(options);
   const params: unknown[] = [options.tenantId, snapshotEndDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
 
@@ -974,7 +1025,7 @@ async function fetchLearnerSummaryBatch(
   options: ReportExcelExportOptions,
   lastUserId: string | null,
 ): Promise<LearnerSummaryRow[]> {
-  const snapshotEndDate = getSnapshotEndDate(options.year, options.month);
+  const snapshotEndDate = getExportSnapshotEndDate(options);
   const params: unknown[] = [options.tenantId, lastUserId, STREAM_BATCH_SIZE, snapshotEndDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
 
@@ -1182,7 +1233,7 @@ async function fetchCourseLearnerBatch(
   courseId: string,
   lastUserId: string | null,
 ): Promise<CourseLearnerRow[]> {
-  const snapshotEndDate = getSnapshotEndDate(options.year, options.month);
+  const snapshotEndDate = getExportSnapshotEndDate(options);
   const params: unknown[] = [options.tenantId, snapshotEndDate, courseId, lastUserId, STREAM_BATCH_SIZE];
   const scopeFilter = appendScopeFilter(params, options.scope);
 
@@ -1333,8 +1384,8 @@ async function writeCourseLearnerDetailSheets(
 
 export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
   const scopeNames = await resolveScopeNames(options.tenantId, options.scope);
-  const selectedPeriodText = options.month ? `${MONTH_LABELS[options.month]}/${options.year}` : `Năm ${options.year}`;
-  const yearlyPeriodText = `Năm ${options.year}`;
+  const selectedPeriodText = getExportPeriodLabel(options);
+  const yearlyPeriodText = getExportPeriodLabel(options);
   const buildSubtitle = (periodText: string): string => [
     `Kỳ dữ liệu: ${periodText}`,
     `${options.labels.group}: ${scopeNames.groupName}`,
