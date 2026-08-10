@@ -6,12 +6,49 @@
 import { query, getClient } from '../../config/database.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { normalizeEmail } from '../../utils/email.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { blacklistUser } from '../../middleware/authenticate.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 import { isLearnerRole } from '../../types/index.js';
 import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
 import { assertUserNotActiveDemoIframeAccount, getActiveDemoIframeUserIds } from '../demo-login/demo-iframe.service.js';
+
+function isPgUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === '23505';
+}
+
+function throwDuplicateUsernameOrEmail(): never {
+  throw new AppError('Username hoặc email đã tồn tại', 409);
+}
+
+async function assertUsernameOrEmailAvailable(username?: string, normalizedEmail?: string, excludeUserId?: string): Promise<void> {
+  if (username !== undefined) {
+    const params: unknown[] = [username];
+    const excludeClause = excludeUserId ? ' AND id <> $2' : '';
+    if (excludeUserId) params.push(excludeUserId);
+    const existingUsername = await query(
+      `SELECT id FROM users WHERE username = $1${excludeClause} LIMIT 1`,
+      params,
+    );
+    if (existingUsername.rowCount! > 0) throwDuplicateUsernameOrEmail();
+  }
+
+  if (normalizedEmail !== undefined) {
+    const params: unknown[] = [normalizedEmail];
+    const excludeClause = excludeUserId ? ' AND id <> $2' : '';
+    if (excludeUserId) params.push(excludeUserId);
+    const existingEmail = await query(
+      `SELECT id
+       FROM users
+       WHERE btrim(email) <> ''
+         AND lower(btrim(email)) = $1${excludeClause}
+       LIMIT 1`,
+      params,
+    );
+    if (existingEmail.rowCount! > 0) throwDuplicateUsernameOrEmail();
+  }
+}
 
 /**
  * Danh sách users — phân trang, search, filter role.
@@ -149,25 +186,24 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
     await checkQuota(tenantId, 'users');
   }
 
-  // Kiểm tra username/email unique (global — không phân theo tenant)
-  const existing = await query(
-    'SELECT id FROM users WHERE username = $1 OR email = $2 LIMIT 1',
-    [input.username, input.email],
-  );
-  if (existing.rowCount! > 0) {
-    throw new AppError('Username hoặc email đã tồn tại', 409);
-  }
+  const normalizedEmail = normalizeEmail(input.email);
+  await assertUsernameOrEmailAvailable(input.username, normalizedEmail);
 
   const passwordHash = await hashPassword(input.password);
 
-  const result = await query(
-    `INSERT INTO users (username, email, password_hash, full_name, phone, role, tenant_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, username, email, full_name, role, tenant_id`,
-    [input.username, input.email, passwordHash, input.full_name || '', input.phone || '', input.role, tenantId],
-  );
+  try {
+    const result = await query(
+      `INSERT INTO users (username, email, password_hash, full_name, phone, role, tenant_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, username, email, full_name, role, tenant_id`,
+      [input.username, normalizedEmail, passwordHash, input.full_name || '', input.phone || '', input.role, tenantId],
+    );
 
-  return result.rows[0];
+    return result.rows[0];
+  } catch (err) {
+    if (isPgUniqueViolation(err)) throwDuplicateUsernameOrEmail();
+    throw err;
+  }
 }
 
 /**
@@ -180,15 +216,23 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
   let oldRole: string | null = null;
   if (input.role !== undefined) {
     const current = await query<{ role: string }>('SELECT role FROM users WHERE id = $1', [userId]);
-    if (current.rowCount) oldRole = current.rows[0].role;
+    if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
+    oldRole = current.rows[0].role;
   }
+
+  const normalizedEmail = input.email !== undefined ? normalizeEmail(input.email) : undefined;
+  if ((input.username !== undefined || normalizedEmail !== undefined) && input.role === undefined) {
+    const current = await query<{ id: string }>('SELECT id FROM users WHERE id = $1 LIMIT 1', [userId]);
+    if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  }
+  await assertUsernameOrEmailAvailable(input.username, normalizedEmail, userId);
 
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
 
   if (input.username !== undefined) { sets.push(`username = $${idx++}`); params.push(input.username); }
-  if (input.email !== undefined) { sets.push(`email = $${idx++}`); params.push(input.email); }
+  if (normalizedEmail !== undefined) { sets.push(`email = $${idx++}`); params.push(normalizedEmail); }
   if (input.full_name !== undefined) { sets.push(`full_name = $${idx++}`); params.push(input.full_name); }
   if (input.phone !== undefined) { sets.push(`phone = $${idx++}`); params.push(input.phone); }
   if (input.avatar_url !== undefined) { sets.push(`avatar_url = $${idx++}`); params.push(input.avatar_url); }
@@ -205,11 +249,17 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
   params.push(userId);
-  const result = await query(
-    `UPDATE users SET ${sets.join(', ')} WHERE id = $${idx}
-     RETURNING id, username, email, full_name, role, is_active`,
-    params,
-  );
+  let result;
+  try {
+    result = await query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${idx}
+       RETURNING id, username, email, full_name, role, is_active`,
+      params,
+    );
+  } catch (err) {
+    if (isPgUniqueViolation(err)) throwDuplicateUsernameOrEmail();
+    throw err;
+  }
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
@@ -292,8 +342,8 @@ export async function hardDeleteUser(
   //   course_modal_states, section_modal_shown
   //   SET NULL: audit_logs.actor_id, course_assets.uploaded_by,
   //   documents.uploaded_by, notifications.sent_by, help_pages.created_by/updated_by
-  const result = await query('DELETE FROM users WHERE id = $1 RETURNING id', [targetId]);
-  if (result.rowCount === 0) throw new AppError('Xóa user thất bại', 500);
+  const deleteResult = await query('DELETE FROM users WHERE id = $1 RETURNING id', [targetId]);
+  if (deleteResult.rowCount === 0) throw new AppError('Xóa user thất bại', 500);
 
   return { avatarUrl: target.avatar_url, deletedUserName: target.username || target.email || target.id };
 }
@@ -341,7 +391,7 @@ export async function assignPermissionGroups(userId: string, groupIds: string[])
  * Get user's own profile by username.
  */
 export async function getProfile(username: string) {
-  const result = await query(
+  const profileResult = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id, u.created_at,
             u.bio, u.gender, u.country, u.language, u.level_of_education,
@@ -350,8 +400,8 @@ export async function getProfile(username: string) {
      WHERE u.username = $1`,
     [username],
   );
-  if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  return result.rows[0];
+  if (profileResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  return profileResult.rows[0];
 }
 
 /**

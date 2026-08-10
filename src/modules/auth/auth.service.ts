@@ -10,6 +10,7 @@ import { env } from '../../config/env.js';
 import { comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { looksLikeEmailIdentifier, normalizeEmail } from '../../utils/email.js';
 import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
@@ -68,23 +69,47 @@ async function getDisplayLabelsForTenant(tenantId: string | null | undefined) {
   return { roleLabels, groupLabels };
 }
 
+const LOGIN_USER_SELECT = `
+  SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
+         u.role, u.is_active, u.tenant_id,
+         u.password_hash,
+         t.name AS tenant_name, t.is_active AS tenant_active
+  FROM users u
+  LEFT JOIN tenants t ON t.id = u.tenant_id
+`;
+
+async function findLoginUser(identifierInput: string) {
+  const identifier = identifierInput.trim();
+  if (!identifier) {
+    throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+  }
+
+  if (looksLikeEmailIdentifier(identifier)) {
+    const normalizedEmail = normalizeEmail(identifier);
+    const emailResult = await query(
+      `${LOGIN_USER_SELECT}
+       WHERE btrim(u.email) <> ''
+         AND lower(btrim(u.email)) = $1
+       LIMIT 1`,
+      [normalizedEmail],
+    );
+    if (emailResult.rowCount! > 0) return emailResult;
+  }
+
+  return query(
+    `${LOGIN_USER_SELECT}
+     WHERE u.username = $1
+     LIMIT 1`,
+    [identifier],
+  );
+}
+
 /**
  * Đăng nhập — verify password, tạo token pair.
  * Trả về access_token, refresh_token, user info, permissions.
  */
 export async function login(username: string, password: string, clientApp?: 'admin' | 'learner', origin?: string) {
-  // Tìm user theo username hoặc email (1 query duy nhất)
-  const userResult = await query(
-    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.is_active, u.tenant_id,
-            u.password_hash,
-            t.name AS tenant_name, t.is_active AS tenant_active
-     FROM users u
-     LEFT JOIN tenants t ON t.id = u.tenant_id
-     WHERE (u.username = $1 OR u.email = $1)
-     LIMIT 1`,
-    [username],
-  );
+  const userResult = await findLoginUser(username);
 
   if (userResult.rowCount === 0) {
     throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);

@@ -3,6 +3,7 @@ import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { looksLikeEmailIdentifier, normalizeEmail } from '../../utils/email.js';
 import { issueSessionForUserId } from '../auth/auth.service.js';
 import { randomBytes } from 'crypto';
 import { hashPassword } from '../../utils/password.js';
@@ -29,6 +30,13 @@ interface ProviderProfile {
 interface ResolvedSsoUser {
   userId: string;
   role: string;
+}
+
+interface SsoExistingUserRow {
+  id: string;
+  tenant_id: string | null;
+  role: string;
+  is_active: boolean;
 }
 
 const PROVIDER_LABELS: Record<SsoProvider, string> = {
@@ -324,10 +332,14 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
     throw err;
   }
   if (!profile.sub || !profile.email) throw new AppError('SSO profile thiếu email hoặc subject', 401);
+  const normalizedEmail = normalizeEmail(profile.email);
+  if (!looksLikeEmailIdentifier(normalizedEmail)) {
+    throw new AppError('SSO profile email không hợp lệ', 401);
+  }
   if (profile.email_verified === false || profile.email_verified === 'false') {
     throw new AppError('Email SSO chưa được xác minh', 403);
   }
-  return profile;
+  return { ...profile, email: normalizedEmail };
 }
 
 function isAutoRegisterEnabled(row: SsoConfigRow): boolean {
@@ -356,6 +368,16 @@ async function buildUniqueUsername(email: string): Promise<string> {
 
 function isPgUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === '23505';
+}
+
+function getPgConstraintName(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('constraint' in err)) return undefined;
+  const constraint = (err as { constraint?: unknown }).constraint;
+  return typeof constraint === 'string' ? constraint : undefined;
+}
+
+function isUsernameUniqueViolation(err: unknown): boolean {
+  return isPgUniqueViolation(err) && getPgConstraintName(err) === 'users_username_key';
 }
 
 async function linkSsoIdentity(tenantId: string, userId: string, provider: SsoProvider, profile: ProviderProfile): Promise<void> {
@@ -396,32 +418,71 @@ async function createLearnerFromProfile(
   const { checkQuota } = await import('../tenants/tenants.service.js');
   await checkQuota(tenantId, 'users');
 
-  const username = await buildUniqueUsername(profile.email);
-  const randomPassword = randomBytes(48).toString('base64url');
-  const passwordHash = await hashPassword(randomPassword);
-  const fullName = (profile.name || profile.email.split('@')[0] || username).trim();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const username = await buildUniqueUsername(profile.email);
+    const randomPassword = randomBytes(48).toString('base64url');
+    const passwordHash = await hashPassword(randomPassword);
+    const fullName = (profile.name || profile.email.split('@')[0] || username).trim();
 
-  const user = await query<{ id: string }>(
-    `INSERT INTO users (username, email, password_hash, full_name, phone, role, tenant_id, is_active)
-     VALUES ($1, $2, $3, $4, '', 'learner', $5, $6)
-     RETURNING id`,
-    [username, profile.email, passwordHash, fullName, tenantId, autoActivate],
-  );
+    let userId: string;
+    try {
+      const user = await query<{ id: string }>(
+        `INSERT INTO users (username, email, password_hash, full_name, phone, role, tenant_id, is_active)
+         VALUES ($1, $2, $3, $4, '', 'learner', $5, $6)
+         RETURNING id`,
+        [username, profile.email, passwordHash, fullName, tenantId, autoActivate],
+      );
+      userId = user.rows[0].id;
+    } catch (err) {
+      if (isUsernameUniqueViolation(err)) continue;
+      throw err;
+    }
 
-  const userId = user.rows[0].id;
-  await query(
-    `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (tenant_id, provider, provider_subject)
-     DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email, updated_at = now()`,
-    [tenantId, userId, provider, profile.sub, profile.email],
-  );
+    await query(
+      `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tenant_id, provider, provider_subject)
+       DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email, updated_at = now()`,
+      [tenantId, userId, provider, profile.sub, profile.email],
+    );
 
-  if (!autoActivate) {
-    throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
+    if (!autoActivate) {
+      throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
+    }
+
+    return { userId, role: 'learner' };
   }
 
-  return { userId, role: 'learner' };
+  throw new AppError('Không thể tạo username SSO duy nhất, vui lòng thử lại', 409);
+}
+
+async function findUserByNormalizedEmail(normalizedEmail: string): Promise<SsoExistingUserRow | null> {
+  const user = await query<SsoExistingUserRow>(
+    `SELECT id, tenant_id, role, is_active
+     FROM users
+     WHERE btrim(email) <> ''
+       AND lower(btrim(email)) = $1
+     LIMIT 1`,
+    [normalizedEmail],
+  );
+  return user.rows[0] ?? null;
+}
+
+async function resolveExistingSsoUserForProfile(
+  tenantId: string,
+  provider: SsoProvider,
+  profile: ProviderProfile,
+  existingUser: SsoExistingUserRow,
+): Promise<ResolvedSsoUser> {
+  if (existingUser.tenant_id !== tenantId && existingUser.role !== 'superadmin') {
+    throw new AppError('Email SSO đã thuộc tenant khác', 403);
+  }
+  if (!existingUser.is_active) {
+    throw new AppError('Tài khoản SSO đang chờ duyệt hoặc đã bị vô hiệu hóa', 403);
+  }
+
+  await linkSsoIdentity(tenantId, existingUser.id, provider, profile);
+  return { userId: existingUser.id, role: existingUser.role };
 }
 
 async function resolveUserForProfile(tenantId: string, provider: SsoProvider, profile: ProviderProfile, config: SsoConfigRow): Promise<ResolvedSsoUser> {
@@ -440,29 +501,19 @@ async function resolveUserForProfile(tenantId: string, provider: SsoProvider, pr
     return { userId: identity.rows[0].user_id, role: identity.rows[0].role };
   }
 
-  const user = await query<{ id: string; tenant_id: string | null; role: string; is_active: boolean }>(
-    `SELECT id, tenant_id, role, is_active
-     FROM users
-     WHERE lower(email) = lower($1)
-     LIMIT 1`,
-    [profile.email],
-  );
-
-  if (user.rowCount === 0) {
-    return createLearnerFromProfile(tenantId, provider, profile, isAutoRegisterEnabled(config));
+  const existingUser = await findUserByNormalizedEmail(profile.email);
+  if (!existingUser) {
+    try {
+      return await createLearnerFromProfile(tenantId, provider, profile, isAutoRegisterEnabled(config));
+    } catch (err) {
+      if (!isPgUniqueViolation(err)) throw err;
+      const racedUser = await findUserByNormalizedEmail(profile.email);
+      if (!racedUser) throw err;
+      return resolveExistingSsoUserForProfile(tenantId, provider, profile, racedUser);
+    }
   }
 
-  const existingUser = user.rows[0];
-  if (existingUser.tenant_id !== tenantId && existingUser.role !== 'superadmin') {
-    throw new AppError('Email SSO đã thuộc tenant khác', 403);
-  }
-  if (!existingUser.is_active) {
-    throw new AppError('Tài khoản SSO đang chờ duyệt hoặc đã bị vô hiệu hóa', 403);
-  }
-
-  const userId = existingUser.id;
-  await linkSsoIdentity(tenantId, userId, provider, profile);
-  return { userId, role: existingUser.role };
+  return resolveExistingSsoUserForProfile(tenantId, provider, profile, existingUser);
 }
 
 async function inferSsoClientApp(tenantId: string, redirectUri: string): Promise<'admin' | 'learner' | null> {
