@@ -144,15 +144,21 @@ export async function listDocuments(tenantId: string | null, queryParams: Record
 export async function createDocument(tenantId: string, input: {
   title: string; file_url: string; file_size?: number; extension?: string;
   category_id?: string; is_visible?: boolean;
-}, uploadedBy: string) {
+}, uploadedBy: string, options: { invalidateCache?: boolean } = {}) {
   const result = await query(
     `INSERT INTO documents (tenant_id, title, file_url, file_size, extension, category_id, is_visible, uploaded_by)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id, title, file_url, file_size, extension, category_id, is_visible`,
     [tenantId, input.title, input.file_url, input.file_size || 0, input.extension || '', input.category_id || null, input.is_visible ?? true, uploadedBy],
   );
-  await invalidateTenantLibraryCaches(tenantId);
+  if (options.invalidateCache !== false) {
+    await invalidateTenantLibraryCaches(tenantId);
+  }
   return result.rows[0];
+}
+
+export async function invalidateLibraryCache(tenantId: string) {
+  await invalidateTenantLibraryCaches(tenantId);
 }
 
 export async function updateDocument(docId: string, input: { title?: string; is_visible?: boolean; category_id?: string | null }) {

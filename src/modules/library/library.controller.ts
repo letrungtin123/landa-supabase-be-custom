@@ -2,12 +2,33 @@
 // Library Controller — Documents + Categories endpoints
 // ═══════════════════════════════════════════════════════════════
 
+import fs from 'fs/promises';
 import type { Request, Response, NextFunction } from 'express';
 import * as libService from './library.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
-import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, fixMulterFilename } from '../../config/storage.js';
+import {
+  uploadFileFromPath,
+  buildFileName,
+  buildStoragePath,
+  deleteFile,
+  deleteFileByUrl,
+  fixMulterFilename,
+} from '../../config/storage.js';
+import { LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 
+function formatUploadSizeMb(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Unknown error';
+}
+
+async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
+  if (!file.path) return;
+  await fs.unlink(file.path).catch(() => {});
+}
 // ── Document Categories ──
 
 export async function listCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -121,20 +142,35 @@ export async function bulkDocumentActionController(req: Request, res: Response, 
 
 /** POST /api/library/documents/upload — Upload multiple files to Supabase Storage + create records */
 export async function uploadDocumentController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const tempFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    if (tempFiles.length === 0) { sendError(res, 'Chưa có file upload', 400); return; }
 
-    const files = req.files as Express.Multer.File[] | undefined;
-    if (!files || files.length === 0) { sendError(res, 'No files uploaded', 400); return; }
+    const docs: any[] = [];
+    const errors: string[] = [];
 
-    const results = await Promise.allSettled(
-      files.map(async (file) => {
-        const originalName = fixMulterFilename(file.originalname);
+    for (const file of tempFiles) {
+      const originalName = fixMulterFilename(file.originalname);
+      let storagePath = '';
+      let storageUploaded = false;
+
+      try {
+        if (file.size > LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES) {
+          throw new Error(`quá giới hạn upload ${LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL}. Dung lượng hiện tại: ${formatUploadSizeMb(file.size)}.`);
+        }
+
+        if (!file.path) {
+          throw new Error('không đọc được file từ vùng tạm upload.');
+        }
+
         const fileName = buildFileName(originalName);
-        const storagePath = buildStoragePath(tenantId, 'library', fileName);
+        storagePath = buildStoragePath(tenantId, 'library', fileName);
 
-        await uploadFile(storagePath, file.buffer, file.mimetype);
+        await uploadFileFromPath(storagePath, file.path, file.mimetype || 'application/octet-stream');
+        storageUploaded = true;
 
         const ext = originalName.split('.').pop()?.toLowerCase() || '';
         const doc = await libService.createDocument(tenantId, {
@@ -144,22 +180,29 @@ export async function uploadDocumentController(req: Request, res: Response, next
           extension: ext,
           category_id: req.body.category_id || null,
           is_visible: req.body.is_visible !== 'false',
-        }, req.user!.id);
+        }, req.user!.id, { invalidateCache: false });
 
         auditFromReq(req, 'CREATE', 'document', doc.id, doc.title);
-        return doc;
-      })
-    );
+        docs.push(doc);
+      } catch (err) {
+        if (storageUploaded && storagePath) {
+          await deleteFile(storagePath).catch(() => {});
+        }
+        errors.push(`${originalName}: ${getErrorMessage(err)}`);
+      } finally {
+        await cleanupTempUpload(file);
+      }
+    }
 
-    const uploaded = results.filter(r => r.status === 'fulfilled').length;
-    const failed = results.filter(r => r.status === 'rejected').length;
-    const docs = results
-      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
-      .map(r => r.value);
-    const errors = results
-      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-      .map((r, i) => `${files[i]?.originalname}: ${r.reason?.message || 'Unknown error'}`);
+    if (docs.length > 0) {
+      await libService.invalidateLibraryCache(tenantId);
+    }
 
-    sendSuccess(res, { uploaded, failed, documents: docs, errors }, `Upload ${uploaded}/${files.length} tài liệu thành công`, 201);
-  } catch (err) { next(err); }
+    const uploaded = docs.length;
+    const failed = tempFiles.length - uploaded;
+    sendSuccess(res, { uploaded, failed, documents: docs, errors }, `Upload ${uploaded}/${tempFiles.length} tài liệu thành công`, 201);
+  } catch (err) {
+    await Promise.all(tempFiles.map(cleanupTempUpload));
+    next(err);
+  }
 }
