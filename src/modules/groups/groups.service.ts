@@ -716,18 +716,70 @@ async function revokeTeamCourseFromDb(teamId: string, courseId: string) {
 // ═══ Team Document Categories ═══
 
 export async function assignTeamDocCategories(teamId: string, categoryIds: string[]) {
+  const normalizedCategoryIds = Array.from(new Set(
+    categoryIds
+      .filter((cid): cid is string => typeof cid === 'string')
+      .map((cid) => cid.trim())
+      .filter(Boolean),
+  ));
   const tenantId = await getTeamTenantId(teamId);
-  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
-  const teamName = teamResult.rows[0]?.name || teamId;
-  let assigned = 0, skipped = 0;
-  for (const cid of categoryIds) {
-    const r = await query('INSERT INTO team_doc_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
-    if (r.rowCount! > 0) assigned++; else skipped++;
-  }
-  if (tenantId) await invalidateTenantLibraryCaches(tenantId);
-  return { success: true, assigned, skipped, teamName };
-}
+  if (!tenantId) throw new AppError('Team không tồn tại', 404);
 
+  const client = await getClient();
+  let assigned = 0, skipped = 0, detachedPublicDocuments = 0;
+  let teamName = teamId;
+  try {
+    await client.query('BEGIN');
+
+    const teamResult = await client.query<{ name: string }>('SELECT name FROM teams WHERE id = $1::uuid', [teamId]);
+    teamName = teamResult.rows[0]?.name || teamId;
+
+    for (const cid of normalizedCategoryIds) {
+      const r = await client.query(
+        `INSERT INTO team_doc_categories (team_id, category_id)
+         SELECT $1::uuid, dc.id
+         FROM document_categories dc
+         WHERE dc.id = $2::uuid
+           AND dc.tenant_id = $3::uuid
+         ON CONFLICT DO NOTHING`,
+        [teamId, cid, tenantId],
+      );
+      if (r.rowCount! > 0) assigned++; else skipped++;
+    }
+
+    if (normalizedCategoryIds.length > 0) {
+      const detached = await client.query<{ id: string }>(
+        `UPDATE documents d
+         SET category_id = NULL
+         WHERE d.tenant_id = $1::uuid
+           AND COALESCE(d.is_public, false) = true
+           AND d.category_id = ANY($2::uuid[])
+           AND EXISTS (
+             SELECT 1
+             FROM team_doc_categories tdc
+             JOIN teams t ON t.id = tdc.team_id
+             JOIN sub_groups sg ON sg.id = t.sub_group_id
+             JOIN org_groups og ON og.id = sg.org_group_id
+             WHERE tdc.category_id = d.category_id
+               AND og.tenant_id = $1::uuid
+           )
+         RETURNING d.id`,
+        [tenantId, normalizedCategoryIds],
+      );
+      detachedPublicDocuments = detached.rowCount || 0;
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  await invalidateTenantLibraryCaches(tenantId);
+  return { success: true, assigned, skipped, teamName, detachedPublicDocuments };
+}
 export async function revokeTeamDocCategory(teamId: string, categoryId: string) {
   const tenantId = await getTeamTenantId(teamId);
   const context = await query<{ team_name: string; category_name: string | null }>(

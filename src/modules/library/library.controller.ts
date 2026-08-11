@@ -98,48 +98,48 @@ export async function createDocumentController(req: Request, res: Response, next
 
 export async function updateDocumentController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const doc = await libService.updateDocument(req.params.id, req.body);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const doc = await libService.updateDocument(req.params.id, tenantId, req.body);
     auditFromReq(req, 'UPDATE', 'document', doc.id, doc.title);
     sendSuccess(res, doc);
   } catch (err) { next(err); }
 }
-
 export async function deleteDocumentController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const doc = await libService.deleteDocument(req.params.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const doc = await libService.deleteDocument(req.params.id, tenantId);
     // Cleanup storage
     await deleteFileByUrl(doc.file_url).catch(() => {});
     auditFromReq(req, 'DELETE', 'document', req.params.id, doc.title);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
-
 export async function bulkDocumentActionController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const { ids, action, category_id } = req.body;
     if (!Array.isArray(ids) || !action) { sendError(res, 'ids và action là bắt buộc', 400); return; }
 
-    // If bulk delete — fetch file_urls first, then delete from DB + storage
+    // If bulk delete — fetch file_urls first, then delete from DB + storage.
     if (action === 'delete') {
-      const { rows } = await (await import('../../config/database.js')).query<{ id: string; file_url: string | null }>(
-        'DELETE FROM documents WHERE id = ANY($1) RETURNING id, file_url', [ids]
-      );
-      // Cleanup storage in background
-      const deletePromises = rows
+      const result = await libService.bulkDeleteDocuments(ids, tenantId);
+      const deletePromises = result.rows
         .filter(r => r.file_url)
         .map(r => deleteFileByUrl(r.file_url).catch(() => {}));
       await Promise.all(deletePromises);
-      auditFromReq(req, 'DELETE', 'document', '', '', `Bulk delete: ${rows.length} documents`);
-      sendSuccess(res, { deleted: rows.length });
+      auditFromReq(req, 'DELETE', 'document', '', '', `Bulk delete: ${result.deleted} documents`);
+      sendSuccess(res, { deleted: result.deleted });
       return;
     }
 
-    const result = await libService.bulkDocumentAction(ids, action, category_id);
+    const result = await libService.bulkDocumentAction(ids, tenantId, action, category_id);
     auditFromReq(req, 'UPDATE', 'document', '', '', `Bulk ${action}: ${result.updated} documents`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
-
 /** POST /api/library/documents/upload — Upload multiple files to Supabase Storage + create records */
 export async function uploadDocumentController(req: Request, res: Response, next: NextFunction): Promise<void> {
   const tempFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
@@ -180,6 +180,7 @@ export async function uploadDocumentController(req: Request, res: Response, next
           extension: ext,
           category_id: req.body.category_id || null,
           is_visible: req.body.is_visible !== 'false',
+          is_public: req.body.is_public === 'true',
         }, req.user!.id, { invalidateCache: false });
 
         auditFromReq(req, 'CREATE', 'document', doc.id, doc.title);

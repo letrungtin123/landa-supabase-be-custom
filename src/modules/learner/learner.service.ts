@@ -876,6 +876,10 @@ async function getCourseFilesFromDb(courseId: string, userId: string, role = 'le
   };
 }
 
+const PUBLIC_LIBRARY_CATEGORY_ID = '__public__';
+const PUBLIC_LIBRARY_CATEGORY_NAME = 'Tài liệu công khai';
+const PUBLIC_LIBRARY_CATEGORY_SLUG = 'public';
+
 // ── Library (Kho tài liệu nội bộ, team-scoped) ──
 
 /**
@@ -908,26 +912,64 @@ async function getMyLibraryCategoriesFromDb(
   let params: unknown[];
 
   if (isLearnerRole(role)) {
-    sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
-                  COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true) AS count
-           FROM document_categories dc
-           JOIN team_doc_categories tdc ON tdc.category_id = dc.id
-           JOIN team_members tm ON tm.team_id = tdc.team_id
-           LEFT JOIN documents d ON d.category_id = dc.id AND d.is_visible = true
-           WHERE dc.tenant_id = $1 AND tm.user_id = $2
-           GROUP BY dc.id
-           ORDER BY dc.sort_order, dc.name`;
-    params = [tenantId, userId];
+    sql = `WITH assigned_categories AS (
+             SELECT dc.id::text AS id, dc.name, dc.slug, dc.sort_order,
+                    COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true) AS count
+             FROM document_categories dc
+             JOIN team_doc_categories tdc ON tdc.category_id = dc.id
+             JOIN team_members tm ON tm.team_id = tdc.team_id
+             LEFT JOIN documents d ON d.category_id = dc.id AND d.is_visible = true
+             WHERE dc.tenant_id = $1 AND tm.user_id = $2
+             GROUP BY dc.id
+           ), public_bucket AS (
+             SELECT $3::text AS id,
+                    $4::text AS name,
+                    $5::text AS slug,
+                    -1::int AS sort_order,
+                    COUNT(*) AS count
+             FROM documents d
+             WHERE d.tenant_id = $1
+               AND d.is_visible = true
+               AND COALESCE(d.is_public, false) = true
+               AND d.category_id IS NULL
+             HAVING COUNT(*) > 0
+           )
+           SELECT id, name, slug, sort_order, count
+           FROM assigned_categories
+           UNION ALL
+           SELECT id, name, slug, sort_order, count
+           FROM public_bucket
+           ORDER BY sort_order, name`;
+    params = [tenantId, userId, PUBLIC_LIBRARY_CATEGORY_ID, PUBLIC_LIBRARY_CATEGORY_NAME, PUBLIC_LIBRARY_CATEGORY_SLUG];
   } else {
-    // staff/superuser/superadmin: thấy tất cả (kể cả ẩn)
-    sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
-                  COUNT(d.id) AS count
-           FROM document_categories dc
-           LEFT JOIN documents d ON d.category_id = dc.id
-           WHERE dc.tenant_id = $1
-           GROUP BY dc.id
-           ORDER BY dc.sort_order, dc.name`;
-    params = [tenantId];
+    // staff/superuser/superadmin: thấy tất cả category DB, kèm bucket public ảo cho docs không còn category.
+    sql = `WITH regular_categories AS (
+             SELECT dc.id::text AS id, dc.name, dc.slug, dc.sort_order,
+                    COUNT(d.id) AS count
+             FROM document_categories dc
+             LEFT JOIN documents d ON d.category_id = dc.id
+             WHERE dc.tenant_id = $1
+             GROUP BY dc.id
+           ), public_bucket AS (
+             SELECT $2::text AS id,
+                    $3::text AS name,
+                    $4::text AS slug,
+                    -1::int AS sort_order,
+                    COUNT(*) AS count
+             FROM documents d
+             WHERE d.tenant_id = $1
+               AND d.is_visible = true
+               AND COALESCE(d.is_public, false) = true
+               AND d.category_id IS NULL
+             HAVING COUNT(*) > 0
+           )
+           SELECT id, name, slug, sort_order, count
+           FROM regular_categories
+           UNION ALL
+           SELECT id, name, slug, sort_order, count
+           FROM public_bucket
+           ORDER BY sort_order, name`;
+    params = [tenantId, PUBLIC_LIBRARY_CATEGORY_ID, PUBLIC_LIBRARY_CATEGORY_NAME, PUBLIC_LIBRARY_CATEGORY_SLUG];
   }
 
   const result = await query<any>(sql, params);
@@ -942,7 +984,6 @@ async function getMyLibraryCategoriesFromDb(
     total: result.rowCount || 0,
   };
 }
-
 /**
  * Lấy documents mà learner được phép xem.
  * Learner: chỉ docs thuộc categories assign qua team_doc_categories + is_visible.
@@ -987,24 +1028,32 @@ async function getMyLibraryDocumentsFromDb(
 ) {
   const { page = 1, page_size = 20, category, extension, search, ordering } = params;
   const offset = (page - 1) * page_size;
+  const isPublicCategory = category === PUBLIC_LIBRARY_CATEGORY_ID || category === PUBLIC_LIBRARY_CATEGORY_SLUG;
 
   const sqlParams: unknown[] = [tenantId];
   const conditions: string[] = ['d.tenant_id = $1'];
 
-  // Learner: chỉ thấy docs visible + restrict to team categories
+  // Learner: thấy docs public hoặc docs thuộc category được assign qua team.
   if (isLearnerRole(role)) {
     conditions.push('d.is_visible = true');
     sqlParams.push(userId);
-    conditions.push(`d.category_id IN (
-      SELECT tdc.category_id
-      FROM team_doc_categories tdc
-      JOIN team_members tm ON tm.team_id = tdc.team_id
-      WHERE tm.user_id = $${sqlParams.length}
+    conditions.push(`(
+      COALESCE(d.is_public, false) = true
+      OR EXISTS (
+        SELECT 1
+        FROM team_doc_categories tdc
+        JOIN team_members tm ON tm.team_id = tdc.team_id
+        WHERE tm.user_id = $${sqlParams.length}
+          AND tdc.category_id = d.category_id
+      )
     )`);
   }
 
-  // Filter by category (slug or id)
-  if (category) {
+  // Filter by category (public bucket, slug or id)
+  if (isPublicCategory) {
+    conditions.push('COALESCE(d.is_public, false) = true');
+    conditions.push('d.category_id IS NULL');
+  } else if (category) {
     sqlParams.push(category);
     conditions.push(`(dc.slug = $${sqlParams.length} OR dc.id::text = $${sqlParams.length})`);
   }
@@ -1044,7 +1093,7 @@ async function getMyLibraryDocumentsFromDb(
   sqlParams.push(page_size, offset);
   const result = await query<any>(
     `SELECT d.id, d.title, d.extension, d.file_size, d.file_url,
-            d.created_at, d.is_visible,
+            d.category_id, d.created_at, d.is_visible, COALESCE(d.is_public, false) AS is_public,
             dc.name AS category_name, dc.slug AS category_slug,
             u.full_name AS uploaded_by_name
      FROM documents d
@@ -1060,20 +1109,24 @@ async function getMyLibraryDocumentsFromDb(
     count: total,
     next: page * page_size < total ? `page=${page + 1}` : null,
     previous: page > 1 ? `page=${page - 1}` : null,
-    results: result.rows.map((r: any) => ({
-      id: r.id,
-      title: r.title,
-      extension: r.extension || '',
-      file_size: parseInt(r.file_size) || 0,
-      category_name: r.category_name || '',
-      category_slug: r.category_slug || '',
-      download_url: r.file_url,
-      uploaded_by_name: r.uploaded_by_name || '',
-      created_at: r.created_at,
-    })),
+    results: result.rows.map((r: any) => {
+      const inPublicBucket = r.is_public === true && !r.category_id;
+      return {
+        id: r.id,
+        title: r.title,
+        extension: r.extension || '',
+        file_size: parseInt(r.file_size) || 0,
+        category_id: r.category_id || null,
+        category_name: inPublicBucket ? PUBLIC_LIBRARY_CATEGORY_NAME : r.category_name || '',
+        category_slug: inPublicBucket ? PUBLIC_LIBRARY_CATEGORY_SLUG : r.category_slug || '',
+        is_public: r.is_public === true,
+        download_url: r.file_url,
+        uploaded_by_name: r.uploaded_by_name || '',
+        created_at: r.created_at,
+      };
+    }),
   };
 }
-
 // ── Enrollments ──
 
 /**

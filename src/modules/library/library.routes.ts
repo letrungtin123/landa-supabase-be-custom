@@ -104,6 +104,12 @@ function uploadLibraryDocuments(req: Request, res: Response, next: NextFunction)
   });
 }
 
+
+function checkDocumentBulkPermission(req: Request, res: Response, next: NextFunction): void {
+  const action = typeof req.body?.action === 'string' ? req.body.action : '';
+  const permission = action === 'delete' ? 'can_delete' : 'can_edit';
+  void checkPermission('library', permission)(req, res, next);
+}
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));
 
 // Categories
@@ -119,6 +125,6 @@ router.post('/documents', checkPermission('library', 'can_add'), createDocumentC
 router.post('/documents/upload', checkPermission('library', 'can_add'), uploadLibraryDocuments, uploadDocumentController);
 router.patch('/documents/:id', checkPermission('library', 'can_edit'), updateDocumentController);
 router.delete('/documents/:id', checkPermission('library', 'can_delete'), deleteDocumentController);
-router.post('/documents/bulk', checkPermission('library', 'can_delete'), bulkDocumentActionController);
+router.post('/documents/bulk', checkDocumentBulkPermission, bulkDocumentActionController);
 
 export default router;
