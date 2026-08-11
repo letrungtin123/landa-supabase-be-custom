@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Groups Controller — All endpoints for 3-level hierarchy
 // ═══════════════════════════════════════════════════════════════
 
@@ -103,6 +103,27 @@ export async function createTeamController(req: Request, res: Response, next: Ne
 export async function getTeamDetailController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try { sendSuccess(res, await svc.getTeamDetail(req.params.id)); }
   catch (err) { next(err); }
+}
+
+export async function listTeamMembersController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    sendSuccess(res, await svc.listTeamMembers(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+  } catch (err) { next(err); }
+}
+
+export async function listTeamDocCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    sendSuccess(res, await svc.listTeamDocCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+  } catch (err) { next(err); }
+}
+
+export async function listTeamCourseCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    sendSuccess(res, await svc.listTeamCourseCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+  } catch (err) { next(err); }
 }
 
 export async function updateTeamController(req: Request, res: Response, next: NextFunction): Promise<void> {

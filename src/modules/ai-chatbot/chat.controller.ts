@@ -10,7 +10,6 @@ import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as chatService from './chat.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
-import { generateSpeechForTenant } from './gemini.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -276,39 +275,6 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
     const result = await chatService.getConversationMessages(id, userId, tenantId, cursor);
     sendSuccess(res, result);
   } catch (err: any) { sendError(res, err.message, 400); }
-}
-
-export async function generateSpeech(req: Request, res: Response): Promise<void> {
-  const userId = req.user!.id;
-  const tenantId = req.user!.tenantId!;
-  const { text, conversation_id } = req.body ?? {};
-
-  if (isDemoIframeSession(req.user)) {
-    sendError(res, 'Phiên demo iframe không hỗ trợ giọng bot', 403);
-    return;
-  }
-  if (!text || typeof text !== 'string') {
-    sendError(res, 'text không hợp lệ', 400);
-    return;
-  }
-  if (conversation_id !== undefined && (typeof conversation_id !== 'string' || !UUID_REGEX.test(conversation_id))) {
-    sendError(res, 'conversation_id không hợp lệ', 400);
-    return;
-  }
-
-  try {
-    const voicePrompt = typeof conversation_id === 'string'
-      ? await chatService.getConversationVoicePrompt(conversation_id, userId, tenantId)
-      : null;
-    const speech = await generateSpeechForTenant(tenantId, text, { voicePrompt });
-    res.status(200);
-    res.setHeader('Content-Type', speech.mimeType);
-    res.setHeader('Content-Length', speech.audio.length.toString());
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(speech.audio);
-  } catch (err: any) {
-    sendError(res, err.message || 'Không tạo được giọng bot', 400);
-  }
 }
 
 /**

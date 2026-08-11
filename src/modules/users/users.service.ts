@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Users Service — CRUD users (tenant-scoped)
 // Tối ưu: parameterized queries, index trên tenant_id + role
 // ═══════════════════════════════════════════════════════════════
@@ -102,6 +102,11 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
     conditions.push(`EXISTS (SELECT 1 FROM user_permission_groups upg WHERE upg.user_id = u.id AND upg.permission_group_id = $${params.length})`);
   }
 
+  const includeTeamAssignments = queryParams.include_team_assignments === 'true' || queryParams.include_team_assignments === true;
+  const currentTeamId = typeof queryParams.current_team_id === 'string' && queryParams.current_team_id.trim()
+    ? queryParams.current_team_id.trim()
+    : null;
+
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const [countResult, dataResult] = await Promise.all([
@@ -124,13 +129,76 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
   ]);
 
   const total = parseInt(countResult.rows[0].count, 10);
-  const activeDemoIframeUserIds = await getActiveDemoIframeUserIds(dataResult.rows.map((row: any) => row.id));
+  const userIds = dataResult.rows.map((row: any) => row.id);
+  const activeDemoIframeUserIds = await getActiveDemoIframeUserIds(userIds);
+  const teamAssignmentsByUser = new Map<string, { team_assignments: unknown[]; is_current_team_member: boolean }>();
+
+  if (includeTeamAssignments && userIds.length > 0) {
+    const membershipParams: unknown[] = [userIds];
+    const membershipConditions = ['tm.user_id = ANY($1::uuid[])'];
+
+    if (tenantId) {
+      membershipParams.push(tenantId);
+      membershipConditions.push(`og.tenant_id = $${membershipParams.length}::uuid`);
+    }
+
+    let currentTeamExpr = 'false';
+    if (currentTeamId) {
+      membershipParams.push(currentTeamId);
+      currentTeamExpr = `t.id::text = $${membershipParams.length}`;
+    }
+
+    const membershipResult = await query<{
+      user_id: string;
+      team_assignments: unknown[] | null;
+      is_current_team_member: boolean | null;
+    }>(
+      `SELECT tm.user_id,
+              jsonb_agg(
+                jsonb_build_object(
+                  'group_id', og.id,
+                  'group_name', og.name,
+                  'subgroup_id', sg.id,
+                  'subgroup_name', sg.name,
+                  'team_id', t.id,
+                  'team_name', t.name,
+                  'is_current_team', ${currentTeamExpr}
+                )
+                ORDER BY og.name, sg.name, t.name
+              ) AS team_assignments,
+              bool_or(${currentTeamExpr}) AS is_current_team_member
+       FROM team_members tm
+       JOIN teams t ON t.id = tm.team_id
+       JOIN sub_groups sg ON sg.id = t.sub_group_id
+       JOIN org_groups og ON og.id = sg.org_group_id
+       WHERE ${membershipConditions.join(' AND ')}
+       GROUP BY tm.user_id`,
+      membershipParams,
+    );
+
+    for (const row of membershipResult.rows) {
+      teamAssignmentsByUser.set(row.user_id, {
+        team_assignments: row.team_assignments || [],
+        is_current_team_member: Boolean(row.is_current_team_member),
+      });
+    }
+  }
 
   return {
-    data: dataResult.rows.map((row: any) => ({
-      ...row,
-      is_demo_iframe_active: activeDemoIframeUserIds.has(row.id),
-    })),
+    data: dataResult.rows.map((row: any) => {
+      const membershipContext = teamAssignmentsByUser.get(row.id);
+      return {
+        ...row,
+        is_demo_iframe_active: activeDemoIframeUserIds.has(row.id),
+        ...(includeTeamAssignments
+          ? {
+              team_assignments: membershipContext?.team_assignments || [],
+              team_assignment_count: membershipContext?.team_assignments.length || 0,
+              is_current_team_member: membershipContext?.is_current_team_member || false,
+            }
+          : {}),
+      };
+    }),
     total,
     page,
     pageSize,

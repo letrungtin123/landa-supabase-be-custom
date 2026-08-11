@@ -33,20 +33,40 @@ export async function listDocCategories(tenantId: string | null, queryParams: Re
   const offset = calcOffset(page, pageSize);
   const params: unknown[] = [];
   const conditions: string[] = [];
+  const assignedTeamId = typeof queryParams.assigned_team_id === 'string' && queryParams.assigned_team_id.trim()
+    ? queryParams.assigned_team_id.trim()
+    : null;
 
   if (tenantId) { params.push(tenantId); conditions.push(`dc.tenant_id = $${params.length}`); }
   if (search) { params.push(`%${search}%`); conditions.push(`unaccent(dc.name) ILIKE unaccent($${params.length})`); }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const dataParams = [...params];
+  let assignedSelect = '';
+  if (assignedTeamId) {
+    dataParams.push(assignedTeamId);
+    const teamParam = dataParams.length;
+    assignedSelect = `,
+            EXISTS (
+              SELECT 1
+              FROM team_doc_categories tdc
+              JOIN teams t_assign ON t_assign.id = tdc.team_id
+              JOIN sub_groups sg_assign ON sg_assign.id = t_assign.sub_group_id
+              JOIN org_groups og_assign ON og_assign.id = sg_assign.org_group_id
+              WHERE tdc.category_id = dc.id
+                AND tdc.team_id = $${teamParam}::uuid
+                ${tenantId ? 'AND og_assign.tenant_id = $1::uuid' : ''}
+            ) AS is_assigned_to_team`;
+  }
 
   const [countR, dataR] = await Promise.all([
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM document_categories dc ${where}`, params),
     query(
-      `SELECT dc.*, (SELECT COUNT(*) FROM documents d WHERE d.category_id = dc.id) AS doc_count
+      `SELECT dc.*, (SELECT COUNT(*) FROM documents d WHERE d.category_id = dc.id) AS doc_count${assignedSelect}
        FROM document_categories dc ${where}
        ORDER BY dc.sort_order, dc.name
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
+       LIMIT $${dataParams.length + 1} OFFSET $${dataParams.length + 2}`,
+      [...dataParams, pageSize, offset],
     ),
   ]);
 

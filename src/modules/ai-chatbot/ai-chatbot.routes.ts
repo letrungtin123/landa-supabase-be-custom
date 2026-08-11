@@ -77,7 +77,6 @@ router.delete('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'ca
 // ── Chat — conversations + messages (SSE stream) ──
 router.get('/chat/demo-iframe-preview', chatCtrl.getDemoIframePreview);
 router.get('/chat/active-bot', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getActiveBot);
-router.post('/chat/tts', checkPermission('ai_chatbot', 'can_view'), chatCtrl.generateSpeech);
 router.get('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.listConversations);
 router.post('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.createConversation);
 router.delete('/chat/conversations/:id', checkPermission('ai_chatbot', 'can_view'), chatCtrl.deleteConversation);

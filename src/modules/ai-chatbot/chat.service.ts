@@ -1013,27 +1013,6 @@ async function loadConversationContext(conversationId: string, userId: string, t
   };
 }
 
-export async function getConversationVoicePrompt(
-  conversationId: string,
-  userId: string,
-  tenantId: string,
-): Promise<string | null> {
-  const result = await query<{ voice_prompt: string | null }>(
-    `SELECT NULLIF(BTRIM(spt.voice_prompt), '') AS voice_prompt
-     FROM chat_conversations cc
-     JOIN bot_personas bp ON bp.id = cc.persona_id
-     JOIN system_prompt_templates spt ON spt.id = bp.template_id
-     WHERE cc.id = $1
-       AND cc.user_id = $2
-       AND cc.tenant_id = $3`,
-    [conversationId, userId, tenantId],
-  );
-
-  if (!result.rowCount || result.rowCount === 0) {
-    throw new Error('Cuộc hội thoại không tồn tại');
-  }
-  return result.rows[0]?.voice_prompt ?? null;
-}
 async function saveInputFilterRejectedTurn(
   ctx: ConversationContext,
   userContent: string,
@@ -4307,17 +4286,6 @@ export async function sendMessageStream(
     // 5b. Course context — inject outline + function calling tool
     let enrichedPrompt = ctx.systemPrompt;
     let hasCourseContext = false;
-    if (isVoiceTurn && ctx.target !== LESSON_AUTHOR_TARGET) {
-      enrichedPrompt += [
-        '',
-        '',
-        'VOICE CHAT RESPONSE RULES:',
-        '- User is in voice chat. Reply in Vietnamese with a short, natural spoken answer.',
-        '- Keep the answer to 2-4 concise sentences unless the user explicitly asks for more detail.',
-        '- Do not use markdown tables, code blocks, or long bullet lists in voice chat.',
-        '- If the full answer would be long, give the key point first and ask whether the user wants more detail.',
-      ].join('\n');
-    }
     if (ctx.target === LESSON_AUTHOR_TARGET) {
       enrichedPrompt += [
         '',

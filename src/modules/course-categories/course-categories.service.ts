@@ -1,29 +1,82 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Course Categories Service — CRUD + assign courses to categories
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
 import { invalidateCourseReadCaches, invalidateTenantCourseCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 
 async function getCategoryTenantId(catId: string): Promise<string | null> {
   const result = await query<{ tenant_id: string }>('SELECT tenant_id FROM course_categories WHERE id = $1', [catId]);
   return result.rows[0]?.tenant_id ?? null;
 }
 
-export async function listCourseCategories(tenantId: string | null) {
-  const params: unknown[] = [];
-  let where = '';
-  if (tenantId) { params.push(tenantId); where = `WHERE cc.tenant_id = $1`; }
+export async function listCourseCategories(tenantId: string | null, queryParams: Record<string, unknown> = {}) {
+  const hasListParams = queryParams.page !== undefined
+    || queryParams.page_size !== undefined
+    || queryParams.search !== undefined
+    || queryParams.assigned_team_id !== undefined;
 
-  const result = await query(
-    `SELECT cc.*,
-            (SELECT COUNT(*) FROM course_category_courses ccc WHERE ccc.category_id = cc.id) AS course_count
-     FROM course_categories cc ${where}
-     ORDER BY cc.sort_order, cc.name`,
-    params,
-  );
-  return { results: result.rows };
+  if (!hasListParams) {
+    const params: unknown[] = [];
+    let where = '';
+    if (tenantId) { params.push(tenantId); where = `WHERE cc.tenant_id = $1`; }
+
+    const result = await query(
+      `SELECT cc.*,
+              (SELECT COUNT(*) FROM course_category_courses ccc WHERE ccc.category_id = cc.id) AS course_count
+       FROM course_categories cc ${where}
+       ORDER BY cc.sort_order, cc.name`,
+      params,
+    );
+    return { results: result.rows };
+  }
+
+  const { page, pageSize, search } = parsePagination(queryParams);
+  const offset = calcOffset(page, pageSize);
+  const params: unknown[] = [];
+  const conditions: string[] = [];
+  const assignedTeamId = typeof queryParams.assigned_team_id === 'string' && queryParams.assigned_team_id.trim()
+    ? queryParams.assigned_team_id.trim()
+    : null;
+
+  if (tenantId) { params.push(tenantId); conditions.push(`cc.tenant_id = $${params.length}::uuid`); }
+  if (search) { params.push(`%${search}%`); conditions.push(`unaccent(cc.name) ILIKE unaccent($${params.length})`); }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const dataParams = [...params];
+  let assignedSelect = '';
+  if (assignedTeamId) {
+    dataParams.push(assignedTeamId);
+    const teamParam = dataParams.length;
+    assignedSelect = `,
+              EXISTS (
+                SELECT 1
+                FROM team_course_categories tcc
+                JOIN teams t_assign ON t_assign.id = tcc.team_id
+                JOIN sub_groups sg_assign ON sg_assign.id = t_assign.sub_group_id
+                JOIN org_groups og_assign ON og_assign.id = sg_assign.org_group_id
+                WHERE tcc.category_id = cc.id
+                  AND tcc.team_id = $${teamParam}::uuid
+                  ${tenantId ? 'AND og_assign.tenant_id = $1::uuid' : ''}
+              ) AS is_assigned_to_team`;
+  }
+
+  const [countR, dataR] = await Promise.all([
+    query<{ count: string }>(`SELECT COUNT(*) AS count FROM course_categories cc ${where}`, params),
+    query(
+      `SELECT cc.*,
+              (SELECT COUNT(*) FROM course_category_courses ccc WHERE ccc.category_id = cc.id) AS course_count${assignedSelect}
+       FROM course_categories cc ${where}
+       ORDER BY cc.sort_order, cc.name
+       LIMIT $${dataParams.length + 1} OFFSET $${dataParams.length + 2}`,
+      [...dataParams, pageSize, offset],
+    ),
+  ]);
+
+  const total = parseInt(countR.rows[0].count, 10);
+  return { results: dataR.rows, total, page, pageSize, totalPages: calcTotalPages(total, pageSize) };
 }
 
 export async function createCourseCategory(tenantId: string, input: { name: string; description?: string; sort_order?: number }) {

@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Groups Service — Org → SubGroup → Team hierarchy + assignments
 // Tenant-scoped, optimized for millions of users
 // ═══════════════════════════════════════════════════════════════
@@ -219,53 +219,193 @@ export async function createTeam(subgroupId: string, input: { name: string }) {
 }
 
 export async function getTeamDetail(teamId: string) {
-  const [teamR, membersR, coursesR, categoriesR, courseCatsR] = await Promise.all([
-    query(
-      `SELECT t.*, sg.name AS subgroup_name, og.id AS org_group_id, og.name AS org_group_name
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE t.id = $1`,
-      [teamId],
-    ),
-    query(
-      `SELECT u.id, u.username, u.email, u.avatar_url AS avatar, tm.added_at
-       FROM team_members tm JOIN users u ON u.id = tm.user_id
-       WHERE tm.team_id = $1 ORDER BY tm.added_at DESC`,
-      [teamId],
-    ),
-    query(
-      `SELECT tc.course_id, c.display_name, tc.assigned_at
-       FROM team_courses tc JOIN courses c ON c.id = tc.course_id
-       WHERE tc.team_id = $1`,
-      [teamId],
-    ),
-    query(
-      `SELECT tdc.category_id, dc.name, tdc.assigned_at
-       FROM team_doc_categories tdc JOIN document_categories dc ON dc.id = tdc.category_id
-       WHERE tdc.team_id = $1`,
-      [teamId],
-    ),
-    query(
-      `SELECT tcc.category_id, cc.name, cc.slug, tcc.assigned_at
-       FROM team_course_categories tcc JOIN course_categories cc ON cc.id = tcc.category_id
-       WHERE tcc.team_id = $1`,
-      [teamId],
-    ),
-  ]);
+  const teamR = await query(
+    `SELECT t.*,
+            sg.name AS subgroup_name,
+            og.id AS org_group_id,
+            og.name AS org_group_name,
+            (SELECT COUNT(*)::int FROM team_members tm WHERE tm.team_id = t.id) AS member_count,
+            (SELECT COUNT(*)::int FROM team_courses tc WHERE tc.team_id = t.id) AS course_count,
+            (SELECT COUNT(*)::int FROM team_doc_categories tdc WHERE tdc.team_id = t.id) AS category_count,
+            (SELECT COUNT(*)::int FROM team_course_categories tcc WHERE tcc.team_id = t.id) AS course_category_count
+     FROM teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.id = $1`,
+    [teamId],
+  );
 
   if (teamR.rowCount === 0) throw new AppError('Team không tồn tại', 404);
 
+  const team = teamR.rows[0];
   return {
-    ...teamR.rows[0],
-    member_count: membersR.rowCount || 0,
-    course_count: coursesR.rowCount || 0,
-    course_category_count: courseCatsR.rowCount || 0,
-    category_count: categoriesR.rowCount || 0,
-    members: membersR.rows,
-    courses: coursesR.rows,
-    categories: categoriesR.rows,
-    course_categories: courseCatsR.rows,
+    ...team,
+    member_count: Number(team.member_count || 0),
+    course_count: Number(team.course_count || 0),
+    course_category_count: Number(team.course_category_count || 0),
+    category_count: Number(team.category_count || 0),
+    members: [],
+    courses: [],
+    categories: [],
+    course_categories: [],
+  };
+}
+
+export async function listTeamMembers(
+  teamId: string,
+  tenantId: string | null,
+  queryParams: Record<string, unknown>,
+) {
+  const { page, pageSize, search } = parsePagination(queryParams);
+  const offset = calcOffset(page, pageSize);
+  const params: unknown[] = [teamId];
+  const conditions = ['tm.team_id = $1::uuid'];
+
+  if (tenantId) {
+    params.push(tenantId);
+    conditions.push(`og.tenant_id = $${params.length}::uuid`);
+  }
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`(
+      u.username ILIKE $${params.length}
+      OR u.email ILIKE $${params.length}
+      OR u.full_name ILIKE $${params.length}
+    )`);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const from = `FROM team_members tm
+    JOIN teams t ON t.id = tm.team_id
+    JOIN sub_groups sg ON sg.id = t.sub_group_id
+    JOIN org_groups og ON og.id = sg.org_group_id
+    JOIN users u ON u.id = tm.user_id`;
+
+  const [countR, dataR] = await Promise.all([
+    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
+    query(
+      `SELECT u.id,
+              u.username,
+              u.email,
+              u.full_name,
+              u.avatar_url AS avatar,
+              tm.added_at
+       ${from}
+       ${where}
+       ORDER BY tm.added_at DESC, u.id
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
+    ),
+  ]);
+
+  const total = parseInt(countR.rows[0]?.count || '0', 10);
+  return {
+    data: dataR.rows,
+    total,
+    page,
+    pageSize,
+    totalPages: calcTotalPages(total, pageSize),
+  };
+}
+
+export async function listTeamDocCategories(
+  teamId: string,
+  tenantId: string | null,
+  queryParams: Record<string, unknown>,
+) {
+  const { page, pageSize, search } = parsePagination(queryParams);
+  const offset = calcOffset(page, pageSize);
+  const params: unknown[] = [teamId];
+  const conditions = ['tdc.team_id = $1::uuid'];
+
+  if (tenantId) {
+    params.push(tenantId);
+    conditions.push(`og.tenant_id = $${params.length}::uuid`);
+  }
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`unaccent(dc.name) ILIKE unaccent($${params.length})`);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const from = `FROM team_doc_categories tdc
+    JOIN teams t ON t.id = tdc.team_id
+    JOIN sub_groups sg ON sg.id = t.sub_group_id
+    JOIN org_groups og ON og.id = sg.org_group_id
+    JOIN document_categories dc ON dc.id = tdc.category_id`;
+
+  const [countR, dataR] = await Promise.all([
+    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
+    query(
+      `SELECT tdc.category_id,
+              dc.name,
+              tdc.assigned_at
+       ${from}
+       ${where}
+       ORDER BY tdc.assigned_at DESC, dc.name
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
+    ),
+  ]);
+
+  const total = parseInt(countR.rows[0]?.count || '0', 10);
+  return {
+    data: dataR.rows,
+    total,
+    page,
+    pageSize,
+    totalPages: calcTotalPages(total, pageSize),
+  };
+}
+
+export async function listTeamCourseCategories(
+  teamId: string,
+  tenantId: string | null,
+  queryParams: Record<string, unknown>,
+) {
+  const { page, pageSize, search } = parsePagination(queryParams);
+  const offset = calcOffset(page, pageSize);
+  const params: unknown[] = [teamId];
+  const conditions = ['tcc.team_id = $1::uuid'];
+
+  if (tenantId) {
+    params.push(tenantId);
+    conditions.push(`og.tenant_id = $${params.length}::uuid`);
+  }
+  if (search) {
+    params.push(`%${search}%`);
+    conditions.push(`unaccent(cc.name) ILIKE unaccent($${params.length})`);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+  const from = `FROM team_course_categories tcc
+    JOIN teams t ON t.id = tcc.team_id
+    JOIN sub_groups sg ON sg.id = t.sub_group_id
+    JOIN org_groups og ON og.id = sg.org_group_id
+    JOIN course_categories cc ON cc.id = tcc.category_id`;
+
+  const [countR, dataR] = await Promise.all([
+    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
+    query(
+      `SELECT tcc.category_id,
+              cc.name,
+              cc.slug,
+              tcc.assigned_at
+       ${from}
+       ${where}
+       ORDER BY tcc.assigned_at DESC, cc.name
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, offset],
+    ),
+  ]);
+
+  const total = parseInt(countR.rows[0]?.count || '0', 10);
+  return {
+    data: dataR.rows,
+    total,
+    page,
+    pageSize,
+    totalPages: calcTotalPages(total, pageSize),
   };
 }
 

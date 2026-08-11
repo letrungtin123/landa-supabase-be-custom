@@ -909,7 +909,7 @@ async function getMyLibraryCategoriesFromDb(
 
   if (isLearnerRole(role)) {
     sql = `SELECT dc.id, dc.name, dc.slug, dc.sort_order,
-                  COUNT(d.id) FILTER (WHERE d.is_visible = true) AS count
+                  COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true) AS count
            FROM document_categories dc
            JOIN team_doc_categories tdc ON tdc.category_id = dc.id
            JOIN team_members tm ON tm.team_id = tdc.team_id

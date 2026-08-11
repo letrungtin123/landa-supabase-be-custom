@@ -1,4 +1,4 @@
-﻿import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import * as svc from './course-categories.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
@@ -6,7 +6,7 @@ import { auditFromReq } from '../../middleware/audit-log.js';
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    sendSuccess(res, await svc.listCourseCategories(tenantId));
+    sendSuccess(res, await svc.listCourseCategories(tenantId, req.query as Record<string, unknown>));
   } catch (err) { next(err); }
 }
 

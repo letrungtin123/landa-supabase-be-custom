@@ -9,7 +9,7 @@ import { tenantContext } from '../../middleware/tenant-context.js';
 import {
   listOrgGroupsController, createOrgGroupController, updateOrgGroupController, deleteOrgGroupController,
   listSubGroupsController, createSubGroupController, getSubGroupDetailController, updateSubGroupController, deleteSubGroupController,
-  listTeamsController, createTeamController, getTeamDetailController, updateTeamController, deleteTeamController,
+  listTeamsController, createTeamController, getTeamDetailController, listTeamMembersController, listTeamDocCategoriesController, listTeamCourseCategoriesController, updateTeamController, deleteTeamController,
   addTeamMembersController, removeTeamMemberController,
   assignTeamCoursesController, revokeTeamCourseController,
   assignTeamDocCategoriesController, revokeTeamDocCategoryController,
@@ -42,6 +42,7 @@ router.patch('/teams/:id', checkPermission('groups', 'can_edit'), updateTeamCont
 router.delete('/teams/:id', checkPermission('groups', 'can_delete'), deleteTeamController);
 
 // Team Members
+router.get('/teams/:teamId/members', checkPermission('groups', 'can_view'), listTeamMembersController);
 router.post('/teams/:teamId/members', checkPermission('groups', 'can_edit'), addTeamMembersController);
 router.delete('/teams/:teamId/members/:userId', checkPermission('groups', 'can_edit'), removeTeamMemberController);
 
@@ -50,10 +51,12 @@ router.post('/teams/:teamId/courses', checkPermission('groups', 'can_edit'), ass
 router.delete('/teams/:teamId/courses/:courseId', checkPermission('groups', 'can_edit'), revokeTeamCourseController);
 
 // Team Doc Categories
+router.get('/teams/:teamId/categories', checkPermission('groups', 'can_view'), listTeamDocCategoriesController);
 router.post('/teams/:teamId/categories', checkPermission('groups', 'can_edit'), assignTeamDocCategoriesController);
 router.delete('/teams/:teamId/categories/:categoryId', checkPermission('groups', 'can_edit'), revokeTeamDocCategoryController);
 
 // Team Course Categories
+router.get('/teams/:teamId/course-categories', checkPermission('groups', 'can_view'), listTeamCourseCategoriesController);
 router.post('/teams/:teamId/course-categories', checkPermission('groups', 'can_edit'), assignTeamCourseCategoriesController);
 router.delete('/teams/:teamId/course-categories/:categoryId', checkPermission('groups', 'can_edit'), revokeTeamCourseCategoryController);
 
