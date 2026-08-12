@@ -5,7 +5,6 @@
 
 import { query, getClient } from '../../config/database.js';
 import {
-  invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
   invalidateTenantLibraryCaches,
   invalidateUserMembershipCaches,
@@ -47,6 +46,13 @@ async function getTeamTenantId(teamId: string): Promise<string | null> {
     [teamId],
   );
   return result.rows[0]?.tenant_id ?? null;
+}
+
+async function assertTeamInTenant(teamId: string, tenantId: string): Promise<void> {
+  const teamTenantId = await getTeamTenantId(teamId);
+  if (!teamTenantId || teamTenantId !== tenantId) {
+    throw new AppError('Team không tồn tại hoặc không thuộc tenant hiện tại', 404);
+  }
 }
 
 // ═══ Org Groups (level 1) ═══
@@ -660,46 +666,26 @@ async function removeTeamMemberFromDb(teamId: string, userId: string) {
 
 // ═══ Team Courses ═══
 
-export async function assignTeamCourses(teamId: string, courseIds: string[]) {
-  const tenantId = await getTeamTenantId(teamId);
-  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
-  const teamName = teamResult.rows[0]?.name || teamId;
-  let assigned = 0, skipped = 0;
-  for (const cid of courseIds) {
-    const r = await query(
-      `INSERT INTO team_courses (team_id, course_id)
-       SELECT $1, c.id
-       FROM courses c
-       WHERE c.id = $2
-         AND c.deleted_at IS NULL
-         AND COALESCE(c.is_public, false) = false
-         AND c.tenant_id = (
-           SELECT og.tenant_id
-           FROM teams t
-           JOIN sub_groups sg ON sg.id = t.sub_group_id
-           JOIN org_groups og ON og.id = sg.org_group_id
-           WHERE t.id = $1
-         )
-       ON CONFLICT DO NOTHING`,
-      [teamId, cid],
-    );
-    if (r.rowCount! > 0) assigned++; else skipped++;
-  }
-  if (tenantId) await invalidateTenantCourseCaches(tenantId);
-  return { success: true, assigned, skipped, teamName };
+export async function assignTeamCourses(teamId: string, courseIds: string[], tenantId: string) {
+  void courseIds;
+  await assertTeamInTenant(teamId, tenantId);
+  throw new AppError('Không còn hỗ trợ phân khóa học riêng cho team. Vui lòng phân danh mục khóa học.', 400);
 }
 
-export async function revokeTeamCourse(teamId: string, courseId: string) {
-  const tenantId = await getTeamTenantId(teamId);
+export async function revokeTeamCourse(teamId: string, courseId: string, tenantId: string) {
+  await assertTeamInTenant(teamId, tenantId);
   const context = await query<{ team_name: string; course_name: string | null }>(
     `SELECT t.name AS team_name, c.display_name AS course_name
      FROM teams t
-     LEFT JOIN courses c ON c.id = $2
-     WHERE t.id = $1`,
-    [teamId, courseId],
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     LEFT JOIN courses c ON c.id = $2 AND c.tenant_id = $3::uuid
+     WHERE t.id = $1::uuid
+       AND og.tenant_id = $3::uuid`,
+    [teamId, courseId, tenantId],
   );
-  const result = await revokeTeamCourseFromDb(teamId, courseId);
-  if (tenantId) await invalidateTenantCourseCaches(tenantId);
+  const result = await revokeTeamCourseFromDb(teamId, courseId, tenantId);
+  await invalidateTenantCourseCaches(tenantId);
   return {
     ...result,
     teamName: context.rows[0]?.team_name || teamId,
@@ -707,26 +693,36 @@ export async function revokeTeamCourse(teamId: string, courseId: string) {
   };
 }
 
-async function revokeTeamCourseFromDb(teamId: string, courseId: string) {
-  const r = await query('DELETE FROM team_courses WHERE team_id = $1 AND course_id = $2 RETURNING course_id', [teamId, courseId]);
-  if (r.rowCount === 0) throw new AppError('Course không thuộc team', 404);
+async function revokeTeamCourseFromDb(teamId: string, courseId: string, tenantId: string) {
+  const r = await query(
+    `DELETE FROM team_courses tc
+     USING teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE tc.team_id = t.id
+       AND tc.team_id = $1::uuid
+       AND tc.course_id = $2
+       AND og.tenant_id = $3::uuid
+     RETURNING tc.course_id`,
+    [teamId, courseId, tenantId],
+  );
+  if (r.rowCount === 0) throw new AppError('Khóa học không thuộc team', 404);
   return { success: true };
 }
 
 // ═══ Team Document Categories ═══
 
-export async function assignTeamDocCategories(teamId: string, categoryIds: string[]) {
+export async function assignTeamDocCategories(teamId: string, categoryIds: string[], tenantId: string) {
   const normalizedCategoryIds = Array.from(new Set(
     categoryIds
       .filter((cid): cid is string => typeof cid === 'string')
       .map((cid) => cid.trim())
       .filter(Boolean),
   ));
-  const tenantId = await getTeamTenantId(teamId);
-  if (!tenantId) throw new AppError('Team không tồn tại', 404);
+  await assertTeamInTenant(teamId, tenantId);
 
   const client = await getClient();
-  let assigned = 0, skipped = 0, detachedPublicDocuments = 0;
+  let assigned = 0, skipped = 0;
   let teamName = teamId;
   try {
     await client.query('BEGIN');
@@ -741,32 +737,11 @@ export async function assignTeamDocCategories(teamId: string, categoryIds: strin
          FROM document_categories dc
          WHERE dc.id = $2::uuid
            AND dc.tenant_id = $3::uuid
+           AND COALESCE(dc.is_public, false) = false
          ON CONFLICT DO NOTHING`,
         [teamId, cid, tenantId],
       );
       if (r.rowCount! > 0) assigned++; else skipped++;
-    }
-
-    if (normalizedCategoryIds.length > 0) {
-      const detached = await client.query<{ id: string }>(
-        `UPDATE documents d
-         SET category_id = NULL
-         WHERE d.tenant_id = $1::uuid
-           AND COALESCE(d.is_public, false) = true
-           AND d.category_id = ANY($2::uuid[])
-           AND EXISTS (
-             SELECT 1
-             FROM team_doc_categories tdc
-             JOIN teams t ON t.id = tdc.team_id
-             JOIN sub_groups sg ON sg.id = t.sub_group_id
-             JOIN org_groups og ON og.id = sg.org_group_id
-             WHERE tdc.category_id = d.category_id
-               AND og.tenant_id = $1::uuid
-           )
-         RETURNING d.id`,
-        [tenantId, normalizedCategoryIds],
-      );
-      detachedPublicDocuments = detached.rowCount || 0;
     }
 
     await client.query('COMMIT');
@@ -778,19 +753,22 @@ export async function assignTeamDocCategories(teamId: string, categoryIds: strin
   }
 
   await invalidateTenantLibraryCaches(tenantId);
-  return { success: true, assigned, skipped, teamName, detachedPublicDocuments };
+  return { success: true, assigned, skipped, teamName };
 }
-export async function revokeTeamDocCategory(teamId: string, categoryId: string) {
-  const tenantId = await getTeamTenantId(teamId);
+export async function revokeTeamDocCategory(teamId: string, categoryId: string, tenantId: string) {
+  await assertTeamInTenant(teamId, tenantId);
   const context = await query<{ team_name: string; category_name: string | null }>(
     `SELECT t.name AS team_name, dc.name AS category_name
      FROM teams t
-     LEFT JOIN document_categories dc ON dc.id = $2
-     WHERE t.id = $1`,
-    [teamId, categoryId],
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     LEFT JOIN document_categories dc ON dc.id = $2::uuid AND dc.tenant_id = $3::uuid
+     WHERE t.id = $1::uuid
+       AND og.tenant_id = $3::uuid`,
+    [teamId, categoryId, tenantId],
   );
-  const result = await revokeTeamDocCategoryFromDb(teamId, categoryId);
-  if (tenantId) await invalidateTenantLibraryCaches(tenantId);
+  const result = await revokeTeamDocCategoryFromDb(teamId, categoryId, tenantId);
+  await invalidateTenantLibraryCaches(tenantId);
   return {
     ...result,
     teamName: context.rows[0]?.team_name || teamId,
@@ -798,65 +776,70 @@ export async function revokeTeamDocCategory(teamId: string, categoryId: string) 
   };
 }
 
-async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string) {
-  const r = await query('DELETE FROM team_doc_categories WHERE team_id = $1 AND category_id = $2 RETURNING category_id', [teamId, categoryId]);
-  if (r.rowCount === 0) throw new AppError('Category không thuộc team', 404);
+async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string, tenantId: string) {
+  const r = await query(
+    `DELETE FROM team_doc_categories tdc
+     USING teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     JOIN document_categories dc ON dc.id = tdc.category_id
+     WHERE tdc.team_id = t.id
+       AND tdc.team_id = $1::uuid
+       AND tdc.category_id = $2::uuid
+       AND og.tenant_id = $3::uuid
+       AND dc.tenant_id = $3::uuid
+     RETURNING tdc.category_id`,
+    [teamId, categoryId, tenantId],
+  );
+  if (r.rowCount === 0) throw new AppError('Danh mục tài liệu không thuộc team', 404);
   return { success: true };
 }
 
 // ═══ Team Course Categories ═══
 
-export async function assignTeamCourseCategories(teamId: string, categoryIds: string[]) {
-  const tenantId = await getTeamTenantId(teamId);
-  const teamResult = await query<{ name: string }>('SELECT name FROM teams WHERE id = $1', [teamId]);
+export async function assignTeamCourseCategories(teamId: string, categoryIds: string[], tenantId: string) {
+  await assertTeamInTenant(teamId, tenantId);
+  const teamResult = await query<{ name: string }>(
+    `SELECT t.name
+     FROM teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.id = $1::uuid AND og.tenant_id = $2::uuid`,
+    [teamId, tenantId],
+  );
   const teamName = teamResult.rows[0]?.name || teamId;
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
-    const r = await query('INSERT INTO team_course_categories (team_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [teamId, cid]);
+    const r = await query(
+      `INSERT INTO team_course_categories (team_id, category_id)
+       SELECT $1::uuid, cc.id
+       FROM course_categories cc
+       WHERE cc.id = $2::uuid
+         AND cc.tenant_id = $3::uuid
+         AND COALESCE(cc.is_public, false) = false
+       ON CONFLICT DO NOTHING`,
+      [teamId, cid, tenantId],
+    );
     if (r.rowCount! > 0) assigned++; else skipped++;
   }
-  if (tenantId) {
-    const removed = await query<{ course_id: string }>(
-      `DELETE FROM course_category_courses ccc
-       USING course_categories cc, courses c
-       WHERE cc.id = ccc.category_id
-         AND c.id = ccc.course_id
-         AND cc.tenant_id = $1::uuid
-         AND c.tenant_id = $1::uuid
-         AND COALESCE(c.is_public, false) = true
-         AND ccc.category_id = ANY($2::uuid[])
-         AND EXISTS (
-           SELECT 1
-           FROM team_course_categories tcc
-           JOIN teams t ON t.id = tcc.team_id
-           JOIN sub_groups sg ON sg.id = t.sub_group_id
-           JOIN org_groups og ON og.id = sg.org_group_id
-           WHERE tcc.category_id = ccc.category_id
-             AND og.tenant_id = $1::uuid
-         )
-       RETURNING ccc.course_id`,
-      [tenantId, categoryIds],
-    );
-    const publicCourseIds = [...new Set(removed.rows.map((row) => row.course_id))];
-    await Promise.all([
-      invalidateTenantCourseCaches(tenantId),
-      ...publicCourseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
-    ]);
-  }
+  if (tenantId) await invalidateTenantCourseCaches(tenantId);
   return { success: true, assigned, skipped, teamName };
 }
 
-export async function revokeTeamCourseCategory(teamId: string, categoryId: string) {
-  const tenantId = await getTeamTenantId(teamId);
+export async function revokeTeamCourseCategory(teamId: string, categoryId: string, tenantId: string) {
+  await assertTeamInTenant(teamId, tenantId);
   const context = await query<{ team_name: string; category_name: string | null }>(
     `SELECT t.name AS team_name, cc.name AS category_name
      FROM teams t
-     LEFT JOIN course_categories cc ON cc.id = $2
-     WHERE t.id = $1`,
-    [teamId, categoryId],
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     LEFT JOIN course_categories cc ON cc.id = $2::uuid AND cc.tenant_id = $3::uuid
+     WHERE t.id = $1::uuid
+       AND og.tenant_id = $3::uuid`,
+    [teamId, categoryId, tenantId],
   );
-  const result = await revokeTeamCourseCategoryFromDb(teamId, categoryId);
-  if (tenantId) await invalidateTenantCourseCaches(tenantId);
+  const result = await revokeTeamCourseCategoryFromDb(teamId, categoryId, tenantId);
+  await invalidateTenantCourseCaches(tenantId);
   return {
     ...result,
     teamName: context.rows[0]?.team_name || teamId,
@@ -864,9 +847,22 @@ export async function revokeTeamCourseCategory(teamId: string, categoryId: strin
   };
 }
 
-async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string) {
-  const r = await query('DELETE FROM team_course_categories WHERE team_id = $1 AND category_id = $2 RETURNING category_id', [teamId, categoryId]);
-  if (r.rowCount === 0) throw new AppError('Course category không thuộc team', 404);
+async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string, tenantId: string) {
+  const r = await query(
+    `DELETE FROM team_course_categories tcc
+     USING teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     JOIN course_categories cc ON cc.id = tcc.category_id
+     WHERE tcc.team_id = t.id
+       AND tcc.team_id = $1::uuid
+       AND tcc.category_id = $2::uuid
+       AND og.tenant_id = $3::uuid
+       AND cc.tenant_id = $3::uuid
+     RETURNING tcc.category_id`,
+    [teamId, categoryId, tenantId],
+  );
+  if (r.rowCount === 0) throw new AppError('Danh mục khóa học không thuộc team', 404);
   return { success: true };
 }
 

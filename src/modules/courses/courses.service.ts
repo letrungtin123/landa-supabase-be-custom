@@ -204,6 +204,16 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses c ${where}`, params),
     query(
       `SELECT c.*,
+              current_category.category_id,
+              current_category.category_name,
+              EXISTS (
+                SELECT 1
+                FROM course_category_courses ccc_public
+                JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+                WHERE ccc_public.course_id = c.id
+                  AND cc_public.tenant_id = c.tenant_id
+                  AND COALESCE(cc_public.is_public, false) = true
+              ) AS is_public,
               creator.id AS creator_id,
               NULLIF(creator.full_name, '') AS creator_display_name,
               mentor.id AS mentor_id,
@@ -217,6 +227,17 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
        FROM courses c
        LEFT JOIN users creator ON creator.id = c.created_by
        LEFT JOIN users mentor ON mentor.id = c.mentor_id
+       LEFT JOIN LATERAL (
+         SELECT cc.id AS category_id,
+                cc.name AS category_name
+         FROM course_category_courses ccc_current
+         JOIN course_categories cc
+           ON cc.id = ccc_current.category_id
+          AND cc.tenant_id = c.tenant_id
+         WHERE ccc_current.course_id = c.id
+         ORDER BY ccc_current.assigned_at DESC NULLS LAST, ccc_current.id DESC
+         LIMIT 1
+       ) current_category ON true
        ${where}
        ORDER BY c.updated_at DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -306,8 +327,8 @@ export async function updateCourse(courseId: string, tenantId: string, input: Co
 }
 
 async function updateCourseFromDb(courseId: string, tenantId: string, input: CourseUpdateInput) {
-  if (input.is_public === true && input.visible_to_staff_only === true) {
-    throw new AppError('Khóa học công khai không thể đang lưu trữ', 400);
+  if (input.is_public !== undefined) {
+    throw new AppError('Chỉ được bật Công khai truy cập ở danh mục khóa học', 400);
   }
 
   const client = await getClient();
@@ -330,13 +351,6 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
     if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
     if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
     if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
-    if (input.is_public !== undefined) { sets.push(`is_public = $${idx++}`); params.push(input.is_public); }
-    if (input.is_public === true && input.visible_to_staff_only === undefined) {
-      sets.push('visible_to_staff_only = false');
-    }
-    if (input.visible_to_staff_only === true && input.is_public === undefined) {
-      sets.push('is_public = false');
-    }
 
     params.push(courseId, tenantId);
     const result = await client.query(
@@ -347,33 +361,6 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
       params,
     );
 
-    if (input.is_public === true && current.rows[0].is_public !== true) {
-      await client.query(
-        `DELETE FROM team_courses tc
-         USING teams t
-         JOIN sub_groups sg ON sg.id = t.sub_group_id
-         JOIN org_groups og ON og.id = sg.org_group_id
-         WHERE tc.team_id = t.id
-           AND tc.course_id = $1
-           AND og.tenant_id = $2::uuid`,
-        [courseId, tenantId],
-      );
-
-      await client.query(
-        `DELETE FROM course_category_courses ccc
-         WHERE ccc.course_id = $1
-           AND EXISTS (
-             SELECT 1
-             FROM team_course_categories tcc
-             JOIN teams t ON t.id = tcc.team_id
-             JOIN sub_groups sg ON sg.id = t.sub_group_id
-             JOIN org_groups og ON og.id = sg.org_group_id
-             WHERE tcc.category_id = ccc.category_id
-               AND og.tenant_id = $2::uuid
-           )`,
-        [courseId, tenantId],
-      );
-    }
 
     await client.query('COMMIT');
     return result.rows[0];
@@ -852,3 +839,8 @@ export async function upsertSectionModalConfig(courseId: string, input: { sectio
   await invalidateCourseReadCaches(courseId);
   return { success: true };
 }
+
+
+
+
+

@@ -1,4 +1,4 @@
-import type { Request, Response, NextFunction } from 'express';
+﻿import type { Request, Response, NextFunction } from 'express';
 import * as svc from './courses.service.js';
 import { requestCourseDeletion } from '../course-deletion/course-deletion.service.js';
 import {
@@ -62,6 +62,10 @@ export async function createController(req: Request, res: Response, next: NextFu
 
 export async function updateController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    if (req.body?.is_public !== undefined) {
+      sendError(res, 'Chỉ được bật Công khai truy cập ở danh mục khóa học', 400);
+      return;
+    }
     const parsed = updateCourseSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const tenantId = req.user!.tenantId;
@@ -234,3 +238,4 @@ export async function hardDeleteController(req: Request, res: Response, next: Ne
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
+

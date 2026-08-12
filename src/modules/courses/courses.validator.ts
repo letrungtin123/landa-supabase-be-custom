@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════
+﻿// ═══════════════════════════════════════════════════════════════
 // Courses Validator — Zod schemas for input validation
 // ═══════════════════════════════════════════════════════════════
 
@@ -26,7 +26,6 @@ export const updateCourseSchema = z.object({
   display_name: requiredTrimmedString('display_name is required', 500).optional(),
   description: requiredTrimmedString('description is required', 5000).optional(),
   visible_to_staff_only: z.boolean().optional(),
-  is_public: z.boolean().optional(),
   image_url: z.string().max(1000).optional(),
   is_active: z.boolean().optional(),
   cover_url: z.string().max(1000).optional(),
@@ -36,8 +35,8 @@ export const updateCourseSchema = z.object({
 
 /** Schema bulk action */
 export const bulkActionSchema = z.object({
-  ids: z.array(z.string().uuid()).min(1, 'ids không được rỗng').max(100, 'Tối đa 100 items'),
-  action: z.enum(['activate', 'deactivate', 'delete']),
+  ids: z.array(z.string()).min(1, 'ids không được rỗng').max(100, 'Tối đa 100 items'),
+  action: z.enum(['staff_only', 'public']),
 });
 
 export const mentorSectionSchema = z.object({
@@ -60,3 +59,4 @@ export type CreateCourseInput = z.infer<typeof createCourseSchema>;
 export type UpdateCourseInput = z.infer<typeof updateCourseSchema>;
 export type BulkActionInput = z.infer<typeof bulkActionSchema>;
 export type MentorSectionInput = z.infer<typeof mentorSectionSchema>;
+

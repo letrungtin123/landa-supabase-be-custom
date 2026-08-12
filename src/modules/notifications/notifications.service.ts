@@ -87,7 +87,15 @@ export async function sendCourseNotification(
   const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
 
   const courseCheck = await query<{ visible_to_staff_only: boolean; is_public: boolean }>(
-    `SELECT visible_to_staff_only, COALESCE(is_public, false) AS is_public
+    `SELECT visible_to_staff_only,
+            EXISTS (
+              SELECT 1
+              FROM course_category_courses ccc
+              JOIN course_categories cc ON cc.id = ccc.category_id
+              WHERE ccc.course_id = courses.id
+                AND cc.tenant_id = courses.tenant_id
+                AND COALESCE(cc.is_public, false) = true
+            ) AS is_public
      FROM courses
      WHERE id = $1
        AND tenant_id = $2::uuid
@@ -128,7 +136,16 @@ export async function sendCourseNotification(
 
     const insertResult = await client.query(
       `WITH course_scope AS (
-         SELECT c.id, c.tenant_id, COALESCE(c.is_public, false) AS is_public
+         SELECT c.id,
+                c.tenant_id,
+                EXISTS (
+                  SELECT 1
+                  FROM course_category_courses ccc_public
+                  JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+                  WHERE ccc_public.course_id = c.id
+                    AND cc_public.tenant_id = c.tenant_id
+                    AND COALESCE(cc_public.is_public, false) = true
+                ) AS is_public
          FROM courses c
          WHERE c.id = $2::varchar
            AND c.tenant_id = $3::uuid

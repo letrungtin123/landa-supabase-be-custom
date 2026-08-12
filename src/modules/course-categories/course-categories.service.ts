@@ -2,14 +2,90 @@
 // Course Categories Service — CRUD + assign courses to categories
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
 import { invalidateCourseReadCaches, invalidateTenantCourseCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 
-async function getCategoryTenantId(catId: string): Promise<string | null> {
-  const result = await query<{ tenant_id: string }>('SELECT tenant_id FROM course_categories WHERE id = $1', [catId]);
-  return result.rows[0]?.tenant_id ?? null;
+type CourseCategoryPublicImpactRow = {
+  group_id: string;
+  group_name: string;
+  subgroup_id: string;
+  subgroup_name: string;
+  team_id: string;
+  team_name: string;
+  assigned_at: string | null;
+};
+
+function normalizeCourseIds(courseIds: string[]): string[] {
+  return Array.from(new Set(
+    courseIds
+      .filter((id): id is string => typeof id === 'string')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  ));
+}
+
+function toCount(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function getCategoryContext(catId: string, tenantId?: string | null) {
+  const params: unknown[] = [catId];
+  const tenantClause = tenantId ? 'AND tenant_id = $2::uuid' : '';
+  if (tenantId) params.push(tenantId);
+  const result = await query<{ id: string; tenant_id: string; name: string; is_public: boolean }>(
+    `SELECT id, tenant_id, name, COALESCE(is_public, false) AS is_public
+     FROM course_categories
+     WHERE id = $1::uuid ${tenantClause}
+     LIMIT 1`,
+    params,
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getCourseCategoryPublicImpact(catId: string, tenantId: string, limit = 30) {
+  const category = await getCategoryContext(catId, tenantId);
+  if (!category) throw new AppError('Danh mục khóa học không tồn tại', 404);
+
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit) || 30, 1), 50);
+  const [countR, dataR] = await Promise.all([
+    query<{ count: string }>(
+      `SELECT COUNT(DISTINCT tcc.team_id)::int AS count
+       FROM team_course_categories tcc
+       JOIN teams t ON t.id = tcc.team_id
+       JOIN sub_groups sg ON sg.id = t.sub_group_id
+       JOIN org_groups og ON og.id = sg.org_group_id
+       WHERE tcc.category_id = $1::uuid
+         AND og.tenant_id = $2::uuid`,
+      [catId, tenantId],
+    ),
+    query<CourseCategoryPublicImpactRow>(
+      `SELECT og.id AS group_id,
+              og.name AS group_name,
+              sg.id AS subgroup_id,
+              sg.name AS subgroup_name,
+              t.id AS team_id,
+              t.name AS team_name,
+              tcc.assigned_at
+       FROM team_course_categories tcc
+       JOIN teams t ON t.id = tcc.team_id
+       JOIN sub_groups sg ON sg.id = t.sub_group_id
+       JOIN org_groups og ON og.id = sg.org_group_id
+       WHERE tcc.category_id = $1::uuid
+         AND og.tenant_id = $2::uuid
+       ORDER BY og.name, sg.name, t.name
+       LIMIT $3`,
+      [catId, tenantId, cappedLimit],
+    ),
+  ]);
+
+  return {
+    category: { id: category.id, name: category.name, is_public: category.is_public },
+    total: toCount(countR.rows[0]?.count),
+    assignments: dataR.rows,
+  };
 }
 
 export async function listCourseCategories(tenantId: string | null, queryParams: Record<string, unknown> = {}) {
@@ -89,108 +165,163 @@ export async function createCourseCategory(tenantId: string, input: { name: stri
   return result.rows[0];
 }
 
-export async function updateCourseCategory(catId: string, input: { name?: string; description?: string; sort_order?: number }) {
-  const category = await updateCourseCategoryFromDb(catId, input);
-  await invalidateTenantCourseCaches(category.tenant_id);
-  return category;
-}
+export async function updateCourseCategory(
+  catId: string,
+  tenantId: string,
+  input: { name?: string; description?: string; sort_order?: number; is_public?: boolean },
+) {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
 
-async function updateCourseCategoryFromDb(catId: string, input: { name?: string; description?: string; sort_order?: number }) {
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
-  if (input.name !== undefined) {
-    const slug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    sets.push(`name = $${idx++}`); params.push(input.name);
-    sets.push(`slug = $${idx++}`); params.push(slug);
+    const current = await client.query<{ id: string; tenant_id: string; name: string; is_public: boolean }>(
+      `SELECT id, tenant_id, name, COALESCE(is_public, false) AS is_public
+       FROM course_categories
+       WHERE id = $1::uuid AND tenant_id = $2::uuid
+       FOR UPDATE`,
+      [catId, tenantId],
+    );
+    if (current.rowCount === 0) throw new AppError('Danh mục khóa học không tồn tại', 404);
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+    if (input.name !== undefined) {
+      const slug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      sets.push(`name = $${idx++}`); params.push(input.name);
+      sets.push(`slug = $${idx++}`); params.push(slug);
+    }
+    if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
+    if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
+    if (input.is_public !== undefined) { sets.push(`is_public = $${idx++}`); params.push(input.is_public); }
+    if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
+
+    let removedAssignments = 0;
+    if (input.is_public === true && current.rows[0].is_public !== true) {
+      const removed = await client.query(
+        `DELETE FROM team_course_categories tcc
+         USING teams t
+         JOIN sub_groups sg ON sg.id = t.sub_group_id
+         JOIN org_groups og ON og.id = sg.org_group_id
+         WHERE tcc.team_id = t.id
+           AND tcc.category_id = $1::uuid
+           AND og.tenant_id = $2::uuid`,
+        [catId, tenantId],
+      );
+      removedAssignments = removed.rowCount || 0;
+    }
+
+    params.push(catId, tenantId);
+    const result = await client.query(
+      `UPDATE course_categories
+       SET ${sets.join(', ')}
+       WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid
+       RETURNING id, name, slug, tenant_id, description, sort_order, is_public`,
+      params,
+    );
+
+    await client.query('COMMIT');
+    await invalidateTenantCourseCaches(tenantId);
+    return { ...result.rows[0], removed_assignments: removedAssignments };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
   }
-  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-  if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
-  if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
-  params.push(catId);
-  const result = await query(`UPDATE course_categories SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, tenant_id`, params);
-  if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
-  return result.rows[0];
 }
 
-export async function deleteCourseCategory(catId: string) {
-  const result = await query<{ id: string; tenant_id: string; name: string }>('DELETE FROM course_categories WHERE id = $1 RETURNING id, tenant_id, name', [catId]);
-  if (result.rowCount === 0) throw new AppError('Danh mục không tồn tại', 404);
+export async function deleteCourseCategory(catId: string, tenantId: string) {
+  const result = await query<{ id: string; tenant_id: string; name: string }>(
+    'DELETE FROM course_categories WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id, tenant_id, name',
+    [catId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Danh mục khóa học không tồn tại hoặc không thuộc tenant hiện tại', 404);
   await invalidateTenantCourseCaches(result.rows[0].tenant_id);
   return result.rows[0];
 }
 
-export async function getCategoryCourses(catId: string) {
+export async function getCategoryCourses(catId: string, tenantId: string) {
   const result = await query(
     `SELECT ccc.id, ccc.course_id, c.display_name, ccc.assigned_at
      FROM course_category_courses ccc
-     JOIN courses c ON c.id = ccc.course_id
-     WHERE ccc.category_id = $1
+     JOIN course_categories cc ON cc.id = ccc.category_id
+     JOIN courses c ON c.id = ccc.course_id AND c.tenant_id = cc.tenant_id
+     WHERE ccc.category_id = $1::uuid
+       AND cc.tenant_id = $2::uuid
      ORDER BY ccc.assigned_at DESC`,
-    [catId],
+    [catId, tenantId],
   );
   return { results: result.rows, count: result.rowCount || 0 };
 }
 
-export async function addCoursesToCategory(catId: string, courseIds: string[]) {
-  const category = await query<{ tenant_id: string; name: string }>('SELECT tenant_id, name FROM course_categories WHERE id = $1', [catId]);
-  const tenantId = category.rows[0]?.tenant_id ?? null;
-  const categoryName = category.rows[0]?.name || catId;
-  let assigned = 0;
-  let skipped = 0;
-  for (const courseId of courseIds) {
-    const r = await query(
-      `INSERT INTO course_category_courses (category_id, course_id)
-       SELECT cc.id, c.id
-       FROM course_categories cc
-       JOIN courses c ON c.id = $2
-        AND c.tenant_id = cc.tenant_id
-        AND c.deleted_at IS NULL
-       WHERE cc.id = $1
-         AND NOT (
-           COALESCE(c.is_public, false) = true
-           AND EXISTS (
-             SELECT 1
-             FROM team_course_categories tcc
-             JOIN teams t ON t.id = tcc.team_id
-             JOIN sub_groups sg ON sg.id = t.sub_group_id
-             JOIN org_groups og ON og.id = sg.org_group_id
-             WHERE tcc.category_id = cc.id
-               AND og.tenant_id = cc.tenant_id
-           )
-         )
-       ON CONFLICT DO NOTHING`,
-      [catId, courseId],
-    );
-    if (r.rowCount! > 0) assigned++; else skipped++;
-  }
-  if (tenantId) {
-    await Promise.all([
-      invalidateTenantCourseCaches(tenantId),
-      ...courseIds.map((courseId) => invalidateCourseReadCaches(courseId, tenantId)),
-    ]);
-  }
-  return { assigned, skipped, categoryName };
+export async function addCoursesToCategory(catId: string, tenantId: string, courseIds: string[]) {
+  const normalizedCourseIds = normalizeCourseIds(courseIds);
+  if (normalizedCourseIds.length > 500) throw new AppError('Tối đa 500 khóa học mỗi lần gán danh mục', 400);
+
+  const category = await getCategoryContext(catId, tenantId);
+  if (!category) throw new AppError('Danh mục khóa học không tồn tại hoặc không thuộc tenant hiện tại', 404);
+  if (normalizedCourseIds.length === 0) return { assigned: 0, skipped: 0, categoryName: category.name, conflicts: [] };
+
+  const conflictsR = await query<{ course_id: string; display_name: string; category_name: string }>(
+    `SELECT ccc.course_id,
+            COALESCE(c.display_name, ccc.course_id) AS display_name,
+            string_agg(DISTINCT cc.name, ', ' ORDER BY cc.name) AS category_name
+     FROM course_category_courses ccc
+     JOIN course_categories cc ON cc.id = ccc.category_id
+     LEFT JOIN courses c ON c.id = ccc.course_id AND c.tenant_id = cc.tenant_id
+     WHERE ccc.course_id = ANY($1::varchar[])
+       AND cc.tenant_id = $2::uuid
+       AND ccc.category_id <> $3::uuid
+     GROUP BY ccc.course_id, c.display_name`,
+    [normalizedCourseIds, category.tenant_id, catId],
+  );
+
+  const inserted = await query<{ course_id: string }>(
+    `INSERT INTO course_category_courses (category_id, course_id)
+     SELECT $1::uuid, c.id
+     FROM courses c
+     WHERE c.id = ANY($2::varchar[])
+       AND c.tenant_id = $3::uuid
+       AND c.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM course_category_courses existing
+         WHERE existing.course_id = c.id
+       )
+     ON CONFLICT DO NOTHING
+     RETURNING course_id`,
+    [catId, normalizedCourseIds, category.tenant_id],
+  );
+
+  await invalidateTenantCourseCaches(category.tenant_id);
+  const assigned = inserted.rowCount || 0;
+  return {
+    assigned,
+    skipped: Math.max(0, normalizedCourseIds.length - assigned),
+    categoryName: category.name,
+    conflicts: conflictsR.rows,
+  };
 }
 
-export async function removeCourseFromCategory(catId: string, courseId: string) {
+export async function removeCourseFromCategory(catId: string, tenantId: string, courseId: string) {
   const context = await query<{ tenant_id: string; category_name: string; course_name: string | null }>(
     `SELECT cc.tenant_id,
             cc.name AS category_name,
             c.display_name AS course_name
      FROM course_categories cc
      LEFT JOIN courses c ON c.id = $2 AND c.tenant_id = cc.tenant_id
-     WHERE cc.id = $1`,
-    [catId, courseId],
+     WHERE cc.id = $1::uuid
+       AND cc.tenant_id = $3::uuid`,
+    [catId, courseId, tenantId],
   );
-  const tenantId = context.rows[0]?.tenant_id ?? null;
-  await removeCourseFromCategoryFromDb(catId, courseId);
-  if (tenantId) {
-    await Promise.all([
-      invalidateTenantCourseCaches(tenantId),
-      invalidateCourseReadCaches(courseId, tenantId),
-    ]);
-  }
+  if (context.rowCount === 0) throw new AppError('Danh mục khóa học không tồn tại hoặc không thuộc tenant hiện tại', 404);
+
+  await removeCourseFromCategoryFromDb(catId, tenantId, courseId);
+  await Promise.all([
+    invalidateTenantCourseCaches(tenantId),
+    invalidateCourseReadCaches(courseId, tenantId),
+  ]);
   return {
     success: true,
     categoryName: context.rows[0]?.category_name || catId,
@@ -198,10 +329,20 @@ export async function removeCourseFromCategory(catId: string, courseId: string) 
   };
 }
 
-async function removeCourseFromCategoryFromDb(catId: string, courseId: string) {
+async function removeCourseFromCategoryFromDb(catId: string, tenantId: string, courseId: string) {
   const result = await query(
-    'DELETE FROM course_category_courses WHERE category_id = $1 AND course_id = $2 RETURNING id',
-    [catId, courseId],
+    `DELETE FROM course_category_courses ccc
+     USING course_categories cc
+     WHERE cc.id = ccc.category_id
+       AND ccc.category_id = $1::uuid
+       AND cc.tenant_id = $2::uuid
+       AND ccc.course_id = $3
+     RETURNING ccc.id`,
+    [catId, tenantId, courseId],
   );
   if (result.rowCount === 0) throw new AppError('Liên kết không tồn tại', 404);
 }
+
+
+
+

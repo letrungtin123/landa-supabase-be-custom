@@ -238,7 +238,14 @@ function buildVisibleCourseUsersCte(options: {
   const publicWhere = `
     ${learnerWhere}
     AND ${courseWhere}
-    AND COALESCE(c.is_public, false) = true
+    AND EXISTS (
+      SELECT 1
+      FROM course_category_courses ccc_public
+      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+      WHERE ccc_public.course_id = c.id
+        AND cc_public.tenant_id = c.tenant_id
+        AND COALESCE(cc_public.is_public, false) = true
+    )
   `;
 
   return `
@@ -773,7 +780,14 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
         JOIN courses c ON c.tenant_id = $1
          AND c.deleted_at IS NULL
          AND c.visible_to_staff_only = false
-         AND COALESCE(c.is_public, false) = true
+         AND EXISTS (
+      SELECT 1
+      FROM course_category_courses ccc_public
+      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+      WHERE ccc_public.course_id = c.id
+        AND cc_public.tenant_id = c.tenant_id
+        AND COALESCE(cc_public.is_public, false) = true
+    )
          AND c.created_at <= $2
       ),
      status_rows AS (
@@ -1103,7 +1117,14 @@ async function fetchLearnerSummaryBatch(
         JOIN courses c ON c.tenant_id = $1
         WHERE c.deleted_at IS NULL
           AND c.visible_to_staff_only = false
-          AND COALESCE(c.is_public, false) = true
+          AND EXISTS (
+      SELECT 1
+      FROM course_category_courses ccc_public
+      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+      WHERE ccc_public.course_id = c.id
+        AND cc_public.tenant_id = c.tenant_id
+        AND COALESCE(cc_public.is_public, false) = true
+    )
           AND c.created_at <= $4
       ),
      learner_status AS (

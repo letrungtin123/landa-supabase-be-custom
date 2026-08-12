@@ -52,15 +52,31 @@ export async function createCategoryController(req: Request, res: Response, next
 
 export async function updateCategoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const cat = await libService.updateDocCategory(req.params.id, req.body);
-    auditFromReq(req, 'UPDATE', 'document_category', cat.id, cat.name);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const cat = await libService.updateDocCategory(req.params.id, tenantId, req.body);
+    const detail = cat.removed_assignments
+      ? `Chuyển công khai, đã gỡ ${cat.removed_assignments} phân quyền danh mục khỏi team`
+      : undefined;
+    auditFromReq(req, 'UPDATE', 'document_category', cat.id, cat.name, detail);
     sendSuccess(res, cat);
+  } catch (err) { next(err); }
+}
+
+export async function publicImpactCategoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    sendSuccess(res, await libService.getDocCategoryPublicImpact(req.params.id, tenantId, limit));
   } catch (err) { next(err); }
 }
 
 export async function deleteCategoryController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const cat = await libService.deleteDocCategory(req.params.id);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const cat = await libService.deleteDocCategory(req.params.id, tenantId);
     auditFromReq(req, 'DELETE', 'document_category', req.params.id, cat?.name);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
@@ -70,7 +86,9 @@ export async function bulkDeleteCategoriesController(req: Request, res: Response
   try {
     const { ids } = req.body;
     if (!Array.isArray(ids)) { sendError(res, 'ids phải là mảng', 400); return; }
-    const result = await libService.bulkDeleteDocCategories(ids);
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const result = await libService.bulkDeleteDocCategories(ids, tenantId);
     auditFromReq(req, 'DELETE', 'document_category', '', '', `Xóa ${result.deleted} danh mục`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
@@ -130,13 +148,13 @@ export async function bulkDocumentActionController(req: Request, res: Response, 
         .filter(r => r.file_url)
         .map(r => deleteFileByUrl(r.file_url).catch(() => {}));
       await Promise.all(deletePromises);
-      auditFromReq(req, 'DELETE', 'document', '', '', `Bulk delete: ${result.deleted} documents`);
+      auditFromReq(req, 'DELETE', 'document', '', '', `Xóa hàng loạt: ${result.deleted} tài liệu`);
       sendSuccess(res, { deleted: result.deleted });
       return;
     }
 
     const result = await libService.bulkDocumentAction(ids, tenantId, action, category_id);
-    auditFromReq(req, 'UPDATE', 'document', '', '', `Bulk ${action}: ${result.updated} documents`);
+    auditFromReq(req, 'UPDATE', 'document', '', '', `Cập nhật hàng loạt ${action}: ${result.updated} tài liệu`);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -180,7 +198,6 @@ export async function uploadDocumentController(req: Request, res: Response, next
           extension: ext,
           category_id: req.body.category_id || null,
           is_visible: req.body.is_visible !== 'false',
-          is_public: req.body.is_public === 'true',
         }, req.user!.id, { invalidateCache: false });
 
         auditFromReq(req, 'CREATE', 'document', doc.id, doc.title);

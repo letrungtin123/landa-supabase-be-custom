@@ -11,7 +11,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
-import { learnerCourseAccessCondition } from '../courses/course-access.js';
+import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -97,7 +97,7 @@ async function getMyVisibleCoursesFromDb(
   sqlParams.push(page_size, offset);
   const result = await query<any>(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, COALESCE(c.is_public, false) AS is_public, c.created_at,
+            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
             COUNT(*) OVER() AS full_count
      FROM courses c
      ${where}
@@ -126,13 +126,28 @@ async function getMyVisibleCoursesFromDb(
     }
   }
 
-  // Fetch all categories for this tenant (for FE filter dropdown)
+  // Fetch categories visible to this user for the FE filter dropdown.
   const allCatsResult = await query<any>(
-    `SELECT DISTINCT cc.id, cc.name
-     FROM course_categories cc
-     WHERE cc.tenant_id = $1
-     ORDER BY cc.name`,
-    [tenantId],
+    isLearnerRole(role)
+      ? `SELECT DISTINCT cc.id, cc.name
+         FROM course_categories cc
+         WHERE cc.tenant_id = $1
+           AND (
+             COALESCE(cc.is_public, false) = true
+             OR EXISTS (
+               SELECT 1
+               FROM team_course_categories tcc
+               JOIN team_members tm ON tm.team_id = tcc.team_id
+               WHERE tcc.category_id = cc.id
+                 AND tm.user_id = $2
+             )
+           )
+         ORDER BY cc.name`
+      : `SELECT DISTINCT cc.id, cc.name
+         FROM course_categories cc
+         WHERE cc.tenant_id = $1
+         ORDER BY cc.name`,
+    isLearnerRole(role) ? [tenantId, userId] : [tenantId],
   );
 
   return {
@@ -178,7 +193,7 @@ async function getCourseDetailFromDb(
 ) {
   const result = await query<any>(
     `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, COALESCE(c.is_public, false) AS is_public, c.created_at,
+            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
             mentor.id AS mentor_id,
             mentor.full_name AS mentor_full_name,
             mentor.email AS mentor_email,
@@ -876,16 +891,12 @@ async function getCourseFilesFromDb(courseId: string, userId: string, role = 'le
   };
 }
 
-const PUBLIC_LIBRARY_CATEGORY_ID = '__public__';
-const PUBLIC_LIBRARY_CATEGORY_NAME = 'Tài liệu công khai';
-const PUBLIC_LIBRARY_CATEGORY_SLUG = 'public';
-
-// ── Library (Kho tài liệu nội bộ, team-scoped) ──
+// ── Library (Kho tài liệu theo danh mục) ──
 
 /**
- * Lấy danh sách document categories mà learner được phép xem.
- * Learner: chỉ thấy categories assign qua team_doc_categories.
- * Staff/superuser/superadmin: thấy tất cả categories trong tenant.
+ * Lấy danh mục tài liệu mà learner được phép xem.
+ * Learner: thấy danh mục công khai hoặc danh mục được phân qua team.
+ * Staff/superuser/superadmin: thấy tất cả danh mục trong tenant.
  */
 export async function getMyLibraryCategories(
   userId: string,
@@ -908,72 +919,44 @@ async function getMyLibraryCategoriesFromDb(
   tenantId: string,
   role: string,
 ) {
-  let sql: string;
-  let params: unknown[];
-
-  if (isLearnerRole(role)) {
-    sql = `WITH assigned_categories AS (
-             SELECT dc.id::text AS id, dc.name, dc.slug, dc.sort_order,
-                    COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true) AS count
-             FROM document_categories dc
-             JOIN team_doc_categories tdc ON tdc.category_id = dc.id
+  const learner = isLearnerRole(role);
+  const sql = learner
+    ? `SELECT dc.id::text AS id,
+              dc.name,
+              dc.slug,
+              dc.sort_order,
+              COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true)::int AS count
+       FROM document_categories dc
+       LEFT JOIN documents d
+         ON d.category_id = dc.id
+        AND d.tenant_id = $1::uuid
+       WHERE dc.tenant_id = $1::uuid
+         AND (
+           COALESCE(dc.is_public, false) = true
+           OR EXISTS (
+             SELECT 1
+             FROM team_doc_categories tdc
              JOIN team_members tm ON tm.team_id = tdc.team_id
-             LEFT JOIN documents d ON d.category_id = dc.id AND d.is_visible = true
-             WHERE dc.tenant_id = $1 AND tm.user_id = $2
-             GROUP BY dc.id
-           ), public_bucket AS (
-             SELECT $3::text AS id,
-                    $4::text AS name,
-                    $5::text AS slug,
-                    -1::int AS sort_order,
-                    COUNT(*) AS count
-             FROM documents d
-             WHERE d.tenant_id = $1
-               AND d.is_visible = true
-               AND COALESCE(d.is_public, false) = true
-               AND d.category_id IS NULL
-             HAVING COUNT(*) > 0
+             WHERE tdc.category_id = dc.id
+               AND tm.user_id = $2::uuid
            )
-           SELECT id, name, slug, sort_order, count
-           FROM assigned_categories
-           UNION ALL
-           SELECT id, name, slug, sort_order, count
-           FROM public_bucket
-           ORDER BY sort_order, name`;
-    params = [tenantId, userId, PUBLIC_LIBRARY_CATEGORY_ID, PUBLIC_LIBRARY_CATEGORY_NAME, PUBLIC_LIBRARY_CATEGORY_SLUG];
-  } else {
-    // staff/superuser/superadmin: thấy tất cả category DB, kèm bucket public ảo cho docs không còn category.
-    sql = `WITH regular_categories AS (
-             SELECT dc.id::text AS id, dc.name, dc.slug, dc.sort_order,
-                    COUNT(d.id) AS count
-             FROM document_categories dc
-             LEFT JOIN documents d ON d.category_id = dc.id
-             WHERE dc.tenant_id = $1
-             GROUP BY dc.id
-           ), public_bucket AS (
-             SELECT $2::text AS id,
-                    $3::text AS name,
-                    $4::text AS slug,
-                    -1::int AS sort_order,
-                    COUNT(*) AS count
-             FROM documents d
-             WHERE d.tenant_id = $1
-               AND d.is_visible = true
-               AND COALESCE(d.is_public, false) = true
-               AND d.category_id IS NULL
-             HAVING COUNT(*) > 0
-           )
-           SELECT id, name, slug, sort_order, count
-           FROM regular_categories
-           UNION ALL
-           SELECT id, name, slug, sort_order, count
-           FROM public_bucket
-           ORDER BY sort_order, name`;
-    params = [tenantId, PUBLIC_LIBRARY_CATEGORY_ID, PUBLIC_LIBRARY_CATEGORY_NAME, PUBLIC_LIBRARY_CATEGORY_SLUG];
-  }
+         )
+       GROUP BY dc.id
+       ORDER BY dc.sort_order, dc.name`
+    : `SELECT dc.id::text AS id,
+              dc.name,
+              dc.slug,
+              dc.sort_order,
+              COUNT(d.id)::int AS count
+       FROM document_categories dc
+       LEFT JOIN documents d
+         ON d.category_id = dc.id
+        AND d.tenant_id = $1::uuid
+       WHERE dc.tenant_id = $1::uuid
+       GROUP BY dc.id
+       ORDER BY dc.sort_order, dc.name`;
 
-  const result = await query<any>(sql, params);
-
+  const result = await query<any>(sql, learner ? [tenantId, userId] : [tenantId]);
   return {
     categories: result.rows.map((r: any) => ({
       id: r.id,
@@ -984,10 +967,10 @@ async function getMyLibraryCategoriesFromDb(
     total: result.rowCount || 0,
   };
 }
+
 /**
- * Lấy documents mà learner được phép xem.
- * Learner: chỉ docs thuộc categories assign qua team_doc_categories + is_visible.
- * Staff+: tất cả docs visible trong tenant.
+ * Lấy tài liệu mà learner được phép xem theo danh mục công khai hoặc danh mục của team.
+ * Staff+: tất cả tài liệu trong tenant theo luồng hiện tại.
  */
 export async function getMyLibraryDocuments(
   userId: string,
@@ -1020,7 +1003,7 @@ async function getMyLibraryDocumentsFromDb(
   params: {
     page?: number;
     page_size?: number;
-    category?: string;     // category slug or id
+    category?: string;
     extension?: string;
     search?: string;
     ordering?: string;
@@ -1028,58 +1011,43 @@ async function getMyLibraryDocumentsFromDb(
 ) {
   const { page = 1, page_size = 20, category, extension, search, ordering } = params;
   const offset = (page - 1) * page_size;
-  const isPublicCategory = category === PUBLIC_LIBRARY_CATEGORY_ID || category === PUBLIC_LIBRARY_CATEGORY_SLUG;
-
   const sqlParams: unknown[] = [tenantId];
-  const conditions: string[] = ['d.tenant_id = $1'];
+  const conditions: string[] = ['d.tenant_id = $1::uuid'];
 
-  // Learner: thấy docs public hoặc docs thuộc category được assign qua team.
   if (isLearnerRole(role)) {
-    conditions.push('d.is_visible = true');
     sqlParams.push(userId);
-    conditions.push(`(
-      COALESCE(d.is_public, false) = true
+    conditions.push(`d.is_visible = true AND d.category_id IS NOT NULL AND (
+      COALESCE(dc.is_public, false) = true
       OR EXISTS (
         SELECT 1
         FROM team_doc_categories tdc
         JOIN team_members tm ON tm.team_id = tdc.team_id
-        WHERE tm.user_id = $${sqlParams.length}
+        WHERE tm.user_id = $${sqlParams.length}::uuid
           AND tdc.category_id = d.category_id
       )
     )`);
   }
 
-  // Filter by category (public bucket, slug or id)
-  if (isPublicCategory) {
-    conditions.push('COALESCE(d.is_public, false) = true');
-    conditions.push('d.category_id IS NULL');
-  } else if (category) {
+  if (category) {
     sqlParams.push(category);
     conditions.push(`(dc.slug = $${sqlParams.length} OR dc.id::text = $${sqlParams.length})`);
   }
-
-  // Filter by extension
   if (extension) {
     sqlParams.push(extension);
     conditions.push(`d.extension = $${sqlParams.length}`);
   }
-
-  // Search
   if (search) {
     sqlParams.push(`%${search}%`);
     conditions.push(`unaccent(d.title) ILIKE unaccent($${sqlParams.length})`);
   }
 
   const where = conditions.join(' AND ');
-
-  // Ordering
   let orderBy = 'd.created_at DESC';
   if (ordering === 'title') orderBy = 'd.title ASC';
   else if (ordering === '-title') orderBy = 'd.title DESC';
   else if (ordering === 'created_at') orderBy = 'd.created_at ASC';
   else if (ordering === 'file_size') orderBy = 'd.file_size DESC';
 
-  // Count
   const countResult = await query<{ count: string }>(
     `SELECT COUNT(*) AS count
      FROM documents d
@@ -1087,14 +1055,21 @@ async function getMyLibraryDocumentsFromDb(
      WHERE ${where}`,
     sqlParams,
   );
-  const total = parseInt(countResult.rows[0].count);
+  const total = parseInt(countResult.rows[0]?.count || '0', 10);
 
-  // Fetch page
   sqlParams.push(page_size, offset);
   const result = await query<any>(
-    `SELECT d.id, d.title, d.extension, d.file_size, d.file_url,
-            d.category_id, d.created_at, d.is_visible, COALESCE(d.is_public, false) AS is_public,
-            dc.name AS category_name, dc.slug AS category_slug,
+    `SELECT d.id,
+            d.title,
+            d.extension,
+            d.file_size,
+            d.file_url,
+            d.category_id,
+            d.created_at,
+            d.is_visible,
+            COALESCE(dc.is_public, false) AS is_public,
+            dc.name AS category_name,
+            dc.slug AS category_slug,
             u.full_name AS uploaded_by_name
      FROM documents d
      LEFT JOIN document_categories dc ON dc.id = d.category_id
@@ -1109,22 +1084,19 @@ async function getMyLibraryDocumentsFromDb(
     count: total,
     next: page * page_size < total ? `page=${page + 1}` : null,
     previous: page > 1 ? `page=${page - 1}` : null,
-    results: result.rows.map((r: any) => {
-      const inPublicBucket = r.is_public === true && !r.category_id;
-      return {
-        id: r.id,
-        title: r.title,
-        extension: r.extension || '',
-        file_size: parseInt(r.file_size) || 0,
-        category_id: r.category_id || null,
-        category_name: inPublicBucket ? PUBLIC_LIBRARY_CATEGORY_NAME : r.category_name || '',
-        category_slug: inPublicBucket ? PUBLIC_LIBRARY_CATEGORY_SLUG : r.category_slug || '',
-        is_public: r.is_public === true,
-        download_url: r.file_url,
-        uploaded_by_name: r.uploaded_by_name || '',
-        created_at: r.created_at,
-      };
-    }),
+    results: result.rows.map((r: any) => ({
+      id: r.id,
+      title: r.title,
+      extension: r.extension || '',
+      file_size: parseInt(r.file_size) || 0,
+      category_id: r.category_id || null,
+      category_name: r.category_name || '',
+      category_slug: r.category_slug || '',
+      is_public: r.is_public === true,
+      download_url: r.file_url,
+      uploaded_by_name: r.uploaded_by_name || '',
+      created_at: r.created_at,
+    })),
   };
 }
 // ── Enrollments ──
@@ -1642,3 +1614,7 @@ export async function markSectionModalShown(userId: string, courseId: string, se
   );
   return { success: true };
 }
+
+
+
+

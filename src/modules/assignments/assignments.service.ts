@@ -172,7 +172,14 @@ function effectiveDeadlineExpression(alias = 'ca', enrollmentAlias = 'e'): strin
 async function ensureCourseForAdmin(courseId: string, tenantId: string): Promise<CourseRow> {
   const result = await query<CourseRow>(
     `SELECT id, display_name, tenant_id, COALESCE(visible_to_staff_only, false) AS visible_to_staff_only,
-            COALESCE(is_public, false) AS is_public
+            EXISTS (
+              SELECT 1
+              FROM course_category_courses ccc_public
+              JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+              WHERE ccc_public.course_id = courses.id
+                AND cc_public.tenant_id = courses.tenant_id
+                AND COALESCE(cc_public.is_public, false) = true
+            ) AS is_public
      FROM courses
      WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
     [courseId, tenantId],

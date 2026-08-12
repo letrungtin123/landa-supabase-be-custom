@@ -13,7 +13,7 @@ import { tenantContext } from '../../middleware/tenant-context.js';
 import { LIBRARY_DOCUMENT_MAX_FILES_PER_UPLOAD, LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { sendError } from '../../utils/response.js';
 import {
-  listCategoriesController, createCategoryController, updateCategoryController,
+  listCategoriesController, createCategoryController, updateCategoryController, publicImpactCategoryController,
   deleteCategoryController, bulkDeleteCategoriesController,
   listDocumentsController, createDocumentController, updateDocumentController,
   deleteDocumentController, bulkDocumentActionController,
@@ -116,6 +116,7 @@ router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superad
 router.get('/categories', checkPermission('library', 'can_view'), listCategoriesController);
 router.post('/categories', checkPermission('library', 'can_add'), createCategoryController);
 router.patch('/categories/:id', checkPermission('library', 'can_edit'), updateCategoryController);
+router.get('/categories/:id/public-impact', checkPermission('library', 'can_view'), publicImpactCategoryController);
 router.delete('/categories/:id', checkPermission('library', 'can_delete'), deleteCategoryController);
 router.post('/categories/bulk', checkPermission('library', 'can_delete'), bulkDeleteCategoriesController);
 

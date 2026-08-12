@@ -457,7 +457,14 @@ function buildVisibleCourseUsersCte(options: {
   const publicWhere = `
     ${learnerWhere}
     AND ${courseWhere}
-    AND COALESCE(c.is_public, false) = true
+    AND EXISTS (
+      SELECT 1
+      FROM course_category_courses ccc_public
+      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
+      WHERE ccc_public.course_id = c.id
+        AND cc_public.tenant_id = c.tenant_id
+        AND COALESCE(cc_public.is_public, false) = true
+    )
   `;
 
   return `
