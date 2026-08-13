@@ -297,7 +297,7 @@ function buildReportChartCacheKey(options: {
   grouped: boolean;
   seriesLimit: number;
 }): string {
-  return cacheKey('reports', 'chart', 'v2', options.tenantId, stableHash({
+  return cacheKey('reports', 'chart', 'v3', options.tenantId, stableHash({
     metric: options.metric,
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
@@ -857,6 +857,8 @@ async function chartGroupedEnrollmentsByRange(
   let entitySql = '';
   let dimensionIdSql = '';
   let dimensionWhereSql = '';
+  let unassignedCteSql = '';
+  let unassignedUnionSql = '';
 
   if (dimension === 'group') {
     entitySql = `SELECT og.id, COALESCE(og.name, 'Không tên') AS name FROM org_groups og WHERE og.tenant_id = $1`;
@@ -865,6 +867,32 @@ async function chartGroupedEnrollmentsByRange(
       params.push(parentId);
       entitySql += ` AND og.id = $${params.length}`;
       dimensionWhereSql = `AND og.id = $${params.length}`;
+    } else {
+      unassignedCteSql = `,
+      unassigned_series AS (
+        SELECT
+          date_trunc($4, e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
+          'Chưa phân nhóm'::text AS series_name,
+          COUNT(DISTINCT e.id)::bigint AS value
+        FROM enrollments e
+        WHERE e.tenant_id = $1
+          AND e.is_active = true
+          AND e.enrolled_at >= $2
+          AND e.enrolled_at <= $3
+          AND NOT EXISTS (
+            SELECT 1
+            FROM team_members tm_unassigned
+            JOIN teams t_unassigned ON t_unassigned.id = tm_unassigned.team_id
+            JOIN sub_groups sg_unassigned ON sg_unassigned.id = t_unassigned.sub_group_id
+            JOIN org_groups og_unassigned ON og_unassigned.id = sg_unassigned.org_group_id
+            WHERE tm_unassigned.user_id = e.user_id
+              AND og_unassigned.tenant_id = e.tenant_id
+          )
+        GROUP BY bucket_start
+      )`;
+      unassignedUnionSql = `
+        UNION ALL
+        SELECT bucket_start, series_name, value FROM unassigned_series`;
     }
   } else if (dimension === 'subgroup') {
     params.push(parentId);
@@ -926,11 +954,11 @@ async function chartGroupedEnrollmentsByRange(
        WHERE NOT EXISTS (SELECT 1 FROM ranked_entities re WHERE re.id = a.entity_id)
        GROUP BY a.bucket_start
        HAVING SUM(a.value) > 0
-     ),
+     )${unassignedCteSql},
      series_rows AS (
        SELECT bucket_start, series_name, value FROM top_series
        UNION ALL
-       SELECT bucket_start, series_name, value FROM other_series
+       SELECT bucket_start, series_name, value FROM other_series${unassignedUnionSql}
      )
      SELECT
        to_char(sr.bucket_start, 'YYYY-MM-DD') AS bucket,
