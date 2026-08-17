@@ -221,7 +221,7 @@ export async function getSummary(req: Request, res: Response) {
 
   const scope = await enforceReportScope(req);
   if (scope.allowedGroupIds?.length === 0) {
-    return sendSuccess(res, { meta: { month: month || new Date().getMonth() + 1, year: year || new Date().getFullYear() }, overview: { total_learners: 0, active_learners: 0, completion_rate: 0, total_enrollments: 0 } });
+    return sendSuccess(res, { meta: { month: month || new Date().getMonth() + 1, year: year || new Date().getFullYear() }, overview: { total_learners: 0, active_learners: 0, completion_rate: 0, total_enrollments: 0, completed_enrollments: 0, incomplete_enrollments: 0 } });
   }
   const result = await svc.getReportSummary(tenantId, month, year, scope.groupId, scope.subgroupId, scope.teamId, dateRange);
   sendSuccess(res, result);

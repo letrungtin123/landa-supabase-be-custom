@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'node:stream';
 import { query } from '../../config/database.js';
-import { getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
+import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
 type ExportScope = {
   groupId?: string;
@@ -41,10 +41,9 @@ type ScopeNames = {
 type CourseRankingExportRow = {
   course_id: string;
   name: string;
-  visible_learners: string;
-  learning_count: string;
-  completed_count: string;
-  not_started_count: string;
+  total_enrollments: string;
+  completed_enrollments: string;
+  incomplete_enrollments: string;
   completion_rate: string;
 };
 
@@ -53,11 +52,9 @@ type TeamBreakdownRow = {
   subgroup_name: string;
   team_name: string;
   member_count: string;
-  visible_courses: string;
   total_enrollments: string;
-  completed_count: string;
-  learning_count: string;
-  not_started_count: string;
+  completed_enrollments: string;
+  incomplete_enrollments: string;
   completion_rate: string | null;
 };
 
@@ -67,6 +64,8 @@ type HierarchyTrendRow = {
   subgroup_name: string;
   team_name: string;
   total_enrollments: string;
+  completed_enrollments: string;
+  incomplete_enrollments: string;
   active_learners: string;
   completion_rate: string | null;
 };
@@ -79,17 +78,16 @@ type LearnerSummaryRow = {
   group_names: string | null;
   subgroup_names: string | null;
   team_names: string | null;
-  visible_courses: string;
   enrolled_courses: string;
   completed_courses: string;
-  learning_courses: string;
-  not_started_courses: string;
-  average_progress: string | null;
+  incomplete_courses: string;
+  completion_rate: string | null;
   last_completion_at: Date | null;
   status: 'not_started' | 'learning' | 'completed';
 };
 
 type CourseLearnerRow = {
+  enrollment_id: string;
   user_id: string;
   username: string;
   email: string;
@@ -101,7 +99,7 @@ type CourseLearnerRow = {
   course_name: string;
   enrolled_at: Date | null;
   completed_at: Date | null;
-  progress: string | null;
+  is_completed: boolean;
   status: 'not_started' | 'learning' | 'completed';
 };
 
@@ -152,18 +150,14 @@ function getPeriodRange(year: number, month?: number): { startDate: Date; endDat
   };
 }
 
-function getSnapshotEndDate(year: number, month?: number): Date {
-  return getPeriodRange(year, month).endDate;
-}
+
 
 function getExportPeriodRange(options: ReportExcelExportOptions): { startDate: Date; endDate: Date } {
   if (options.dateRange) return options.dateRange;
   return getPeriodRange(options.year, options.month);
 }
 
-function getExportSnapshotEndDate(options: ReportExcelExportOptions): Date {
-  return getExportPeriodRange(options).endDate;
-}
+
 
 function getExportPeriodLabel(options: ReportExcelExportOptions): string {
   if (options.dateRange) return `${options.dateRange.dateFrom} đến ${options.dateRange.dateTo}`;
@@ -210,83 +204,6 @@ function appendScopeFilter(
   }
   return '';
 }
-
-function buildVisibleCourseUsersCte(options: {
-  tenantParam: string;
-  snapshotParam: string;
-  extraFilterSql?: string;
-}): string {
-  const { tenantParam, snapshotParam, extraFilterSql = '' } = options;
-  const learnerWhere = `
-    u.tenant_id = ${tenantParam}
-    AND u.is_active = true
-    AND u.role IN ('learner', 'learner_plus')
-    AND u.created_at <= ${snapshotParam}
-  `;
-  const courseWhere = `
-    c.tenant_id = ${tenantParam}
-    AND c.deleted_at IS NULL
-    AND c.visible_to_staff_only = false
-    AND c.created_at <= ${snapshotParam}
-    ${extraFilterSql}
-  `;
-  const assignedWhere = `
-    ${learnerWhere}
-    AND og.tenant_id = ${tenantParam}
-    AND ${courseWhere}
-  `;
-  const publicWhere = `
-    ${learnerWhere}
-    AND ${courseWhere}
-    AND EXISTS (
-      SELECT 1
-      FROM course_category_courses ccc_public
-      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-      WHERE ccc_public.course_id = c.id
-        AND cc_public.tenant_id = c.tenant_id
-        AND COALESCE(cc_public.is_public, false) = true
-    )
-  `;
-
-  return `
-    visible_course_users AS (
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      JOIN team_members tm ON tm.user_id = u.id
-      JOIN teams t ON t.id = tm.team_id
-      JOIN sub_groups sg ON sg.id = t.sub_group_id
-      JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN team_courses tc ON tc.team_id = t.id
-      JOIN courses c ON c.id = tc.course_id
-      WHERE ${assignedWhere}
-
-      UNION
-
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      JOIN team_members tm ON tm.user_id = u.id
-      JOIN teams t ON t.id = tm.team_id
-      JOIN sub_groups sg ON sg.id = t.sub_group_id
-      JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN team_course_categories tcc ON tcc.team_id = t.id
-      JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-      JOIN courses c ON c.id = ccc.course_id
-      WHERE ${assignedWhere}
-
-      UNION
-
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      LEFT JOIN team_members tm ON tm.user_id = u.id
-      LEFT JOIN teams t ON t.id = tm.team_id
-      LEFT JOIN sub_groups sg ON sg.id = t.sub_group_id
-      LEFT JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN courses c ON c.tenant_id = ${tenantParam}
-      WHERE ${publicWhere}
-    )
-  `;
-}
-
 function safeSheetName(baseName: string, index?: number): string {
   const suffix = index && index > 1 ? ` ${index}` : '';
   return `${baseName}${suffix}`.replace(/[\\/*?:[\]]/g, ' ').slice(0, 31);
@@ -525,10 +442,11 @@ async function writeMonthlyOverviewSheet(
   const columns: ColumnDef[] = [
     { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
     { header: 'Tổng học viên', key: 'totalLearners', width: 18 },
-    { header: 'Học viên hoạt động', key: 'activeLearners', width: 22 },
-    { header: 'Lượt ghi danh', key: 'enrollments', width: 18 },
-    { header: 'Tỉ lệ hoàn thành', key: 'completionRate', width: 18 },
-    { header: 'Trạng thái dữ liệu', key: 'status', width: 18 },
+    { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 24 },
+    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
+    { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 18 },
+    { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 18 },
+    { header: 'Tỷ lệ hoàn thành khóa học trong kỳ', key: 'completionRate', width: 28 },
   ];
   const worksheet = addWorksheetChrome(
     workbook,
@@ -538,151 +456,135 @@ async function writeMonthlyOverviewSheet(
     columns,
   );
 
-  if (options.dateRange) {
-    const summary = await getReportSummary(
-      options.tenantId,
-      undefined,
-      undefined,
-      options.scope.groupId,
-      options.scope.subgroupId,
-      options.scope.teamId,
-      options.dateRange,
-    );
-    const completionRate = roundPercent(summary.overview.completion_rate);
+  const addOverviewRow = (label: string, summary: ReportSummary | null, index: number): void => {
+    const rate = summary ? roundPercent(summary.overview.completion_rate) : null;
     const row = worksheet.addRow([
-      getExportPeriodLabel(options),
-      summary.overview.total_learners,
-      summary.overview.active_learners,
-      summary.overview.total_enrollments,
-      completionRate / 100,
-      'Đã có dữ liệu',
+      label,
+      summary?.overview.total_learners ?? '',
+      summary?.overview.active_learners ?? '',
+      summary?.overview.total_enrollments ?? '',
+      summary?.overview.completed_enrollments ?? '',
+      summary?.overview.incomplete_enrollments ?? '',
+      rate === null ? '' : rate / 100,
     ]);
     row.height = 22;
     for (let i = 1; i <= columns.length; i++) {
       const cell = row.getCell(i);
       cell.border = thinBorder;
       cell.alignment = { vertical: 'middle', horizontal: i === 1 ? 'left' : 'center' };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.white } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft } };
       cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy }, bold: i === 1 };
     }
-    row.getCell(5).numFmt = '0.0%';
+    if (rate !== null) {
+      row.getCell(7).numFmt = '0.00%';
+      row.getCell(7).font = { name: 'Arial', size: 10, bold: true, color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red } };
+    }
+    row.commit();
+  };
+
+  if (options.dateRange) {
+    const summary = await getReportSummary(
+      options.tenantId, undefined, undefined, options.scope.groupId, options.scope.subgroupId, options.scope.teamId, options.dateRange,
+    );
+    addOverviewRow(getExportPeriodLabel(options), summary, 0);
     addStyledRow(worksheet, [], columns.length, 'spacer');
     addStyledRow(worksheet, ['Tổng lượt ghi danh trong khoảng', summary.overview.total_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, ['Tỉ lệ hoàn thành', `${completionRate.toFixed(1)}%`], columns.length, 'summary');
+    addStyledRow(worksheet, ['Đã hoàn thành', summary.overview.completed_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, ['Chưa hoàn thành', summary.overview.incomplete_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, ['Tỷ lệ hoàn thành khóa học trong kỳ', `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
     worksheet.commit();
     return;
   }
 
   const now = new Date();
-  const maxMonth = options.year > now.getFullYear()
-    ? 0
-    : options.year === now.getFullYear()
-      ? now.getMonth() + 1
-      : 12;
-
+  const maxMonth = options.year > now.getFullYear() ? 0 : options.year === now.getFullYear() ? now.getMonth() + 1 : 12;
   let totalEnrollments = 0;
-  let rateSum = 0;
-  let rateCount = 0;
+  let completedEnrollments = 0;
+  let incompleteEnrollments = 0;
 
   for (let month = 1; month <= 12; month++) {
-    const isFuture = month > maxMonth;
-    const summary: ReportSummary | null = isFuture
+    const summary = month > maxMonth
       ? null
-      : await getReportSummary(
-        options.tenantId,
-        month,
-        options.year,
-        options.scope.groupId,
-        options.scope.subgroupId,
-        options.scope.teamId,
-      );
-
-    const completionRate = summary ? roundPercent(summary.overview.completion_rate) : null;
+      : await getReportSummary(options.tenantId, month, options.year, options.scope.groupId, options.scope.subgroupId, options.scope.teamId);
     if (summary) {
       totalEnrollments += summary.overview.total_enrollments;
-      rateSum += completionRate ?? 0;
-      rateCount++;
+      completedEnrollments += summary.overview.completed_enrollments;
+      incompleteEnrollments += summary.overview.incomplete_enrollments;
     }
-
-    const row = worksheet.addRow([
-      MONTH_LABELS[month],
-      summary?.overview.total_learners ?? '',
-      summary?.overview.active_learners ?? '',
-      summary?.overview.total_enrollments ?? '',
-      completionRate === null ? '' : completionRate / 100,
-      isFuture ? 'Chưa đến kỳ' : 'Đã có dữ liệu',
-    ]);
-
-    row.height = 22;
-    for (let i = 1; i <= columns.length; i++) {
-      const cell = row.getCell(i);
-      cell.border = thinBorder;
-      cell.alignment = { vertical: 'middle', horizontal: i === 1 ? 'left' : 'center' };
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: month % 2 === 0 ? COLORS.slateSoft : COLORS.white },
-      };
-      cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy }, bold: i === 1 };
-    }
-    row.getCell(5).numFmt = '0.0%';
-    if (completionRate !== null) {
-      row.getCell(5).font = {
-        name: 'Arial',
-        size: 10,
-        bold: true,
-        color: { argb: completionRate >= 80 ? COLORS.emerald : completionRate >= 50 ? COLORS.amber : COLORS.red },
-      };
-    }
-    if (isFuture) row.getCell(6).font = { name: 'Arial', size: 10, italic: true, color: { argb: COLORS.slate } };
-    row.commit();
+    addOverviewRow(MONTH_LABELS[month], summary, month - 1);
   }
 
+  const yearlyRate = totalEnrollments ? (completedEnrollments * 100) / totalEnrollments : 0;
   addStyledRow(worksheet, [], columns.length, 'spacer');
   addStyledRow(worksheet, ['Tổng lượt ghi danh trong năm', totalEnrollments], columns.length, 'summary');
-  addStyledRow(worksheet, ['Tỉ lệ hoàn thành trung bình', rateCount ? `${(rateSum / rateCount).toFixed(1)}%` : 'N/A'], columns.length, 'summary');
+  addStyledRow(worksheet, ['Đã hoàn thành trong năm', completedEnrollments], columns.length, 'summary');
+  addStyledRow(worksheet, ['Chưa hoàn thành trong năm', incompleteEnrollments], columns.length, 'summary');
+  addStyledRow(worksheet, ['Tỷ lệ hoàn thành khóa học trong năm', `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
   worksheet.commit();
 }
-
 async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promise<HierarchyTrendRow[]> {
   const { startDate, endDate } = getExportPeriodRange(options);
   const params: unknown[] = [options.tenantId, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
-
+  const cohort = buildReportEnrollmentCte({
+    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4,
+  });
   const result = await query<HierarchyTrendRow>(
-    `SELECT
-       'Tháng ' || EXTRACT(MONTH FROM date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh'))::int || '/' || EXTRACT(YEAR FROM date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh'))::int AS period_label,
-       date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS period_start,
-       og.name AS group_name,
-       sg.name AS subgroup_name,
-       t.name AS team_name,
-       COUNT(DISTINCT e.id)::bigint AS total_enrollments,
-       COUNT(DISTINCT CASE
-         WHEN u.last_login_at >= (date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AT TIME ZONE 'Asia/Ho_Chi_Minh')
-          AND u.last_login_at < ((date_trunc('month', e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') + INTERVAL '1 month') AT TIME ZONE 'Asia/Ho_Chi_Minh')
-         THEN u.id END)::bigint AS active_learners,
-       ROUND(AVG(COALESCE(cp.progress, 0))::numeric, 1) AS completion_rate
-     FROM enrollments e
-     JOIN users u ON u.id = e.user_id AND u.role IN ('learner', 'learner_plus')
-     JOIN team_members tm ON tm.user_id = e.user_id
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.tenant_id = $1
-       AND e.is_active = true
-       AND e.enrolled_at >= $2
-       AND e.enrolled_at <= $3
-       AND og.tenant_id = $1
-       ${scopeFilter}
-     GROUP BY period_start, period_label, og.name, sg.name, t.name
-     ORDER BY period_start, og.name, sg.name, t.name`,
+    `WITH ${buildActiveLearnerEventsCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3' })},
+      ${cohort.sql},
+      enrollment_metrics AS (
+        SELECT
+          date_trunc('month', re.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS period_start,
+          og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id,
+          og.name AS group_name, sg.name AS subgroup_name, t.name AS team_name,
+          COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
+          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
+          COALESCE(ROUND((COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(DISTINCT re.enrollment_id), 0), 2), 0) AS completion_rate
+        FROM report_enrollments re
+        JOIN team_members tm ON tm.user_id = re.user_id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        WHERE og.tenant_id = $1 ${scopeFilter}
+        GROUP BY period_start, og.id, sg.id, t.id, og.name, sg.name, t.name
+      ),
+      activity_metrics AS (
+        SELECT
+          date_trunc('month', ae.activity_date::timestamp) AS period_start,
+          og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id,
+          og.name AS group_name, sg.name AS subgroup_name, t.name AS team_name,
+          COUNT(DISTINCT ae.user_id)::bigint AS active_learners
+        FROM active_learner_events ae
+        JOIN users u ON u.id = ae.user_id
+        JOIN team_members tm ON tm.user_id = ae.user_id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        WHERE u.tenant_id = $1
+          AND u.is_active = true
+          AND u.role IN ('learner', 'learner_plus')
+          AND og.tenant_id = $1 ${scopeFilter}
+        GROUP BY period_start, og.id, sg.id, t.id, og.name, sg.name, t.name
+      )
+      SELECT
+        'Tháng ' || EXTRACT(MONTH FROM COALESCE(em.period_start, am.period_start))::int || '/' || EXTRACT(YEAR FROM COALESCE(em.period_start, am.period_start))::int AS period_label,
+        COALESCE(em.group_name, am.group_name) AS group_name,
+        COALESCE(em.subgroup_name, am.subgroup_name) AS subgroup_name,
+        COALESCE(em.team_name, am.team_name) AS team_name,
+        COALESCE(em.total_enrollments, 0)::bigint AS total_enrollments,
+        COALESCE(em.completed_enrollments, 0)::bigint AS completed_enrollments,
+        COALESCE(em.incomplete_enrollments, 0)::bigint AS incomplete_enrollments,
+        COALESCE(am.active_learners, 0)::bigint AS active_learners,
+        em.completion_rate
+      FROM enrollment_metrics em
+      FULL OUTER JOIN activity_metrics am
+        ON am.period_start = em.period_start AND am.group_id = em.group_id AND am.subgroup_id = em.subgroup_id AND am.team_id = em.team_id
+      ORDER BY COALESCE(em.period_start, am.period_start), COALESCE(em.group_name, am.group_name), COALESCE(em.subgroup_name, am.subgroup_name), COALESCE(em.team_name, am.team_name)`,
     params,
   );
-
   return result.rows;
 }
-
 async function writeHierarchyTrendSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -694,165 +596,78 @@ async function writeHierarchyTrendSheet(
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
     { header: 'Lượt ghi danh', key: 'enrollments', width: 16 },
-    { header: 'Học viên hoạt động', key: 'activeLearners', width: 20 },
-    { header: 'Tỉ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 16 },
+    { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 16 },
+    { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 22 },
+    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
   ];
-  const worksheet = addWorksheetChrome(
-    workbook,
-    `Xu hướng theo ${options.labels.team}`,
-    `Xu hướng theo ${lowerLabel(options.labels.team)} - ${getExportPeriodLabel(options)}`,
-    subtitle,
-    columns,
-  );
+  const worksheet = addWorksheetChrome(workbook, `Xu hướng theo ${options.labels.team}`, `Xu hướng theo ${lowerLabel(options.labels.team)} - ${getExportPeriodLabel(options)}`, subtitle, columns);
   const rows = await fetchHierarchyTrendRows(options);
-
   rows.forEach((item, index) => {
     const row = worksheet.addRow([
-      item.period_label,
-      item.group_name,
-      item.subgroup_name,
-      item.team_name,
-      toNumber(item.total_enrollments),
-      toNumber(item.active_learners),
-      roundPercent(item.completion_rate) / 100,
+      item.period_label, item.group_name, item.subgroup_name, item.team_name,
+      toNumber(item.total_enrollments), toNumber(item.completed_enrollments), toNumber(item.incomplete_enrollments), toNumber(item.active_learners), roundPercent(item.completion_rate) / 100,
     ]);
     row.height = 22;
     for (let i = 1; i <= columns.length; i++) {
       const cell = row.getCell(i);
       cell.border = thinBorder;
       cell.alignment = { vertical: 'middle', horizontal: i >= 5 ? 'center' : 'left' };
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft },
-      };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft } };
       cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy } };
     }
-    row.getCell(7).numFmt = '0.0%';
+    row.getCell(9).numFmt = '0.00%';
     row.commit();
   });
-
   worksheet.commit();
 }
-
 async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promise<TeamBreakdownRow[]> {
-  const snapshotEndDate = getExportSnapshotEndDate(options);
   const { startDate, endDate } = getExportPeriodRange(options);
-  const params: unknown[] = [options.tenantId, snapshotEndDate, startDate, endDate];
+  const params: unknown[] = [options.tenantId, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
-
+  const cohort = buildReportEnrollmentCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4 });
   const result = await query<TeamBreakdownRow>(
-    `WITH scoped_teams AS (
-       SELECT t.id AS team_id, t.name AS team_name, sg.name AS subgroup_name, og.name AS group_name
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE og.tenant_id = $1
-       ${scopeFilter}
-     ),
-     members AS (
-       SELECT st.team_id, COUNT(DISTINCT u.id)::bigint AS member_count
-       FROM scoped_teams st
-       LEFT JOIN team_members tm ON tm.team_id = st.team_id
-       LEFT JOIN users u ON u.id = tm.user_id
-        AND u.tenant_id = $1
-        AND u.is_active = true
-        AND u.role IN ('learner', 'learner_plus')
-        AND u.created_at <= $2
-       GROUP BY st.team_id
-     ),
-      visible_courses AS (
-        SELECT st.team_id, tc.course_id
-        FROM scoped_teams st
-        JOIN team_courses tc ON tc.team_id = st.team_id
-
-        UNION
-
-        SELECT st.team_id, ccc.course_id
-        FROM scoped_teams st
-        JOIN team_course_categories tcc ON tcc.team_id = st.team_id
-        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-
-        UNION
-
-        SELECT st.team_id, c.id AS course_id
-        FROM scoped_teams st
-        JOIN courses c ON c.tenant_id = $1
-         AND c.deleted_at IS NULL
-         AND c.visible_to_staff_only = false
-         AND EXISTS (
-      SELECT 1
-      FROM course_category_courses ccc_public
-      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-      WHERE ccc_public.course_id = c.id
-        AND cc_public.tenant_id = c.tenant_id
-        AND COALESCE(cc_public.is_public, false) = true
-    )
-         AND c.created_at <= $2
+    `WITH ${cohort.sql},
+      scoped_teams AS (
+        SELECT t.id AS team_id, t.name AS team_name, sg.name AS subgroup_name, og.name AS group_name
+        FROM teams t
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        WHERE og.tenant_id = $1 ${scopeFilter}
       ),
-     status_rows AS (
-       SELECT
-         st.team_id,
-         u.id AS user_id,
-         vc.course_id,
-         e.id AS enrollment_id,
-         e.enrolled_at,
-         CASE
-           WHEN e.id IS NULL THEN 'not_started'
-           WHEN (
-             COALESCE(cp.progress, 0) >= 100
-             OR COALESCE(cp.is_completed, false) = true
-           ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
-           ELSE 'learning'
-         END AS status,
-         CASE WHEN e.id IS NULL THEN NULL ELSE COALESCE(cp.progress, 0) END AS progress
-       FROM scoped_teams st
-       JOIN team_members tm ON tm.team_id = st.team_id
-       JOIN users u ON u.id = tm.user_id
-        AND u.tenant_id = $1
-        AND u.is_active = true
-        AND u.role IN ('learner', 'learner_plus')
-        AND u.created_at <= $2
-       JOIN visible_courses vc ON vc.team_id = st.team_id
-       JOIN courses c ON c.id = vc.course_id
-        AND c.tenant_id = $1
-        AND c.deleted_at IS NULL
-        AND c.visible_to_staff_only = false
-        AND c.created_at <= $2
-       LEFT JOIN enrollments e
-        ON e.tenant_id = $1
-       AND e.user_id = u.id
-       AND e.course_id = vc.course_id
-       AND e.is_active = true
-       AND e.enrolled_at <= $2
-       LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     )
-     SELECT
-       st.group_name,
-       st.subgroup_name,
-       st.team_name,
-       COALESCE(m.member_count, 0)::bigint AS member_count,
-       COUNT(DISTINCT sr.course_id)::bigint AS visible_courses,
-       COUNT(DISTINCT sr.enrollment_id) FILTER (WHERE sr.enrolled_at >= $3 AND sr.enrolled_at <= $4)::bigint AS total_enrollments,
-       COUNT(sr.course_id) FILTER (WHERE sr.status = 'completed')::bigint AS completed_count,
-       COUNT(sr.course_id) FILTER (WHERE sr.status = 'learning')::bigint AS learning_count,
-       COUNT(sr.course_id) FILTER (WHERE sr.status = 'not_started')::bigint AS not_started_count,
-       ROUND(
-         (COUNT(sr.course_id) FILTER (WHERE sr.status = 'completed')::numeric * 100)
-         / NULLIF(COUNT(sr.course_id), 0),
-         1
-       ) AS completion_rate
-     FROM scoped_teams st
-     LEFT JOIN members m ON m.team_id = st.team_id
-     LEFT JOIN status_rows sr ON sr.team_id = st.team_id
-     GROUP BY st.group_name, st.subgroup_name, st.team_name, m.member_count
-     ORDER BY st.group_name, st.subgroup_name, st.team_name`,
+      members AS (
+        SELECT st.team_id, COUNT(DISTINCT u.id)::bigint AS member_count
+        FROM scoped_teams st
+        LEFT JOIN team_members tm ON tm.team_id = st.team_id
+        LEFT JOIN users u ON u.id = tm.user_id AND u.tenant_id = $1 AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
+        GROUP BY st.team_id
+      ),
+      enrollment_metrics AS (
+        SELECT
+          st.team_id,
+          COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
+          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments
+        FROM scoped_teams st
+        LEFT JOIN team_members tm ON tm.team_id = st.team_id
+        LEFT JOIN report_enrollments re ON re.user_id = tm.user_id
+        GROUP BY st.team_id
+      )
+      SELECT
+        st.group_name, st.subgroup_name, st.team_name,
+        COALESCE(m.member_count, 0)::bigint AS member_count,
+        COALESCE(em.total_enrollments, 0)::bigint AS total_enrollments,
+        COALESCE(em.completed_enrollments, 0)::bigint AS completed_enrollments,
+        COALESCE(em.incomplete_enrollments, 0)::bigint AS incomplete_enrollments,
+        COALESCE(ROUND((COALESCE(em.completed_enrollments, 0)::numeric * 100) / NULLIF(COALESCE(em.total_enrollments, 0), 0), 2), 0) AS completion_rate
+      FROM scoped_teams st
+      LEFT JOIN members m ON m.team_id = st.team_id
+      LEFT JOIN enrollment_metrics em ON em.team_id = st.team_id
+      ORDER BY st.group_name, st.subgroup_name, st.team_name`,
     params,
   );
-
   return result.rows;
 }
-
 async function writeTeamBreakdownSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -862,117 +677,56 @@ async function writeTeamBreakdownSheet(
     { header: options.labels.group, key: 'groupName', width: 24 },
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
-    { header: 'Số học viên', key: 'memberCount', width: 15 },
-    { header: 'Số khóa được phân', key: 'visibleCourses', width: 18 },
-    { header: 'Lượt ghi danh kỳ', key: 'enrollments', width: 18 },
-    { header: 'Đã học', key: 'completed', width: 12 },
-    { header: 'Đang học', key: 'learning', width: 12 },
-    { header: 'Chưa học', key: 'notStarted', width: 12 },
-    { header: 'Tỉ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Học viên hiện thuộc đội', key: 'memberCount', width: 22 },
+    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
+    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
+    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
+    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
   ];
-  const worksheet = addWorksheetChrome(
-    workbook,
-    `Chi tiết ${options.labels.team}`,
-    `Chi tiết ${lowerLabel(options.labels.team)}`,
-    subtitle,
-    columns,
-  );
+  const worksheet = addWorksheetChrome(workbook, `Chi tiết ${options.labels.team}`, `Chi tiết ${lowerLabel(options.labels.team)}`, subtitle, columns);
   const rows = await fetchTeamBreakdownRows(options);
-
   rows.forEach((item, index) => {
     const rate = roundPercent(item.completion_rate);
     const row = worksheet.addRow([
-      item.group_name,
-      item.subgroup_name,
-      item.team_name,
-      toNumber(item.member_count),
-      toNumber(item.visible_courses),
-      toNumber(item.total_enrollments),
-      toNumber(item.completed_count),
-      toNumber(item.learning_count),
-      toNumber(item.not_started_count),
-      rate / 100,
+      item.group_name, item.subgroup_name, item.team_name, toNumber(item.member_count), toNumber(item.total_enrollments),
+      toNumber(item.completed_enrollments), toNumber(item.incomplete_enrollments), rate / 100,
     ]);
     row.height = 22;
     for (let i = 1; i <= columns.length; i++) {
       const cell = row.getCell(i);
       cell.border = thinBorder;
       cell.alignment = { vertical: 'middle', horizontal: i >= 4 ? 'center' : 'left' };
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft },
-      };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft } };
       cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy } };
     }
-    row.getCell(10).numFmt = '0.0%';
-    row.getCell(10).font = {
-      name: 'Arial',
-      size: 10,
-      bold: true,
-      color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red },
-    };
+    row.getCell(8).numFmt = '0.00%';
+    row.getCell(8).font = { name: 'Arial', size: 10, bold: true, color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red } };
     row.commit();
   });
-
   worksheet.commit();
 }
-
 async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promise<CourseRankingExportRow[]> {
-  const snapshotEndDate = getExportSnapshotEndDate(options);
-  const params: unknown[] = [options.tenantId, snapshotEndDate];
-  const scopeFilter = appendScopeFilter(params, options.scope);
-
+  const { startDate, endDate } = getExportPeriodRange(options);
+  const cohort = buildReportEnrollmentCte({
+    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
+    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
+  });
   const result = await query<CourseRankingExportRow>(
-    `WITH
-      ${buildVisibleCourseUsersCte({
-        tenantParam: '$1',
-        snapshotParam: '$2',
-        extraFilterSql: scopeFilter,
-      })},
-      learner_status AS (
-        SELECT
-          v.course_id,
-          v.name,
-          v.user_id,
-          CASE
-            WHEN e.id IS NULL THEN 'not_started'
-            WHEN (
-              COALESCE(cp.progress, 0) >= 100
-              OR COALESCE(cp.is_completed, false) = true
-            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
-            ELSE 'learning'
-          END AS status
-        FROM visible_course_users v
-        LEFT JOIN enrollments e
-          ON e.tenant_id = $1
-         AND e.course_id = v.course_id
-         AND e.user_id = v.user_id
-         AND e.is_active = true
-         AND e.enrolled_at <= $2
-        LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-      )
+    `WITH ${cohort.sql}
      SELECT
-       course_id,
-       name,
-       COUNT(*)::bigint AS visible_learners,
-       COUNT(*) FILTER (WHERE status = 'learning')::bigint AS learning_count,
-       COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed_count,
-       COUNT(*) FILTER (WHERE status = 'not_started')::bigint AS not_started_count,
-       ROUND(
-         (COUNT(*) FILTER (WHERE status = 'completed')::numeric * 100)
-         / NULLIF(COUNT(*), 0),
-         1
-       ) AS completion_rate
-     FROM learner_status
-     GROUP BY course_id, name
-     ORDER BY completion_rate DESC NULLS LAST, completed_count DESC, visible_learners DESC, name ASC`,
-    params,
+       re.course_id,
+       MAX(re.course_name) AS name,
+       COUNT(*)::bigint AS total_enrollments,
+       COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+       COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
+       COALESCE(ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2), 0) AS completion_rate
+     FROM report_enrollments re
+     GROUP BY re.course_id
+     ORDER BY completion_rate DESC NULLS LAST, completed_enrollments DESC, total_enrollments DESC, name ASC`,
+    [options.tenantId, startDate, endDate, ...cohort.params],
   );
-
   return result.rows;
 }
-
 async function writeCourseRankingSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -982,295 +736,63 @@ async function writeCourseRankingSheet(
     { header: 'Hạng', key: 'rank', width: 10 },
     { header: 'Khóa học', key: 'courseName', width: 46 },
     { header: 'Course ID', key: 'courseId', width: 38 },
-    { header: 'Học viên được phân', key: 'visibleLearners', width: 20 },
-    { header: 'Đã học', key: 'completed', width: 13 },
-    { header: 'Đang học', key: 'learning', width: 13 },
-    { header: 'Chưa học', key: 'notStarted', width: 13 },
-    { header: 'Tỉ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
+    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
+    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
+    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(
-    workbook,
-    'Xếp hạng khóa học',
-    'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học',
-    subtitle,
-    columns,
+    workbook, 'Xếp hạng khóa học', 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', subtitle, columns,
   );
   const rows = await fetchCourseRankingRows(options);
-
   rows.forEach((item, index) => {
     const rate = roundPercent(item.completion_rate);
     const row = worksheet.addRow([
-      index + 1,
-      item.name,
-      item.course_id,
-      toNumber(item.visible_learners),
-      toNumber(item.completed_count),
-      toNumber(item.learning_count),
-      toNumber(item.not_started_count),
-      rate / 100,
+      index + 1, item.name, item.course_id, toNumber(item.total_enrollments),
+      toNumber(item.completed_enrollments), toNumber(item.incomplete_enrollments), rate / 100,
     ]);
     row.height = 22;
     for (let i = 1; i <= columns.length; i++) {
       const cell = row.getCell(i);
       cell.border = thinBorder;
       cell.alignment = { vertical: 'middle', horizontal: i >= 4 || i === 1 ? 'center' : 'left' };
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft },
-      };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft } };
       cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy }, bold: i === 1 || (index < 3 && i === 2) };
     }
-    row.getCell(8).numFmt = '0.0%';
-    row.getCell(8).font = {
-      name: 'Arial',
-      size: 10,
-      bold: true,
-      color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red },
-    };
+    row.getCell(7).numFmt = '0.00%';
+    row.getCell(7).font = { name: 'Arial', size: 10, bold: true, color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red } };
     row.commit();
   });
-
   worksheet.commit();
   return rows;
 }
-
 async function fetchLearnerSummaryBatch(
   options: ReportExcelExportOptions,
   lastUserId: string | null,
 ): Promise<LearnerSummaryRow[]> {
-  const snapshotEndDate = getExportSnapshotEndDate(options);
-  const params: unknown[] = [options.tenantId, lastUserId, STREAM_BATCH_SIZE, snapshotEndDate];
-  const scopeFilter = appendScopeFilter(params, options.scope);
-
+  const { startDate, endDate } = getExportPeriodRange(options);
+  const cohort = buildReportEnrollmentCte({
+    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
+    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
+  });
+  const cursorParam = 4 + cohort.params.length;
+  const limitParam = cursorParam + 1;
+  const membershipScope = options.scope.teamId
+    ? 'AND t.id = $4'
+    : options.scope.subgroupId
+      ? 'AND sg.id = $4'
+      : options.scope.groupId
+        ? 'AND og.id = $4'
+        : '';
   const result = await query<LearnerSummaryRow>(
-    `WITH scoped_users AS (
-       SELECT DISTINCT u.id, u.username, u.email, u.full_name
-       FROM users u
-       JOIN team_members tm ON tm.user_id = u.id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE u.tenant_id = $1
-         AND u.is_active = true
-         AND u.role IN ('learner', 'learner_plus')
-         AND u.created_at <= $4
-         AND ($2::uuid IS NULL OR u.id > $2::uuid)
-         AND og.tenant_id = $1
-         ${scopeFilter}
-       ORDER BY u.id
-       LIMIT $3
-     ),
-     memberships AS (
-       SELECT
-         tm.user_id,
-         string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
-         string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
-         string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-       FROM scoped_users su
-       JOIN team_members tm ON tm.user_id = su.id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE og.tenant_id = $1
-       ${scopeFilter}
-       GROUP BY tm.user_id
-     ),
-      visible_course_users AS (
-        SELECT su.id AS user_id, c.id AS course_id
-        FROM scoped_users su
-        JOIN team_members tm ON tm.user_id = su.id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        JOIN team_courses tc ON tc.team_id = t.id
-        JOIN courses c ON c.id = tc.course_id
-        WHERE og.tenant_id = $1
-          AND c.tenant_id = $1
-          AND c.deleted_at IS NULL
-          AND c.visible_to_staff_only = false
-          AND c.created_at <= $4
-          ${scopeFilter}
-
-        UNION
-
-        SELECT su.id AS user_id, c.id AS course_id
-        FROM scoped_users su
-        JOIN team_members tm ON tm.user_id = su.id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        JOIN team_course_categories tcc ON tcc.team_id = t.id
-        JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-        JOIN courses c ON c.id = ccc.course_id
-        WHERE og.tenant_id = $1
-          AND c.tenant_id = $1
-          AND c.deleted_at IS NULL
-          AND c.visible_to_staff_only = false
-          AND c.created_at <= $4
-          ${scopeFilter}
-
-        UNION
-
-        SELECT su.id AS user_id, c.id AS course_id
-        FROM scoped_users su
-        JOIN courses c ON c.tenant_id = $1
-        WHERE c.deleted_at IS NULL
-          AND c.visible_to_staff_only = false
-          AND EXISTS (
-      SELECT 1
-      FROM course_category_courses ccc_public
-      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-      WHERE ccc_public.course_id = c.id
-        AND cc_public.tenant_id = c.tenant_id
-        AND COALESCE(cc_public.is_public, false) = true
-    )
-          AND c.created_at <= $4
-      ),
-     learner_status AS (
-       SELECT
-         v.user_id,
-         v.course_id,
-         e.id AS enrollment_id,
-         cp.completed_at,
-         CASE WHEN e.id IS NULL THEN NULL ELSE COALESCE(cp.progress, 0) END AS progress,
-         CASE
-           WHEN e.id IS NULL THEN 'not_started'
-           WHEN (
-             COALESCE(cp.progress, 0) >= 100
-             OR COALESCE(cp.is_completed, false) = true
-           ) AND (cp.completed_at IS NULL OR cp.completed_at <= $4) THEN 'completed'
-           ELSE 'learning'
-         END AS status
-       FROM visible_course_users v
-       LEFT JOIN enrollments e
-        ON e.tenant_id = $1
-       AND e.user_id = v.user_id
-       AND e.course_id = v.course_id
-       AND e.is_active = true
-       AND e.enrolled_at <= $4
-       LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     )
-     SELECT
-       su.id AS user_id,
-       su.username,
-       su.email,
-       su.full_name,
-       m.group_names,
-       m.subgroup_names,
-       m.team_names,
-       COUNT(ls.course_id)::bigint AS visible_courses,
-       COUNT(ls.enrollment_id)::bigint AS enrolled_courses,
-       COUNT(*) FILTER (WHERE ls.status = 'completed')::bigint AS completed_courses,
-       COUNT(*) FILTER (WHERE ls.status = 'learning')::bigint AS learning_courses,
-       COUNT(*) FILTER (WHERE ls.status = 'not_started')::bigint AS not_started_courses,
-       ROUND(AVG(ls.progress)::numeric, 1) AS average_progress,
-       MAX(ls.completed_at) AS last_completion_at,
-       CASE
-         WHEN COUNT(ls.course_id) > 0
-          AND COUNT(*) FILTER (WHERE ls.status = 'completed') = COUNT(ls.course_id) THEN 'completed'
-         WHEN COUNT(ls.enrollment_id) > 0 THEN 'learning'
-         ELSE 'not_started'
-       END AS status
-     FROM scoped_users su
-     LEFT JOIN memberships m ON m.user_id = su.id
-     LEFT JOIN learner_status ls ON ls.user_id = su.id
-     GROUP BY su.id, su.username, su.email, su.full_name, m.group_names, m.subgroup_names, m.team_names
-     ORDER BY su.id`,
-    params,
-  );
-
-  return result.rows;
-}
-
-async function writeLearnerSummarySheet(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  options: ReportExcelExportOptions,
-  subtitle: string,
-): Promise<void> {
-  const columns: ColumnDef[] = [
-    { header: 'Username', key: 'username', width: 26 },
-    { header: 'Họ tên', key: 'fullName', width: 26 },
-    { header: 'Email', key: 'email', width: 34 },
-    { header: options.labels.group, key: 'groups', width: 24 },
-    { header: options.labels.subgroup, key: 'subgroups', width: 28 },
-    { header: options.labels.team, key: 'teams', width: 30 },
-    { header: 'Số khóa được phân', key: 'visibleCourses', width: 18 },
-    { header: 'Đã học', key: 'completed', width: 12 },
-    { header: 'Đang học', key: 'learning', width: 12 },
-    { header: 'Chưa học', key: 'notStarted', width: 12 },
-    { header: 'Tiến độ TB', key: 'progress', width: 14 },
-    { header: 'Hoàn thành gần nhất', key: 'lastCompletion', width: 20 },
-  ];
-  const writer = new SplitWorksheetWriter(
-    workbook,
-    'Danh sách học viên',
-    'Danh sách học viên theo bộ lọc',
-    subtitle,
-    columns,
-  );
-
-  let lastUserId: string | null = null;
-  for (;;) {
-    const rows = await fetchLearnerSummaryBatch(options, lastUserId);
-    if (rows.length === 0) break;
-
-    for (const item of rows) {
-      const progress = roundPercent(item.average_progress);
-      writer.addRow([
-        item.username,
-        item.full_name || '',
-        item.email,
-        item.group_names || '',
-        item.subgroup_names || '',
-        item.team_names || '',
-        toNumber(item.visible_courses),
-        toNumber(item.completed_courses),
-        toNumber(item.learning_courses),
-        toNumber(item.not_started_courses),
-        progress / 100,
-        item.last_completion_at,
-      ], (row) => {
-        row.getCell(11).numFmt = '0.0%';
-        row.getCell(11).font = {
-          name: 'Arial',
-          size: 10,
-          bold: true,
-          color: { argb: progress >= 80 ? COLORS.emerald : progress >= 50 ? COLORS.amber : COLORS.red },
-        };
-        row.getCell(12).numFmt = 'dd/mm/yyyy hh:mm';
-      });
-    }
-
-    lastUserId = rows[rows.length - 1].user_id;
-    if (rows.length < STREAM_BATCH_SIZE) break;
-  }
-
-  writer.finish();
-}
-
-async function fetchCourseLearnerBatch(
-  options: ReportExcelExportOptions,
-  courseId: string,
-  lastUserId: string | null,
-): Promise<CourseLearnerRow[]> {
-  const snapshotEndDate = getExportSnapshotEndDate(options);
-  const params: unknown[] = [options.tenantId, snapshotEndDate, courseId, lastUserId, STREAM_BATCH_SIZE];
-  const scopeFilter = appendScopeFilter(params, options.scope);
-
-  const result = await query<CourseLearnerRow>(
-    `WITH
-      ${buildVisibleCourseUsersCte({
-        tenantParam: '$1',
-        snapshotParam: '$2',
-        extraFilterSql: `AND c.id = $3 ${scopeFilter}`,
-      })},
+    `WITH ${cohort.sql},
       selected_users AS (
-        SELECT v.user_id, v.course_id, v.name
-        FROM visible_course_users v
-        WHERE ($4::uuid IS NULL OR v.user_id > $4::uuid)
-        ORDER BY v.user_id
-        LIMIT $5
+        SELECT re.user_id
+        FROM report_enrollments re
+        WHERE ($${cursorParam}::uuid IS NULL OR re.user_id > $${cursorParam}::uuid)
+        GROUP BY re.user_id
+        ORDER BY re.user_id
+        LIMIT $${limitParam}
       ),
       memberships AS (
         SELECT
@@ -1283,60 +805,150 @@ async function fetchCourseLearnerBatch(
         JOIN teams t ON t.id = tm.team_id
         JOIN sub_groups sg ON sg.id = t.sub_group_id
         JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1
-        ${scopeFilter}
+        WHERE og.tenant_id = $1 ${membershipScope}
         GROUP BY tm.user_id
       )
-     SELECT
-       u.id AS user_id,
-       u.username,
-       u.email,
-       u.full_name,
-       m.group_names,
-       m.subgroup_names,
-       m.team_names,
-       su.course_id,
-       su.name AS course_name,
-       e.enrolled_at,
-       cp.completed_at,
-       CASE
-         WHEN e.id IS NULL THEN NULL
-         WHEN (
-           COALESCE(cp.progress, 0) >= 100
-           OR COALESCE(cp.is_completed, false) = true
-         ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 100
-         ELSE LEAST(COALESCE(cp.progress, 0), 99.99)
-       END AS progress,
-       CASE
-         WHEN e.id IS NULL THEN 'not_started'
-         WHEN (
-           COALESCE(cp.progress, 0) >= 100
-           OR COALESCE(cp.is_completed, false) = true
-         ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
-         ELSE 'learning'
-       END AS status
-     FROM selected_users su
-     JOIN users u ON u.id = su.user_id
-     LEFT JOIN memberships m ON m.user_id = su.user_id
-     LEFT JOIN enrollments e
-      ON e.tenant_id = $1
-     AND e.course_id = su.course_id
-     AND e.user_id = su.user_id
-     AND e.is_active = true
-     AND e.enrolled_at <= $2
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     ORDER BY u.id`,
-    params,
+      SELECT
+        su.user_id,
+        u.username,
+        u.email,
+        u.full_name,
+        m.group_names,
+        m.subgroup_names,
+        m.team_names,
+        COUNT(re.enrollment_id)::bigint AS enrolled_courses,
+        COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_courses,
+        COUNT(re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_courses,
+        COALESCE(ROUND((COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(re.enrollment_id), 0), 2), 0) AS completion_rate,
+        MAX(re.completed_at) FILTER (WHERE re.is_completed) AS last_completion_at,
+        CASE
+          WHEN COUNT(re.enrollment_id) FILTER (WHERE re.is_completed) = COUNT(re.enrollment_id) THEN 'completed'
+          WHEN COUNT(re.enrollment_id) FILTER (WHERE re.has_started) > 0 THEN 'learning'
+          ELSE 'not_started'
+        END AS status
+      FROM selected_users su
+      JOIN users u ON u.id = su.user_id
+      JOIN report_enrollments re ON re.user_id = su.user_id
+      LEFT JOIN memberships m ON m.user_id = su.user_id
+      GROUP BY su.user_id, u.username, u.email, u.full_name, m.group_names, m.subgroup_names, m.team_names
+      ORDER BY su.user_id`,
+    [options.tenantId, startDate, endDate, ...cohort.params, lastUserId, STREAM_BATCH_SIZE],
   );
-
   return result.rows;
 }
-
+async function writeLearnerSummarySheet(
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
+  options: ReportExcelExportOptions,
+  subtitle: string,
+): Promise<void> {
+  const columns: ColumnDef[] = [
+    { header: 'Username', key: 'username', width: 26 },
+    { header: 'Họ tên', key: 'fullName', width: 26 },
+    { header: 'Email', key: 'email', width: 34 },
+    { header: options.labels.group, key: 'groups', width: 24 },
+    { header: options.labels.subgroup, key: 'subgroups', width: 28 },
+    { header: options.labels.team, key: 'teams', width: 30 },
+    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
+    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
+    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
+    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Hoàn thành gần nhất', key: 'lastCompletion', width: 20 },
+  ];
+  const writer = new SplitWorksheetWriter(workbook, 'Danh sách học viên', 'Danh sách học viên có ghi danh trong kỳ', subtitle, columns);
+  let lastUserId: string | null = null;
+  for (;;) {
+    const rows = await fetchLearnerSummaryBatch(options, lastUserId);
+    if (rows.length === 0) break;
+    for (const item of rows) {
+      const rate = roundPercent(item.completion_rate);
+      writer.addRow([
+        item.username, item.full_name || '', item.email, item.group_names || '', item.subgroup_names || '', item.team_names || '',
+        toNumber(item.enrolled_courses), toNumber(item.completed_courses), toNumber(item.incomplete_courses), rate / 100, item.last_completion_at,
+      ], (row) => {
+        row.getCell(10).numFmt = '0.00%';
+        row.getCell(10).font = { name: 'Arial', size: 10, bold: true, color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red } };
+        row.getCell(11).numFmt = 'dd/mm/yyyy hh:mm';
+      });
+    }
+    lastUserId = rows[rows.length - 1].user_id;
+    if (rows.length < STREAM_BATCH_SIZE) break;
+  }
+  writer.finish();
+}
+async function fetchCourseLearnerBatch(
+  options: ReportExcelExportOptions,
+  lastEnrolledAt: Date | null,
+  lastEnrollmentId: string | null,
+): Promise<CourseLearnerRow[]> {
+  const { startDate, endDate } = getExportPeriodRange(options);
+  const cohort = buildReportEnrollmentCte({
+    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
+    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
+  });
+  const cursorDateParam = 4 + cohort.params.length;
+  const cursorIdParam = cursorDateParam + 1;
+  const limitParam = cursorIdParam + 1;
+  const membershipScope = options.scope.teamId
+    ? 'AND t.id = $4'
+    : options.scope.subgroupId
+      ? 'AND sg.id = $4'
+      : options.scope.groupId
+        ? 'AND og.id = $4'
+        : '';
+  const result = await query<CourseLearnerRow>(
+    `WITH ${cohort.sql},
+      selected_enrollments AS (
+        SELECT re.*
+        FROM report_enrollments re
+        WHERE (
+          $${cursorDateParam}::timestamptz IS NULL
+          OR re.enrolled_at > $${cursorDateParam}
+          OR (re.enrolled_at = $${cursorDateParam} AND re.enrollment_id > $${cursorIdParam}::uuid)
+        )
+        ORDER BY re.enrolled_at, re.enrollment_id
+        LIMIT $${limitParam}
+      ),
+      memberships AS (
+        SELECT
+          tm.user_id,
+          string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
+          string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
+          string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
+        FROM selected_enrollments se
+        JOIN team_members tm ON tm.user_id = se.user_id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        WHERE og.tenant_id = $1 ${membershipScope}
+        GROUP BY tm.user_id
+      )
+      SELECT
+        se.enrollment_id,
+        se.user_id,
+        u.username,
+        u.email,
+        u.full_name,
+        m.group_names,
+        m.subgroup_names,
+        m.team_names,
+        se.course_id,
+        se.course_name,
+        se.enrolled_at,
+        se.completed_at,
+        se.is_completed,
+        CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
+      FROM selected_enrollments se
+      JOIN users u ON u.id = se.user_id
+      LEFT JOIN memberships m ON m.user_id = se.user_id
+      ORDER BY se.enrolled_at, se.enrollment_id`,
+    [options.tenantId, startDate, endDate, ...cohort.params, lastEnrolledAt, lastEnrollmentId, STREAM_BATCH_SIZE],
+  );
+  return result.rows;
+}
 async function writeCourseLearnerDetailSheets(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
   subtitle: string,
-  courses: CourseRankingExportRow[],
 ): Promise<void> {
   const columns: ColumnDef[] = [
     { header: 'Khóa học', key: 'courseName', width: 42 },
@@ -1347,62 +959,34 @@ async function writeCourseLearnerDetailSheets(
     { header: options.labels.group, key: 'groups', width: 24 },
     { header: options.labels.subgroup, key: 'subgroups', width: 28 },
     { header: options.labels.team, key: 'teams', width: 30 },
-    { header: 'Trạng thái', key: 'status', width: 14 },
-    { header: 'Tiến độ', key: 'progress', width: 12 },
+    { header: 'Trạng thái', key: 'status', width: 16 },
+    { header: 'Hoàn thành trong kỳ', key: 'completed', width: 20 },
     { header: 'Ngày ghi danh', key: 'enrolledAt', width: 18 },
     { header: 'Ngày hoàn thành', key: 'completedAt', width: 18 },
   ];
-  const writer = new SplitWorksheetWriter(
-    workbook,
-    'Chi tiết khóa-học viên',
-    'Chi tiết học viên theo từng khóa học',
-    subtitle,
-    columns,
-  );
-
-  for (const course of courses) {
-    let lastUserId: string | null = null;
-    for (;;) {
-      const rows = await fetchCourseLearnerBatch(options, course.course_id, lastUserId);
-      if (rows.length === 0) break;
-
-      for (const item of rows) {
-        const progress = item.progress === null ? null : roundPercent(item.progress);
-        writer.addRow([
-          item.course_name,
-          item.course_id,
-          item.username,
-          item.full_name || '',
-          item.email,
-          item.group_names || '',
-          item.subgroup_names || '',
-          item.team_names || '',
-          statusText(item.status),
-          progress === null ? '' : progress / 100,
-          item.enrolled_at,
-          item.completed_at,
-        ], (row) => {
-          row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
-          row.getCell(10).numFmt = '0.0%';
-          row.getCell(10).font = {
-            name: 'Arial',
-            size: 10,
-            bold: true,
-            color: { argb: progress === null ? COLORS.slate : progress >= 80 ? COLORS.emerald : progress >= 50 ? COLORS.amber : COLORS.red },
-          };
-          row.getCell(11).numFmt = 'dd/mm/yyyy hh:mm';
-          row.getCell(12).numFmt = 'dd/mm/yyyy hh:mm';
-        });
-      }
-
-      lastUserId = rows[rows.length - 1].user_id;
-      if (rows.length < STREAM_BATCH_SIZE) break;
+  const writer = new SplitWorksheetWriter(workbook, 'Chi tiết khóa-học viên', 'Chi tiết lượt ghi danh theo từng khóa học', subtitle, columns);
+  let lastEnrolledAt: Date | null = null;
+  let lastEnrollmentId: string | null = null;
+  for (;;) {
+    const rows = await fetchCourseLearnerBatch(options, lastEnrolledAt, lastEnrollmentId);
+    if (rows.length === 0) break;
+    for (const item of rows) {
+      writer.addRow([
+        item.course_name, item.course_id, item.username, item.full_name || '', item.email,
+        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status), item.is_completed ? 'Có' : 'Chưa', item.enrolled_at, item.completed_at,
+      ], (row) => {
+        row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
+        row.getCell(11).numFmt = 'dd/mm/yyyy hh:mm';
+        row.getCell(12).numFmt = 'dd/mm/yyyy hh:mm';
+      });
     }
+    const lastRow = rows[rows.length - 1];
+    lastEnrolledAt = lastRow.enrolled_at;
+    lastEnrollmentId = lastRow.enrollment_id;
+    if (rows.length < STREAM_BATCH_SIZE) break;
   }
-
   writer.finish();
 }
-
 export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
   const scopeNames = await resolveScopeNames(options.tenantId, options.scope);
   const selectedPeriodText = getExportPeriodLabel(options);
@@ -1432,9 +1016,9 @@ export async function streamReportExcel(options: ReportExcelExportOptions): Prom
   await writeMonthlyOverviewSheet(workbook, options, yearlySubtitle);
   await writeHierarchyTrendSheet(workbook, options, yearlySubtitle);
   await writeTeamBreakdownSheet(workbook, options, yearlySubtitle);
-  const courseRows = await writeCourseRankingSheet(workbook, options, selectedPeriodSubtitle);
+  await writeCourseRankingSheet(workbook, options, selectedPeriodSubtitle);
   await writeLearnerSummarySheet(workbook, options, selectedPeriodSubtitle);
-  await writeCourseLearnerDetailSheets(workbook, options, selectedPeriodSubtitle, courseRows);
+  await writeCourseLearnerDetailSheets(workbook, options, selectedPeriodSubtitle);
 
   await workbook.commit();
 }

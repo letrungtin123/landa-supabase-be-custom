@@ -7,6 +7,9 @@ const DEFAULT_JITTER_RATIO = 0.1;
 
 type CacheHit<T> = { hit: true; value: T } | { hit: false; value?: undefined };
 
+// Coalesce concurrent misses in one Node process to protect the database from request bursts.
+const inFlightCacheLoads = new Map<string, Promise<unknown>>();
+
 function normalizeForHash(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeForHash);
   if (value && typeof value === 'object') {
@@ -84,9 +87,21 @@ export async function cacheJson<T>(
   const cached = await getCacheJson<T>(key);
   if (cached.hit) return cached.value;
 
-  const value = await loader();
-  await setCacheJson(key, value, ttlSeconds);
-  return value;
+  const inFlight = inFlightCacheLoads.get(key) as Promise<T> | undefined;
+  if (inFlight) return inFlight;
+
+  const load = (async () => {
+    const value = await loader();
+    await setCacheJson(key, value, ttlSeconds);
+    return value;
+  })();
+  inFlightCacheLoads.set(key, load);
+
+  try {
+    return await load;
+  } finally {
+    inFlightCacheLoads.delete(key);
+  }
 }
 
 export async function getCacheVersion(...segments: readonly unknown[]): Promise<string> {
