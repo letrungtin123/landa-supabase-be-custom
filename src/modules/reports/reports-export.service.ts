@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'node:stream';
 import { query } from '../../config/database.js';
-import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
+import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
 type ExportScope = {
   groupId?: string;
@@ -797,6 +797,13 @@ async function fetchLearnerSummaryBatch(
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
     groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
   });
+  const roster = buildReportLearnerRosterCte({
+    tenantParam: '$1',
+    groupId: options.scope.groupId,
+    subgroupId: options.scope.subgroupId,
+    teamId: options.scope.teamId,
+    scopeParamStart: 4,
+  });
   const cursorParam = 4 + cohort.params.length;
   const limitParam = cursorParam + 1;
   const membershipScope = options.scope.teamId
@@ -808,12 +815,12 @@ async function fetchLearnerSummaryBatch(
         : '';
   const result = await query<LearnerSummaryRow>(
     `WITH ${cohort.sql},
+      ${roster.sql},
       selected_users AS (
-        SELECT re.user_id
-        FROM report_enrollments re
-        WHERE ($${cursorParam}::uuid IS NULL OR re.user_id > $${cursorParam}::uuid)
-        GROUP BY re.user_id
-        ORDER BY re.user_id
+        SELECT rl.user_id
+        FROM report_learners rl
+        WHERE ($${cursorParam}::uuid IS NULL OR rl.user_id > $${cursorParam}::uuid)
+        ORDER BY rl.user_id
         LIMIT $${limitParam}
       ),
       memberships AS (
@@ -844,13 +851,13 @@ async function fetchLearnerSummaryBatch(
         COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate,
         MAX(re.completed_at) FILTER (WHERE re.is_completed) AS last_completion_at,
         CASE
-          WHEN COUNT(re.enrollment_id) FILTER (WHERE re.is_completed) = COUNT(re.enrollment_id) THEN 'completed'
-          WHEN COUNT(re.enrollment_id) FILTER (WHERE re.has_started) > 0 THEN 'learning'
+          WHEN COALESCE(AVG(re.progress), 0) >= 100 THEN 'completed'
+          WHEN COALESCE(AVG(re.progress), 0) > 0 THEN 'learning'
           ELSE 'not_started'
         END AS status
       FROM selected_users su
       JOIN users u ON u.id = su.user_id
-      JOIN report_enrollments re ON re.user_id = su.user_id
+      LEFT JOIN report_enrollments re ON re.user_id = su.user_id
       LEFT JOIN memberships m ON m.user_id = su.user_id
       GROUP BY su.user_id, u.username, u.email, u.full_name, m.group_names, m.subgroup_names, m.team_names
       ORDER BY su.user_id`,
@@ -876,7 +883,7 @@ async function writeLearnerSummarySheet(
     { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
     { header: 'Hoàn thành gần nhất', key: 'lastCompletion', width: 20 },
   ];
-  const writer = new SplitWorksheetWriter(workbook, 'Danh sách học viên', 'Danh sách học viên có ghi danh trong kỳ', subtitle, columns);
+  const writer = new SplitWorksheetWriter(workbook, 'Danh sách học viên', 'Danh sách học viên trong phạm vi đang lọc', subtitle, columns);
   let lastUserId: string | null = null;
   for (;;) {
     const rows = await fetchLearnerSummaryBatch(options, lastUserId);
