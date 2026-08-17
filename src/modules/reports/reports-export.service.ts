@@ -100,6 +100,7 @@ type CourseLearnerRow = {
   enrolled_at: Date | null;
   completed_at: Date | null;
   is_completed: boolean;
+  progress: string;
   status: 'not_started' | 'learning' | 'completed';
 };
 
@@ -170,7 +171,7 @@ function toNumber(value: unknown): number {
 }
 
 function roundPercent(value: unknown): number {
-  return Math.round(Math.min(Math.max(toNumber(value), 0), 100) * 10) / 10;
+  return Math.round(Math.min(Math.max(toNumber(value), 0), 100) * 100) / 100;
 }
 
 function statusText(status: string): string {
@@ -441,12 +442,12 @@ async function writeMonthlyOverviewSheet(
 ): Promise<void> {
   const columns: ColumnDef[] = [
     { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
-    { header: 'Tổng học viên', key: 'totalLearners', width: 18 },
+    { header: 'Tổng học viên đã tạo', key: 'totalLearners', width: 22 },
     { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 24 },
     { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
     { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 18 },
     { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 18 },
-    { header: 'Tỷ lệ hoàn thành khóa học trong kỳ', key: 'completionRate', width: 28 },
+    { header: 'Tỷ lệ hoàn thành trung bình của học viên', key: 'completionRate', width: 36 },
   ];
   const worksheet = addWorksheetChrome(
     workbook,
@@ -491,7 +492,7 @@ async function writeMonthlyOverviewSheet(
     addStyledRow(worksheet, ['Tổng lượt ghi danh trong khoảng', summary.overview.total_enrollments], columns.length, 'summary');
     addStyledRow(worksheet, ['Đã hoàn thành', summary.overview.completed_enrollments], columns.length, 'summary');
     addStyledRow(worksheet, ['Chưa hoàn thành', summary.overview.incomplete_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, ['Tỷ lệ hoàn thành khóa học trong kỳ', `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
+    addStyledRow(worksheet, ['Tỷ lệ hoàn thành trung bình của học viên', `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
     worksheet.commit();
     return;
   }
@@ -514,12 +515,32 @@ async function writeMonthlyOverviewSheet(
     addOverviewRow(MONTH_LABELS[month], summary, month - 1);
   }
 
-  const yearlyRate = totalEnrollments ? (completedEnrollments * 100) / totalEnrollments : 0;
-  addStyledRow(worksheet, [], columns.length, 'spacer');
+  const annualRange = maxMonth === 0 ? null : (() => {
+    const startDate = new Date(options.year, 0, 1);
+    const endDate = getMonthRange(options.year, maxMonth).endDate;
+    return {
+      startDate,
+      endDate,
+      dateFrom: `${options.year}-01-01`,
+      dateTo: `${options.year}-${String(maxMonth).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`,
+    };
+  })();
+  const annualSummary = annualRange
+    ? await getReportSummary(
+      options.tenantId,
+      undefined,
+      undefined,
+      options.scope.groupId,
+      options.scope.subgroupId,
+      options.scope.teamId,
+      annualRange,
+    )
+    : null;
+  const yearlyRate = annualSummary?.overview.completion_rate ?? 0;  addStyledRow(worksheet, [], columns.length, 'spacer');
   addStyledRow(worksheet, ['Tổng lượt ghi danh trong năm', totalEnrollments], columns.length, 'summary');
   addStyledRow(worksheet, ['Đã hoàn thành trong năm', completedEnrollments], columns.length, 'summary');
   addStyledRow(worksheet, ['Chưa hoàn thành trong năm', incompleteEnrollments], columns.length, 'summary');
-  addStyledRow(worksheet, ['Tỷ lệ hoàn thành khóa học trong năm', `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
+  addStyledRow(worksheet, ['Tỷ lệ hoàn thành trung bình của học viên trong năm', `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
   worksheet.commit();
 }
 async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promise<HierarchyTrendRow[]> {
@@ -540,7 +561,7 @@ async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promi
           COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
           COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
           COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND((COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(DISTINCT re.enrollment_id), 0), 2), 0) AS completion_rate
+          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
         FROM report_enrollments re
         JOIN team_members tm ON tm.user_id = re.user_id
         JOIN teams t ON t.id = tm.team_id
@@ -599,7 +620,7 @@ async function writeHierarchyTrendSheet(
     { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 16 },
     { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 16 },
     { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 22 },
-    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(workbook, `Xu hướng theo ${options.labels.team}`, `Xu hướng theo ${lowerLabel(options.labels.team)} - ${getExportPeriodLabel(options)}`, subtitle, columns);
   const rows = await fetchHierarchyTrendRows(options);
@@ -647,7 +668,8 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
           st.team_id,
           COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
           COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments
+          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
+          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
         FROM scoped_teams st
         LEFT JOIN team_members tm ON tm.team_id = st.team_id
         LEFT JOIN report_enrollments re ON re.user_id = tm.user_id
@@ -659,7 +681,7 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
         COALESCE(em.total_enrollments, 0)::bigint AS total_enrollments,
         COALESCE(em.completed_enrollments, 0)::bigint AS completed_enrollments,
         COALESCE(em.incomplete_enrollments, 0)::bigint AS incomplete_enrollments,
-        COALESCE(ROUND((COALESCE(em.completed_enrollments, 0)::numeric * 100) / NULLIF(COALESCE(em.total_enrollments, 0), 0), 2), 0) AS completion_rate
+        COALESCE(em.completion_rate, 0) AS completion_rate
       FROM scoped_teams st
       LEFT JOIN members m ON m.team_id = st.team_id
       LEFT JOIN enrollment_metrics em ON em.team_id = st.team_id
@@ -681,7 +703,7 @@ async function writeTeamBreakdownSheet(
     { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
     { header: 'Đã hoàn thành', key: 'completed', width: 18 },
     { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(workbook, `Chi tiết ${options.labels.team}`, `Chi tiết ${lowerLabel(options.labels.team)}`, subtitle, columns);
   const rows = await fetchTeamBreakdownRows(options);
@@ -719,7 +741,7 @@ async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promis
        COUNT(*)::bigint AS total_enrollments,
        COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
        COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-       COALESCE(ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2), 0) AS completion_rate
+       COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
      FROM report_enrollments re
      GROUP BY re.course_id
      ORDER BY completion_rate DESC NULLS LAST, completed_enrollments DESC, total_enrollments DESC, name ASC`,
@@ -739,7 +761,7 @@ async function writeCourseRankingSheet(
     { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
     { header: 'Đã hoàn thành', key: 'completed', width: 18 },
     { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(
     workbook, 'Xếp hạng khóa học', 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', subtitle, columns,
@@ -819,7 +841,7 @@ async function fetchLearnerSummaryBatch(
         COUNT(re.enrollment_id)::bigint AS enrolled_courses,
         COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_courses,
         COUNT(re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_courses,
-        COALESCE(ROUND((COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(re.enrollment_id), 0), 2), 0) AS completion_rate,
+        COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate,
         MAX(re.completed_at) FILTER (WHERE re.is_completed) AS last_completion_at,
         CASE
           WHEN COUNT(re.enrollment_id) FILTER (WHERE re.is_completed) = COUNT(re.enrollment_id) THEN 'completed'
@@ -851,7 +873,7 @@ async function writeLearnerSummarySheet(
     { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
     { header: 'Đã hoàn thành', key: 'completed', width: 18 },
     { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tỷ lệ hoàn thành', key: 'completionRate', width: 18 },
+    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
     { header: 'Hoàn thành gần nhất', key: 'lastCompletion', width: 20 },
   ];
   const writer = new SplitWorksheetWriter(workbook, 'Danh sách học viên', 'Danh sách học viên có ghi danh trong kỳ', subtitle, columns);
@@ -936,6 +958,7 @@ async function fetchCourseLearnerBatch(
         se.enrolled_at,
         se.completed_at,
         se.is_completed,
+        se.progress,
         CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
       FROM selected_enrollments se
       JOIN users u ON u.id = se.user_id
@@ -960,6 +983,7 @@ async function writeCourseLearnerDetailSheets(
     { header: options.labels.subgroup, key: 'subgroups', width: 28 },
     { header: options.labels.team, key: 'teams', width: 30 },
     { header: 'Trạng thái', key: 'status', width: 16 },
+    { header: 'Tiến độ', key: 'progress', width: 14 },
     { header: 'Hoàn thành trong kỳ', key: 'completed', width: 20 },
     { header: 'Ngày ghi danh', key: 'enrolledAt', width: 18 },
     { header: 'Ngày hoàn thành', key: 'completedAt', width: 18 },
@@ -973,11 +997,12 @@ async function writeCourseLearnerDetailSheets(
     for (const item of rows) {
       writer.addRow([
         item.course_name, item.course_id, item.username, item.full_name || '', item.email,
-        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status), item.is_completed ? 'Có' : 'Chưa', item.enrolled_at, item.completed_at,
+        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status), roundPercent(item.progress) / 100, item.is_completed ? 'Có' : 'Chưa', item.enrolled_at, item.completed_at,
       ], (row) => {
         row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
-        row.getCell(11).numFmt = 'dd/mm/yyyy hh:mm';
+        row.getCell(10).numFmt = '0.00%';
         row.getCell(12).numFmt = 'dd/mm/yyyy hh:mm';
+        row.getCell(13).numFmt = 'dd/mm/yyyy hh:mm';
       });
     }
     const lastRow = rows[rows.length - 1];

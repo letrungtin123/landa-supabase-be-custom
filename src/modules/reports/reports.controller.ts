@@ -398,6 +398,14 @@ export async function getLearnerDetail(req: Request, res: Response) {
     ? rawStatus as svc.ReportCourseCompletionStatus
     : 'all';
 
+  const rawDataScope = req.query.data_scope as string | undefined;
+  const dataScope: svc.LearnerDetailDataScope | undefined = rawDataScope === 'report_filter' || rawDataScope === 'learner_history'
+    ? rawDataScope
+    : undefined;
+  const dateRange = dataScope === 'report_filter' ? parseReportDateRange(req) : undefined;
+  if (dataScope === 'report_filter' && !dateRange) {
+    return sendError(res, 'date_from và date_to là bắt buộc khi lọc theo bộ lọc báo cáo', 400);
+  }
   const scope = await enforceReportScope(req);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: page });
@@ -413,6 +421,8 @@ export async function getLearnerDetail(req: Request, res: Response) {
     scope.subgroupId,
     scope.teamId,
     status,
+    dataScope,
+    dateRange,
   );
   sendSuccess(res, result);
 }

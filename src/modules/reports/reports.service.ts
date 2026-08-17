@@ -78,6 +78,7 @@ export interface ReportTopCourse {
 }
 
 export type ReportCourseCompletionStatus = 'all' | 'not_started' | 'learning' | 'completed';
+export type LearnerDetailDataScope = 'report_filter' | 'learner_history';
 
 export interface ReportCourseCompletionRanking {
   course_id: string;
@@ -299,7 +300,7 @@ function buildReportChartCacheKey(options: {
   grouped: boolean;
   seriesLimit: number;
 }): string {
-  return cacheKey('reports', 'chart', 'v5', options.tenantId, stableHash({
+  return cacheKey('reports', 'chart', 'v7', options.tenantId, stableHash({
     metric: options.metric,
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
@@ -320,7 +321,7 @@ function buildReportSummaryCacheKey(options: {
   teamId?: string;
   usesDateRange: boolean;
 }): string {
-  return cacheKey('reports', 'summary', 'v3', options.tenantId, stableHash({
+  return cacheKey('reports', 'summary', 'v5', options.tenantId, stableHash({
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
     groupId: options.groupId,
@@ -572,6 +573,10 @@ export function buildReportEnrollmentCte(options: {
         e.enrolled_at,
         COALESCE(c.display_name, 'Khóa học không còn hiển thị') AS course_name,
         CASE
+          WHEN cp.completed_at IS NOT NULL AND cp.completed_at <= ${rangeEndParam} THEN 100
+          ELSE LEAST(GREATEST(COALESCE(cp.progress, 0), 0), 99.99)
+        END AS progress,
+        CASE
           WHEN cp.completed_at IS NOT NULL AND cp.completed_at <= ${rangeEndParam} THEN cp.completed_at
           ELSE NULL
         END AS completed_at,
@@ -760,7 +765,16 @@ async function getReportSummaryForRange(options: {
       rangeStartParam: '$2',
       rangeEndParam: '$3',
     })},
-    ${cohort.sql}
+    ${cohort.sql},
+    learner_completion AS (
+      SELECT
+        re.user_id,
+        COUNT(*)::bigint AS total_enrollments,
+        COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+        COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
+      FROM report_enrollments re
+      GROUP BY re.user_id
+    )
     SELECT
       (
         SELECT COUNT(*)
@@ -781,14 +795,11 @@ async function getReportSummaryForRange(options: {
           AND u.role IN ('learner', 'learner_plus')
           ${learnerScope.sql}
       )::bigint AS active_learners,
-      COUNT(*)::bigint AS total_enrollments,
-      COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-      COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-      COALESCE(
-        ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2),
-        0
-      ) AS completion_rate
-    FROM report_enrollments re`,
+      COALESCE(SUM(lc.total_enrollments), 0)::bigint AS total_enrollments,
+      COALESCE(SUM(lc.completed_enrollments), 0)::bigint AS completed_enrollments,
+      COALESCE(SUM(lc.total_enrollments - lc.completed_enrollments), 0)::bigint AS incomplete_enrollments,
+      COALESCE(ROUND(AVG(lc.completion_rate), 2), 0) AS completion_rate
+    FROM learner_completion lc`,
     [tenantId, range.startDate, range.endDate, ...cohort.params],
   );
 
@@ -1002,13 +1013,22 @@ async function chartSimpleByRange(
     });
     sql = `WITH ${getBucketCteSql()},
       ${cohort.sql},
-      aggregated AS (
+      learner_bucket_completion AS (
         SELECT
           date_trunc($4, re.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-          ${metric === 'completion_rate'
-            ? "COALESCE(ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2), 0) AS value"
-            : 'COUNT(*)::bigint AS value'}
+          re.user_id,
+          COUNT(*)::bigint AS total_enrollments,
+          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
         FROM report_enrollments re
+        GROUP BY bucket_start, re.user_id
+      ),
+      aggregated AS (
+        SELECT
+          bucket_start,
+          ${metric === 'completion_rate'
+            ? "COALESCE(ROUND(AVG(completion_rate), 2), 0) AS value"
+            : 'SUM(total_enrollments)::bigint AS value'}
+        FROM learner_bucket_completion
         GROUP BY bucket_start
       )
       SELECT
@@ -1362,25 +1382,30 @@ async function batchMetricByMonth(
       break;
     }
     case 'completion_rate': {
-      // AVG progress per month — uses enrolled_at month as bucket
-      // Chỉ tính cho learner, không tính staff/superuser/superadmin
-      const egf = buildGroupFilter(groupId, subgroupId);
-      let idx = 2;
-      const conds = egf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await query<{ m: number; avg_p: string }>(
-        `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
-                COALESCE(AVG(cp.progress), 0) AS avg_p
-         FROM enrollments e
-         JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
-         LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-         ${egf.joins}
-         WHERE e.tenant_id = $1 AND e.is_active = true
-           AND e.enrolled_at >= $${idx} AND e.enrolled_at <= $${idx + 1}
-           ${conds.length ? 'AND ' + conds.join(' AND ') : ''}
-         GROUP BY EXTRACT(MONTH FROM e.enrolled_at)`,
-        [tenantId, ...egf.params, yearStart, yearEnd],
+      const cohort = buildReportEnrollmentCte({
+        tenantParam: '$1',
+        rangeStartParam: '$2',
+        rangeEndParam: '$3',
+        groupId,
+        subgroupId,
+        scopeParamStart: 4,
+      });
+      const r = await query<{ m: number; completion_rate: string }>(
+        `WITH ${cohort.sql},
+          learner_month AS (
+            SELECT
+              EXTRACT(MONTH FROM re.enrolled_at)::INT AS m,
+              re.user_id,
+              COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
+            FROM report_enrollments re
+            GROUP BY EXTRACT(MONTH FROM re.enrolled_at), re.user_id
+          )
+         SELECT m, COALESCE(ROUND(AVG(completion_rate), 2), 0) AS completion_rate
+         FROM learner_month
+         GROUP BY m`,
+        [tenantId, yearStart, yearEnd, ...cohort.params],
       );
-      for (const row of r.rows) result.set(row.m, Math.round(parseFloat(row.avg_p) * 10) / 10);
+      for (const row of r.rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
       break;
     }
     case 'total_enrollments': {
@@ -1456,20 +1481,29 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'completion_rate': {
-      // Chỉ tính cho learner
-      const r = await query<{ m: number; avg_p: string }>(
-        `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
-                COALESCE(AVG(cp.progress), 0) AS avg_p
-         FROM enrollments e
-         JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
-         LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-         JOIN team_members tm ON tm.user_id = e.user_id
-         WHERE e.tenant_id = $1 AND e.is_active = true AND tm.team_id = $2
-           AND e.enrolled_at >= $3 AND e.enrolled_at <= $4
-         GROUP BY EXTRACT(MONTH FROM e.enrolled_at)`,
-        [tenantId, teamId, yearStart, yearEnd],
+      const cohort = buildReportEnrollmentCte({
+        tenantParam: '$1',
+        rangeStartParam: '$2',
+        rangeEndParam: '$3',
+        teamId,
+        scopeParamStart: 4,
+      });
+      const r = await query<{ m: number; completion_rate: string }>(
+        `WITH ${cohort.sql},
+          learner_month AS (
+            SELECT
+              EXTRACT(MONTH FROM re.enrolled_at)::INT AS m,
+              re.user_id,
+              COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
+            FROM report_enrollments re
+            GROUP BY EXTRACT(MONTH FROM re.enrolled_at), re.user_id
+          )
+         SELECT m, COALESCE(ROUND(AVG(completion_rate), 2), 0) AS completion_rate
+         FROM learner_month
+         GROUP BY m`,
+        [tenantId, yearStart, yearEnd, ...cohort.params],
       );
-      for (const row of r.rows) result.set(row.m, Math.round(parseFloat(row.avg_p) * 10) / 10);
+      for (const row of r.rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
       break;
     }
     case 'total_enrollments': {
@@ -1509,7 +1543,7 @@ export async function getReportCourseCompletionRanking(
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const range = getReportRange(month, year, dateRange);
-  const rankingCacheKey = cacheKey('reports', 'course-ranking', 'v2', tenantId, stableHash({
+  const rankingCacheKey = cacheKey('reports', 'course-ranking', 'v3', tenantId, stableHash({
     dateFrom: range.dateFrom,
     dateTo: range.dateTo,
     groupId,
@@ -1538,7 +1572,7 @@ export async function getReportCourseCompletionRanking(
           COUNT(*)::bigint AS total_enrollments,
           COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
           COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2), 0) AS completion_rate
+          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
         FROM report_enrollments re
         GROUP BY re.course_id
       )
@@ -1612,7 +1646,7 @@ export async function getReportCourseCompletionLearners(
        u.avatar_url AS avatar,
        re.enrolled_at,
        re.completed_at,
-       CASE WHEN re.is_completed THEN 100 ELSE 0 END AS progress,
+       re.progress AS progress,
        CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END AS status,
        COUNT(*) OVER() AS full_count
      FROM report_enrollments re
@@ -1752,7 +1786,7 @@ export async function getReportLearners(
           MAX(re.completed_at) AS last_completion_at,
           COUNT(*)::bigint AS enrolled_courses,
           COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_courses,
-          COALESCE(ROUND((COUNT(*) FILTER (WHERE re.is_completed)::numeric * 100) / NULLIF(COUNT(*), 0), 2), 0) AS completion_rate,
+          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate,
           CASE
             WHEN COUNT(*) FILTER (WHERE re.is_completed) = COUNT(*) THEN 'completed'
             WHEN COUNT(*) FILTER (WHERE re.has_started) > 0 THEN 'learning'
@@ -1791,6 +1825,147 @@ export async function getReportLearners(
 // Learner Detail
 // ═══════════════════════════════════════════════════════════════
 
+async function getEnrollmentScopedLearnerDetailRows(options: {
+  tenantId: string;
+  userId: string;
+  page: number;
+  pageSize: number;
+  search: string;
+  status: ReportCourseCompletionStatus;
+  dataScope: LearnerDetailDataScope;
+  dateRange?: ReportDateRange;
+  groupId?: string;
+  subgroupId?: string;
+  teamId?: string;
+}): Promise<{ total_count: number; total_pages: number; current_page: number; results: LearnerDetailResult[] }> {
+  const {
+    tenantId, userId, page, pageSize, search, status, dataScope,
+    dateRange, groupId, subgroupId, teamId,
+  } = options;
+  const safePage = Math.max(page, 1);
+  const safePageSize = Math.min(Math.max(pageSize, 1), 100);
+  const offset = (safePage - 1) * safePageSize;
+  const params: any[] = [];
+  let sourceCte: string;
+
+  if (dataScope === 'report_filter') {
+    if (!dateRange) return { total_count: 0, total_pages: 0, current_page: safePage, results: [] };
+    const cohort = buildReportEnrollmentCte({
+      tenantParam: '$1',
+      rangeStartParam: '$2',
+      rangeEndParam: '$3',
+      groupId,
+      subgroupId,
+      teamId,
+      scopeParamStart: 4,
+    });
+    params.push(tenantId, dateRange.startDate, dateRange.endDate, ...cohort.params, userId);
+    const userParam = `$${params.length}`;
+    sourceCte = `${cohort.sql},
+      source_enrollments AS (
+        SELECT DISTINCT ON (re.course_id)
+          re.enrollment_id,
+          re.course_id,
+          re.course_name,
+          re.enrolled_at,
+          re.completed_at,
+          re.is_completed,
+          re.has_started,
+          COALESCE(cp.progress, 0) AS progress
+        FROM report_enrollments re
+        LEFT JOIN course_progress cp ON cp.enrollment_id = re.enrollment_id
+        WHERE re.user_id = ${userParam}
+        ORDER BY re.course_id, re.enrolled_at DESC, re.enrollment_id DESC
+      )`;
+  } else {
+    params.push(tenantId, userId);
+    sourceCte = `source_enrollments AS (
+      SELECT DISTINCT ON (e.course_id)
+        e.id AS enrollment_id,
+        e.course_id,
+        COALESCE(c.display_name, 'Khóa học không còn hiển thị') AS course_name,
+        e.enrolled_at,
+        cp.completed_at,
+        COALESCE(cp.progress, 0) AS progress,
+        (
+          COALESCE(cp.progress, 0) >= 100
+          OR COALESCE(cp.is_completed, false) = true
+        ) AS is_completed,
+        (
+          COALESCE(cp.progress, 0) > 0
+          OR cp.completed_at IS NOT NULL
+        ) AS has_started
+      FROM enrollments e
+      LEFT JOIN courses c ON c.id = e.course_id
+      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
+      WHERE e.tenant_id = $1
+        AND e.user_id = $2
+      ORDER BY e.course_id, e.enrolled_at DESC, e.id DESC
+    )`;
+  }
+
+  let paramIdx = params.length + 1;
+  const filters: string[] = [];
+  if (search.trim()) {
+    filters.push(`cr.course_name ILIKE '%' || $${paramIdx} || '%'`);
+    params.push(search.trim());
+    paramIdx++;
+  }
+  const safeStatus: ReportCourseCompletionStatus = ['all', 'not_started', 'learning', 'completed'].includes(status)
+    ? status
+    : 'all';
+  if (safeStatus !== 'all') {
+    filters.push(`cr.status = $${paramIdx}`);
+    params.push(safeStatus);
+    paramIdx++;
+  }
+  const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  params.push(safePageSize, offset);
+
+  const result = await query<LearnerDetailResult & { full_count: string }>(
+    `WITH ${sourceCte},
+      course_rows AS (
+        SELECT
+          se.course_id,
+          se.course_name,
+          se.enrolled_at,
+          se.completed_at,
+          CASE
+            WHEN se.is_completed THEN 100
+            ELSE LEAST(se.progress, 99.99)
+          END AS progress,
+          se.is_completed,
+          CASE
+            WHEN se.is_completed THEN 'completed'
+            WHEN se.has_started THEN 'learning'
+            ELSE 'not_started'
+          END AS status
+        FROM source_enrollments se
+      )
+     SELECT cr.*, COUNT(*) OVER() AS full_count
+     FROM course_rows cr
+     ${whereSql}
+     ORDER BY cr.enrolled_at DESC NULLS LAST, cr.course_name ASC, cr.course_id ASC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    params,
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
+  return {
+    total_count: total,
+    total_pages: Math.ceil(total / safePageSize),
+    current_page: safePage,
+    results: result.rows.map(row => ({
+      course_id: row.course_id,
+      course_name: row.course_name,
+      enrolled_at: row.enrolled_at,
+      completed_at: row.completed_at,
+      progress: Number(row.progress) || 0,
+      is_completed: Boolean(row.is_completed),
+      status: row.status,
+    })),
+  };
+}
 export async function getLearnerDetail(
   tenantId: string,
   username: string,
@@ -1801,21 +1976,27 @@ export async function getLearnerDetail(
   subgroupId?: string,
   teamId?: string,
   status: ReportCourseCompletionStatus = 'all',
+  dataScope?: LearnerDetailDataScope,
+  dateRange?: ReportDateRange,
 ): Promise<LearnerDetailResponse> {
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const offset = (safePage - 1) * safePageSize;
   const snapshotEndDate = new Date();
 
+  const userScope = dataScope
+    ? buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, 3)
+    : { sql: '', params: [] as string[] };
   const userResult = await query<{ id: string }>(
-    `SELECT id
-     FROM users
-     WHERE username = $1
-       AND tenant_id = $2
-       AND is_active = true
-       AND role IN ('learner', 'learner_plus')
+    `SELECT u.id
+     FROM users u
+     WHERE u.username = $1
+       AND u.tenant_id = $2
+       AND u.is_active = true
+       AND u.role IN ('learner', 'learner_plus')
+       ${userScope.sql}
      LIMIT 1`,
-    [username, tenantId],
+    [username, tenantId, ...userScope.params],
   );
   if (userResult.rowCount === 0) {
     return { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: safePage };
@@ -1835,6 +2016,22 @@ export async function getLearnerDetail(
     [userId, tenantId],
   );
 
+  if (dataScope) {
+    const scopedResult = await getEnrollmentScopedLearnerDetailRows({
+      tenantId,
+      userId,
+      page: safePage,
+      pageSize: safePageSize,
+      search,
+      status,
+      dataScope,
+      dateRange,
+      groupId,
+      subgroupId,
+      teamId,
+    });
+    return { username, groups: groupsResult.rows, ...scopedResult };
+  }
   const params: any[] = [tenantId, snapshotEndDate, userId];
   let paramIdx = 4;
   const visibilityFilters: string[] = ['AND u.id = $3'];
