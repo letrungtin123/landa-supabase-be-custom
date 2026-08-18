@@ -300,7 +300,7 @@ function buildReportChartCacheKey(options: {
   grouped: boolean;
   seriesLimit: number;
 }): string {
-  return cacheKey('reports', 'chart', 'v8', options.tenantId, stableHash({
+  return cacheKey('reports', 'chart', 'v9', options.tenantId, stableHash({
     metric: options.metric,
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
@@ -321,7 +321,7 @@ function buildReportSummaryCacheKey(options: {
   teamId?: string;
   usesDateRange: boolean;
 }): string {
-  return cacheKey('reports', 'summary', 'v6', options.tenantId, stableHash({
+  return cacheKey('reports', 'summary', 'v7', options.tenantId, stableHash({
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
     groupId: options.groupId,
@@ -505,7 +505,7 @@ export function buildLearnerScopeExists(
 }
 
 /**
- * Returns one logical learning-activity event per learner and Vietnam-local day.
+ * Returns completed-learning events in the selected range.
  * Keep this CTE shared by UI charts and Excel so the metric cannot silently drift.
  */
 export function buildActiveLearnerEventsCte(options: {
@@ -515,19 +515,8 @@ export function buildActiveLearnerEventsCte(options: {
   cteName?: string;
 }): string {
   const { tenantParam, rangeStartParam, rangeEndParam, cteName = 'active_learner_events' } = options;
-  const startDateSql = `(${rangeStartParam}::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`;
-  const endDateSql = `(${rangeEndParam}::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::date`;
 
   return `${cteName} AS (
-    SELECT ss.user_id, ss.study_date AS activity_date
-    FROM study_sessions ss
-    WHERE ss.tenant_id = ${tenantParam}
-      AND COALESCE(ss.duration_minutes, 0) > 0
-      AND ss.study_date >= ${startDateSql}
-      AND ss.study_date <= ${endDateSql}
-
-    UNION
-
     SELECT e.user_id, (bc.completed_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS activity_date
     FROM block_completions bc
     JOIN enrollments e ON e.id = bc.enrollment_id
@@ -536,7 +525,6 @@ export function buildActiveLearnerEventsCte(options: {
       AND bc.completed_at <= ${rangeEndParam}
   )`;
 }
-
 /**
  * Returns the immutable report cohort: active learner enrollments created in the selected period.
  * Every course-completion metric must use this CTE so cards, lists, rankings, charts, and Excel reconcile.
