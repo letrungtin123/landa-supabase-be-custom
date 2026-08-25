@@ -11,6 +11,11 @@ import {
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import {
+  assertCourseComponentTypeAllowed,
+  assertTenantCanAddCourseComponent,
+  getTenantAllowedCourseComponentTypeSet,
+} from '../tenants/tenant-course-components.service.js';
 import { deleteFile, extractStoragePath } from '../../config/storage.js';
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
@@ -248,11 +253,13 @@ export async function createBlock(
   metadata?: any,
   boilerplate?: string,
 ): Promise<{ id: string }> {
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
+  const courseCheck = await query<{ id: string; tenant_id: string }>(
+    `SELECT id, tenant_id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
     [courseId],
   );
   if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+
+  await assertTenantCanAddCourseComponent(courseCheck.rows[0].tenant_id, blockType);
 
   if (parentId) {
     const parent = await getBlockInfo(parentId);
@@ -302,6 +309,7 @@ function getDefaultName(blockType: string): string {
     html: 'Văn bản',
     problem: 'Câu hỏi',
     la_media_quiz: 'Câu hỏi kèm media',
+    la_scenario_chat: 'Giao tiếp tình huống',
     la_crossword: 'Đố vui ô chữ',
     la_sortable: 'sắp xếp ô chữ',
     la_diagram: 'Biểu đồ',
@@ -320,6 +328,59 @@ function mediaQuizModeValue(raw: unknown, fallback: 'single_select' | 'multiple_
 }
 
 function getDefaultData(blockType: string, boilerplate?: string): any {
+  if (blockType === 'la_scenario_chat') {
+    return {
+      version: 1,
+      participant: {
+        name: 'Nhân vật tình huống',
+        description: 'Người đối thoại trong kịch bản',
+      },
+      learner: {
+        name: 'Bạn',
+        description: 'Học viên',
+      },
+      context_description: 'Tình huống bắt đầu',
+      rounds: [
+        {
+          id: 'round_1',
+          scenario_message: {
+            text: 'Chào bạn, tôi cần trao đổi với bạn về tình huống này.',
+            description: 'Hãy chọn phản hồi phù hợp nhất.',
+          },
+          choices: [
+            {
+              id: 'choice_1',
+              text: 'Phản hồi phù hợp',
+              correct: true,
+              response_message: 'Cảm ơn bạn, cách phản hồi này phù hợp với tình huống.',
+              response_description: 'Phản hồi của nhân vật',
+              character_status: '',
+              explanation: 'Đáp án này đúng vì thể hiện thái độ và nội dung phù hợp với mục tiêu giao tiếp.',
+            },
+            {
+              id: 'choice_2',
+              text: 'Phản hồi chưa phù hợp 1',
+              correct: false,
+              response_message: 'Cách phản hồi này có thể khiến cuộc trao đổi đi sai hướng.',
+              response_description: 'Phản hồi của nhân vật',
+              character_status: '',
+              explanation: 'Đáp án này chưa đúng. Hãy chọn cách phản hồi rõ ràng và phù hợp hơn.',
+            },
+            {
+              id: 'choice_3',
+              text: 'Phản hồi chưa phù hợp 2',
+              correct: false,
+              response_message: 'Tôi chưa nhận được thông tin cần thiết từ câu trả lời này.',
+              response_description: 'Phản hồi của nhân vật',
+              character_status: '',
+              explanation: 'Đáp án này chưa đúng vì chưa xử lý trọng tâm của tình huống.',
+            },
+          ],
+        },
+      ],
+    };
+  }
+
   if (blockType !== 'la_media_quiz') return {};
   const mode = mediaQuizModeFromBoilerplate(boilerplate);
   return {
@@ -372,6 +433,47 @@ function assertPublishableMediaQuizData(raw: any, label: string): void {
     if (questionMode === 'single_select' && correctCount !== 1) {
       throw new AppError(`${label} - câu hỏi ${index + 1} phải có đúng một đáp án đúng trước khi publish`, 400);
     }
+  });
+}
+
+function scenarioChatText(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function assertPublishableScenarioChatData(raw: any, label: string): void {
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.rounds) || data.rounds.length === 0) {
+    throw new AppError(`${label} cần ít nhất một lượt hội thoại trước khi publish`, 400);
+  }
+  if (!scenarioChatText(data.participant?.name)) {
+    throw new AppError(`${label} cần tên nhân vật tình huống trước khi publish`, 400);
+  }
+  if (!scenarioChatText(data.learner?.name)) {
+    throw new AppError(`${label} cần tên học viên trước khi publish`, 400);
+  }
+
+  data.rounds.forEach((round: any, index: number) => {
+    if (!scenarioChatText(round?.scenario_message?.text)) {
+      throw new AppError(`${label} - lượt ${index + 1} cần nội dung bong bóng tình huống`, 400);
+    }
+    if (!Array.isArray(round?.choices) || round.choices.length !== 3) {
+      throw new AppError(`${label} - lượt ${index + 1} phải có đúng 3 câu trả lời`, 400);
+    }
+    const correctCount = round.choices.filter((choice: any) => choice?.correct === true).length;
+    if (correctCount !== 1) {
+      throw new AppError(`${label} - lượt ${index + 1} phải có đúng 1 câu trả lời đúng`, 400);
+    }
+    round.choices.forEach((choice: any, choiceIndex: number) => {
+      if (!scenarioChatText(choice?.text)) {
+        throw new AppError(`${label} - lượt ${index + 1}, câu ${choiceIndex + 1} cần nội dung câu trả lời`, 400);
+      }
+      if (!scenarioChatText(choice?.response_message)) {
+        throw new AppError(`${label} - lượt ${index + 1}, câu ${choiceIndex + 1} cần bong bóng phản hồi`, 400);
+      }
+      if (!scenarioChatText(choice?.explanation)) {
+        throw new AppError(`${label} - lượt ${index + 1}, câu ${choiceIndex + 1} cần giải thích`, 400);
+      }
+    });
   });
 }
 
@@ -602,6 +704,32 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
 
   for (const row of mediaQuizRows.rows) {
     assertPublishableMediaQuizData(row.data, row.display_name || 'Câu hỏi kèm media');
+  }
+
+  const scenarioChatRows = await query<{ display_name: string; data: any }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT display_name, data
+     FROM course_blocks
+     WHERE id IN (SELECT id FROM descendants)
+       AND block_type::text = 'la_scenario_chat'
+       AND deleted_at IS NULL
+       AND (
+         has_draft_changes = true OR
+         data IS DISTINCT FROM published_data OR
+         metadata IS DISTINCT FROM published_metadata OR
+         is_published = false
+       )`,
+    [blockId],
+  );
+
+  for (const row of scenarioChatRows.rows) {
+    assertPublishableScenarioChatData(row.data, row.display_name || 'Giao tiếp tình huống');
   }
 
   // Cascade: publish block + tất cả children (recursive) trong 1 query
@@ -1770,6 +1898,7 @@ export async function applyLessonAuthorProposalToCourse(
       [input.courseId, input.tenantId],
     );
     if (courseResult.rowCount === 0) throw new AppError('Course not found', 404);
+    const allowedComponentTypes = await getTenantAllowedCourseComponentTypeSet(input.tenantId, client);
 
     let rootResult = await client.query<{ id: string }>(
       `SELECT id
@@ -1879,6 +2008,7 @@ export async function applyLessonAuthorProposalToCourse(
               { ...baseMetadata, ai_index: unitIndex },
               componentIndex,
             );
+            assertCourseComponentTypeAllowed(allowedComponentTypes, generatedComponent.blockType);
             const componentBlock = await getOrCreateGeneratedBlock(
               client,
               input.courseId,

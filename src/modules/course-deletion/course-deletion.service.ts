@@ -2,6 +2,7 @@ import { query, getClient } from '../../config/database.js';
 import {
   invalidateBlockReadCaches,
   invalidateCourseReadCaches,
+  invalidateTenantBadgeCaches,
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
 import { deleteFile, deleteFileByUrl, extractStoragePath } from '../../config/storage.js';
@@ -617,11 +618,15 @@ async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
     stats.storageDeleteRequested += 1;
   }
 
-  await query(
+  const deletedCourse = await query(
     `DELETE FROM courses
      WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NOT NULL`,
     [job.course_id, job.tenant_id],
   );
+
+  if ((deletedCourse.rowCount || 0) > 0) {
+    await invalidateTenantBadgeCaches(job.tenant_id);
+  }
 
   return stats;
 }

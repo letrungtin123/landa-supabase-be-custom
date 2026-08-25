@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { z } from 'zod';
+import { COURSE_COMPONENT_TYPES } from './tenant-course-components.constants.js';
 
 /** Sanitize domain: full URL với protocol (http:// hoặc https://), bỏ trailing slash */
 const domainField = z.string().max(255)
@@ -40,6 +41,11 @@ export const updateTenantModulesSchema = z.object({
   })),
 });
 
+export const updateTenantCourseComponentPermissionsSchema = z.object({
+  allowed_component_types: z.array(z.enum(COURSE_COMPONENT_TYPES)),
+});
+
 export type CreateTenantInput = z.infer<typeof createTenantSchema>;
 export type UpdateTenantInput = z.infer<typeof updateTenantSchema>;
 export type UpdateTenantModulesInput = z.infer<typeof updateTenantModulesSchema>;
+export type UpdateTenantCourseComponentPermissionsInput = z.infer<typeof updateTenantCourseComponentPermissionsSchema>;

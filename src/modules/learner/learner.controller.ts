@@ -283,8 +283,28 @@ export async function getBatchProgress(req: Request, res: Response, next: NextFu
 export async function listBadges(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    const result = isDemoIframeSession(req.user) ? [] : await learnerService.getMyBadges(req.user.id);
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+    const result = isDemoIframeSession(req.user) ? [] : await learnerService.getMyBadges(req.user.id, tenantId);
     sendSuccess(res, result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/learner/badges/evaluate */
+export async function evaluateBadges(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+    if (isDemoIframeSession(req.user)) {
+      sendSuccess(res, {
+        badge_definitions: [], earned_badges: [], newly_earned: [], pending_popups: [], progress: {},
+      });
+      return;
+    }
+    sendSuccess(res, await learnerService.evaluateBadges(req.user.id, tenantId));
   } catch (err) {
     next(err);
   }
@@ -314,8 +334,10 @@ export async function saveBadge(req: Request, res: Response, next: NextFunction)
       sendSuccess(res, null, 'Demo iframe không lưu huy hiệu');
       return;
     }
-    await learnerService.saveBadge(req.user.id, badge_id);
-    sendSuccess(res, null, 'Lưu huy hiệu thành công');
+    const tenantId = req.user.tenantId;
+    if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
+    await learnerService.saveBadge(req.user.id, tenantId, badge_id);
+    sendSuccess(res, null, 'Đã đánh giá huy hiệu');
   } catch (err) {
     next(err);
   }
@@ -325,13 +347,25 @@ export async function saveBadge(req: Request, res: Response, next: NextFunction)
 export async function updateBadge(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
-    const { badge_id, is_shown } = req.body;
+    const { badge_id } = req.body;
     if (!badge_id) { sendError(res, 'Thiếu badge_id', 400); return; }
     if (isDemoIframeSession(req.user)) {
       sendSuccess(res, null);
       return;
     }
-    await learnerService.updateBadgeShown(req.user.id, badge_id, is_shown ?? true);
+    await learnerService.updateBadgeShown(req.user.id, badge_id, true);
+    sendSuccess(res, null);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** PATCH /api/learner/badges/:badgeId/shown */
+export async function updateBadgeShown(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    if (isDemoIframeSession(req.user)) { sendSuccess(res, null); return; }
+    await learnerService.updateBadgeShown(req.user.id, req.params.badgeId, true);
     sendSuccess(res, null);
   } catch (err) {
     next(err);

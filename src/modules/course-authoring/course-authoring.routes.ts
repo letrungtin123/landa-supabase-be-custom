@@ -67,6 +67,7 @@ router.post('/courses', checkPermission('courses', 'can_edit'), ctrl.createCours
 
 // Outline
 router.get('/outline/:courseId', checkPermission('courses', 'can_view'), ctrl.getOutline);
+router.get('/component-permissions', checkPermission('courses', 'can_view'), ctrl.getComponentPermissions);
 
 // Blocks CRUD
 router.get('/blocks/:blockId', checkPermission('courses', 'can_view'), ctrl.getBlock);

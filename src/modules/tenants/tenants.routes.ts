@@ -13,6 +13,8 @@ import {
   deleteController,
   getModulesController,
   updateModulesController,
+  getCourseComponentPermissionsController,
+  updateCourseComponentPermissionsController,
   getQuotaController,
   getGroupLabelsController,
   getRoleLabelsController,
@@ -41,6 +43,8 @@ router.put('/:id', authorize('superadmin'), updateController);
 router.delete('/:id', authorize('superadmin'), deleteController);
 router.get('/:id/modules', authorize('superadmin'), getModulesController);
 router.put('/:id/modules', authorize('superadmin'), updateModulesController);
+router.get('/:id/course-component-permissions', authorize('superadmin'), getCourseComponentPermissionsController);
+router.put('/:id/course-component-permissions', authorize('superadmin'), updateCourseComponentPermissionsController);
 router.get('/:id/role-labels', authorize('superadmin'), getRoleLabelsController);
 router.put('/:id/role-labels', authorize('superadmin'), updateRoleLabelsController);
 router.get('/:id/group-labels', authorize('superadmin'), getGroupLabelsController);

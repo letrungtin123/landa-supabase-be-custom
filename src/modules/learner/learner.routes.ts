@@ -6,12 +6,13 @@
 
 import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate.js';
+import { tenantContext } from '../../middleware/tenant-context.js';
 import * as ctrl from './learner.controller.js';
 
 const router = Router();
 
 // Tất cả routes yêu cầu xác thực
-router.use(authenticate);
+router.use(authenticate, tenantContext);
 
 // ── Courses ──
 router.get('/courses', ctrl.listCourses);
@@ -51,8 +52,10 @@ router.get('/progress/:courseId', ctrl.getProgress);
 // ── Badges ──
 router.get('/badges', ctrl.listBadges);
 router.get('/badges/active', ctrl.getActiveBadges);
+router.post('/badges/evaluate', ctrl.evaluateBadges);
 router.post('/badges', ctrl.saveBadge);
 router.patch('/badges', ctrl.updateBadge);
+router.patch('/badges/:badgeId/shown', ctrl.updateBadgeShown);
 
 // ── Notifications ──
 router.get('/notifications', ctrl.listNotifications);

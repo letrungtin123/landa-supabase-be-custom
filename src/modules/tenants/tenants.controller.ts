@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Tenants Controller — CRUD + module toggle handlers
 // ═══════════════════════════════════════════════════════════════
 
@@ -7,7 +7,8 @@ import * as tenantsService from './tenants.service.js';
 import * as roleLabelsService from './tenant-role-labels.service.js';
 import * as groupLabelsService from './tenant-group-labels.service.js';
 import * as smtpService from './tenant-smtp.service.js';
-import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema } from './tenants.validator.js';
+import * as tenantCourseComponentsService from './tenant-course-components.service.js';
+import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema, updateTenantCourseComponentPermissionsSchema } from './tenants.validator.js';
 import { updateTenantSmtpSchema } from './tenant-smtp.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
@@ -81,6 +82,29 @@ export async function updateModulesController(req: Request, res: Response, next:
     await tenantsService.updateTenantModules(req.params.id, parsed.data.modules);
     auditFromReq(req, 'UPDATE', 'tenant_modules', req.params.id, undefined, 'Cập nhật modules tenant');
     sendSuccess(res, null, 'Cập nhật modules thành công');
+  } catch (err) { next(err); }
+}
+
+/** GET /api/tenants/:id/course-component-permissions */
+export async function getCourseComponentPermissionsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const permissions = await tenantCourseComponentsService.getTenantCourseComponentPermissions(req.params.id);
+    sendSuccess(res, permissions);
+  } catch (err) { next(err); }
+}
+
+/** PUT /api/tenants/:id/course-component-permissions */
+export async function updateCourseComponentPermissionsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = updateTenantCourseComponentPermissionsSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+
+    const permissions = await tenantCourseComponentsService.updateTenantCourseComponentPermissions(
+      req.params.id,
+      parsed.data.allowed_component_types,
+    );
+    auditFromReq(req, 'UPDATE', 'tenant_course_component_permissions', req.params.id, undefined, 'Cap nhat component duoc them trong khoa hoc');
+    sendSuccess(res, permissions, 'Cập nhật quyền component khóa học thành công');
   } catch (err) { next(err); }
 }
 

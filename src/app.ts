@@ -35,6 +35,7 @@ import dashboardContentRoutes from './modules/branding/dashboard-content.routes.
 import aiChatbotRoutes from './modules/ai-chatbot/ai-chatbot.routes.js';
 import promptTemplatesRoutes from './modules/prompt-templates/prompt-templates.routes.js';
 import badgesRoutes from './modules/badges/badges.routes.js';
+import tenantBadgesRoutes from './modules/tenant-badges/tenant-badges.routes.js';
 import ssoRoutes from './modules/sso/sso.routes.js';
 import demoLoginRoutes from './modules/demo-login/demo-login.routes.js';
 import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
@@ -167,6 +168,7 @@ app.use('/api/welcome-init', welcomeInitRoutes);
 app.use('/api/ai-chatbot', aiChatbotRoutes);
 app.use('/api/prompt-templates', promptTemplatesRoutes);
 app.use('/api/badges', badgesRoutes);
+app.use('/api/tenant-badges', tenantBadgesRoutes);
 app.use('/api/sso', ssoRoutes);
 
 // ── 404 Handler ──

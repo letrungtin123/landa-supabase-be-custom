@@ -1,4 +1,4 @@
-﻿// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
 // Course Authoring Controller
 // ═══════════════════════════════════════════════════════════════
 
@@ -7,6 +7,7 @@ import { auditFromReq } from '../../middleware/audit-log.js';
 import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
+import { getTenantCourseComponentPermissions } from '../tenants/tenant-course-components.service.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
 import { initializeCourseMentorSectionDefaults, recordCourseMentorAssignmentHistory } from '../courses/courses.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
@@ -206,6 +207,86 @@ function getMediaQuizMetadataMode(data: any): 'single_select' | 'multiple_select
   return hasMultiple ? 'multiple_select' : 'single_select';
 }
 
+function sanitizeScenarioChatText(raw: unknown, fallback: string, maxLength: number): string {
+  const value = typeof raw === 'string' ? raw : fallback;
+  return value
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .slice(0, maxLength)
+    .trim();
+}
+
+function sanitizeScenarioChatId(raw: unknown, fallback: string): string {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  return /^[a-zA-Z0-9_-]{1,80}$/.test(value) ? value : fallback;
+}
+
+function sanitizeScenarioChatPerson(raw: any, fallbackName: string) {
+  return {
+    name: sanitizeScenarioChatText(raw?.name, fallbackName, 80) || fallbackName,
+    description: sanitizeScenarioChatText(raw?.description, '', 240),
+  };
+}
+
+function getScenarioChatContextDescription(raw: any): string {
+  if (typeof raw?.context_description === 'string') return raw.context_description;
+  if (typeof raw?.status_line === 'string') return raw.status_line;
+  if (!Array.isArray(raw?.rounds)) return '';
+
+  for (const round of raw.rounds) {
+    const value = typeof round?.status_line === 'string' ? round.status_line.trim() : '';
+    if (value) return value;
+  }
+
+  return '';
+}
+
+function sanitizeScenarioChatData(raw: any) {
+  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu Giao tiếp tình huống phải là object');
+  if (!Array.isArray(parsed.rounds) || parsed.rounds.length === 0) {
+    throw new Error('Giao tiếp tình huống cần ít nhất một lượt hội thoại');
+  }
+
+  const contextDescription = sanitizeScenarioChatText(getScenarioChatContextDescription(parsed), '', 1200);
+  const rounds = parsed.rounds.slice(0, 100).map((round: any, roundIndex: number) => {
+    if (!Array.isArray(round?.choices) || round.choices.length !== 3) {
+      throw new Error(`Lượt ${roundIndex + 1} phải có đúng 3 câu trả lời`);
+    }
+
+    const choices = round.choices.map((choice: any, choiceIndex: number) => ({
+      id: sanitizeScenarioChatId(choice?.id, `choice_${choiceIndex + 1}`),
+      text: sanitizeScenarioChatText(choice?.text, '', 600),
+      correct: choice?.correct === true,
+      response_message: sanitizeScenarioChatText(choice?.response_message, '', 1200),
+      response_description: sanitizeScenarioChatText(choice?.response_description, '', 300),
+      character_status: sanitizeScenarioChatText(choice?.character_status, '', 300),
+      explanation: sanitizeScenarioChatText(choice?.explanation, '', 1500),
+    }));
+
+    const correctCount = choices.filter((choice: any) => choice.correct).length;
+    if (correctCount !== 1) {
+      throw new Error(`Lượt ${roundIndex + 1} phải có đúng 1 câu trả lời đúng`);
+    }
+
+    return {
+      id: sanitizeScenarioChatId(round?.id, `round_${roundIndex + 1}`),
+      scenario_message: {
+        text: sanitizeScenarioChatText(round?.scenario_message?.text, '', 1200),
+        description: sanitizeScenarioChatText(round?.scenario_message?.description, '', 300),
+      },
+      choices,
+    };
+  });
+
+  return {
+    version: 1,
+    context_description: contextDescription,
+    participant: sanitizeScenarioChatPerson(parsed.participant, 'Nhân vật tình huống'),
+    learner: sanitizeScenarioChatPerson(parsed.learner, 'Bạn'),
+    rounds,
+  };
+}
+
 function sanitizeMetadata(metadata: any) {
   if (!metadata || typeof metadata !== 'object') return undefined;
   const next = { ...metadata };
@@ -244,6 +325,19 @@ export async function getBlock(req: Request, res: Response) {
   }
 }
 
+/** GET /api/course-authoring/component-permissions */
+export async function getComponentPermissions(req: Request, res: Response) {
+  try {
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) return sendError(res, 'Tenant context is required', 403);
+
+    const permissions = await getTenantCourseComponentPermissions(tenantId);
+    sendSuccess(res, permissions);
+  } catch (err: any) {
+    sendError(res, err.message || 'Failed to load component permissions', err.statusCode || 500);
+  }
+}
+
 /** POST /api/course-authoring/blocks */
 export async function createBlock(req: Request, res: Response) {
   const { course_id, parent_id, block_type, display_name, data, metadata, type, category, parent_locator, boilerplate } = req.body;
@@ -270,10 +364,15 @@ export async function createBlock(req: Request, res: Response) {
       return sendError(res, 'Parent block not found', 404);
     }
   }
+  if (!finalCourseId) {
+    return sendError(res, 'course_id could not be resolved', 400);
+  }
 
   const sanitizedCreateData = resolvedType === 'la_media_quiz' && data !== undefined
     ? sanitizeMediaQuizData(data)
-    : data;
+    : resolvedType === 'la_scenario_chat' && data !== undefined
+      ? sanitizeScenarioChatData(data)
+      : data;
   const mediaQuizMetadataMode = resolvedType === 'la_media_quiz'
     ? data !== undefined
       ? getMediaQuizMetadataMode(sanitizedCreateData)
@@ -337,6 +436,8 @@ export async function updateBlock(req: Request, res: Response) {
           ...(sanitizedMetadata ?? {}),
           media_quiz_mode: getMediaQuizMetadataMode(sanitizedData),
         };
+      } else if (currentBlock.block_type === 'la_scenario_chat') {
+        sanitizedData = sanitizeScenarioChatData(data);
       }
     }
 

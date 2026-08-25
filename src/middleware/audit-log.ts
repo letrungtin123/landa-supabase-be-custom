@@ -142,4 +142,24 @@ export function auditFromReq(req: Request, action: AuditAction, entityType: stri
   });
 }
 
-
+export function auditFromReqForTenant(
+  req: Request,
+  tenantId: string,
+  action: AuditAction,
+  entityType: string,
+  entityId?: string,
+  entityName?: string,
+  details?: string,
+): void {
+  logAudit({
+    tenantId,
+    actorId: req.user?.id,
+    actorUsername: req.user?.username,
+    action,
+    entityType,
+    entityId,
+    entityName,
+    details,
+    ipAddress: getClientIp(req),
+  });
+}

@@ -12,6 +12,10 @@ import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
+import {
+  evaluateUserBadges,
+  getEffectiveBadgeDefinitions,
+} from '../badges/badge-evaluation.service.js';
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -438,11 +442,19 @@ async function getBlockDetailFromDb(
 }
 
 function toLearnerBlockRow(row: any) {
-  if (row?.block_type !== 'la_media_quiz') return row;
-  return {
-    ...row,
-    data: toLearnerMediaQuizData(row.data),
-  };
+  if (row?.block_type === 'la_media_quiz') {
+    return {
+      ...row,
+      data: toLearnerMediaQuizData(row.data),
+    };
+  }
+  if (row?.block_type === 'la_scenario_chat') {
+    return {
+      ...row,
+      data: toLearnerScenarioChatData(row.data),
+    };
+  }
+  return row;
 }
 
 function safeJsonParse(value: string): any {
@@ -488,6 +500,57 @@ function toLearnerMediaQuizData(raw: any) {
     mode,
     require_correct_to_advance: true,
     questions,
+  };
+}
+
+function scenarioChatString(raw: unknown): string {
+  return typeof raw === 'string' ? raw : '';
+}
+
+function learnerScenarioChatContextDescription(data: any): string {
+  if (typeof data?.context_description === 'string') return scenarioChatString(data.context_description);
+  if (typeof data?.status_line === 'string') return scenarioChatString(data.status_line);
+  if (!Array.isArray(data?.rounds)) return '';
+
+  for (const round of data.rounds) {
+    const value = scenarioChatString(round?.status_line).trim();
+    if (value) return value;
+  }
+
+  return '';
+}
+
+function toLearnerScenarioChatData(raw: any) {
+  const data = typeof raw === 'string' ? safeJsonParse(raw) : raw;
+  if (!data || typeof data !== 'object') return data;
+  const rounds = Array.isArray(data.rounds)
+    ? data.rounds.map((round: any, roundIndex: number) => ({
+        id: scenarioChatString(round?.id) || `round_${roundIndex + 1}`,
+        scenario_message: {
+          text: scenarioChatString(round?.scenario_message?.text),
+          description: scenarioChatString(round?.scenario_message?.description),
+        },
+        choices: Array.isArray(round?.choices)
+          ? round.choices.slice(0, 3).map((choice: any, choiceIndex: number) => ({
+              id: scenarioChatString(choice?.id) || `choice_${choiceIndex + 1}`,
+              text: scenarioChatString(choice?.text),
+            }))
+          : [],
+      }))
+    : [];
+
+  return {
+    version: 1,
+    context_description: learnerScenarioChatContextDescription(data),
+    participant: {
+      name: scenarioChatString(data.participant?.name) || 'Nhân vật tình huống',
+      description: scenarioChatString(data.participant?.description),
+    },
+    learner: {
+      name: scenarioChatString(data.learner?.name) || 'Bạn',
+      description: scenarioChatString(data.learner?.description),
+    },
+    rounds,
   };
 }
 
@@ -537,6 +600,9 @@ export async function submitBlockAnswer(
 
     case 'la_media_quiz':
       return gradeMediaQuiz(block, body);
+
+    case 'la_scenario_chat':
+      return gradeScenarioChat(block, body);
 
     case 'la_crossword':
       return gradeCrossword(block, body.answers || {});
@@ -600,6 +666,46 @@ function gradeMediaQuiz(block: any, body: any) {
     next_question_id: isCorrect && nextQuestion?.id ? nextQuestion.id : null,
     explanation_html: isCorrect && typeof question?.explanation_html === 'string' ? question.explanation_html : undefined,
     correctness: { [questionId]: isCorrect ? 'correct' : 'incorrect' },
+  };
+}
+
+function gradeScenarioChat(block: any, body: any) {
+  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.rounds)) {
+    return { status: 'error', message: 'Giao tiếp tình huống chưa có dữ liệu', score: 0 };
+  }
+
+  const roundId = typeof body?.round_id === 'string' ? body.round_id : '';
+  const choiceId = typeof body?.choice_id === 'string' ? body.choice_id : '';
+  const roundIndex = data.rounds.findIndex((round: any) => round?.id === roundId);
+  if (roundIndex < 0) {
+    return { status: 'error', message: 'Không tìm thấy lượt hội thoại', score: 0 };
+  }
+
+  const round = data.rounds[roundIndex];
+  const choices = Array.isArray(round?.choices) ? round.choices : [];
+  const choice = choices.find((item: any) => item?.id === choiceId);
+  if (!choice) {
+    return { status: 'error', message: 'Không tìm thấy câu trả lời', score: 0, round_id: roundId };
+  }
+
+  const isCorrect = choice.correct === true;
+  const nextRound = isCorrect ? data.rounds[roundIndex + 1] : null;
+  const completed = isCorrect && roundIndex >= data.rounds.length - 1;
+
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
+    score: isCorrect ? 100 : 0,
+    round_id: roundId,
+    choice_id: choiceId,
+    completed,
+    next_round_id: isCorrect && nextRound?.id ? nextRound.id : null,
+    response_message: scenarioChatString(choice.response_message),
+    response_description: scenarioChatString(choice.response_description),
+    character_status: scenarioChatString(choice.character_status),
+    explanation: scenarioChatString(choice.explanation),
+    correctness: { [roundId]: isCorrect ? 'correct' : 'incorrect' },
   };
 }
 
@@ -1331,51 +1437,23 @@ export async function getBatchProgress(
 
 // ── Badges ──
 
-export async function getMyBadges(userId: string) {
-  const result = await query<any>(
-    `SELECT ub.badge_id, ub.is_shown, ub.earned_at
-     FROM user_badges ub
-     WHERE ub.user_id = $1
-     ORDER BY ub.earned_at DESC`,
-    [userId],
-  );
-  return result.rows;
+export async function getMyBadges(userId: string, tenantId: string) {
+  const overview = await evaluateUserBadges(userId, tenantId);
+  return overview.earned_badges;
 }
 
 export async function getActiveBadges(tenantId: string) {
-  const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
-  return cacheJson(
-    cacheKeys.tenantResource(tenantId, 'active-badges', version),
-    CACHE_TTL.badges,
-    () => getActiveBadgesFromDb(tenantId),
-  );
+  return getEffectiveBadgeDefinitions(tenantId);
 }
 
-async function getActiveBadgesFromDb(tenantId: string) {
-  const result = await query<any>(
-    `SELECT b.id,
-            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name,
-            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS title,
-            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS description,
-            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS desc,
-            b.image_key,
-            tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url
-     FROM badge_definitions b
-     LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
-     WHERE COALESCE(tbs.is_active, true) = true
-     ORDER BY b.sort_order, b.id`,
-    [tenantId]
-  );
-  return result.rows;
+export async function evaluateBadges(userId: string, tenantId: string) {
+  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể nhận huy hiệu');
+  return evaluateUserBadges(userId, tenantId);
 }
 
-
-export async function saveBadge(userId: string, badgeId: string) {
-  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể lưu huy hiệu');
-  await query(
-    `INSERT INTO user_badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [userId, badgeId],
-  );
+/** Compatibility endpoint for old learner clients. badgeId is intentionally ignored. */
+export async function saveBadge(userId: string, tenantId: string, _badgeId: string) {
+  return evaluateBadges(userId, tenantId);
 }
 
 export async function updateBadgeShown(userId: string, badgeId: string, isShown: boolean) {

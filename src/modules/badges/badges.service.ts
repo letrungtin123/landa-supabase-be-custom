@@ -50,6 +50,17 @@ function normalizeBadgeTextOverride(
   return value === defaultText ? null : value;
 }
 
+async function assertBadgeAccessibleToTenant(tenantId: string, badgeId: string): Promise<void> {
+  const result = await query<{ id: string }>(
+    `SELECT id FROM badge_definitions
+     WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)`,
+    [badgeId, tenantId],
+  );
+  if (result.rowCount === 0) {
+    throw new AppError('Badge không tồn tại hoặc không thuộc tenant', 404);
+  }
+}
+
 export async function getTenantBadgeSettings(tenantId: string) {
   const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
   return cacheJson(
@@ -75,6 +86,7 @@ async function getTenantBadgeSettingsFromDb(tenantId: string) {
             COALESCE(tbs.is_active, true) AS is_active
      FROM badge_definitions b
      LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
+     WHERE b.tenant_id IS NULL OR b.tenant_id = $1
      ORDER BY b.sort_order, b.id`,
     [tenantId]
   );
@@ -82,6 +94,7 @@ async function getTenantBadgeSettingsFromDb(tenantId: string) {
 }
 
 export async function updateTenantBadgeSetting(tenantId: string, badgeId: string, isActive: boolean) {
+  await assertBadgeAccessibleToTenant(tenantId, badgeId);
   await query(
     `INSERT INTO tenant_badge_settings (tenant_id, badge_id, is_active)
      VALUES ($1, $2, $3)
@@ -101,8 +114,9 @@ export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatus
   }
 
   const defaultsResult = await query<BadgeDefaults>(
-    `SELECT id, name, description FROM badge_definitions WHERE id = ANY($1::varchar[])`,
-    [badgeIds],
+    `SELECT id, name, description FROM badge_definitions
+     WHERE id = ANY($1::varchar[]) AND (tenant_id IS NULL OR tenant_id = $2)`,
+    [badgeIds, tenantId],
   );
   const defaultMap = new Map(defaultsResult.rows.map((row) => [row.id, row]));
   const missingBadgeIds = badgeIds.filter((id) => !defaultMap.has(id));
@@ -195,6 +209,7 @@ async function uploadTenantBadgeImage(
   column: BadgeImageColumn,
   fileBaseName: string,
 ) {
+  await assertBadgeAccessibleToTenant(tenantId, badgeId);
   await query(
     `INSERT INTO tenant_badge_settings (tenant_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
     [tenantId, badgeId]
