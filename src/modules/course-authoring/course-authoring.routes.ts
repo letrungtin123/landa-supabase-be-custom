@@ -16,6 +16,27 @@ import * as ctrl from './course-authoring.controller.js';
 
 const router = Router();
 const courseAssetTempDir = path.join(process.cwd(), 'tmp', 'course-assets');
+
+function cleanupStaleCourseAssetTempFiles(): void {
+  try {
+    fs.mkdirSync(courseAssetTempDir, { recursive: true });
+    const entries = fs.readdirSync(courseAssetTempDir, { withFileTypes: true });
+    let deleted = 0;
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      fs.unlinkSync(path.join(courseAssetTempDir, entry.name));
+      deleted += 1;
+    }
+    if (deleted > 0) {
+      console.log(`[CourseAssets] Removed ${deleted} stale temp upload file(s)`);
+    }
+  } catch (err) {
+    console.warn('[CourseAssets] Failed to cleanup stale temp upload files:', err);
+  }
+}
+
+cleanupStaleCourseAssetTempFiles();
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {

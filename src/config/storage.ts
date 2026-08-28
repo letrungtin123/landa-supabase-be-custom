@@ -8,7 +8,6 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { env } from './env.js';
-import { createReadStream } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES } from './upload-limits.js';
@@ -75,7 +74,11 @@ export async function uploadFile(
 }
 
 /**
- * Upload a local temp file to Supabase Storage without loading the full file into RAM.
+ * Upload a local temp file to Supabase Storage.
+ *
+ * Supabase JS can keep Node file streams open on Windows in this runtime,
+ * leaving multer temp files locked and the request unresolved. Read the temp
+ * file into a Buffer and reuse the stable upload path used by memory uploads.
  */
 export async function uploadFileFromPath(
   storagePath: string,
@@ -83,22 +86,8 @@ export async function uploadFileFromPath(
   contentType: string,
   upsert = false,
 ): Promise<string> {
-  await ensureBucket();
-
-  const { error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storagePath, createReadStream(filePath), {
-      contentType,
-      upsert,
-      cacheControl: '3600',
-      duplex: 'half',
-    });
-
-  if (error) {
-    throw new Error(`[Storage] Upload failed (${storagePath}): ${error.message}`);
-  }
-
-  return storagePath;
+  const buffer = await fs.readFile(filePath);
+  return uploadFile(storagePath, buffer, contentType, upsert);
 }
 
 /**

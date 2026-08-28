@@ -252,7 +252,10 @@ export async function updateTenantModules(tenantId: string, modules: { module_id
     client.release();
   }
 
-  await invalidateTenantBadgeCaches(tenantId);
+  await Promise.all([
+    invalidateTenantBadgeCaches(tenantId),
+    invalidateTenantAiCaches(tenantId),
+  ]);
 }
 
 /**

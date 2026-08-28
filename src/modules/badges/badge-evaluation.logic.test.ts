@@ -108,7 +108,7 @@ test('completion_within_minutes uses enrolled_at through completed_at inclusivel
   assert.equal(evaluateBadgeRule(rule, [completed('course-bad', 'invalid', 'invalid')], {}).achieved, false);
 });
 
-test('award candidates contain a sorted snapshot of valid mapped course ids', () => {
+test('award candidates contain a sorted distinct snapshot of valid mapped course ids', () => {
   const criteria = {
     version: 1 as const,
     type: 'completed_selected_courses' as const,
@@ -120,7 +120,13 @@ test('award candidates contain a sorted snapshot of valid mapped course ids', ()
     id: 'badge-1',
     rule_version: '2026-08-24 12:00:00+00',
     criteria,
-    mapped_courses: [mapped('course-b'), mapped(null), mapped('course-deleted', true), mapped('course-a')],
+    mapped_courses: [
+      mapped('course-b'),
+      mapped(null),
+      mapped('course-a'),
+      mapped('course-deleted', true),
+      mapped('course-a'),
+    ],
   }]), [{
     badge_id: 'badge-1',
     rule_version: '2026-08-24 12:00:00+00',

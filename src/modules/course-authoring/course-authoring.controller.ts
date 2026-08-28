@@ -207,6 +207,70 @@ function getMediaQuizMetadataMode(data: any): 'single_select' | 'multiple_select
   return hasMultiple ? 'multiple_select' : 'single_select';
 }
 
+function plainTextFromHtml(raw: string): string {
+  return raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeImageChoiceQuizData(raw: any) {
+  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu câu hỏi đáp án hình ảnh phải là object');
+
+  const promptHtml = sanitizeMediaQuizHtml(parsed.prompt_html, '', 4000);
+  if (!plainTextFromHtml(promptHtml)) {
+    throw new Error('Câu hỏi đáp án hình ảnh cần nội dung câu hỏi');
+  }
+
+  if (!Array.isArray(parsed.choices) || parsed.choices.length < 2 || parsed.choices.length > 4) {
+    throw new Error('Câu hỏi đáp án hình ảnh phải có từ 2 đến 4 đáp án');
+  }
+
+  const choices = parsed.choices.map((choice: any, choiceIndex: number) => {
+    const choiceHtml = sanitizeMediaQuizHtml(choice?.html, '', 2000);
+    if (!plainTextFromHtml(choiceHtml)) {
+      throw new Error(`Đáp án ${choiceIndex + 1} cần nội dung`);
+    }
+
+    const storagePath = typeof choice?.image?.storage_path === 'string'
+      ? choice.image.storage_path.trim()
+      : '';
+    if (storagePath && !isSafeCourseAssetPath(storagePath)) {
+      throw new Error(`Đáp án ${choiceIndex + 1} có đường dẫn hình ảnh không hợp lệ`);
+    }
+
+    return {
+      id: sanitizeMediaQuizId(choice?.id, `choice_${choiceIndex + 1}`),
+      html: choiceHtml,
+      correct: choice?.correct === true,
+      image: {
+        storage_path: storagePath,
+        alt: typeof choice?.image?.alt === 'string'
+          ? choice.image.alt.replace(/[<>]/g, '').slice(0, 200)
+          : '',
+      },
+    };
+  });
+
+  const correctCount = choices.filter((choice: any) => choice.correct).length;
+  if (correctCount !== 1) {
+    throw new Error('Câu hỏi đáp án hình ảnh phải có đúng 1 đáp án đúng');
+  }
+
+  const hints = Array.isArray(parsed.hints)
+    ? parsed.hints
+        .slice(0, 10)
+        .map((hint: unknown) => sanitizeMediaQuizHtml(hint, '', 2000))
+        .filter(Boolean)
+    : [];
+
+  return {
+    version: 1,
+    prompt_html: promptHtml,
+    explanation_html: sanitizeMediaQuizHtml(parsed.explanation_html, '', 8000),
+    hints,
+    choices,
+  };
+}
+
 function sanitizeScenarioChatText(raw: unknown, fallback: string, maxLength: number): string {
   const value = typeof raw === 'string' ? raw : fallback;
   return value
@@ -370,6 +434,8 @@ export async function createBlock(req: Request, res: Response) {
 
   const sanitizedCreateData = resolvedType === 'la_media_quiz' && data !== undefined
     ? sanitizeMediaQuizData(data)
+    : resolvedType === 'la_image_choice_quiz' && data !== undefined
+      ? sanitizeImageChoiceQuizData(data)
     : resolvedType === 'la_scenario_chat' && data !== undefined
       ? sanitizeScenarioChatData(data)
       : data;
@@ -378,6 +444,12 @@ export async function createBlock(req: Request, res: Response) {
       ? getMediaQuizMetadataMode(sanitizedCreateData)
       : boilerplate === 'media_quiz_multiple_select' ? 'multiple_select' : 'single_select'
     : undefined;
+
+  if (resolvedType === 'la_image_choice_quiz' && sanitizedCreateData !== undefined) {
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) return sendError(res, 'Tenant context is required', 403);
+    await svc.assertImageChoiceQuizImageAssets(finalCourseId, tenantId, sanitizedCreateData);
+  }
 
   const result = await svc.createBlock(
     finalCourseId,
@@ -436,6 +508,11 @@ export async function updateBlock(req: Request, res: Response) {
           ...(sanitizedMetadata ?? {}),
           media_quiz_mode: getMediaQuizMetadataMode(sanitizedData),
         };
+      } else if (currentBlock.block_type === 'la_image_choice_quiz') {
+        sanitizedData = sanitizeImageChoiceQuizData(data);
+        const tenantId = req.user?.tenantId;
+        if (!tenantId) return sendError(res, 'Tenant context is required', 403);
+        await svc.assertImageChoiceQuizImageAssets(currentBlock.course_id, tenantId, sanitizedData);
       } else if (currentBlock.block_type === 'la_scenario_chat') {
         sanitizedData = sanitizeScenarioChatData(data);
       }

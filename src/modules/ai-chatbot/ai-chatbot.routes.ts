@@ -2,7 +2,7 @@
 // AI Chatbot Routes — KB + Bot + Document + Chat management
 // ═══════════════════════════════════════════════════════════════
 
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
@@ -12,6 +12,28 @@ import * as botCtrl from './bot.controller.js';
 import * as chatCtrl from './chat.controller.js';
 
 const router = Router();
+const chatViewPermission = checkPermission('ai_chatbot', 'can_view');
+
+function getExplicitChatTarget(req: Request): string | undefined {
+  const queryTarget = req.query.target;
+  if (typeof queryTarget === 'string') return queryTarget;
+
+  const body = req.body as { target?: unknown } | undefined;
+  return typeof body?.target === 'string' ? body.target : undefined;
+}
+
+function isLearnerChatRole(role: string | undefined): boolean {
+  return role === 'learner' || role === 'learner_plus';
+}
+
+function allowLearnerChatOrPermission(req: Request, res: Response, next: NextFunction): void {
+  if (getExplicitChatTarget(req) === 'learner' && isLearnerChatRole(req.user?.role)) {
+    next();
+    return;
+  }
+
+  void chatViewPermission(req, res, next);
+}
 
 // Multer — memory storage, 50MB limit
 const upload = multer({
@@ -76,11 +98,12 @@ router.delete('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'ca
 
 // ── Chat — conversations + messages (SSE stream) ──
 router.get('/chat/demo-iframe-preview', chatCtrl.getDemoIframePreview);
-router.get('/chat/active-bot', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getActiveBot);
-router.get('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.listConversations);
-router.post('/chat/conversations', checkPermission('ai_chatbot', 'can_view'), chatCtrl.createConversation);
-router.delete('/chat/conversations/:id', checkPermission('ai_chatbot', 'can_view'), chatCtrl.deleteConversation);
-router.get('/chat/conversations/:id/messages', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getMessages);
-router.post('/chat/conversations/:id/messages', checkPermission('ai_chatbot', 'can_view'), chatCtrl.sendMessage);
+router.get('/chat/active-bot', allowLearnerChatOrPermission, chatCtrl.getActiveBot);
+router.get('/chat/active-bot/personas', allowLearnerChatOrPermission, chatCtrl.getActiveBotPersonas);
+router.get('/chat/conversations', allowLearnerChatOrPermission, chatCtrl.listConversations);
+router.post('/chat/conversations', allowLearnerChatOrPermission, chatCtrl.createConversation);
+router.delete('/chat/conversations/:id', allowLearnerChatOrPermission, chatCtrl.deleteConversation);
+router.get('/chat/conversations/:id/messages', allowLearnerChatOrPermission, chatCtrl.getMessages);
+router.post('/chat/conversations/:id/messages', allowLearnerChatOrPermission, chatCtrl.sendMessage);
 
 export default router;

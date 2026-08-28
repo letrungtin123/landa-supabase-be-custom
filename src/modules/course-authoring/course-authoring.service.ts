@@ -113,7 +113,7 @@ export interface DeleteAssetByStoragePathResult {
   storagePathsToDelete: string[];
 }
 
-export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram';
+export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram' | 'la_image_choice_quiz';
 
 export interface LessonAuthorComponentProposal {
   type: LessonAuthorComponentType;
@@ -309,6 +309,7 @@ function getDefaultName(blockType: string): string {
     html: 'Văn bản',
     problem: 'Câu hỏi',
     la_media_quiz: 'Câu hỏi kèm media',
+    la_image_choice_quiz: 'Câu hỏi đáp án hình ảnh',
     la_scenario_chat: 'Giao tiếp tình huống',
     la_crossword: 'Đố vui ô chữ',
     la_sortable: 'sắp xếp ô chữ',
@@ -327,7 +328,32 @@ function mediaQuizModeValue(raw: unknown, fallback: 'single_select' | 'multiple_
   return raw === 'single_select' || raw === 'multiple_select' ? raw : fallback;
 }
 
+function makeDefaultImageChoiceQuizChoice(index: number, correct = false) {
+  return {
+    id: `choice_${index + 1}`,
+    html: `<p>${correct ? 'Đáp án đúng' : `Đáp án sai ${index}`}</p>`,
+    correct,
+    image: {
+      storage_path: '',
+      alt: '',
+    },
+  };
+}
+
 function getDefaultData(blockType: string, boilerplate?: string): any {
+  if (blockType === 'la_image_choice_quiz') {
+    return {
+      version: 1,
+      prompt_html: '<p>Câu hỏi của bạn</p>',
+      explanation_html: '',
+      hints: [],
+      choices: [
+        makeDefaultImageChoiceQuizChoice(0, true),
+        makeDefaultImageChoiceQuizChoice(1, false),
+      ],
+    };
+  }
+
   if (blockType === 'la_scenario_chat') {
     return {
       version: 1,
@@ -410,6 +436,80 @@ function getDefaultData(blockType: string, boilerplate?: string): any {
 function getDefaultMetadata(blockType: string, boilerplate?: string): Record<string, unknown> {
   if (blockType !== 'la_media_quiz') return {};
   return { media_quiz_mode: mediaQuizModeFromBoilerplate(boilerplate) };
+}
+
+function htmlPlainText(raw: unknown): string {
+  return typeof raw === 'string'
+    ? raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
+}
+
+function imageChoiceString(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function getImageChoiceQuizImagePaths(raw: any): string[] {
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.choices)) return [];
+
+  return Array.from(new Set(
+    data.choices
+      .map((choice: any) => {
+        const value = imageChoiceString(choice?.image?.storage_path);
+        return extractStoragePath(value) || value;
+      })
+      .filter(Boolean),
+  ));
+}
+
+export async function assertImageChoiceQuizImageAssets(courseId: string, tenantId: string, raw: any): Promise<void> {
+  const storagePaths = getImageChoiceQuizImagePaths(raw);
+  if (storagePaths.length === 0) return;
+
+  const result = await query<{ storage_path: string; content_type: string }>(
+    `SELECT storage_path, content_type
+     FROM course_assets
+     WHERE course_id = $1
+       AND tenant_id = $2
+       AND storage_path = ANY($3::text[])`,
+    [courseId, tenantId, storagePaths],
+  );
+
+  const rowByPath = new Map(result.rows.map(row => [row.storage_path, row]));
+  for (const storagePath of storagePaths) {
+    const row = rowByPath.get(storagePath);
+    if (!row) {
+      throw new AppError('Ảnh đáp án phải là asset thuộc đúng khóa học hiện tại', 400);
+    }
+    if (!String(row.content_type || '').toLowerCase().startsWith('image/')) {
+      throw new AppError('Mỗi đáp án chỉ được dùng asset hình ảnh', 400);
+    }
+  }
+}
+
+function assertPublishableImageChoiceQuizData(raw: any, label: string): void {
+  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!data || typeof data !== 'object') {
+    throw new AppError(`${label} cần dữ liệu câu hỏi trước khi publish`, 400);
+  }
+  if (!htmlPlainText(data.prompt_html)) {
+    throw new AppError(`${label} cần nội dung câu hỏi trước khi publish`, 400);
+  }
+  if (!Array.isArray(data.choices) || data.choices.length < 2 || data.choices.length > 4) {
+    throw new AppError(`${label} phải có từ 2 đến 4 đáp án`, 400);
+  }
+  const correctCount = data.choices.filter((choice: any) => choice?.correct === true).length;
+  if (correctCount !== 1) {
+    throw new AppError(`${label} phải có đúng 1 đáp án đúng`, 400);
+  }
+  data.choices.forEach((choice: any, index: number) => {
+    if (!htmlPlainText(choice?.html)) {
+      throw new AppError(`${label} - đáp án ${index + 1} cần nội dung`, 400);
+    }
+    if (!imageChoiceString(choice?.image?.storage_path)) {
+      throw new AppError(`${label} - đáp án ${index + 1} cần upload hình ảnh`, 400);
+    }
+  });
 }
 
 function assertPublishableMediaQuizData(raw: any, label: string): void {
@@ -704,6 +804,35 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
 
   for (const row of mediaQuizRows.rows) {
     assertPublishableMediaQuizData(row.data, row.display_name || 'Câu hỏi kèm media');
+  }
+
+  const imageChoiceQuizRows = await query<{ display_name: string; data: any; course_id: string; tenant_id: string }>(
+    `WITH RECURSIVE descendants AS (
+       SELECT id FROM course_blocks WHERE id = $1 AND deleted_at IS NULL
+       UNION ALL
+       SELECT cb.id FROM course_blocks cb
+       JOIN descendants d ON cb.parent_id = d.id
+       WHERE cb.deleted_at IS NULL
+     )
+     SELECT cb.display_name, cb.data, cb.course_id, c.tenant_id
+     FROM course_blocks cb
+     JOIN courses c ON c.id = cb.course_id
+     WHERE cb.id IN (SELECT id FROM descendants)
+       AND cb.block_type::text = 'la_image_choice_quiz'
+       AND cb.deleted_at IS NULL
+       AND c.deleted_at IS NULL
+       AND (
+         cb.has_draft_changes = true OR
+         cb.data IS DISTINCT FROM cb.published_data OR
+         cb.metadata IS DISTINCT FROM cb.published_metadata OR
+         cb.is_published = false
+       )`,
+    [blockId],
+  );
+
+  for (const row of imageChoiceQuizRows.rows) {
+    assertPublishableImageChoiceQuizData(row.data, row.display_name || 'Câu hỏi đáp án hình ảnh');
+    await assertImageChoiceQuizImageAssets(row.course_id, row.tenant_id, row.data);
   }
 
   const scenarioChatRows = await query<{ display_name: string; data: any }>(

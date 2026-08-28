@@ -17,6 +17,20 @@ type CourseMapping = {
   is_deleted: boolean;
 };
 
+function uniqueCourseIds(courseIds: string[]): string[] {
+  return Array.from(new Set(courseIds));
+}
+
+function uniqueCourseMappings(courses: CourseMapping[]): CourseMapping[] {
+  const seen = new Set<string>();
+  return courses.filter((course) => {
+    if (!course.course_id) return true;
+    if (seen.has(course.course_id)) return false;
+    seen.add(course.course_id);
+    return true;
+  });
+}
+
 async function assertModuleEnabled(tenantId: string, allowWhenDisabled = false): Promise<boolean> {
   const moduleEnabled = await isBadgeManagementModuleEnabled(tenantId);
   if (!moduleEnabled && !allowWhenDisabled) {
@@ -73,12 +87,12 @@ export async function listTenantBadges(tenantId: string, allowWhenDisabled = fal
 
   return result.rows.map((row: any) => {
     const criteria = parseBadgeCriteria(row.criteria);
-    const courses = (Array.isArray(row.courses) ? row.courses : []) as CourseMapping[];
+    const courses = uniqueCourseMappings((Array.isArray(row.courses) ? row.courses : []) as CourseMapping[]);
     const validCourseCount = courses.filter((course) => course.course_id && !course.is_deleted).length;
     const requiresCourses = criteria ? criteriaRequiresCourses(criteria) : false;
     const minimumRequiredCourses = criteria ? minimumMappedCourses(criteria) : 0;
     const isConfigValid = Boolean(criteria)
-      && (!requiresCourses || validCourseCount >= minimumRequiredCourses);
+      && (!requiresCourses || validCourseCount === minimumRequiredCourses);
 
     return {
       id: row.id,
@@ -150,7 +164,7 @@ async function getCurrentCourseIds(tenantId: string, badgeId: string): Promise<s
      ORDER BY assigned_at, id`,
     [tenantId, badgeId],
   );
-  return result.rows.map((row) => row.course_id);
+  return uniqueCourseIds(result.rows.map((row) => row.course_id));
 }
 
 async function getCurrentRuleState(tenantId: string, badgeId: string) {
@@ -194,13 +208,16 @@ export async function updateTenantBadgeRule(
     getCurrentCourseIds(tenantId, badgeId),
     getCurrentRuleState(tenantId, badgeId),
   ]);
-  const nextCourseIds = input.course_ids ?? previousCourseIds;
+  const nextCourseIds = uniqueCourseIds(input.course_ids ?? previousCourseIds);
 
   if (!requiresCourses && nextCourseIds.length > 0) {
     throw new AppError('Huy hiệu này không cho phép cấu hình khóa học', 400);
   }
-  if (requiresCourses && input.is_enabled && nextCourseIds.length < minimumRequiredCourses) {
-    throw new AppError(`Cần chọn ít nhất ${minimumRequiredCourses} khóa học trước khi bật huy hiệu`, 400);
+  if (requiresCourses && (input.course_ids !== undefined || input.is_enabled) && nextCourseIds.length > minimumRequiredCourses) {
+    throw new AppError(`Chỉ được chọn đúng ${minimumRequiredCourses} khóa học cho huy hiệu này`, 400);
+  }
+  if (requiresCourses && input.is_enabled && nextCourseIds.length !== minimumRequiredCourses) {
+    throw new AppError(`Cần chọn đúng ${minimumRequiredCourses} khóa học trước khi bật huy hiệu`, 400);
   }
 
   let courses: Array<{ id: string; display_name: string }> = [];

@@ -119,9 +119,10 @@ export function buildBadgeAwardCandidates(rules: AwardCandidateRule[]): BadgeAwa
     badge_id: rule.id,
     rule_version: rule.rule_version,
     criteria: rule.criteria,
-    mapped_course_ids: rule.mapped_courses
-      .filter((course) => course.course_id && !course.is_deleted)
-      .map((course) => course.course_id as string)
-      .sort(),
+    mapped_course_ids: Array.from(new Set(
+      rule.mapped_courses
+        .filter((course) => course.course_id && !course.is_deleted)
+        .map((course) => course.course_id as string),
+    )).sort(),
   }));
 }

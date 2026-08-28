@@ -3,6 +3,7 @@ export const COURSE_COMPONENT_TYPES = [
   'html',
   'problem',
   'la_media_quiz',
+  'la_image_choice_quiz',
   'la_scenario_chat',
   'la_crossword',
   'la_sortable',

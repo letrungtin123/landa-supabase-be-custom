@@ -311,6 +311,8 @@ async function fetchLessonContent(courseId: string, lessonId: string, includeDra
       text = `[Video: ${label}]`;
     } else if (row.block_type === 'problem') {
       text = `[Bài tập: ${label}]`;
+    } else if (row.block_type === 'la_image_choice_quiz') {
+      text = `[Câu hỏi đáp án hình ảnh: ${label}]`;
     } else {
       text = `[${row.block_type}: ${label}]`;
     }
@@ -503,6 +505,8 @@ async function getActiveBotFromDb(tenantId: string, target: ChatTarget): Promise
   const result = await query<BotAssignment>(
     `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id
      FROM tenant_bot_assignments tba
+     JOIN tenant_modules tm ON tm.tenant_id = tba.tenant_id AND tm.is_enabled = true
+     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
      JOIN chatbots c ON c.id = tba.bot_id
      WHERE tba.tenant_id = $1 AND tba.target = $2`,
     [tenantId, target],
@@ -808,12 +812,25 @@ export async function createConversation(
   return insertResult.rows[0];
 }
 
-export async function deleteConversation(conversationId: string, userId: string, tenantId: string): Promise<boolean> {
+export async function deleteConversation(
+  conversationId: string,
+  userId: string,
+  tenantId: string,
+  expectedTarget?: ChatTarget,
+): Promise<boolean> {
   if (!isValidUUID(conversationId)) throw new Error('ID không hợp lệ');
 
   const result = await query(
-    `DELETE FROM chat_conversations WHERE id = $1 AND user_id = $2 AND tenant_id = $3`,
-    [conversationId, userId, tenantId],
+    `DELETE FROM chat_conversations
+     USING tenant_modules tm
+     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
+     WHERE chat_conversations.id = $1
+       AND chat_conversations.user_id = $2
+       AND chat_conversations.tenant_id = $3
+       AND tm.tenant_id = chat_conversations.tenant_id
+       AND tm.is_enabled = true
+       AND ($4::text IS NULL OR chat_conversations.target = $4)`,
+    [conversationId, userId, tenantId, expectedTarget ?? null],
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -872,15 +889,24 @@ async function hydrateLessonAuthorProposalMessages(
 }
 
 export async function getConversationMessages(
-  conversationId: string, userId: string, tenantId: string, cursor?: string,
+  conversationId: string,
+  userId: string,
+  tenantId: string,
+  cursor?: string,
+  expectedTarget?: ChatTarget,
 ): Promise<PaginatedMessages> {
   if (!isValidUUID(conversationId)) throw new Error('ID không hợp lệ');
 
   // Validate ownership + tenant in one query
   const convCheck = await query<{ id: string }>(
     `SELECT cc.id FROM chat_conversations cc
-     WHERE cc.id = $1 AND cc.user_id = $2 AND cc.tenant_id = $3`,
-    [conversationId, userId, tenantId],
+     JOIN tenant_modules tm ON tm.tenant_id = cc.tenant_id AND tm.is_enabled = true
+     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
+     WHERE cc.id = $1
+       AND cc.user_id = $2
+       AND cc.tenant_id = $3
+       AND ($4::text IS NULL OR cc.target = $4)`,
+    [conversationId, userId, tenantId, expectedTarget ?? null],
   );
   if (!convCheck.rowCount || convCheck.rowCount === 0) {
     throw new Error('Cuộc hội thoại không tồn tại');
@@ -962,7 +988,12 @@ function getInputFilterConfigFromBotConfig(botConfig: unknown): unknown {
   return (botConfig as Record<string, unknown>)[INPUT_FILTER_CONFIG_KEY] ?? null;
 }
 
-async function loadConversationContext(conversationId: string, userId: string, tenantId: string): Promise<ConversationContext> {
+async function loadConversationContext(
+  conversationId: string,
+  userId: string,
+  tenantId: string,
+  expectedTarget?: ChatTarget,
+): Promise<ConversationContext> {
   // Single query: load conversation + bot + persona + prompt + message count via CTE
   const result = await query<{
     id: string; tenant_id: string; bot_id: string; target: ChatTarget; course_id: string | null; bot_kb_id: string | null;
@@ -972,8 +1003,13 @@ async function loadConversationContext(conversationId: string, userId: string, t
     `WITH conv AS (
        SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.course_id, c.kb_id AS bot_kb_id, c.config AS bot_config, cc.persona_id
        FROM chat_conversations cc
+       JOIN tenant_modules tm ON tm.tenant_id = cc.tenant_id AND tm.is_enabled = true
+       JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
        JOIN chatbots c ON c.id = cc.bot_id
-       WHERE cc.id = $1 AND cc.user_id = $2 AND cc.tenant_id = $3
+       WHERE cc.id = $1
+         AND cc.user_id = $2
+         AND cc.tenant_id = $3
+         AND ($4::text IS NULL OR cc.target = $4)
      ), msg_cnt AS (
        SELECT COUNT(*)::int AS cnt FROM chat_messages WHERE conversation_id = $1
      )
@@ -984,7 +1020,7 @@ async function loadConversationContext(conversationId: string, userId: string, t
      JOIN bot_personas bp ON bp.id = conv.persona_id
      JOIN system_prompt_templates spt ON spt.id = bp.template_id
      CROSS JOIN msg_cnt`,
-    [conversationId, userId, tenantId],
+    [conversationId, userId, tenantId, expectedTarget ?? null],
   );
 
   if (!result.rowCount || result.rowCount === 0) {
@@ -4009,7 +4045,7 @@ export async function sendMessageStream(
   let ctxForError: ConversationContext | null = null;
   try {
     // 1. Load context (CTE: 1 query for conversation + persona + prompt + msg count)
-    const ctx = await loadConversationContext(conversationId, userId, tenantId);
+    const ctx = await loadConversationContext(conversationId, userId, tenantId, options.target);
     ctxForError = ctx;
     const inputMode = options.inputMode === 'voice' ? 'voice' : 'text';
     const isVoiceTurn = inputMode === 'voice';

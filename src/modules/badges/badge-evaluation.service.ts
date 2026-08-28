@@ -56,6 +56,16 @@ export const EMPTY_BADGE_OVERVIEW: BadgeEvaluationOverview = {
   progress: {},
 };
 
+function uniqueMappedCourses(courses: MappedCourse[]): MappedCourse[] {
+  const seen = new Set<string>();
+  return courses.filter((course) => {
+    if (!course.course_id) return true;
+    if (seen.has(course.course_id)) return false;
+    seen.add(course.course_id);
+    return true;
+  });
+}
+
 export async function isBadgeManagementModuleEnabled(tenantId: string): Promise<boolean> {
   const result = await query<{ enabled: boolean }>(
     `SELECT EXISTS (
@@ -134,9 +144,9 @@ async function getEffectiveBadgeRulesFromDb(tenantId: string): Promise<Effective
       continue;
     }
 
-    const mappedCourses = Array.isArray(row.mapped_courses) ? row.mapped_courses as MappedCourse[] : [];
+    const mappedCourses = uniqueMappedCourses(Array.isArray(row.mapped_courses) ? row.mapped_courses as MappedCourse[] : []);
     const validMappedCourses = mappedCourses.filter((course) => Boolean(course.course_id) && !course.is_deleted);
-    if (criteriaRequiresCourses(criteria) && validMappedCourses.length < minimumMappedCourses(criteria)) continue;
+    if (criteriaRequiresCourses(criteria) && validMappedCourses.length !== minimumMappedCourses(criteria)) continue;
 
     rules.push({
       ...row,
@@ -236,16 +246,19 @@ async function insertValidatedBadgeAwards(
          AND COALESCE(tbs.is_active, true) = true
          AND tbr.updated_at::text = candidate.rule_version
          AND b.criteria = candidate.criteria
-         AND candidate.mapped_course_ids = COALESCE((
-           SELECT jsonb_agg(tbrc.course_id ORDER BY tbrc.course_id)
-           FROM tenant_badge_rule_courses tbrc
-           JOIN courses current_course
-             ON current_course.id = tbrc.course_id
-            AND current_course.tenant_id = $2
-           WHERE tbrc.tenant_id = $2
-             AND tbrc.badge_id = candidate.badge_id
-             AND tbrc.course_id IS NOT NULL
-         ), '[]'::jsonb)
+          AND candidate.mapped_course_ids = COALESCE((
+            SELECT jsonb_agg(valid_course_ids.course_id ORDER BY valid_course_ids.course_id)
+            FROM (
+              SELECT DISTINCT tbrc.course_id
+              FROM tenant_badge_rule_courses tbrc
+              JOIN courses current_course
+                ON current_course.id = tbrc.course_id
+               AND current_course.tenant_id = $2
+              WHERE tbrc.tenant_id = $2
+                AND tbrc.badge_id = candidate.badge_id
+                AND tbrc.course_id IS NOT NULL
+            ) valid_course_ids
+          ), '[]'::jsonb)
          AND EXISTS (
            SELECT 1
            FROM tenant_modules tm

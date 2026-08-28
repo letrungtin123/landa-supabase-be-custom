@@ -448,6 +448,12 @@ function toLearnerBlockRow(row: any) {
       data: toLearnerMediaQuizData(row.data),
     };
   }
+  if (row?.block_type === 'la_image_choice_quiz') {
+    return {
+      ...row,
+      data: toLearnerImageChoiceQuizData(row.data),
+    };
+  }
   if (row?.block_type === 'la_scenario_chat') {
     return {
       ...row,
@@ -500,6 +506,32 @@ function toLearnerMediaQuizData(raw: any) {
     mode,
     require_correct_to_advance: true,
     questions,
+  };
+}
+
+function toLearnerImageChoiceQuizData(raw: any) {
+  const data = typeof raw === 'string' ? safeJsonParse(raw) : raw;
+  if (!data || typeof data !== 'object') return data;
+  const choices = Array.isArray(data.choices)
+    ? data.choices.slice(0, 4).map((choice: any, choiceIndex: number) => ({
+        id: typeof choice?.id === 'string' ? choice.id : `choice_${choiceIndex + 1}`,
+        html: typeof choice?.html === 'string' ? choice.html : '',
+        image: {
+          storage_path: typeof choice?.image?.storage_path === 'string' ? choice.image.storage_path : '',
+          alt: typeof choice?.image?.alt === 'string' ? choice.image.alt : '',
+        },
+      }))
+    : [];
+
+  return {
+    version: 1,
+    prompt_html: typeof data.prompt_html === 'string' ? data.prompt_html : '',
+    hints: Array.isArray(data.hints)
+      ? data.hints
+          .filter((hint: unknown): hint is string => typeof hint === 'string' && hint.trim().length > 0)
+          .slice(0, 10)
+      : [],
+    choices,
   };
 }
 
@@ -601,6 +633,9 @@ export async function submitBlockAnswer(
     case 'la_media_quiz':
       return gradeMediaQuiz(block, body);
 
+    case 'la_image_choice_quiz':
+      return gradeImageChoiceQuiz(block, body);
+
     case 'la_scenario_chat':
       return gradeScenarioChat(block, body);
 
@@ -666,6 +701,41 @@ function gradeMediaQuiz(block: any, body: any) {
     next_question_id: isCorrect && nextQuestion?.id ? nextQuestion.id : null,
     explanation_html: isCorrect && typeof question?.explanation_html === 'string' ? question.explanation_html : undefined,
     correctness: { [questionId]: isCorrect ? 'correct' : 'incorrect' },
+  };
+}
+
+function gradeImageChoiceQuiz(block: any, body: any) {
+  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
+  if (!data || typeof data !== 'object' || !Array.isArray(data.choices)) {
+    return { status: 'error', message: 'Câu hỏi đáp án hình ảnh chưa có dữ liệu', score: 0 };
+  }
+
+  const answerFromMap = body?.answers && typeof body.answers === 'object'
+    ? Object.values(body.answers)[0]
+    : undefined;
+  const choiceId = typeof body?.choice_id === 'string'
+    ? body.choice_id.trim()
+    : typeof body?.answer === 'string'
+      ? body.answer.trim()
+      : typeof answerFromMap === 'string'
+        ? answerFromMap.trim()
+        : '';
+
+  const choices = data.choices.slice(0, 4);
+  const choice = choices.find((item: any) => item?.id === choiceId);
+  if (!choice) {
+    return { status: 'error', message: 'Không tìm thấy đáp án', score: 0 };
+  }
+
+  const isCorrect = choice.correct === true;
+  return {
+    status: isCorrect ? 'correct' : 'incorrect',
+    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
+    score: isCorrect ? 100 : 0,
+    choice_id: choiceId,
+    completed: isCorrect,
+    explanation_html: isCorrect && typeof data.explanation_html === 'string' ? data.explanation_html : undefined,
+    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
   };
 }
 
@@ -1692,7 +1762,4 @@ export async function markSectionModalShown(userId: string, courseId: string, se
   );
   return { success: true };
 }
-
-
-
 

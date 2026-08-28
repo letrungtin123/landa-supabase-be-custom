@@ -13,9 +13,23 @@ import * as kbService from './kb.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function getRawTarget(req: Request): string | undefined {
+  const queryTarget = req.query.target;
+  if (typeof queryTarget === 'string') return queryTarget;
+
+  const body = req.body as { target?: unknown } | undefined;
+  return typeof body?.target === 'string' ? body.target : undefined;
+}
+
 function resolveTarget(req: Request): chatService.ChatTarget {
-  const raw = (req.query.target as string) || (req.body?.target as string) || 'admin';
+  const raw = getRawTarget(req) || 'admin';
   return chatService.isChatTarget(raw) ? raw : 'admin';
+}
+
+function resolveExplicitTarget(req: Request): chatService.ChatTarget | undefined {
+  const raw = getRawTarget(req);
+  return raw && chatService.isChatTarget(raw) ? raw : undefined;
 }
 
 function resolveCourseId(req: Request): string | undefined {
@@ -23,7 +37,7 @@ function resolveCourseId(req: Request): string | undefined {
   return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
 }
 
-type DemoIframePersonaPreview = Pick<
+type PublicPersonaPreview = Pick<
   botService.BotPersona,
   | 'id'
   | 'bot_id'
@@ -36,7 +50,7 @@ type DemoIframePersonaPreview = Pick<
   | 'custom_description'
 >;
 
-function toDemoIframePersonaPreview(persona: botService.BotPersona): DemoIframePersonaPreview {
+function toPublicPersonaPreview(persona: botService.BotPersona): PublicPersonaPreview {
   return {
     id: persona.id,
     bot_id: persona.bot_id,
@@ -158,6 +172,27 @@ export async function getActiveBot(req: Request, res: Response): Promise<void> {
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
+export async function getActiveBotPersonas(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const target = resolveTarget(req);
+
+  if (target !== 'learner') {
+    sendError(res, 'Endpoint này chỉ hỗ trợ target learner', 400);
+    return;
+  }
+
+  try {
+    const bot = await chatService.getActiveBot(tenantId, 'learner');
+    if (!bot) {
+      sendSuccess(res, []);
+      return;
+    }
+
+    const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
+    sendSuccess(res, personas.map(toPublicPersonaPreview));
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
 export async function getDemoIframePreview(req: Request, res: Response): Promise<void> {
   const tenantId = req.user?.tenantId;
   const target = resolveTarget(req);
@@ -182,7 +217,7 @@ export async function getDemoIframePreview(req: Request, res: Response): Promise
     const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
     sendSuccess(res, {
       bot,
-      personas: personas.map(toDemoIframePersonaPreview),
+      personas: personas.map(toPublicPersonaPreview),
     });
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -251,7 +286,7 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
   if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
   try {
-    const deleted = await chatService.deleteConversation(id, userId, tenantId);
+    const deleted = await chatService.deleteConversation(id, userId, tenantId, resolveExplicitTarget(req));
     if (!deleted) { sendError(res, 'Cuộc hội thoại không tồn tại', 404); return; }
     sendSuccess(res, { message: 'Đã xoá' });
   } catch (err: any) { sendError(res, err.message, 400); }
@@ -272,7 +307,7 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
   if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
   try {
-    const result = await chatService.getConversationMessages(id, userId, tenantId, cursor);
+    const result = await chatService.getConversationMessages(id, userId, tenantId, cursor, resolveExplicitTarget(req));
     sendSuccess(res, result);
   } catch (err: any) { sendError(res, err.message, 400); }
 }
