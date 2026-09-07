@@ -7,6 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { sendError } from '../utils/response.js';
 import type { AuthUser } from '../types/express.js';
+import { isUserAccessRevoked } from '../modules/auth/auth-revocation.service.js';
 
 // ── In-memory blacklist: users cần force re-auth (role đã thay đổi) ──
 // Key = userId, Value = timestamp khi blacklist
@@ -58,7 +59,7 @@ function getBlacklistedAt(userId: string, sessionMode: SessionMode): number {
  * Đọc token từ header "Authorization: Bearer <token>".
  * Gắn req.user nếu hợp lệ, trả 401 nếu không.
  */
-export function authenticate(req: Request, res: Response, next: NextFunction): void {
+export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -70,6 +71,14 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
 
   try {
     const payload = verifyAccessToken(token);
+
+    // Durable revocation is written before a permanent user deletion is queued.
+    // This closes the gap where an otherwise valid JWT could remain usable until
+    // its normal expiry while the background purge is still running.
+    if (await isUserAccessRevoked(payload.sub)) {
+      sendError(res, 'Phiên đăng nhập đã bị thu hồi', 401);
+      return;
+    }
 
     // ── Check blacklist: user bị force re-auth (role thay đổi) ──
     const blacklistedAt = getBlacklistedAt(payload.sub, normalizeSessionMode(payload.session_mode));
@@ -116,12 +125,17 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
  * Middleware xác thực tùy chọn — không trả lỗi nếu thiếu token.
  * Dùng cho endpoint công khai nhưng muốn biết user nếu có.
  */
-export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {
+export async function optionalAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (authHeader?.startsWith('Bearer ')) {
     try {
       const payload = verifyAccessToken(authHeader.slice(7));
+
+      if (await isUserAccessRevoked(payload.sub)) {
+        next();
+        return;
+      }
 
       // Check blacklist
       const blacklistedAt = getBlacklistedAt(payload.sub, normalizeSessionMode(payload.session_mode));

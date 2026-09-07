@@ -112,14 +112,29 @@ export async function downloadFileBuffer(storagePath: string): Promise<{ buffer:
 }
 
 /**
- * Delete a file from storage.
+ * Delete storage objects in bounded batches.
+ *
+ * A caller that needs a guaranteed purge must be able to observe a failure.
+ * Do not change this back to log-and-continue: that behavior turns storage
+ * leaks into falsely successful deletion jobs.
  */
-export async function deleteFile(storagePath: string): Promise<void> {
+export async function deleteFiles(storagePaths: readonly string[]): Promise<void> {
+  const paths = [...new Set(storagePaths.map((path) => path.trim()).filter(Boolean))];
+  if (paths.length === 0) return;
+
   await ensureBucket();
-  const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
-  if (error) {
-    console.error(`[Storage] Delete failed (${storagePath}): ${error.message}`);
+  for (let index = 0; index < paths.length; index += 100) {
+    const batch = paths.slice(index, index + 100);
+    const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(batch);
+    if (error) {
+      throw new Error(`[Storage] Delete failed (${batch.length} object(s)): ${error.message}`);
+    }
   }
+}
+
+/** Delete one storage object. Errors are deliberately propagated to the caller. */
+export async function deleteFile(storagePath: string): Promise<void> {
+  await deleteFiles([storagePath]);
 }
 
 /**

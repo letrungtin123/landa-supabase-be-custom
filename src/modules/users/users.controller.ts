@@ -10,6 +10,11 @@ import { auditFromReq } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+import {
+  getUserDeletionJobStatus,
+  requestUserDeletion,
+  retryTerminalUserDeletionJob,
+} from './user-deletion.service.js';
 
 /** GET /api/users */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -53,26 +58,39 @@ export async function updateController(req: Request, res: Response, next: NextFu
   } catch (err) { next(err); }
 }
 
-/** DELETE /api/users/:id — Hard delete user + cascade */
+/** DELETE /api/users/:id — Queue a durable permanent deletion. */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { avatarUrl, deletedUserName } = await usersService.hardDeleteUser(
+    const { jobId } = await requestUserDeletion(
       req.params.id,
       req.user!.id,
       req.user!.role,
       req.user!.tenantId || null,
     );
 
-    // Async cleanup avatar từ Storage
-    if (avatarUrl) {
-      deleteFileByUrl(avatarUrl).catch(() => {});
-    }
-
     // Invalidate caches
     invalidatePermissionCache(req.params.id);
 
-    auditFromReq(req, 'DELETE', 'user', req.params.id, deletedUserName, 'Hard delete');
-    sendSuccess(res, null, 'Xóa user thành công');
+    // Do not fire-and-forget an audit row for a subject that the background
+    // job can hard-delete before this request returns. Operational state lives
+    // in user_deletion_jobs and is purged without retaining personal fields.
+    sendSuccess(res, { job_id: jobId, status: 'queued' }, 'Đã đưa user vào hàng đợi xóa vĩnh viễn', 202);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/users/deletion-jobs/:jobId — status for a queued permanent deletion. */
+export async function getDeletionJobStatusController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const job = await getUserDeletionJobStatus(req.params.jobId, req.user!.tenantId || null);
+    sendSuccess(res, job);
+  } catch (err) { next(err); }
+}
+
+/** POST /api/users/deletion-jobs/:jobId/retry — retry an exhausted job. */
+export async function retryDeletionJobController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    await retryTerminalUserDeletionJob(req.params.jobId, req.user!.tenantId || null);
+    sendSuccess(res, { job_id: req.params.jobId, status: 'queued' }, 'Đã đưa deletion job vào hàng đợi retry', 202);
   } catch (err) { next(err); }
 }
 
@@ -144,7 +162,14 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
     const avatarPath = await uploadFile(storagePath, file.buffer, file.mimetype, true);
 
     // DB lưu PATH, không lưu full URL
-    await usersService.updateAvatar(userId, avatarPath);
+    try {
+      await usersService.updateAvatar(userId, avatarPath);
+    } catch (error) {
+      // A concurrent permanent deletion can fence the profile write after the
+      // object upload completed. Do not leave that object behind.
+      await deleteFileByUrl(avatarPath).catch(() => undefined);
+      throw error;
+    }
 
     // sendSuccess tự động resolve path → full URL
     sendSuccess(res, { avatar_url: avatarPath });

@@ -11,7 +11,9 @@
     "pm2:save": "pm2 save",
     "deploy:prod": "npm run build && npm run pm2:prod && npm run pm2:save",
     "seed": "tsx src/scripts/seed.ts",
-    "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts"
+    "reconcile:deletion-storage": "tsx src/scripts/reconcile-deletion-storage.ts",
+    "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts",
+    "test:deletion": "tsx --test src/modules/deletion/storage-manifest.logic.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

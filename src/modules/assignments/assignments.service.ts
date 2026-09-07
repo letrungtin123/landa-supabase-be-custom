@@ -265,7 +265,6 @@ async function uploadAssignmentAttachment(
   tenantId: string,
   courseId: string,
   assignmentId: string,
-  uploadedBy: string,
 ): Promise<StoredAssignmentAttachment | null> {
   if (!file) return null;
   if (file.size > MAX_ASSIGNMENT_FILE_SIZE_BYTES) {
@@ -279,7 +278,10 @@ async function uploadAssignmentAttachment(
     tenantId,
     'assignments',
     storageName,
-    `${courseId}/${assignmentId}/attachment/${uploadedBy}`,
+    // Assignment attachments belong to the course, not to the staff member
+    // who uploaded them. Do not embed a deletable user ID in a long-lived
+    // course asset path.
+    `${courseId}/${assignmentId}/attachment`,
   );
   await uploadFile(storagePath, file.buffer, file.mimetype || 'application/octet-stream');
   return {
@@ -372,7 +374,7 @@ export async function createAssignment(
   }
 
   const assignmentId = uuidv4();
-  const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId, userId);
+  const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId);
   const client = await getClient();
   let assignmentCreatedEmailJobQueued = false;
   const deadline = normalizeDeadlineForWrite(input);
@@ -574,7 +576,6 @@ export async function updateAssignment(
     tenantId,
     current.course_id,
     assignmentId,
-    userId,
   );
   const shouldChangeAttachment = Boolean(uploadedAttachment || input.remove_attachment);
   const oldAttachmentPath = shouldChangeAttachment ? attachmentStoragePath(current.attachment_file) : null;

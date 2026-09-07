@@ -352,16 +352,34 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     'X-Accel-Buffering': 'no',
   });
 
+  let clientDisconnected = false;
+
   // Helper to write SSE event
-  const writeSSE = (data: Record<string, unknown>) => {
-    if (!res.writableEnded) {
+  const writeSSE = (data: Record<string, unknown>): boolean => {
+    if (clientDisconnected || res.writableEnded || res.destroyed) return false;
+    try {
       res.write(`data: ${JSON.stringify(data)}\n\n`);
+      return true;
+    } catch {
+      clientDisconnected = true;
+      return false;
     }
   };
 
-  // Handle client disconnect
-  let clientDisconnected = false;
-  req.on('close', () => { clientDisconnected = true; });
+  const endSSE = () => {
+    if (clientDisconnected || res.writableEnded || res.destroyed) return;
+    try {
+      res.end();
+    } catch {
+      clientDisconnected = true;
+    }
+  };
+
+  // Handle real response disconnects. req.close can fire after the request body is read on long SSE responses.
+  req.on('aborted', () => { clientDisconnected = true; });
+  res.on('close', () => {
+    if (!res.writableEnded) clientDisconnected = true;
+  });
 
   await chatService.sendMessageStream(
     conversationId,
@@ -388,13 +406,13 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     () => {
       if (!clientDisconnected) {
         writeSSE({ type: 'done' });
-        res.end();
+        endSSE();
       }
     },
     (err: Error) => {
       if (!clientDisconnected) {
         writeSSE({ type: 'error', message: err.message });
-        res.end();
+        endSSE();
       }
     },
     (event) => {

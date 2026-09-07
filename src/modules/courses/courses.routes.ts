@@ -11,6 +11,8 @@ import {
   getModalConfigController, updateModalConfigController,
   getSectionModalController, updateSectionModalController,
   hardDeleteController,
+  getDeletionJobStatusController,
+  retryDeletionJobController,
 } from './courses.controller.js';
 
 const router = Router();
@@ -22,6 +24,8 @@ const upload = multer({
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));
 
 router.get('/', checkPermission('courses', 'can_view'), listController);
+router.get('/deletion-jobs/:jobId', checkPermission('courses', 'can_view'), getDeletionJobStatusController);
+router.post('/deletion-jobs/:jobId/retry', checkPermission('courses', 'can_delete'), retryDeletionJobController);
 router.get('/:id/export-markdown', checkPermission('courses', 'can_view'), exportMarkdownController);
 router.post('/', checkPermission('courses', 'can_add'), createController);
 router.patch('/:id', checkPermission('courses', 'can_edit'), updateController);

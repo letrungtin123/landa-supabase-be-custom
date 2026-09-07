@@ -16,6 +16,8 @@ import {
   createController,
   updateController,
   deleteController,
+  getDeletionJobStatusController,
+  retryDeletionJobController,
   assignGroupsController,
   getProfileController,
   updateProfileController,
@@ -49,6 +51,8 @@ router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superad
 
 router.get('/', checkPermission('account', 'can_view'), listController);
 router.post('/', checkPermission('account', 'can_add'), createController);
+router.get('/deletion-jobs/:jobId', checkPermission('account', 'can_view'), getDeletionJobStatusController);
+router.post('/deletion-jobs/:jobId/retry', checkPermission('account', 'can_delete'), retryDeletionJobController);
 router.get('/:id', checkPermission('account', 'can_view'), getByIdController);
 router.put('/:id', checkPermission('account', 'can_edit'), updateController);
 router.delete('/:id', checkPermission('account', 'can_delete'), deleteController);

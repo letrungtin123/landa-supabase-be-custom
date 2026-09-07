@@ -1,6 +1,10 @@
 ﻿import type { Request, Response, NextFunction } from 'express';
 import * as svc from './courses.service.js';
-import { requestCourseDeletion } from '../course-deletion/course-deletion.service.js';
+import {
+  getCourseDeletionJobStatus,
+  requestCourseDeletion,
+  retryTerminalCourseDeletionJob,
+} from '../course-deletion/course-deletion.service.js';
 import {
   createCourseSchema,
   updateCourseSchema,
@@ -234,8 +238,27 @@ export async function hardDeleteController(req: Request, res: Response, next: Ne
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
 
     const result = await requestCourseDeletion(req.params.id, tenantId, req.user!.id);
-    auditFromReq(req, 'DELETE', 'course', req.params.id, undefined, `Delete requested: ${result.jobId}`);
-    sendSuccess(res, { success: true });
+    // Do not enqueue a fire-and-forget audit row here: the deletion worker may
+    // finish before it writes, which would recreate course residue.
+    sendSuccess(res, { job_id: result.jobId, status: 'queued' }, 'Đã đưa khóa học vào hàng đợi xóa vĩnh viễn', 202);
+  } catch (err) { next(err); }
+}
+
+export async function getDeletionJobStatusController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    sendSuccess(res, await getCourseDeletionJobStatus(req.params.jobId, tenantId));
+  } catch (err) { next(err); }
+}
+
+/** POST /api/courses/deletion-jobs/:jobId/retry — retry an exhausted job. */
+export async function retryDeletionJobController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    await retryTerminalCourseDeletionJob(req.params.jobId, tenantId);
+    sendSuccess(res, { job_id: req.params.jobId, status: 'queued' }, 'Đã đưa deletion job vào hàng đợi retry', 202);
   } catch (err) { next(err); }
 }
 

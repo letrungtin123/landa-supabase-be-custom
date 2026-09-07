@@ -60,7 +60,7 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
   const offset = calcOffset(page, pageSize);
 
   const params: unknown[] = [];
-  const conditions: string[] = [];
+  const conditions: string[] = ['u.deletion_requested_at IS NULL'];
 
   // Tenant scope (trừ superadmin)
   if (tenantId) {
@@ -217,7 +217,7 @@ export async function getUserById(userId: string) {
               t.name AS tenant_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
-       WHERE u.id = $1`,
+       WHERE u.id = $1 AND u.deletion_requested_at IS NULL`,
       [userId],
     ),
     query(
@@ -278,6 +278,7 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
  * Cập nhật user — partial update.
  */
 export async function updateUser(userId: string, input: UpdateUserInput) {
+  await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật');
 
   // Check if role is changing FROM learner → remove from teams
@@ -357,69 +358,21 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
   return result.rows[0];
 }
 
-/**
- * Hard delete user — CASCADE xóa sạch 14+ bảng.
- * Role hierarchy:
- *   - KHÔNG cho xóa chính mình
- *   - staff: KHÔNG xóa superadmin, superuser, staff khác
- *   - superuser: xóa superuser khác, staff, learner (trong tenant)
- *   - superadmin: xóa tất cả (trừ chính mình)
- */
-export async function hardDeleteUser(
-  targetId: string,
-  callerId: string,
-  callerRole: string,
-  callerTenantId: string | null,
-) {
-  // Guard 1: không xóa chính mình
-  if (targetId === callerId) throw new AppError('Không thể xóa chính mình', 403);
-
-  // Lấy thông tin target user
-  const targetResult = await query<{ id: string; username: string; email: string; role: string; tenant_id: string | null; avatar_url: string | null }>(
-    'SELECT id, username, email, role, tenant_id, avatar_url FROM users WHERE id = $1',
-    [targetId],
+async function assertUserIsNotPendingDeletion(userId: string): Promise<void> {
+  const result = await query<{ id: string }>(
+    `SELECT id FROM users WHERE id = $1 AND deletion_requested_at IS NULL`,
+    [userId],
   );
-  if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  const target = targetResult.rows[0];
-  await assertUserNotActiveDemoIframeAccount(targetId, 'Tài khoản learner demo iframe đang được khóa, không thể xóa');
-
-  // Guard 2: tenant isolation (trừ superadmin)
-  if (callerRole !== 'superadmin' && callerTenantId && target.tenant_id !== callerTenantId) {
-    throw new AppError('Không có quyền xóa user ngoài tenant', 403);
+  if (result.rowCount === 0) {
+    throw new AppError('User đang được xóa vĩnh viễn hoặc không tồn tại', 409);
   }
-
-  // Guard 3: role hierarchy
-  const ROLE_LEVEL: Record<string, number> = { learner: 0, learner_plus: 0, staff: 1, superuser: 2, superadmin: 3 };
-  const callerLevel = ROLE_LEVEL[callerRole] ?? 0;
-  const targetLevel = ROLE_LEVEL[target.role] ?? 0;
-
-  // superadmin (3) có thể xóa tất cả (trừ chính mình — đã check)
-  // superuser (2) có thể xóa: superuser khác (2), staff (1), learner (0)
-  // staff (1) chỉ có thể xóa: learner (0)
-  if (callerLevel <= targetLevel && callerRole !== 'superadmin') {
-    throw new AppError(`Không có quyền xóa ${target.role}`, 403);
-  }
-  // Đặc biệt: superadmin mới xóa được superadmin khác
-  if (target.role === 'superadmin' && callerRole !== 'superadmin') {
-    throw new AppError('Chỉ superadmin mới xóa được superadmin', 403);
-  }
-
-  // DELETE — CASCADE xóa sạch: enrollments, course_progress, block_completions,
-  //   refresh_tokens, team_members, user_permission_groups, user_tenants,
-  //   user_badges, study_sessions, notification_recipients,
-  //   course_modal_states, section_modal_shown
-  //   SET NULL: audit_logs.actor_id, course_assets.uploaded_by,
-  //   documents.uploaded_by, notifications.sent_by, help_pages.created_by/updated_by
-  const deleteResult = await query('DELETE FROM users WHERE id = $1 RETURNING id', [targetId]);
-  if (deleteResult.rowCount === 0) throw new AppError('Xóa user thất bại', 500);
-
-  return { avatarUrl: target.avatar_url, deletedUserName: target.username || target.email || target.id };
 }
 
 /**
  * Gán user vào permission groups (replace toàn bộ).
  */
 export async function assignPermissionGroups(userId: string, groupIds: string[]) {
+  await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật quyền');
 
   // Enforce max 1 group per staff/superuser
@@ -488,6 +441,7 @@ export async function updateProfile(
     phone_number?: string;
   },
 ) {
+  await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật hồ sơ');
 
   const sets: string[] = [];
@@ -539,14 +493,26 @@ export async function updateProfile(
  * Update avatar URL.
  */
 export async function updateAvatar(userId: string, avatarUrl: string) {
+  await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật avatar');
-  await query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, userId]);
+  const result = await query(
+    `UPDATE users
+     SET avatar_url = $1
+     WHERE id = $2
+       AND is_active = true
+       AND deletion_requested_at IS NULL`,
+    [avatarUrl, userId],
+  );
+  if (result.rowCount === 0) {
+    throw new AppError('Tài khoản đang bị xóa hoặc không còn hoạt động', 409);
+  }
 }
 
 /**
  * Change password — verify current password first.
  */
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
+  await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể đổi mật khẩu');
 
   const { comparePassword } = await import('../../utils/password.js');

@@ -692,17 +692,25 @@ export async function uploadCourseMentorSectionLogo(
   await uploadFile(storagePath, file.buffer, file.mimetype, true);
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
-  const result = await query<any>(
-    `INSERT INTO course_mentor_sections (tenant_id, course_id, ${logoColumn}, updated_by)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (tenant_id, course_id)
-     DO UPDATE SET
-       ${logoColumn} = EXCLUDED.${logoColumn},
-       updated_by = EXCLUDED.updated_by,
-       updated_at = NOW()
-     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-    [tenantId, courseId, storagePath, userId],
-  );
+  let result;
+  try {
+    result = await query<any>(
+      `INSERT INTO course_mentor_sections (tenant_id, course_id, ${logoColumn}, updated_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tenant_id, course_id)
+       DO UPDATE SET
+         ${logoColumn} = EXCLUDED.${logoColumn},
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()
+       RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+      [tenantId, courseId, storagePath, userId],
+    );
+  } catch (error) {
+    // A deletion fence can reject the DB write after the external upload has
+    // succeeded. Delete the just-uploaded object rather than leaving it orphaned.
+    await deleteFile(storagePath).catch(() => undefined);
+    throw error;
+  }
 
   if (oldPath && oldPath !== storagePath) {
     await deleteFile(oldPath).catch(() => {});
@@ -747,42 +755,11 @@ export async function deleteCourseMentorSectionLogo(
   return mapMentorSection(result.rows[0]);
 }
 
-/**
- * Hard delete course — CASCADE xóa sạch 14+ bảng.
- * Trả về danh sách storage_path để caller cleanup files.
- */
+/** Direct course deletion is forbidden; use the durable deletion-job module. */
 export async function hardDeleteCourse(courseId: string, tenantId: string) {
   void courseId;
   void tenantId;
   throw new AppError('Direct hard delete is disabled. Use course deletion jobs.', 400);
-
-  // 1. Verify course tồn tại + thuộc tenant (tenant isolation)
-  const courseCheck = await query<{ id: string; image_url: string | null }>(
-    'SELECT id, image_url FROM courses WHERE id = $1 AND tenant_id = $2',
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('Course không tồn tại hoặc không thuộc tenant', 404);
-
-  // 2. Lấy danh sách files trên Storage TRƯỚC khi cascade xóa
-  const assetsResult = await query<{ storage_path: string }>(
-    'SELECT storage_path FROM course_assets WHERE course_id = $1 AND storage_path IS NOT NULL',
-    [courseId],
-  );
-  const filePaths = assetsResult.rows.map(r => r.storage_path);
-
-  // Cover image
-  const coverUrl = courseCheck.rows[0].image_url || '';
-  if (coverUrl.length > 0) filePaths.push(coverUrl);
-
-  // 3. DELETE — CASCADE tự xóa: course_blocks, block_completions,
-  //    course_assets, enrollments, course_progress, team_courses,
-  //    course_category_courses, course_modal_configs, course_modal_states,
-  //    section_modal_configs, section_modal_shown
-  //    SET NULL: notifications.course_id, study_sessions.course_id
-  const result = await query('DELETE FROM courses WHERE id = $1 AND tenant_id = $2', [courseId, tenantId]);
-  if (result.rowCount === 0) throw new AppError('Xóa course thất bại', 500);
-
-  return { filePaths };
 }
 
 // ── Modal Config ──

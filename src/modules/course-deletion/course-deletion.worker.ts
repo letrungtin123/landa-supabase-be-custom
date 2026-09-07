@@ -1,6 +1,6 @@
 import { consume, QUEUES } from '../../config/rabbitmq/index.js';
+import { env } from '../../config/env.js';
 import {
-  markJobFailed,
   markJobRetryable,
   requeuePendingDeletionJobs,
   runDeletionJob,
@@ -30,7 +30,7 @@ export async function startCourseDeletionWorker(): Promise<void> {
       try {
         const parsed = JSON.parse(rawMessage) as Record<string, any>;
         const jobId = parseJobId(parsed);
-        await markJobFailed(jobId, 'Max retries reached for course deletion job');
+        await markJobRetryable(jobId, 'RabbitMQ retry limit reached; DB sweeper will retry');
       } catch (err) {
         console.error('[CourseDeleteWorker] Max retry handler failed:', err);
       }
@@ -40,4 +40,10 @@ export async function startCourseDeletionWorker(): Promise<void> {
   await requeuePendingDeletionJobs().catch((err) => {
     console.error('[CourseDeleteWorker] Failed to requeue pending jobs:', err);
   });
+
+  setInterval(() => {
+    requeuePendingDeletionJobs().catch((error) => {
+      console.error('[CourseDeleteWorker] Periodic requeue failed:', error);
+    });
+  }, env.DELETION_REQUEUE_INTERVAL_MS).unref();
 }

@@ -1550,10 +1550,10 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
       tenant_id: string;
       notification_id: string;
       course_id: string;
-      last_user_id: string | null;
+      last_recipient_id: string | null;
       attempts: number;
     }>(
-      `SELECT id, tenant_id, notification_id, course_id, last_user_id, attempts
+      `SELECT id, tenant_id, notification_id, course_id, last_recipient_id, attempts
        FROM notification_email_jobs
        WHERE id = $1::uuid
        FOR UPDATE`,
@@ -1562,6 +1562,22 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
 
     const row = job.rows[0];
     if (!row) {
+      await client.query('COMMIT');
+      return 0;
+    }
+
+    // Serialize course deletion against fanout. The deletion request takes
+    // FOR UPDATE on this row; holding KEY SHARE here means any outbox rows we
+    // enqueue are still visible to, and removed by, the course purge.
+    const activeCourse = await client.query<{ id: string }>(
+      `SELECT id
+       FROM courses
+       WHERE id = $1::varchar AND tenant_id = $2::uuid AND deleted_at IS NULL
+       FOR KEY SHARE`,
+      [row.course_id, row.tenant_id],
+    );
+    if (activeCourse.rowCount === 0) {
+      await client.query('DELETE FROM notification_email_jobs WHERE id = $1::uuid', [row.id]);
       await client.query('COMMIT');
       return 0;
     }
@@ -1604,12 +1620,14 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     }
 
     const recipients = await client.query<{
+      recipient_id: string;
       user_id: string;
       email: string;
       name: string;
       enrolled_at: string | Date | null;
     }>(
-      `SELECT nr.user_id,
+      `SELECT nr.id AS recipient_id,
+              nr.user_id,
               BTRIM(u.email)::text AS email,
               COALESCE(NULLIF(u.full_name, ''), u.username, u.email)::text AS name,
               e.enrolled_at
@@ -1621,18 +1639,21 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
         AND e.tenant_id = $4::uuid
         AND e.is_active = true
        WHERE nr.notification_id = $1::uuid
-          AND ($2::uuid IS NULL OR nr.user_id > $2::uuid)
+          AND ($2::uuid IS NULL OR nr.id > $2::uuid)
+          AND u.is_active = true
+          AND u.deletion_requested_at IS NULL
           AND u.email IS NOT NULL
          AND BTRIM(u.email) <> ''
-       ORDER BY nr.user_id ASC
+       ORDER BY nr.id ASC
        LIMIT $5::int`,
-      [row.notification_id, row.last_user_id, row.course_id, row.tenant_id, batchSize],
+      [row.notification_id, row.last_recipient_id, row.course_id, row.tenant_id, batchSize],
     );
 
     if (recipients.rowCount === 0) {
       await client.query(
         `UPDATE notification_email_jobs
          SET status = 'done',
+             last_user_id = NULL,
              last_error = NULL,
              updated_at = now()
          WHERE id = $1::uuid`,
@@ -1680,7 +1701,7 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
       }
     }
 
-    if (assignmentBaseContext && !row.last_user_id) {
+    if (assignmentBaseContext && !row.last_recipient_id) {
       await enqueueAssignmentCreatedOwnerCopyForFanoutJob(
         client,
         assignmentBaseContext,
@@ -1718,18 +1739,19 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
       ],
     );
 
-    const lastUserId = recipients.rows[recipients.rows.length - 1].user_id;
+    const lastRecipientId = recipients.rows[recipients.rows.length - 1].recipient_id;
     const isDone = recipients.rows.length < batchSize;
     await client.query(
       `UPDATE notification_email_jobs
        SET status = $2,
-           last_user_id = $3::uuid,
+           last_recipient_id = $3::uuid,
+           last_user_id = NULL,
            queued_count = queued_count + $4::int,
            last_error = NULL,
            next_attempt_at = now(),
            updated_at = now()
        WHERE id = $1::uuid`,
-      [row.id, isDone ? 'done' : 'pending', lastUserId, insertResult.rowCount || 0],
+      [row.id, isDone ? 'done' : 'pending', lastRecipientId, insertResult.rowCount || 0],
     );
 
     await client.query('COMMIT');
@@ -1836,6 +1858,7 @@ interface ClaimedEmailOutboxJob {
   tenant_id: string;
   status: string;
   previous_status: string;
+  recipient_user_id: string | null;
   recipient_email: string;
   subject: string;
   html_body: string;
@@ -1861,6 +1884,16 @@ async function claimEmailOutboxJobs(tenantId: string | undefined, limit: number)
          WHERE status IN ('pending', 'failed')
            AND next_attempt_at <= now()
            AND (status = 'pending' OR attempts < max_attempts)
+           AND (
+             (requires_active_recipient = false AND recipient_user_id IS NULL)
+             OR EXISTS (
+               SELECT 1
+               FROM users recipient
+               WHERE recipient.id = email_outbox.recipient_user_id
+                 AND recipient.deletion_requested_at IS NULL
+                 AND recipient.is_active = true
+             )
+           )
            ${tenantFilter}
          ORDER BY next_attempt_at ASC, created_at ASC
          LIMIT $1::int
@@ -1872,6 +1905,7 @@ async function claimEmailOutboxJobs(tenantId: string | undefined, limit: number)
        FROM picked
        WHERE eo.id = picked.id
        RETURNING eo.id, eo.tenant_id, eo.status, picked.previous_status,
+                 eo.recipient_user_id,
                  eo.recipient_email, eo.subject, eo.html_body, eo.text_body,
                  eo.attempts, eo.max_attempts`,
       params,
@@ -1894,6 +1928,16 @@ async function claimEmailOutboxJobs(tenantId: string | undefined, limit: number)
          FROM email_outbox
          WHERE status = 'sending'
            AND updated_at < now() - (($2::int || ' minutes')::interval)
+           AND (
+             (requires_active_recipient = false AND recipient_user_id IS NULL)
+             OR EXISTS (
+               SELECT 1
+               FROM users recipient
+               WHERE recipient.id = email_outbox.recipient_user_id
+                 AND recipient.deletion_requested_at IS NULL
+                 AND recipient.is_active = true
+             )
+           )
            ${staleTenantFilter}
          ORDER BY updated_at ASC, created_at ASC
          LIMIT $1::int
@@ -1905,6 +1949,7 @@ async function claimEmailOutboxJobs(tenantId: string | undefined, limit: number)
        FROM picked
        WHERE eo.id = picked.id
        RETURNING eo.id, eo.tenant_id, eo.status, picked.previous_status,
+                 eo.recipient_user_id,
                  eo.recipient_email, eo.subject, eo.html_body, eo.text_body,
                  eo.attempts, eo.max_attempts`,
       staleParams,
@@ -2121,6 +2166,37 @@ function toSmtpBatchMail(job: ClaimedEmailOutboxJob): SmtpBatchMail {
   };
 }
 
+/**
+ * A job can be claimed just before a permanent deletion request commits. Check
+ * its durable recipient state immediately before touching SMTP, and discard any
+ * now-deleted outbox rows rather than delivering stale personal data.
+ */
+async function filterDeliverableOutboxJobs(jobs: ClaimedEmailOutboxJob[]): Promise<ClaimedEmailOutboxJob[]> {
+  if (jobs.length === 0) return jobs;
+  const result = await query<{ id: string }>(
+    `SELECT eo.id
+     FROM email_outbox eo
+     LEFT JOIN users recipient ON recipient.id = eo.recipient_user_id
+     WHERE eo.id = ANY($1::uuid[])
+       AND eo.status = 'sending'
+       AND (
+         (eo.requires_active_recipient = false AND eo.recipient_user_id IS NULL)
+         OR (recipient.id IS NOT NULL AND recipient.is_active = true AND recipient.deletion_requested_at IS NULL)
+       )`,
+    [jobs.map((job) => job.id)],
+  );
+  const deliverableIds = new Set(result.rows.map((row) => row.id));
+  const cancelledIds = jobs.filter((job) => !deliverableIds.has(job.id)).map((job) => job.id);
+  if (cancelledIds.length > 0) {
+    await query(
+      `DELETE FROM email_outbox
+       WHERE id = ANY($1::uuid[]) AND status = 'sending'`,
+      [cancelledIds],
+    );
+  }
+  return jobs.filter((job) => deliverableIds.has(job.id));
+}
+
 async function getTenantSmtpConfigOrThrow(tenantId: string): Promise<SmtpConfig> {
   const smtp = await getTenantSmtpConfigForSend(tenantId);
   if (!smtp || !smtp.password_ciphertext || !smtp.password_iv || !smtp.password_auth_tag) {
@@ -2170,7 +2246,9 @@ async function sendClaimedEmailOutboxTenantGroup(
 
   const jobMap = new Map(jobs.map(job => [job.id, job]));
   for (let start = 0; start < jobs.length; start += EMAIL_OUTBOX_SESSION_MAX_MESSAGES) {
-    const slice = jobs.slice(start, start + EMAIL_OUTBOX_SESSION_MAX_MESSAGES);
+    const claimedSlice = jobs.slice(start, start + EMAIL_OUTBOX_SESSION_MAX_MESSAGES);
+    const slice = await filterDeliverableOutboxJobs(claimedSlice);
+    if (slice.length === 0) continue;
     const seen = new Set<string>();
     let sliceSuccessCount = 0;
     let sliceInfrastructureError: unknown = null;

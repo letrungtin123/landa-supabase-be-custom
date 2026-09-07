@@ -64,6 +64,14 @@ function optionalNonNegativeInt(key: string, fallback: number): number {
   return num;
 }
 
+function optionalPositiveInt(key: string, fallback: number): number {
+  const num = optionalInt(key, fallback);
+  if (num <= 0) {
+    throw new Error(`[ENV] ${key} must be a positive integer, received: "${num}"`);
+  }
+  return num;
+}
+
 function optionalBoolean(key: string, fallback: boolean): boolean {
   const raw = process.env[key]?.trim().toLowerCase();
   if (!raw) return fallback;
@@ -101,6 +109,7 @@ export const env = {
   // Redis (optional; DB fallback is used if unavailable)
   REDIS_URL: process.env.REDIS_URL?.trim() || '',
   REDIS_CONNECT_TIMEOUT_MS: optionalInt('REDIS_CONNECT_TIMEOUT_MS', 2_000),
+  AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION: optionalBoolean('AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION', true),
 
   // SSO config encryption (optional until SSO secrets are configured)
   SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',
@@ -127,6 +136,15 @@ export const env = {
   EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD: optionalInt('EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD', 3),
   EMAIL_OUTBOX_TENANT_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_COOLDOWN_MS', 300_000),
   EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS', 1_800_000),
+
+  // Durable user/course deletion workers. Polling is mandatory delivery recovery
+  // when a RabbitMQ publish succeeds only partially or a worker crashes. Jobs
+  // are due-based; do not reduce the retry delays to a hot polling loop.
+  DELETION_REQUEUE_INTERVAL_MS: optionalPositiveInt('DELETION_REQUEUE_INTERVAL_MS', 30_000),
+  DELETION_MAX_ATTEMPTS: optionalPositiveInt('DELETION_MAX_ATTEMPTS', 12),
+  DELETION_RETRY_BASE_MS: optionalPositiveInt('DELETION_RETRY_BASE_MS', 30_000),
+  DELETION_RETRY_MAX_MS: optionalPositiveInt('DELETION_RETRY_MAX_MS', 3_600_000),
+  DELETION_JOB_RETENTION_DAYS: optionalPositiveInt('DELETION_JOB_RETENTION_DAYS', 30),
 
   // Course progress recalculation worker
   COURSE_PROGRESS_RECALC_WORKER_ENABLED: optionalBoolean('COURSE_PROGRESS_RECALC_WORKER_ENABLED', true),
