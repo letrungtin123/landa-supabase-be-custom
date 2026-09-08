@@ -233,7 +233,10 @@ async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
        SET ${sets.join(', ')}
        FROM current
        WHERE tenant.id = $${idx}
-       RETURNING ${tenantFields}, current.data_limit_bytes AS previous_data_limit_bytes`,
+       RETURNING tenant.id, tenant.name, tenant.slug, tenant.domain_learner,
+                 tenant.domain_admin, tenant.max_users, tenant.max_courses,
+                 tenant.data_limit_bytes, tenant.is_active,
+                 current.data_limit_bytes AS previous_data_limit_bytes`,
       params,
     );
 
