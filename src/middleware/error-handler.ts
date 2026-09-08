@@ -5,17 +5,27 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { env } from '../config/env.js';
+import {
+  TENANT_DATA_LIMIT_REACHED_CODE,
+  TENANT_DATA_LIMIT_REACHED_MESSAGE,
+  TENANT_DATA_LIMIT_REACHED_SQLSTATE,
+  TENANT_DATA_QUOTA_RECONCILING_CODE,
+  TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
+  TENANT_DATA_QUOTA_RECONCILING_SQLSTATE,
+} from '../modules/tenants/tenant-data-quota.constants.js';
 
 /**
  * Custom error class cho business logic errors.
  */
 export class AppError extends Error {
   public readonly statusCode: number;
+  public readonly code?: string;
 
-  constructor(message: string, statusCode = 400) {
+  constructor(message: string, statusCode = 400, code?: string) {
     super(message);
     this.name = 'AppError';
     this.statusCode = statusCode;
+    this.code = code;
   }
 }
 
@@ -29,6 +39,27 @@ export function errorHandler(err: Error, _req: Request, res: Response, _next: Ne
     res.status(err.statusCode).json({
       success: false,
       message: err.message,
+      ...(err.code ? { code: err.code } : {}),
+    });
+    return;
+  }
+
+  // PostgreSQL quota triggers are the final database enforcement boundary.
+  // Map their private SQLSTATE before any raw database detail can reach a UI.
+  if ((err as { code?: string }).code === TENANT_DATA_LIMIT_REACHED_SQLSTATE) {
+    res.status(409).json({
+      success: false,
+      code: TENANT_DATA_LIMIT_REACHED_CODE,
+      message: TENANT_DATA_LIMIT_REACHED_MESSAGE,
+    });
+    return;
+  }
+
+  if ((err as { code?: string }).code === TENANT_DATA_QUOTA_RECONCILING_SQLSTATE) {
+    res.status(503).json({
+      success: false,
+      code: TENANT_DATA_QUOTA_RECONCILING_CODE,
+      message: TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
     });
     return;
   }

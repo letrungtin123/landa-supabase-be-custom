@@ -11,6 +11,11 @@ const domainField = z.string().max(255)
   .pipe(z.string().regex(/^https?:\/\/[a-z0-9]([a-z0-9.:@-]*[a-z0-9])?$/i, 'Nhập đầy đủ URL. Ví dụ: https://lms.nesso.com.vn'))
   .nullable().optional();
 
+const dataLimitBytesField = z.string()
+  .regex(/^\d+$/, 'Dung lượng phải là số nguyên không âm')
+  .refine((value) => BigInt(value) <= 9223372036854775807n, 'Dung lượng vượt quá giới hạn cho phép')
+  .nullable().optional();
+
 export const createTenantSchema = z.object({
   name: z.string().min(1, 'Tên tenant không được để trống').max(255),
   slug: z.string().min(1, 'Slug không được để trống').max(100)
@@ -19,6 +24,7 @@ export const createTenantSchema = z.object({
   domain_admin: domainField,
   max_users: z.number().int().min(0, 'Giới hạn user phải >= 0').nullable().optional(),
   max_courses: z.number().int().min(0, 'Giới hạn course phải >= 0').nullable().optional(),
+  data_limit_bytes: dataLimitBytesField,
   settings: z.record(z.unknown()).optional(),
 });
 
@@ -29,6 +35,7 @@ export const updateTenantSchema = z.object({
   domain_admin: domainField,
   max_users: z.number().int().min(0).nullable().optional(),
   max_courses: z.number().int().min(0).nullable().optional(),
+  data_limit_bytes: dataLimitBytesField,
   is_active: z.boolean().optional(),
   settings: z.record(z.unknown()).optional(),
 });

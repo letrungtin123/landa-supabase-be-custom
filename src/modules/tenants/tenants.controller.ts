@@ -14,6 +14,19 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { auditFromReq } from '../../middleware/audit-log.js';
 import { invalidateTenantCache } from '../../middleware/tenant-context.js';
 
+function formatQuotaLimitForAudit(bytes: string | null): string {
+  if (bytes === null) return 'Không giới hạn';
+  try {
+    const gigabyte = 1_000_000_000n;
+    const hundredths = (BigInt(bytes) * 100n + gigabyte / 2n) / gigabyte;
+    const whole = hundredths / 100n;
+    const fraction = (hundredths % 100n).toString().padStart(2, '0');
+    return fraction === '00' ? `${whole} GB` : `${whole}.${fraction} GB`;
+  } catch {
+    return 'Không xác định';
+  }
+}
+
 /** GET /api/tenants */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -48,9 +61,21 @@ export async function updateController(req: Request, res: Response, next: NextFu
     const parsed = updateTenantSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const tenant = await tenantsService.updateTenant(req.params.id, parsed.data);
+    const update = await tenantsService.updateTenant(req.params.id, parsed.data);
+    const { tenant, previousDataLimitBytes } = update;
     invalidateTenantCache(req.params.id);
-    auditFromReq(req, 'UPDATE', 'tenant', tenant.id, tenant.name);
+    const didChangeDataLimit = parsed.data.data_limit_bytes !== undefined
+      && previousDataLimitBytes !== tenant.data_limit_bytes;
+    auditFromReq(
+      req,
+      'UPDATE',
+      'tenant',
+      tenant.id,
+      tenant.name,
+      didChangeDataLimit
+        ? `Cập nhật dung lượng lưu trữ: ${formatQuotaLimitForAudit(previousDataLimitBytes)} → ${formatQuotaLimitForAudit(tenant.data_limit_bytes)}`
+        : undefined,
+    );
     sendSuccess(res, tenant, 'Cập nhật thành công');
   } catch (err) { next(err); }
 }
@@ -161,6 +186,19 @@ export async function getQuotaController(req: Request, res: Response, next: Next
   try {
     const usage = await tenantsService.getTenantQuotaUsage(req.params.id);
     sendSuccess(res, usage);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/tenants/current/data-quota — quota của tenant trong phiên hiện tại. */
+export async function getCurrentDataQuotaController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user?.tenantId;
+    if (!tenantId) {
+      sendError(res, 'Không xác định được doanh nghiệp đang sử dụng', 403);
+      return;
+    }
+    const quota = await tenantsService.getCurrentTenantDataQuota(tenantId);
+    sendSuccess(res, quota);
   } catch (err) { next(err); }
 }
 

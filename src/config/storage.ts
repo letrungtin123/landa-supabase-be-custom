@@ -11,6 +11,16 @@ import { env } from './env.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES } from './upload-limits.js';
+import {
+  commitStorageUpload,
+  flagStorageDeletesForReconciliation,
+  flagStorageUploadForReconciliation,
+  recordStorageDelete,
+  releaseStorageDeleteReservations,
+  releaseStorageUploadReservation,
+  reserveStorageDeletes,
+  reserveStorageUpload,
+} from '../modules/tenants/tenant-data-quota.service.js';
 
 // ── Supabase admin client (service_role — bypass RLS) ──
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
@@ -18,6 +28,14 @@ const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
 });
 
 export const STORAGE_BUCKET = 'landa-storage';
+
+/** A received Storage API error is a definitive provider rejection, unlike a timeout. */
+class StorageProviderRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StorageProviderRejectedError';
+  }
+}
 
 // ── Ensure bucket exists (idempotent — gọi 1 lần khi app start) ──
 let bucketReady = false;
@@ -57,20 +75,38 @@ export async function uploadFile(
 ): Promise<string> {
   await ensureBucket();
 
-  const { error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .upload(storagePath, buffer, {
-      contentType,
-      upsert,
-      cacheControl: '3600',
-    });
+  // Reserve before the provider call. This is intentionally server-side: a
+  // browser-provided Content-Length is not a quota authority.
+  const reservation = await reserveStorageUpload(storagePath, buffer.byteLength);
 
-  if (error) {
-    throw new Error(`[Storage] Upload failed (${storagePath}): ${error.message}`);
+  try {
+    const { error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(storagePath, buffer, {
+        contentType,
+        upsert,
+        cacheControl: '3600',
+      });
+
+    if (error) {
+      throw new StorageProviderRejectedError(`[Storage] Upload failed (${storagePath}): ${error.message}`);
+    }
+
+    // A successful provider response is the only point where a reservation is
+    // converted into used bytes. A commit mismatch is conservatively retained
+    // for reconciliation rather than freeing quota optimistically.
+    await commitStorageUpload(reservation, buffer.byteLength);
+    // Trả về PATH, không phải full URL — DB chỉ lưu path để không lộ infra
+    return storagePath;
+  } catch (error) {
+    if (error instanceof StorageProviderRejectedError) {
+      await releaseStorageUploadReservation(reservation)
+        .catch(() => flagStorageUploadForReconciliation(reservation));
+    } else {
+      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+    }
+    throw error;
   }
-
-  // Trả về PATH, không phải full URL — DB chỉ lưu path để không lộ infra
-  return storagePath;
 }
 
 /**
@@ -125,9 +161,22 @@ export async function deleteFiles(storagePaths: readonly string[]): Promise<void
   await ensureBucket();
   for (let index = 0; index < paths.length; index += 100) {
     const batch = paths.slice(index, index + 100);
-    const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(batch);
-    if (error) {
-      throw new Error(`[Storage] Delete failed (${batch.length} object(s)): ${error.message}`);
+    const reservations = await reserveStorageDeletes(batch);
+    try {
+      const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(batch);
+      if (error) {
+        throw new StorageProviderRejectedError(`[Storage] Delete failed (${batch.length} object(s)): ${error.message}`);
+      }
+      // Only reduce quota after the provider confirms removal of this batch.
+      await recordStorageDelete(batch, reservations);
+    } catch (error) {
+      if (error instanceof StorageProviderRejectedError) {
+        await releaseStorageDeleteReservations(reservations)
+          .catch(() => flagStorageDeletesForReconciliation(reservations));
+      } else {
+        await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+      }
+      throw error;
     }
   }
 }

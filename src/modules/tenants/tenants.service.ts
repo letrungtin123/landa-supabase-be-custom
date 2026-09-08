@@ -16,8 +16,22 @@ import { AppError } from '../../middleware/error-handler.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
 import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';
+import { getTenantDataQuota } from './tenant-data-quota.service.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
+
+type UpdatedTenantRow = {
+  id: string;
+  name: string;
+  slug: string;
+  domain_learner: string | null;
+  domain_admin: string | null;
+  max_users: number | null;
+  max_courses: number | null;
+  data_limit_bytes: string | null;
+  is_active: boolean;
+  previous_data_limit_bytes?: string | null;
+};
 
 function getGeminiKeyFromSettings(settings: unknown): string | null {
   if (!settings || typeof settings !== 'object') return null;
@@ -45,15 +59,23 @@ export async function listTenants(queryParams: Record<string, unknown>) {
 
   if (search) {
     params.push(`%${search}%`);
-    where = `WHERE name ILIKE $${params.length} OR slug ILIKE $${params.length} OR domain_learner ILIKE $${params.length} OR domain_admin ILIKE $${params.length}`;
+    where = `WHERE t.name ILIKE $${params.length} OR t.slug ILIKE $${params.length} OR t.domain_learner ILIKE $${params.length} OR t.domain_admin ILIKE $${params.length}`;
   }
 
   params.push(pageSize, offset);
   const result = await query<any>(
-    `SELECT id, name, slug, domain_learner, domain_admin, is_active, settings, max_users, max_courses, created_at, updated_at,
+    `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
+            t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
+            COALESCE(quota.database_used_bytes, 0)::bigint::text AS database_used_bytes,
+            COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
+            COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
+            COALESCE(quota.state, 'initializing') AS data_quota_state,
+            quota.last_verified_at AS data_quota_last_verified_at,
             COUNT(*) OVER() AS full_count
-     FROM tenants ${where}
-     ORDER BY created_at DESC
+     FROM tenants t
+     LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
+     ${where}
+     ORDER BY t.created_at DESC
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params,
   );
@@ -77,7 +99,16 @@ export async function listTenants(queryParams: Record<string, unknown>) {
  */
 export async function getTenantById(id: string) {
   const result = await query(
-    'SELECT id, name, slug, domain_learner, domain_admin, is_active, settings, max_users, max_courses, created_at, updated_at FROM tenants WHERE id = $1',
+    `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
+            t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
+            COALESCE(quota.database_used_bytes, 0)::bigint::text AS database_used_bytes,
+            COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
+            COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
+            COALESCE(quota.state, 'initializing') AS data_quota_state,
+            quota.last_verified_at AS data_quota_last_verified_at
+     FROM tenants t
+     LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
+     WHERE t.id = $1`,
     [id],
   );
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
@@ -97,10 +128,10 @@ export async function createTenant(input: CreateTenantInput) {
     await client.query('BEGIN');
 
     const result = await client.query(
-      `INSERT INTO tenants (name, slug, domain_learner, domain_admin, max_users, max_courses, settings)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses`,
-      [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, JSON.stringify(input.settings || {})],
+      `INSERT INTO tenants (name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, settings)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8)
+       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes`,
+      [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, input.data_limit_bytes ?? null, JSON.stringify(input.settings || {})],
     );
     const tenant = result.rows[0];
 
@@ -150,7 +181,8 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
     nextGeminiFingerprint = nextKey ? fingerprintGeminiApiKey(nextKey) : null;
   }
 
-  const tenant = await updateTenantFromDb(id, input);
+  const update = await updateTenantFromDb(id, input);
+  const tenant = update.tenant;
   await Promise.all([
     bumpCacheVersion(...cacheVersions.tenantResource('system', 'tenants-simple')),
     bumpCacheVersion(...cacheVersions.tenantResource(id, 'branding')),
@@ -162,7 +194,7 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
       TENANT_PUBLIC_CACHE_RESOURCES,
     ),
   ]);
-  return tenant;
+  return update;
 }
 
 async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
@@ -177,19 +209,41 @@ async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
   if (input.domain_admin !== undefined) { sets.push(`domain_admin = $${idx++}`); params.push(input.domain_admin); }
   if (input.max_users !== undefined) { sets.push(`max_users = $${idx++}`); params.push(input.max_users); }
   if (input.max_courses !== undefined) { sets.push(`max_courses = $${idx++}`); params.push(input.max_courses); }
+  if (input.data_limit_bytes !== undefined) { sets.push(`data_limit_bytes = $${idx++}::bigint`); params.push(input.data_limit_bytes); }
   if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
   if (input.settings !== undefined) { sets.push(`settings = $${idx++}`); params.push(JSON.stringify(input.settings)); }
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
   params.push(id);
-  const result = await query(
-    `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, is_active`,
-    params,
-  );
+  const tenantFields = 'id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active';
+  const result = input.data_limit_bytes === undefined
+    ? await query<UpdatedTenantRow>(
+      `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${tenantFields}`,
+      params,
+    )
+    : await query<UpdatedTenantRow>(
+      `WITH current AS (
+         SELECT data_limit_bytes
+         FROM tenants
+         WHERE id = $${idx}
+         FOR UPDATE
+       )
+       UPDATE tenants AS tenant
+       SET ${sets.join(', ')}
+       FROM current
+       WHERE tenant.id = $${idx}
+       RETURNING ${tenantFields}, current.data_limit_bytes AS previous_data_limit_bytes`,
+      params,
+    );
 
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
-  return result.rows[0];
+  const row = result.rows[0];
+  const { previous_data_limit_bytes: previousDataLimitBytes = null, ...tenant } = row;
+  return {
+    tenant,
+    previousDataLimitBytes: previousDataLimitBytes === null ? null : String(previousDataLimitBytes),
+  };
 }
 
 /**
@@ -358,12 +412,21 @@ export async function getTenantQuotaUsage(tenantId: string) {
   );
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
   const row = result.rows[0];
+  const dataQuota = await getTenantDataQuota(tenantId);
   return {
     max_users: row.max_users,
     max_courses: row.max_courses,
     current_users: parseInt(row.current_users, 10),
     current_courses: parseInt(row.current_courses, 10),
+    data_quota: dataQuota,
   };
+}
+
+/** Quota dữ liệu duy nhất cần cho header; tránh COUNT users/courses trên mọi page load. */
+export async function getCurrentTenantDataQuota(tenantId: string) {
+  const quota = await getTenantDataQuota(tenantId);
+  if (!quota) throw new AppError('Tenant không tồn tại', 404);
+  return quota;
 }
 
 /**

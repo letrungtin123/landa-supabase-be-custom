@@ -72,6 +72,14 @@ function optionalPositiveInt(key: string, fallback: number): number {
   return num;
 }
 
+function optionalBoundedInt(key: string, fallback: number, minimum: number, maximum: number): number {
+  const num = optionalInt(key, fallback);
+  if (num < minimum || num > maximum) {
+    throw new Error(`[ENV] ${key} must be between ${minimum} and ${maximum}, received: "${num}"`);
+  }
+  return num;
+}
+
 function optionalBoolean(key: string, fallback: boolean): boolean {
   const raw = process.env[key]?.trim().toLowerCase();
   if (!raw) return fallback;
@@ -152,6 +160,23 @@ export const env = {
   COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK: optionalInt('COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK', 5),
   COURSE_PROGRESS_RECALC_RABBIT_PREFETCH: optionalInt('COURSE_PROGRESS_RECALC_RABBIT_PREFETCH', 1),
   COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS: optionalNonNegativeInt('COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS', 60000),
+
+  // Tenant data quota reconciliation is deliberately a dedicated PM2 worker.
+  // It must never run inside every HTTP API replica on startup.
+  TENANT_DATA_QUOTA_WORKER_ENABLED: optionalBoolean('TENANT_DATA_QUOTA_WORKER_ENABLED', false),
+  TENANT_DATA_QUOTA_WORKER_HEARTBEAT_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_HEARTBEAT_INTERVAL_MS', 30_000, 5_000, 60_000),
+  TENANT_DATA_QUOTA_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_POLL_INTERVAL_MS', 15_000, 1_000, 300_000),
+  TENANT_DATA_QUOTA_WORKER_STANDBY_RETRY_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_STANDBY_RETRY_MS', 30_000, 1_000, 300_000),
+  TENANT_DATA_QUOTA_WORKER_PAGE_SIZE: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_PAGE_SIZE', 500, 1, 1_000),
+  TENANT_DATA_QUOTA_WORKER_MAX_TENANTS_PER_CYCLE: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_TENANTS_PER_CYCLE', 1, 1, 10),
+  TENANT_DATA_QUOTA_WORKER_MAX_PAGES_PER_CLAIM: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_PAGES_PER_CLAIM', 100, 1, 10_000),
+  // At least 90 seconds leaves room for a bounded Storage read, ledger write,
+  // and a 30-second lease guard before a resumable slice yields.
+  TENANT_DATA_QUOTA_WORKER_LEASE_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_LEASE_SECONDS', 120, 90, 900),
+  TENANT_DATA_QUOTA_WORKER_MAX_SLICE_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_SLICE_MS', 60_000, 5_000, 870_000),
+  TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS', 600_000, 30_000, 600_000),
+  TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
+  TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',

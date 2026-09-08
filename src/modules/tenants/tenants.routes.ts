@@ -5,6 +5,7 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize } from '../../middleware/authorize.js';
+import { tenantContext } from '../../middleware/tenant-context.js';
 import {
   listController,
   getByIdController,
@@ -16,6 +17,7 @@ import {
   getCourseComponentPermissionsController,
   updateCourseComponentPermissionsController,
   getQuotaController,
+  getCurrentDataQuotaController,
   getGroupLabelsController,
   getRoleLabelsController,
   listSimpleController,
@@ -34,6 +36,10 @@ router.use(authenticate);
 
 // ── Simple list — superadmin + superuser (cho dropdown filter) ──
 router.get('/simple', authorize('superadmin'), listSimpleController);
+
+// Tenant đang active được lấy từ JWT; superadmin chỉ có thể đổi qua X-Tenant-Id
+// vốn đã được tenantContext kiểm tra. Không nhận tenant id tùy ý từ URL.
+router.get('/current/data-quota', tenantContext, getCurrentDataQuotaController);
 
 // ── CRUD + modules — superadmin only ──
 router.get('/', authorize('superadmin'), listController);
