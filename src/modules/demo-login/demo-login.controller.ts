@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import * as authService from '../auth/auth.service.js';
 import * as demoIframeService from './demo-iframe.service.js';
@@ -40,12 +40,16 @@ export async function updateAdminConfigController(req: Request, res: Response, n
     const body = updateDemoLoginConfigSchema.safeParse(req.body);
     if (!body.success) { sendError(res, firstError(body), 400); return; }
 
-    const result = await demoLoginService.updateDemoLoginConfig(
-      params.data.tenantId,
-      body.data,
-      req.user?.id || null,
+    const result = await runAuditedTransaction(
+      () => demoLoginService.updateDemoLoginConfig(params.data.tenantId, body.data, req.user?.id || null),
+      (updated) => ({
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant',
+          { code: 'demo_login.settings.updated', context: { related_entity_name: 'demo_qr_login', related_entity_type: 'tenant_setting' } },
+          params.data.tenantId, updated.tenant.name,
+        ), tenantId: params.data.tenantId,
+      }),
     );
-    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Cập nhật cấu hình demo QR login');
     sendSuccess(res, result, 'Đã lưu cấu hình demo QR login');
   } catch (err) {
     next(err);
@@ -75,12 +79,17 @@ export async function replaceAccountsController(req: Request, res: Response, nex
     const body = replaceDemoLoginAccountsSchema.safeParse(req.body);
     if (!body.success) { sendError(res, firstError(body), 400); return; }
 
+    const config = await demoLoginService.getDemoLoginConfig(params.data.tenantId);
     const result = await demoLoginService.replaceDemoLoginAccounts(
-      params.data.tenantId,
-      body.data,
-      req.user?.id || null,
+      params.data.tenantId, body.data, req.user?.id || null,
+      {
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant',
+          { code: 'demo_login.accounts.updated', context: { related_entity_name: 'demo_qr_login', related_entity_type: 'tenant_setting', affected_count: body.data.accounts.length } },
+          params.data.tenantId, config.tenant.name,
+        ), tenantId: params.data.tenantId,
+      },
     );
-    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Cập nhật danh sách learner demo');
     sendSuccess(res, result, 'Đã cập nhật danh sách learner demo');
   } catch (err) {
     next(err);
@@ -92,8 +101,16 @@ export async function deleteAccountController(req: Request, res: Response, next:
     const params = deleteDemoLoginAccountParamSchema.safeParse(req.params);
     if (!params.success) { sendError(res, firstError(params), 400); return; }
 
-    await demoLoginService.deleteDemoLoginAccount(params.data.tenantId, params.data.publicId);
-    auditFromReq(req, 'DELETE', 'tenant', params.data.tenantId, params.data.publicId, 'Xóa learner khỏi demo QR login');
+    const result = await runAuditedTransaction(
+      () => demoLoginService.deleteDemoLoginAccount(params.data.tenantId, params.data.publicId),
+      (deleted) => ({
+        ...createTransactionalAuditEntry(
+          req, 'DELETE', 'demo_login_account',
+          { code: 'demo_login.account.removed', context: { related_entity_name: deleted.username, related_entity_type: 'learner' } },
+          params.data.publicId, deleted.username,
+        ), tenantId: params.data.tenantId,
+      }),
+    );
     sendSuccess(res, null, 'Đã xóa tài khoản demo');
   } catch (err) {
     next(err);
@@ -147,12 +164,16 @@ export async function updateAdminIframeConfigController(req: Request, res: Respo
     const body = updateDemoIframeConfigSchema.safeParse(req.body);
     if (!body.success) { sendError(res, firstError(body), 400); return; }
 
-    const result = await demoIframeService.updateDemoIframeConfig(
-      params.data.tenantId,
-      body.data,
-      req.user?.id || null,
+    const result = await runAuditedTransaction(
+      () => demoIframeService.updateDemoIframeConfig(params.data.tenantId, body.data, req.user?.id || null),
+      (updated) => ({
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant',
+          { code: 'demo_iframe.settings.updated', context: { related_entity_name: 'demo_iframe_login', related_entity_type: 'tenant_setting' } },
+          params.data.tenantId, updated.tenant.name,
+        ), tenantId: params.data.tenantId,
+      }),
     );
-    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Cập nhật cấu hình demo iframe login');
     sendSuccess(res, result, 'Đã lưu cấu hình demo iframe login');
   } catch (err) {
     next(err);
@@ -164,8 +185,16 @@ export async function regenerateAdminIframeEmbedController(req: Request, res: Re
     const params = tenantParamSchema.safeParse(req.params);
     if (!params.success) { sendError(res, firstError(params), 400); return; }
 
-    const result = await demoIframeService.regenerateDemoIframeEmbedId(params.data.tenantId, req.user?.id || null);
-    auditFromReq(req, 'UPDATE', 'tenant', params.data.tenantId, result.tenant.name, 'Tạo lại mã nhúng demo iframe login');
+    const result = await runAuditedTransaction(
+      () => demoIframeService.regenerateDemoIframeEmbedId(params.data.tenantId, req.user?.id || null),
+      (updated) => ({
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant',
+          { code: 'demo_iframe.embed.regenerated', context: { related_entity_name: 'demo_iframe_login', related_entity_type: 'tenant_setting' } },
+          params.data.tenantId, updated.tenant.name,
+        ), tenantId: params.data.tenantId,
+      }),
+    );
     sendSuccess(res, result, 'Đã tạo lại mã nhúng demo iframe');
   } catch (err) {
     next(err);

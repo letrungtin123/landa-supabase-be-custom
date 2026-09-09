@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -100,6 +101,7 @@ export async function replaceTenantRoleLabels(
   tenantId: string,
   input: unknown,
   actorId: string | null,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<RoleLabelMap> {
   const labels = sanitizeRoleLabels(input);
   const entries = Object.entries(labels) as [UserRole, string][];
@@ -121,6 +123,7 @@ export async function replaceTenantRoleLabels(
       );
     }
 
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
     await invalidateTenantRoleLabelsCache(tenantId);
     return labels;

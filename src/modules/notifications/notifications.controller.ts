@@ -2,7 +2,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import * as svc from './notifications.service.js';
 
 export async function send(req: Request, res: Response, next: NextFunction) {
@@ -16,8 +16,28 @@ export async function send(req: Request, res: Response, next: NextFunction) {
       return;
     }
 
-    const result = await svc.sendCourseNotification(course_id, tenantId, title, message || '', userId);
-    auditFromReq(req, 'CREATE', 'notification', course_id, title, `Gửi cho ${result.recipients} learners`);
+    const result = await svc.sendCourseNotification(
+      course_id,
+      tenantId,
+      title,
+      message || '',
+      userId,
+      (created) => createTransactionalAuditEntry(
+        req,
+        'CREATE',
+        'notification',
+        {
+          code: 'notification.created',
+          context: {
+            course_id: created.courseId,
+            course_name: created.courseName,
+            affected_count: created.recipientCount,
+          },
+        },
+        created.notificationId,
+        title,
+      ),
+    );
     sendSuccess(res, result);
   } catch (err) {
     next(err);

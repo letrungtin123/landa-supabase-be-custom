@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import {
   invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
@@ -63,6 +64,23 @@ type CourseUpdateInput = {
   image_url?: string;
   is_public?: boolean;
 };
+
+export interface CourseAuditSnapshot {
+  id: string;
+  tenant_id: string;
+  display_name: string;
+  visible_to_staff_only: boolean;
+  image_url: string | null;
+}
+
+export async function getCourseAuditName(courseId: string, tenantId: string): Promise<string> {
+  const result = await query<{ display_name: string }>(
+    'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
+    [courseId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Course không tồn tại', 404);
+  return result.rows[0].display_name;
+}
 
 function getRoleDisplayLabel(role: string | null | undefined, labels: RoleLabelMap = {}): string {
   if (!role) return '';
@@ -317,8 +335,13 @@ export async function createCourse(tenantId: string, createdBy: string, input: {
   return result.rows[0];
 }
 
-export async function updateCourse(courseId: string, tenantId: string, input: CourseUpdateInput) {
-  const course = await updateCourseFromDb(courseId, tenantId, input);
+export async function updateCourse(
+  courseId: string,
+  tenantId: string,
+  input: CourseUpdateInput,
+  auditEntry?: (before: CourseAuditSnapshot, after: CourseAuditSnapshot) => TransactionalAuditEntry,
+) {
+  const course = await updateCourseFromDb(courseId, tenantId, input, auditEntry);
   await Promise.all([
     invalidateCourseReadCaches(courseId, course.tenant_id),
     invalidateTenantCourseCaches(course.tenant_id),
@@ -326,7 +349,12 @@ export async function updateCourse(courseId: string, tenantId: string, input: Co
   return course;
 }
 
-async function updateCourseFromDb(courseId: string, tenantId: string, input: CourseUpdateInput) {
+async function updateCourseFromDb(
+  courseId: string,
+  tenantId: string,
+  input: CourseUpdateInput,
+  auditEntry?: (before: CourseAuditSnapshot, after: CourseAuditSnapshot) => TransactionalAuditEntry,
+) {
   if (input.is_public !== undefined) {
     throw new AppError('Chỉ được bật Công khai truy cập ở danh mục khóa học', 400);
   }
@@ -335,10 +363,10 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
   try {
     await client.query('BEGIN');
 
-    const current = await client.query<{ id: string; tenant_id: string; is_public: boolean }>(
-      `SELECT id, tenant_id, COALESCE(is_public, false) AS is_public
+    const current = await client.query<CourseAuditSnapshot>(
+      `SELECT id, tenant_id, display_name, visible_to_staff_only, image_url
        FROM courses
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+       WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL
        FOR UPDATE`,
       [courseId, tenantId],
     );
@@ -353,7 +381,7 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
     if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
 
     params.push(courseId, tenantId);
-    const result = await client.query(
+    const result = await client.query<CourseAuditSnapshot>(
       `UPDATE courses
        SET ${sets.join(', ')}
        WHERE id = $${idx++} AND tenant_id = $${idx} AND deleted_at IS NULL
@@ -362,8 +390,12 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
     );
 
 
+    const updated = result.rows[0];
+    if (!updated) throw new AppError('Course không tồn tại', 404);
+    if (auditEntry) await appendAuditLog(client, auditEntry(current.rows[0], updated));
+
     await client.query('COMMIT');
-    return result.rows[0];
+    return updated;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
@@ -372,16 +404,16 @@ async function updateCourseFromDb(courseId: string, tenantId: string, input: Cou
   }
 }
 
-export async function bulkCourseAction(ids: string[], action: string) {
+export async function bulkCourseAction(ids: string[], action: string, tenantId: string) {
   const staffOnly = action === 'staff_only';
   const r = await query(
     `UPDATE courses
      SET visible_to_staff_only = $1,
          is_public = CASE WHEN $1::boolean THEN false ELSE is_public END,
          updated_at = NOW()
-     WHERE id = ANY($2) AND deleted_at IS NULL
+     WHERE id = ANY($2) AND tenant_id = $3 AND deleted_at IS NULL
      RETURNING id, tenant_id`,
-    [staffOnly, ids],
+    [staffOnly, ids, tenantId],
   );
   await Promise.all((r.rows as Array<{ id: string; tenant_id: string }>).map((row) => invalidateCourseReadCaches(row.id, row.tenant_id)));
   return { updated: r.rowCount || 0 };
@@ -463,6 +495,7 @@ export async function updateCourseMentor(
   tenantId: string,
   mentorId: string | null,
   assignedBy: string,
+  createAuditEntry?: (context: { courseName: string; mentorName: string | null }) => TransactionalAuditEntry,
 ): Promise<CourseMentor | null> {
   const client = await getClient();
   let mentorRow: any = null;
@@ -471,10 +504,12 @@ export async function updateCourseMentor(
   try {
     await client.query('BEGIN');
 
-    const courseResult = await client.query<{ mentor_id: string | null }>(
-      `SELECT mentor_id
-       FROM courses
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+    const courseResult = await client.query<{ mentor_id: string | null; display_name: string; mentor_name: string | null }>(
+      `SELECT c.mentor_id, c.display_name,
+              COALESCE(NULLIF(u.full_name, ''), u.username) AS mentor_name
+       FROM courses c
+       LEFT JOIN users u ON u.id = c.mentor_id
+       WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL
        FOR UPDATE`,
       [courseId, tenantId],
     );
@@ -513,6 +548,12 @@ export async function updateCourseMentor(
       changed = true;
     }
 
+    if (changed && createAuditEntry) {
+      await appendAuditLog(client, createAuditEntry({
+        courseName: courseResult.rows[0].display_name,
+        mentorName: mentorRow ? (mentorRow.full_name?.trim() || mentorRow.username) : courseResult.rows[0].mentor_name,
+      }));
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -672,6 +713,7 @@ export async function uploadCourseMentorSectionLogo(
   userId: string,
   mode: MentorSectionLogoMode,
   file: Express.Multer.File,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<CourseMentorSection> {
   await ensureCourseInTenant(courseId, tenantId);
 
@@ -692,9 +734,11 @@ export async function uploadCourseMentorSectionLogo(
   await uploadFile(storagePath, file.buffer, file.mimetype, true);
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
+  const client = await getClient();
   let result;
   try {
-    result = await query<any>(
+    await client.query('BEGIN');
+    result = await client.query<any>(
       `INSERT INTO course_mentor_sections (tenant_id, course_id, ${logoColumn}, updated_by)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (tenant_id, course_id)
@@ -705,11 +749,16 @@ export async function uploadCourseMentorSectionLogo(
        RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
       [tenantId, courseId, storagePath, userId],
     );
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
   } catch (error) {
-    // A deletion fence can reject the DB write after the external upload has
-    // succeeded. Delete the just-uploaded object rather than leaving it orphaned.
+    await client.query('ROLLBACK').catch(() => undefined);
+    // The storage write happened before the transaction. If either the data
+    // write or atomic audit insert fails, compensate by removing this new file.
     await deleteFile(storagePath).catch(() => undefined);
     throw error;
+  } finally {
+    client.release();
   }
 
   if (oldPath && oldPath !== storagePath) {
@@ -725,27 +774,41 @@ export async function deleteCourseMentorSectionLogo(
   tenantId: string,
   userId: string,
   mode: MentorSectionLogoMode,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<CourseMentorSection | null> {
   await ensureCourseInTenant(courseId, tenantId);
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
-  const current = await query<any>(
-    `SELECT ${logoColumn} AS logo_path
-     FROM course_mentor_sections
-     WHERE course_id = $1 AND tenant_id = $2`,
-    [courseId, tenantId],
-  );
+  const client = await getClient();
+  let oldPath: string | null = null;
+  let result;
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<{ logo_path: string | null }>(
+      `SELECT ${logoColumn} AS logo_path
+       FROM course_mentor_sections
+       WHERE course_id = $1 AND tenant_id = $2
+       FOR UPDATE`,
+      [courseId, tenantId],
+    );
+    if (current.rowCount === 0) { await client.query('COMMIT'); return null; }
+    oldPath = current.rows[0].logo_path;
 
-  if (current.rowCount === 0) return null;
-  const oldPath = current.rows[0]?.logo_path;
-
-  const result = await query<any>(
-    `UPDATE course_mentor_sections
-     SET ${logoColumn} = NULL, updated_by = $3, updated_at = NOW()
-     WHERE course_id = $1 AND tenant_id = $2
-     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-    [courseId, tenantId, userId],
-  );
+    result = await client.query<any>(
+      `UPDATE course_mentor_sections
+       SET ${logoColumn} = NULL, updated_by = $3, updated_at = NOW()
+       WHERE course_id = $1 AND tenant_id = $2
+       RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
+      [courseId, tenantId, userId],
+    );
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 
   if (oldPath) {
     await deleteFile(oldPath).catch(() => {});
@@ -772,7 +835,8 @@ export async function getCourseModalConfig(courseId: string) {
   return result.rows[0];
 }
 
-export async function upsertCourseModalConfig(courseId: string, input: Record<string, unknown>) {
+export async function upsertCourseModalConfig(courseId: string, tenantId: string, input: Record<string, unknown>) {
+  await ensureCourseInTenant(courseId, tenantId);
   const fields = ['welcome_enabled', 'welcome_title', 'welcome_description', 'confirm_enabled', 'confirm_title', 'confirm_description', 'confirm_checkbox_text', 'completion_enabled', 'completion_title', 'completion_description', 'completion_social_type', 'completion_social_link'];
   const sets: string[] = [];
   const params: unknown[] = [courseId];
@@ -802,7 +866,12 @@ export async function getSectionModalConfig(courseId: string, sectionId: string)
   return result.rows[0];
 }
 
-export async function upsertSectionModalConfig(courseId: string, input: { section_id: string; enabled?: boolean; title?: string; description?: string }) {
+export async function upsertSectionModalConfig(
+  courseId: string,
+  tenantId: string,
+  input: { section_id: string; enabled?: boolean; title?: string; description?: string },
+) {
+  await ensureCourseInTenant(courseId, tenantId);
   await query(
     `INSERT INTO section_modal_configs (course_id, section_id, enabled, title, description)
      VALUES ($1, $2, $3, $4, $5)

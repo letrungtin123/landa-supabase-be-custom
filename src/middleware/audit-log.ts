@@ -1,135 +1,152 @@
 ﻿// ═══════════════════════════════════════════════════════════════
-// Audit Log Middleware — Ghi log hành động tự động
-// Chạy async sau khi response đã gửi (không block request)
+// Audit Log Middleware — structured, transactional audit entries only.
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request } from 'express';
-import { query } from '../config/database.js';
+import type { PoolClient } from 'pg';
+import { withDatabaseTransaction } from '../config/database.js';
+import { normalizeStructuredAuditEvent, type StructuredAuditEvent } from '../modules/audit-logs/audit-event.contract.js';
 
 type AuditAction = 'CREATE' | 'UPDATE' | 'DELETE' | 'LOGIN' | 'LOGOUT';
 
-interface AuditEntry {
+/**
+ * Immutable, server-generated identity of an audited subject that can be
+ * permanently removed later. Do not put this in event_metadata: list APIs
+ * return metadata for every row, while subject email is detail-only PII.
+ */
+export interface AuditSubjectSnapshot {
+  displayName?: string | null;
+  username?: string | null;
+  email?: string | null;
+  role?: string | null;
+}
+
+export interface TransactionalAuditEntry {
   tenantId?: string | null;
   actorId?: string | null;
   actorUsername?: string;
+  /** Only platform/global events may intentionally have no tenant owner. */
+  platformEvent?: boolean;
   action: AuditAction;
   entityType: string;
   entityId?: string;
   entityName?: string;
-  details?: string;
   ipAddress?: string;
+  event: StructuredAuditEvent;
+  /** Only server-side deletion flows may provide a subject snapshot. */
+  subject?: AuditSubjectSnapshot;
+}
+
+function normalizeSnapshotText(value: string | null | undefined, maxLength: number): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
+}
+
+function normalizeSubjectSnapshot(subject: AuditSubjectSnapshot | undefined): Required<AuditSubjectSnapshot> {
+  return {
+    displayName: normalizeSnapshotText(subject?.displayName, 160),
+    username: normalizeSnapshotText(subject?.username, 150),
+    email: normalizeSnapshotText(subject?.email?.toLowerCase(), 254),
+    role: normalizeSnapshotText(subject?.role, 50),
+  };
 }
 
 /**
  * Lấy IP address thực từ request (hỗ trợ proxy).
  */
 export function getClientIp(req: Request): string {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string') return forwarded.split(',')[0].trim();
-  return req.socket.remoteAddress || 'unknown';
+  // Express derives req.ip from its configured `trust proxy` policy. Reading
+  // X-Forwarded-For directly would let an untrusted client forge audit IPs.
+  const candidate = req.ip || req.socket.remoteAddress || 'unknown';
+  return candidate.slice(0, 45);
 }
 
 /**
- * Ghi audit log — chạy async, không throw error.
- * Fire-and-forget: không block request flow.
+ * Appends a structured audit record through the caller's existing transaction.
+ * The transaction owner must await this before COMMIT; this is deliberately not
+ * fire-and-forget, so a quota/database failure rolls the business write back.
  */
-// Mapping entity_type → { table, nameColumn } để auto-resolve tên khi thiếu
-const ENTITY_NAME_MAP: Record<string, { table: string; col: string }> = {
-  user: { table: 'users', col: 'username' },
-  tenant: { table: 'tenants', col: 'name' },
-  course: { table: 'courses', col: 'display_name' },
-  document: { table: 'documents', col: 'title' },
-  document_category: { table: 'document_categories', col: 'name' },
-  permission_group: { table: 'permission_groups', col: 'name' },
-  org_group: { table: 'org_groups', col: 'name' },
-  sub_group: { table: 'sub_groups', col: 'name' },
-  team: { table: 'teams', col: 'name' },
-  module: { table: 'modules', col: 'name' },
-  help_folder: { table: 'help_folders', col: 'title' },
-  help_page: { table: 'help_pages', col: 'title' },
-  course_category: { table: 'course_categories', col: 'name' },
-  course_block: { table: 'course_blocks', col: 'display_name' },
-  course_asset: { table: 'course_assets', col: 'display_name' },
-  knowledgebase: { table: 'knowledgebases', col: 'name' },
-  kb_document: { table: 'kb_documents', col: 'name' },
-  chatbot: { table: 'chatbots', col: 'name' },
-  assignment: { table: 'course_assignments', col: 'title' },
-  lesson_author_job: { table: 'courses', col: 'display_name' },
-  user_permission_groups: { table: 'users', col: 'username' },
-  user_tenants: { table: 'users', col: 'username' },
-  tenant_modules: { table: 'tenants', col: 'name' },
-  tenant_role_labels: { table: 'tenants', col: 'name' },
-  tenant_group_labels: { table: 'tenants', col: 'name' },
-  tenant_smtp_config: { table: 'tenants', col: 'name' },
-  sso_config: { table: 'tenants', col: 'name' },
-  branding_image: { table: 'tenants', col: 'name' },
-  dashboard_content: { table: 'tenants', col: 'name' },
-  badge_setting: { table: 'tenants', col: 'name' },
-  permission_matrix: { table: 'permission_groups', col: 'name' },
-  permission_group_members: { table: 'permission_groups', col: 'name' },
-  team_member: { table: 'teams', col: 'name' },
-  team_course: { table: 'teams', col: 'name' },
-  team_category: { table: 'teams', col: 'name' },
-  team_doc_category: { table: 'teams', col: 'name' },
-  team_course_category: { table: 'teams', col: 'name' },
-  course_mentor_section: { table: 'courses', col: 'display_name' },
-  course_modal_config: { table: 'courses', col: 'display_name' },
-  section_modal_config: { table: 'courses', col: 'display_name' },
-};
-
-/**
- * Auto-resolve entity name từ DB nếu chưa truyền.
- * Fire-and-forget, không block.
- */
-async function resolveEntityName(entityType: string, entityId: string): Promise<string | null> {
-  const mapping = ENTITY_NAME_MAP[entityType];
-  if (!mapping) return null;
-  try {
-    const r = await query<Record<string, string>>(
-      `SELECT ${mapping.col} AS name FROM ${mapping.table} WHERE id = $1 LIMIT 1`,
-      [entityId],
-    );
-    return r.rows[0]?.name || null;
-  } catch {
-    return null;
+export async function appendAuditLog(client: PoolClient, entry: TransactionalAuditEntry): Promise<void> {
+  const structured = normalizeStructuredAuditEvent(entry.event);
+  const subject = normalizeSubjectSnapshot(entry.subject);
+  if (!entry.tenantId && !entry.platformEvent) {
+    throw new Error('Audit log thiếu doanh nghiệp sở hữu');
   }
-}
+  const viewerScope = entry.platformEvent ? 'superadmin_only' : structured.viewerScope;
 
-export async function logAudit(entry: AuditEntry): Promise<void> {
-  try {
-    // Auto-resolve entity_name nếu thiếu mà có entityId
-    let entityName = entry.entityName || null;
-    if (!entityName && entry.entityId) {
-      entityName = await resolveEntityName(entry.entityType, entry.entityId);
-    }
-
-    await query(
-      `INSERT INTO audit_logs (tenant_id, actor_id, actor_username, action, entity_type, entity_id, entity_name, details, ip_address)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        entry.tenantId || null,
-        entry.actorId || null,
-        entry.actorUsername || null,
-        entry.action,
-        entry.entityType,
-        entry.entityId || null,
-        entityName,
-        entry.details || '',
-        entry.ipAddress || null,
-      ],
+  // Snapshot PII only at the audited write, rather than enriching every
+  // authenticated request. The primary-key lookup is O(1) and runs on the
+  // same transaction, so the audit record cannot refer to a future profile.
+  let actorDisplayName: string | null = null;
+  let actorEmail: string | null = null;
+  if (entry.actorId) {
+    const actor = await client.query<{ full_name: string | null; email: string | null }>(
+      `SELECT NULLIF(btrim(full_name), '') AS full_name,
+              NULLIF(lower(btrim(email)), '') AS email
+       FROM users
+       WHERE id = $1::uuid
+       LIMIT 1`,
+      [entry.actorId],
     );
-  } catch (err) {
-    // Log lỗi nhưng không crash app
-    console.error('[AuditLog] Failed to write:', err);
+    actorDisplayName = actor.rows[0]?.full_name?.slice(0, 160) || null;
+    actorEmail = actor.rows[0]?.email?.slice(0, 254) || null;
   }
+  await client.query(
+    `INSERT INTO audit_logs (
+       tenant_id, is_platform_event, actor_id, actor_username, actor_display_name, actor_email, action, entity_type, entity_id,
+       entity_name, details, ip_address, event_code, event_metadata, changes,
+       viewer_scope, subject_display_name, subject_username, subject_email, subject_role
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, '', $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19)`,
+    [
+      entry.tenantId || null,
+      entry.platformEvent === true,
+      entry.actorId || null,
+      entry.actorUsername || null,
+      actorDisplayName,
+      actorEmail,
+      entry.action,
+      entry.entityType,
+      entry.entityId || null,
+      entry.entityName || null,
+      entry.ipAddress || null,
+      structured.eventCode,
+      JSON.stringify(structured.metadata),
+      JSON.stringify(structured.changes),
+      viewerScope,
+      subject.displayName,
+      subject.username,
+      subject.email,
+      subject.role,
+    ],
+  );
 }
 
-/**
- * Helper: tạo audit entry từ request context.
- */
-export function auditFromReq(req: Request, action: AuditAction, entityType: string, entityId?: string, entityName?: string, details?: string): void {
-  // Fire-and-forget — không await
-  logAudit({
+/** Creates a superadmin-only platform event which must never inherit X-Tenant-ID. */
+export function createPlatformTransactionalAuditEntry(
+  req: Request,
+  action: AuditAction,
+  entityType: string,
+  event: StructuredAuditEvent,
+  entityId?: string,
+  entityName?: string,
+): TransactionalAuditEntry {
+  return {
+    ...createTransactionalAuditEntry(req, action, entityType, event, entityId, entityName),
+    tenantId: null,
+    platformEvent: true,
+  };
+}
+
+export function createTransactionalAuditEntry(
+  req: Request,
+  action: AuditAction,
+  entityType: string,
+  event: StructuredAuditEvent,
+  entityId?: string,
+  entityName?: string,
+): TransactionalAuditEntry {
+  return {
     tenantId: req.user?.tenantId,
     actorId: req.user?.id,
     actorUsername: req.user?.username,
@@ -137,29 +154,24 @@ export function auditFromReq(req: Request, action: AuditAction, entityType: stri
     entityType,
     entityId,
     entityName,
-    details,
     ipAddress: getClientIp(req),
-  });
+    event,
+  };
 }
 
-export function auditFromReqForTenant(
-  req: Request,
-  tenantId: string,
-  action: AuditAction,
-  entityType: string,
-  entityId?: string,
-  entityName?: string,
-  details?: string,
-): void {
-  logAudit({
-    tenantId,
-    actorId: req.user?.id,
-    actorUsername: req.user?.username,
-    action,
-    entityType,
-    entityId,
-    entityName,
-    details,
-    ipAddress: getClientIp(req),
+/**
+ * Runs a business write and its allowlisted audit record in exactly one
+ * database transaction. If quota enforcement or the audit insert fails, the
+ * business write is rolled back before the controller sends a success reply.
+ */
+export async function runAuditedTransaction<T>(
+  operation: () => Promise<T>,
+  createEntry: (result: T) => TransactionalAuditEntry | null | Promise<TransactionalAuditEntry | null>,
+): Promise<T> {
+  return withDatabaseTransaction(async (client) => {
+    const result = await operation();
+    const entry = await createEntry(result);
+    if (entry) await appendAuditLog(client, entry);
+    return result;
   });
 }

@@ -1,5 +1,5 @@
 ﻿import type { Request, Response, NextFunction } from 'express';
-import { auditFromReqForTenant } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import * as badgesService from './badges.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 
@@ -100,8 +100,13 @@ export async function updateTenantBadges(req: Request, res: Response, next: Next
       return;
     }
 
-    await badgesService.updateAllTenantBadgeSettings(tenantId, badges);
-    auditFromReqForTenant(req, tenantId, 'UPDATE', 'badge_setting', tenantId, undefined, `Cập nhật ${badges.length} danh hiệu`);
+    await badgesService.updateAllTenantBadgeSettings(
+      tenantId, badges,
+      {
+        ...createTransactionalAuditEntry(req, 'UPDATE', 'badge_setting', { code: 'badge.settings.updated', context: { affected_count: badges.length } }, tenantId, 'badge_settings'),
+        tenantId,
+      },
+    );
     sendSuccess(res, null, 'Cập nhật danh hiệu thành công');
   } catch (err) {
     next(err);
@@ -122,8 +127,13 @@ export async function uploadCardImage(req: Request, res: Response, next: NextFun
     if (!badgeId) { sendError(res, 'Thiếu badgeId', 400); return; }
     if (!validateBadgeImageFile(file, res)) return;
 
-    const result = await badgesService.uploadBadgeCardImage(tenantId, badgeId, file);
-    auditFromReqForTenant(req, tenantId, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh card ${badgeId}`);
+    const result = await badgesService.uploadBadgeCardImage(
+      tenantId, badgeId, file,
+      {
+        ...createTransactionalAuditEntry(req, 'UPDATE', 'badge_setting', { code: 'badge.image.updated', context: { related_entity_name: `${badgeId}: card`, related_entity_type: 'badge', file_size_bytes: file.size } }, badgeId, badgeId),
+        tenantId,
+      },
+    );
     sendSuccess(res, result, 'Upload ảnh card thành công');
   } catch (err) {
     next(err);
@@ -144,8 +154,13 @@ export async function uploadIconImage(req: Request, res: Response, next: NextFun
     if (!badgeId) { sendError(res, 'Thiếu badgeId', 400); return; }
     if (!validateBadgeImageFile(file, res)) return;
 
-    const result = await badgesService.uploadBadgeIconImage(tenantId, badgeId, file);
-    auditFromReqForTenant(req, tenantId, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh icon ${badgeId}`);
+    const result = await badgesService.uploadBadgeIconImage(
+      tenantId, badgeId, file,
+      {
+        ...createTransactionalAuditEntry(req, 'UPDATE', 'badge_setting', { code: 'badge.image.updated', context: { related_entity_name: `${badgeId}: icon`, related_entity_type: 'badge', file_size_bytes: file.size } }, badgeId, badgeId),
+        tenantId,
+      },
+    );
     sendSuccess(res, result, 'Upload ảnh icon thành công');
   } catch (err) {
     next(err);
@@ -166,8 +181,13 @@ export async function uploadMobileCardImage(req: Request, res: Response, next: N
     if (!badgeId) { sendError(res, 'Thiếu badgeId', 400); return; }
     if (!validateBadgeImageFile(file, res)) return;
 
-    const result = await badgesService.uploadBadgeMobileCardImage(tenantId, badgeId, file);
-    auditFromReqForTenant(req, tenantId, 'UPDATE', 'badge_setting', tenantId, undefined, `Upload ảnh card mobile ${badgeId}`);
+    const result = await badgesService.uploadBadgeMobileCardImage(
+      tenantId, badgeId, file,
+      {
+        ...createTransactionalAuditEntry(req, 'UPDATE', 'badge_setting', { code: 'badge.image.updated', context: { related_entity_name: `${badgeId}: mobile_card`, related_entity_type: 'badge', file_size_bytes: file.size } }, badgeId, badgeId),
+        tenantId,
+      },
+    );
     sendSuccess(res, result, 'Upload ảnh card mobile thành công');
   } catch (err) {
     next(err);

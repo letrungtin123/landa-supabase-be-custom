@@ -56,12 +56,23 @@ export async function consume(
       console.error(`[Consumer:${queue}] Error (attempt ${retryCount + 1}/${MAX_RETRIES + 1}):`, err.message);
 
       if (retryCount < MAX_RETRIES) {
-        // 🔁 Re-publish with incremented retry count
-        channel.sendToQueue(queue, msg.content, {
-          persistent: true,
-          headers: { 'x-retries': retryCount + 1 },
-        });
-        channel.ack(msg); // ACK the old message
+        // Re-publish with a broker confirm before acknowledging the old
+        // message. Otherwise a process/channel crash can silently lose it.
+        try {
+          await new Promise<void>((resolve, reject) => {
+            channel.sendToQueue(queue, msg.content, {
+              persistent: true,
+              headers: { 'x-retries': retryCount + 1 },
+            }, (publishError) => {
+              if (publishError) reject(publishError);
+              else resolve();
+            });
+          });
+          channel.ack(msg);
+        } catch (publishError: any) {
+          console.error(`[Consumer:${queue}] Retry publish was not confirmed:`, publishError?.message || String(publishError));
+          channel.nack(msg, false, true);
+        }
       } else {
         // ❌ Max retries reached → call onFail and discard
         console.error(`[Consumer:${queue}] Max retries reached, discarding message`);

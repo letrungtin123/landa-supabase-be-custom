@@ -6,6 +6,39 @@ import type { Request, Response, NextFunction } from 'express';
 import * as authService from './auth.service.js';
 import { loginSchema, refreshSchema } from './auth.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { withDatabaseTransaction } from '../../config/database.js';
+import { appendAuditLog, getClientIp, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
+
+/**
+ * Authentication availability must not depend on tenant quota. We record only
+ * operator sessions (staff+) and deliberately do not fail login/logout when
+ * the audit write is rejected; the failure remains visible to operations.
+ */
+async function appendBestEffortOperatorAuthAudit(
+  req: Request,
+  actor: { id: string; username: string; role: string; tenant_id: string | null },
+  action: 'LOGIN' | 'LOGOUT',
+): Promise<void> {
+  if (!['staff', 'superuser', 'superadmin'].includes(actor.role)) return;
+  const isPlatformEvent = actor.role === 'superadmin' || !actor.tenant_id;
+  const entry: TransactionalAuditEntry = {
+    tenantId: isPlatformEvent ? null : actor.tenant_id,
+    platformEvent: isPlatformEvent,
+    actorId: actor.id,
+    actorUsername: actor.username,
+    action,
+    entityType: 'user',
+    entityId: actor.id,
+    entityName: actor.username,
+    ipAddress: getClientIp(req),
+    event: { code: action === 'LOGIN' ? 'auth.login.succeeded' : 'auth.logout.succeeded' },
+  };
+  try {
+    await withDatabaseTransaction((client) => appendAuditLog(client, entry));
+  } catch (error) {
+    console.error(`[Audit] Could not record ${action.toLowerCase()} event for ${actor.id}:`, error);
+  }
+}
 
 /**
  * POST /api/auth/login
@@ -23,6 +56,7 @@ export async function loginController(req: Request, res: Response, next: NextFun
     const origin = parsed.data.origin || (req.headers.origin as string | undefined);
 
     const result = await authService.login(parsed.data.username, parsed.data.password, parsed.data.client_app, origin);
+    await appendBestEffortOperatorAuthAudit(req, result.user, 'LOGIN');
 
     sendSuccess(res, result, 'Đăng nhập thành công');
   } catch (err) {
@@ -58,6 +92,15 @@ export async function logoutController(req: Request, res: Response, next: NextFu
     const parsed = refreshSchema.safeParse(req.body);
     if (parsed.success && parsed.data.refresh_token) {
       await authService.logout(parsed.data.refresh_token);
+    }
+
+    if (req.user) {
+      await appendBestEffortOperatorAuthAudit(req, {
+        id: req.user.id,
+        username: req.user.username,
+        role: req.user.role,
+        tenant_id: req.user.role === 'superadmin' ? null : req.user.tenantId,
+      }, 'LOGOUT');
     }
 
     sendSuccess(res, null, 'Đăng xuất thành công');

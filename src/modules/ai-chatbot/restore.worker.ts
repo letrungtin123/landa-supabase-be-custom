@@ -3,8 +3,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { consume, QUEUES } from '../../config/rabbitmq/index.js';
+import { env } from '../../config/env.js';
 import {
   markKnowledgebaseRestoreFailed,
+  redispatchRecoverableKnowledgebaseRestores,
   releaseKnowledgebaseRestoreLock,
   restoreKnowledgebase,
 } from './kb.service.js';
@@ -14,8 +16,8 @@ interface RestoreJob {
   jobId: string;
   kbId: string;
   tenantId: string;
-  lockKey: string;
-  lockToken: string;
+  lockKey?: string;
+  lockToken?: string;
 }
 
 function parseRestoreJob(data: Record<string, any>): RestoreJob | null {
@@ -23,14 +25,18 @@ function parseRestoreJob(data: Record<string, any>): RestoreJob | null {
   if (
     typeof jobId !== 'string' ||
     typeof kbId !== 'string' ||
-    typeof tenantId !== 'string' ||
-    typeof lockKey !== 'string' ||
-    typeof lockToken !== 'string'
+    typeof tenantId !== 'string'
   ) {
     return null;
   }
 
-  return { jobId, kbId, tenantId, lockKey, lockToken };
+  return {
+    jobId,
+    kbId,
+    tenantId,
+    lockKey: typeof lockKey === 'string' ? lockKey : undefined,
+    lockToken: typeof lockToken === 'string' ? lockToken : undefined,
+  };
 }
 
 async function processRestoreJob(data: Record<string, any>): Promise<void> {
@@ -47,7 +53,7 @@ async function processRestoreJob(data: Record<string, any>): Promise<void> {
     console.log(
       `[RestoreWorker] KB ${job.kbId} restored: enqueued=${result.enqueued}, failed_to_enqueue=${result.failed_to_enqueue}, orphaned_stores=${result.orphaned_stores}, mappings=${result.deleted_mappings}`,
     );
-    await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
+    if (job.lockKey && job.lockToken) await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
   } catch (err: any) {
     console.error(`[RestoreWorker] Restore failed for KB ${job.kbId}:`, err?.message || String(err));
     throw err;
@@ -67,7 +73,7 @@ export async function startRestoreWorker(): Promise<void> {
         const job = parseRestoreJob(data);
         if (job) {
           await markKnowledgebaseRestoreFailed(job.jobId, job.kbId, job.tenantId, 'Restore worker reached max retries');
-          await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
+          if (job.lockKey && job.lockToken) await releaseKnowledgebaseRestoreLock(job.lockKey, job.lockToken);
           console.error(`[RestoreWorker] Max retries reached for KB ${job.kbId}, lock released`);
         }
       } catch (err: any) {
@@ -76,4 +82,12 @@ export async function startRestoreWorker(): Promise<void> {
     },
     { prefetch: 1 },
   );
+  void redispatchRecoverableKnowledgebaseRestores().catch((error) => {
+    console.error('[RestoreWorker] Initial restore recovery failed:', error);
+  });
+  setInterval(() => {
+    void redispatchRecoverableKnowledgebaseRestores().catch((error) => {
+      console.error('[RestoreWorker] Restore recovery failed:', error);
+    });
+  }, env.KB_RESTORE_RECOVERY_POLL_INTERVAL_MS).unref();
 }

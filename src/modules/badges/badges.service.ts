@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
@@ -105,7 +106,11 @@ export async function updateTenantBadgeSetting(tenantId: string, badgeId: string
   await invalidateTenantBadgeCaches(tenantId);
 }
 
-export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatuses: TenantBadgeStatusUpdate[]) {
+export async function updateAllTenantBadgeSettings(
+  tenantId: string,
+  badgeStatuses: TenantBadgeStatusUpdate[],
+  auditEntry?: TransactionalAuditEntry,
+) {
   if (badgeStatuses.length === 0) return;
 
   const badgeIds = [...new Set(badgeStatuses.map((status) => status.badge_id).filter(Boolean))];
@@ -175,6 +180,7 @@ export async function updateAllTenantBadgeSettings(tenantId: string, badgeStatus
       );
     }
 
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -208,34 +214,51 @@ async function uploadTenantBadgeImage(
   file: { buffer: Buffer; mimetype: string },
   column: BadgeImageColumn,
   fileBaseName: string,
+  auditEntry?: TransactionalAuditEntry,
 ) {
   await assertBadgeAccessibleToTenant(tenantId, badgeId);
-  await query(
-    `INSERT INTO tenant_badge_settings (tenant_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [tenantId, badgeId]
-  );
-
-  const badge = await query<any>(
-    `SELECT ${column} AS image_url FROM tenant_badge_settings WHERE tenant_id = $1 AND badge_id = $2`,
-    [tenantId, badgeId]
-  );
-
-  const oldPath = badge.rows[0]?.image_url;
-  if (oldPath) {
-    await deleteFileByUrl(oldPath).catch(() => {});
-  }
-
   const ext = getBadgeImageExtension(file.mimetype);
-  const fileName = `${fileBaseName}.${ext}`;
+  // A new immutable object key lets us preserve the currently visible image
+  // until the DB update and its audit record have committed successfully.
+  const fileName = `${fileBaseName}-${Date.now()}.${ext}`;
   const subFolder = `badges/${badgeId}`;
   const storagePath = buildStoragePath(tenantId, 'branding', fileName, subFolder);
-
   await uploadFile(storagePath, file.buffer, file.mimetype, true);
 
-  await query(
-    `UPDATE tenant_badge_settings SET ${column} = $1, updated_at = now() WHERE tenant_id = $2 AND badge_id = $3`,
-    [storagePath, tenantId, badgeId]
-  );
+  const client = await getClient();
+  let oldPath: string | null = null;
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO tenant_badge_settings (tenant_id, badge_id)
+       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [tenantId, badgeId],
+    );
+    const current = await client.query<{ image_url: string | null }>(
+      `SELECT ${column} AS image_url
+       FROM tenant_badge_settings
+       WHERE tenant_id = $1 AND badge_id = $2
+       FOR UPDATE`,
+      [tenantId, badgeId],
+    );
+    oldPath = current.rows[0]?.image_url ?? null;
+    await client.query(
+      `UPDATE tenant_badge_settings
+       SET ${column} = $1, updated_at = now()
+       WHERE tenant_id = $2 AND badge_id = $3`,
+      [storagePath, tenantId, badgeId],
+    );
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    await deleteFileByUrl(storagePath).catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
   await invalidateTenantBadgeCaches(tenantId);
 
   return storagePath;
@@ -245,8 +268,9 @@ export async function uploadBadgeCardImage(
   tenantId: string,
   badgeId: string,
   file: { buffer: Buffer; mimetype: string; originalname: string },
+  auditEntry?: TransactionalAuditEntry,
 ) {
-  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'card_image_url', 'card');
+  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'card_image_url', 'card', auditEntry);
   return { card_image_url: storagePath };
 }
 
@@ -254,8 +278,9 @@ export async function uploadBadgeIconImage(
   tenantId: string,
   badgeId: string,
   file: { buffer: Buffer; mimetype: string; originalname: string },
+  auditEntry?: TransactionalAuditEntry,
 ) {
-  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'icon_image_url', 'icon');
+  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'icon_image_url', 'icon', auditEntry);
   return { icon_image_url: storagePath };
 }
 
@@ -263,7 +288,8 @@ export async function uploadBadgeMobileCardImage(
   tenantId: string,
   badgeId: string,
   file: { buffer: Buffer; mimetype: string; originalname: string },
+  auditEntry?: TransactionalAuditEntry,
 ) {
-  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'mobile_card_image_url', 'mobile-card');
+  const storagePath = await uploadTenantBadgeImage(tenantId, badgeId, file, 'mobile_card_image_url', 'mobile-card', auditEntry);
   return { mobile_card_image_url: storagePath };
 }

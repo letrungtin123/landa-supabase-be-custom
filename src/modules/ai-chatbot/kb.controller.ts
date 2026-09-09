@@ -13,7 +13,7 @@ import * as kbService from './kb.service.js';
 import { getGeminiApiKey } from './gemini.service.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { fixMulterFilename } from '../../config/storage.js';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 
 // ── KB CRUD ──
 
@@ -39,8 +39,10 @@ export async function createKb(req: Request, res: Response): Promise<void> {
   const parsed = createKbSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-  const kb = await kbService.createKnowledgebase(tenantId, parsed.data, req.user!.id);
-  auditFromReq(req, 'CREATE', 'knowledgebase', kb.id, kb.name);
+  const kb = await runAuditedTransaction(
+    () => kbService.createKnowledgebase(tenantId, parsed.data, req.user!.id),
+    (created) => createTransactionalAuditEntry(req, 'CREATE', 'knowledgebase', { code: 'knowledgebase.created' }, created.id, created.name),
+  );
   sendSuccess(res, kb, undefined, 201);
 }
 
@@ -49,9 +51,20 @@ export async function updateKb(req: Request, res: Response): Promise<void> {
   const parsed = updateKbSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-  const kb = await kbService.updateKnowledgebase(req.params.id, tenantId, parsed.data);
+  let previous: Awaited<ReturnType<typeof kbService.getKnowledgebase>> | undefined;
+  const kb = await runAuditedTransaction(
+    async () => {
+      // Audit snapshots must be read from the same transaction as the write.
+      previous = await kbService.getKnowledgebase(req.params.id, tenantId);
+      return kbService.updateKnowledgebase(req.params.id, tenantId, parsed.data);
+    },
+    (updated) => updated ? createTransactionalAuditEntry(
+      req, 'UPDATE', 'knowledgebase',
+      { code: 'knowledgebase.updated', changes: previous && previous.name !== updated.name ? [{ field: 'name', before: previous.name, after: updated.name }] : [] },
+      updated.id, updated.name,
+    ) : null,
+  );
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
-  auditFromReq(req, 'UPDATE', 'knowledgebase', kb.id, kb.name);
   sendSuccess(res, kb);
 }
 
@@ -61,11 +74,12 @@ export async function deleteKb(req: Request, res: Response): Promise<void> {
     // Fetch name before deleting for audit log
     const kb = await kbService.getKnowledgebase(req.params.id, tenantId);
     if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
-    const deleted = await kbService.deleteKnowledgebase(req.params.id, tenantId);
-    if (!deleted) { sendError(res, 'Lỗi xoá KB', 500); return; }
-    invalidateGeminiStoreNameCache(req.params.id);
-    auditFromReq(req, 'DELETE', 'knowledgebase', req.params.id, kb.name);
-    sendSuccess(res, { deleted: true });
+    const queued = await runAuditedTransaction(
+      () => kbService.queueKnowledgebaseDeletion(req.params.id, tenantId),
+      (didQueue) => didQueue ? createTransactionalAuditEntry(req, 'DELETE', 'knowledgebase', { code: 'knowledgebase.deleted' }, kb.id, kb.name) : null,
+    );
+    if (!queued) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
+    sendSuccess(res, { queued: true }, 'Đã đưa Kho tri thức vào hàng đợi xoá an toàn', 202);
   } catch (err: any) {
     sendError(res, err.message, 400);
   }
@@ -81,9 +95,14 @@ export async function restoreKb(req: Request, res: Response): Promise<void> {
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
     if (!kb) { sendError(res, 'Knowledge Base khong ton tai', 404); return; }
 
-    const result = await kbService.enqueueKnowledgebaseRestore(kbId, tenantId);
+    const result = await runAuditedTransaction(
+      () => kbService.enqueueKnowledgebaseRestore(kbId, tenantId),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'knowledgebase', { code: 'knowledgebase.restore.queued' }, kbId, kb.name),
+    );
+    // This runs only after the Audit transaction committed. If RabbitMQ is
+    // unavailable, kb_restore_jobs remains the durable recovery source.
+    await kbService.dispatchKnowledgebaseRestore({ jobId: result.job_id, kbId, tenantId });
     invalidateGeminiStoreNameCache(kbId);
-    auditFromReq(req, 'UPDATE', 'knowledgebase', kbId, kb.name, 'Khoi phuc lai kho tri thuc');
     sendSuccess(res, result, 'Da dua kho tri thuc vao hang doi khoi phuc', 202);
   } catch (err: any) {
     sendError(res, err.message, 400);
@@ -137,16 +156,21 @@ export async function uploadDocuments(req: Request, res: Response): Promise<void
       continue;
     }
 
+    let staged: kbService.StagedKbSource | null = null;
     try {
-      const doc = await kbService.uploadDocument(kbId, tenantId, req.user!.id, file);
+      staged = await kbService.stageDocumentSource(kbId, tenantId, file);
+      const doc = await runAuditedTransaction(
+        () => kbService.createQueuedDocumentFromStagedSource(kbId, tenantId, req.user!.id, staged!),
+        (created) => createTransactionalAuditEntry(req, 'CREATE', 'kb_document', { code: 'knowledgebase.document.created', context: { parent_name: kb.name, file_name: created.name, file_size_bytes: file.size } }, created.id, created.name),
+      );
       results.push({ file: file.originalname, success: true, data: doc });
     } catch (err: any) {
+      await kbService.discardStagedKbSource(staged);
       results.push({ file: file.originalname, success: false, error: err.message });
     }
   }
 
   const successCount = results.filter(r => r.success).length;
-  if (successCount > 0) auditFromReq(req, 'CREATE', 'kb_document', kbId, undefined, `Upload ${successCount} files`);
   sendSuccess(res, { results, uploaded: successCount, failed: files.length - successCount }, undefined, 201);
 }
 
@@ -156,10 +180,15 @@ export async function deleteDocument(req: Request, res: Response): Promise<void>
   try {
     // Fetch doc name before deleting for audit
     const doc = await kbService.getDocument(docId, tenantId);
-    const deleted = await kbService.deleteDocument(docId, kbId, tenantId);
-    if (!deleted) { sendError(res, 'Document không tồn tại', 404); return; }
-    auditFromReq(req, 'DELETE', 'kb_document', docId, doc?.name || docId);
-    sendSuccess(res, { deleted: true });
+    const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    if (!doc) { sendError(res, 'Document không tồn tại', 404); return; }
+    if (doc.status === 'learning') { sendError(res, 'Không thể xoá tài liệu đang được huấn luyện', 400); return; }
+    const queued = await runAuditedTransaction(
+      () => kbService.queueDocumentDeletion(docId, kbId, tenantId),
+      (queuedDocument) => queuedDocument ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.deleted', context: { parent_name: kb?.name } }, docId, queuedDocument.name) : null,
+    );
+    if (!queued) { sendError(res, 'Không thể đưa tài liệu vào hàng đợi xoá', 400); return; }
+    sendSuccess(res, { queued: true }, 'Đã đưa tài liệu vào hàng đợi xoá an toàn', 202);
   } catch (err: any) {
     sendError(res, err.message, 400);
   }
@@ -174,9 +203,12 @@ export async function bulkDeleteDocuments(req: Request, res: Response): Promise<
   if (docIds.length > 500) { sendError(res, 'Tối đa 500 tài liệu mỗi lần xoá', 400); return; }
 
   try {
-    const result = await kbService.bulkDeleteDocuments(docIds, kbId, tenantId);
-    auditFromReq(req, 'DELETE', 'kb_document', kbId, undefined, `Bulk delete ${result.deleted} docs`);
-    sendSuccess(res, result);
+    const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    const result = await runAuditedTransaction(
+      () => kbService.queueBulkDocumentDeletion(docIds, kbId, tenantId),
+      (deleted) => deleted.deleted > 0 ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.bulk_deleted', context: { parent_name: kb?.name, affected_count: deleted.deleted } }, kbId, kb?.name) : null,
+    );
+    sendSuccess(res, { deleted: result.deleted, queued: result.deleted }, undefined, 202);
   } catch (err: any) { sendError(res, err.message, 500); }
 }
 
@@ -189,7 +221,18 @@ export async function retryDocuments(req: Request, res: Response): Promise<void>
   if (docIds.length > 100) { sendError(res, 'Tối đa 100 tài liệu mỗi lần retry', 400); return; }
 
   try {
-    const result = await kbService.retryDocuments(docIds, kbId, tenantId);
+    const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    const result = await runAuditedTransaction(
+      () => kbService.queueDocumentRetry(docIds, kbId, tenantId),
+      (retried) => retried.retried > 0 ? createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'kb_document',
+        { code: 'knowledgebase.document.retry_queued', context: { parent_name: kb?.name, affected_count: retried.retried } },
+        kbId,
+        kb?.name,
+      ) : null,
+    );
     sendSuccess(res, result);
   } catch (err: any) { sendError(res, err.message, 500); }
 }
@@ -224,9 +267,18 @@ export async function uploadFaqDocument(req: Request, res: Response): Promise<vo
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
 
   try {
-    const doc = await kbService.uploadFaqDocument(kbId, tenantId, req.user!.id, file);
-    auditFromReq(req, 'CREATE', 'kb_document', doc.id, doc.name, 'FAQ upload');
-    sendSuccess(res, doc, undefined, 201);
+    let staged: kbService.StagedKbSource | null = null;
+    try {
+      staged = await kbService.stageFaqSource(kbId, tenantId, file);
+      const doc = await runAuditedTransaction(
+        () => kbService.createQueuedDocumentFromStagedSource(kbId, tenantId, req.user!.id, staged!),
+      (created) => createTransactionalAuditEntry(req, 'CREATE', 'kb_document', { code: 'knowledgebase.document.created', context: { parent_name: kb.name, file_name: created.name, file_size_bytes: file.size } }, created.id, created.name),
+      );
+      sendSuccess(res, doc, undefined, 201);
+    } catch (err: any) {
+      await kbService.discardStagedKbSource(staged);
+      throw err;
+    }
   } catch (err: any) {
     sendError(res, err.message, 400);
   }
@@ -259,11 +311,16 @@ export async function createArticle(req: Request, res: Response): Promise<void> 
   const kb = await kbService.getKnowledgebase(kbId, tenantId);
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
 
+  let staged: kbService.StagedKbSource | null = null;
   try {
-    const doc = await kbService.uploadArticle(kbId, tenantId, req.user!.id, parsed.data);
-    auditFromReq(req, 'CREATE', 'kb_document', doc.id, doc.name, 'Article create');
+    staged = await kbService.stageArticleSource(kbId, tenantId, parsed.data);
+    const doc = await runAuditedTransaction(
+      () => kbService.createQueuedDocumentFromStagedSource(kbId, tenantId, req.user!.id, staged!),
+      (created) => createTransactionalAuditEntry(req, 'CREATE', 'kb_document', { code: 'knowledgebase.document.created', context: { parent_name: kb.name } }, created.id, created.name),
+    );
     sendSuccess(res, doc, undefined, 201);
   } catch (err: any) {
+    await kbService.discardStagedKbSource(staged);
     sendError(res, err.message, 500);
   }
 }
@@ -274,12 +331,31 @@ export async function updateArticle(req: Request, res: Response): Promise<void> 
   const parsed = updateArticleSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
+  let staged: kbService.StagedKbSource | null = null;
+  let committed = false;
   try {
-    const doc = await kbService.updateArticle(docId, kbId, tenantId, parsed.data);
-    if (!doc) { sendError(res, 'Article không tồn tại', 404); return; }
-    auditFromReq(req, 'UPDATE', 'kb_document', docId, doc.name, 'Article update');
-    sendSuccess(res, doc);
+    const previous = await kbService.getDocument(docId, tenantId);
+    if (!previous || previous.type !== 'article' || previous.kb_id !== kbId) { sendError(res, 'Article không tồn tại', 404); return; }
+    const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    staged = await kbService.stageArticleSource(
+      kbId,
+      tenantId,
+      { title: parsed.data.title ?? previous.name, content: parsed.data.content ?? previous.content ?? '' },
+      docId,
+    );
+    const doc = await runAuditedTransaction(
+      () => kbService.updateArticleFromStagedSource(docId, kbId, tenantId, parsed.data, staged!),
+      (updated) => updated ? createTransactionalAuditEntry(
+        req, 'UPDATE', 'kb_document',
+        { code: 'knowledgebase.document.updated', context: { parent_name: kb?.name }, changes: updated.previousName !== updated.document.name ? [{ field: 'name', before: updated.previousName, after: updated.document.name }] : [] },
+        docId, updated.document.name,
+      ) : null,
+    );
+    if (!doc) { await kbService.discardStagedKbSource(staged); sendError(res, 'Article không tồn tại', 404); return; }
+    committed = true;
+    sendSuccess(res, doc.document);
   } catch (err: any) {
+    if (!committed) await kbService.discardStagedKbSource(staged);
     sendError(res, err.message, 500);
   }
 }

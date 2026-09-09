@@ -6,7 +6,7 @@ import type { Request, Response, NextFunction } from 'express';
 import * as usersService from './users.service.js';
 import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
@@ -14,7 +14,15 @@ import {
   getUserDeletionJobStatus,
   requestUserDeletion,
   retryTerminalUserDeletionJob,
+  type UserDeletionAuditTarget,
 } from './user-deletion.service.js';
+
+function userDeletionAuditLabel(target: UserDeletionAuditTarget): string {
+  const displayName = target.full_name?.trim();
+  const username = target.username?.trim();
+  if (displayName && username) return `${displayName} (@${username})`;
+  return displayName || (username ? `@${username}` : 'Tài khoản đã xóa');
+}
 
 /** GET /api/users */
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -40,8 +48,20 @@ export async function createController(req: Request, res: Response, next: NextFu
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
     const callerTenantId = req.user!.tenantId;
-    const user = await usersService.createUser(parsed.data, callerTenantId);
-    auditFromReq(req, 'CREATE', 'user', user.id, user.username);
+    const user = await runAuditedTransaction(
+      () => usersService.createUser(parsed.data, callerTenantId),
+      (created) => ({
+        ...createTransactionalAuditEntry(
+          req,
+          'CREATE',
+          'user',
+          { code: 'user.created' },
+          created.id,
+          created.username,
+        ),
+        tenantId: created.tenant_id || null,
+      }),
+    );
     sendSuccess(res, user, 'Tạo user thành công', 201);
   } catch (err) { next(err); }
 }
@@ -52,8 +72,40 @@ export async function updateController(req: Request, res: Response, next: NextFu
     const parsed = updateUserSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const user = await usersService.updateUser(req.params.id, parsed.data);
-    auditFromReq(req, 'UPDATE', 'user', user.id, user.username);
+    let before: Awaited<ReturnType<typeof usersService.getUserById>> | undefined;
+    const user = await runAuditedTransaction(
+      async () => {
+        before = await usersService.getUserById(req.params.id);
+        return usersService.updateUser(req.params.id, parsed.data);
+      },
+      (updated) => {
+        if (!before) throw new Error('Missing user snapshot for audit');
+        return {
+          ...createTransactionalAuditEntry(
+            req,
+            'UPDATE',
+            'user',
+            {
+              code: 'user.updated',
+              changes: [
+                ...(before.username !== updated.username
+                  ? [{ field: 'username', before: before.username, after: updated.username }]
+                  : []),
+                ...(before.role !== updated.role
+                  ? [{ field: 'role', before: before.role, after: updated.role }]
+                  : []),
+                ...(before.is_active !== updated.is_active
+                  ? [{ field: 'is_active', before: before.is_active, after: updated.is_active }]
+                  : []),
+              ],
+            },
+            updated.id,
+            updated.username,
+          ),
+          tenantId: before.tenant_id || null,
+        };
+      },
+    );
     sendSuccess(res, user, 'Cập nhật thành công');
   } catch (err) { next(err); }
 }
@@ -66,14 +118,28 @@ export async function deleteController(req: Request, res: Response, next: NextFu
       req.user!.id,
       req.user!.role,
       req.user!.tenantId || null,
+      (jobId, targetTenantId, target) => ({
+        ...createTransactionalAuditEntry(
+          req,
+          'DELETE',
+          'user_deletion_job',
+          { code: 'user.deleted' },
+          jobId,
+          userDeletionAuditLabel(target),
+        ),
+        tenantId: targetTenantId,
+        subject: {
+          displayName: target.full_name,
+          username: target.username,
+          email: target.email,
+          role: target.role,
+        },
+      }),
     );
 
     // Invalidate caches
     invalidatePermissionCache(req.params.id);
 
-    // Do not fire-and-forget an audit row for a subject that the background
-    // job can hard-delete before this request returns. Operational state lives
-    // in user_deletion_jobs and is purged without retaining personal fields.
     sendSuccess(res, { job_id: jobId, status: 'queued' }, 'Đã đưa user vào hàng đợi xóa vĩnh viễn', 202);
   } catch (err) { next(err); }
 }
@@ -89,7 +155,17 @@ export async function getDeletionJobStatusController(req: Request, res: Response
 /** POST /api/users/deletion-jobs/:jobId/retry — retry an exhausted job. */
 export async function retryDeletionJobController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    await retryTerminalUserDeletionJob(req.params.jobId, req.user!.tenantId || null);
+    await runAuditedTransaction(
+      () => retryTerminalUserDeletionJob(req.params.jobId, req.user!.tenantId || null),
+      () => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'user_deletion_job',
+        { code: 'user.deletion_job.retry_queued' },
+        req.params.jobId,
+        'Yêu cầu xóa tài khoản',
+      ),
+    );
     sendSuccess(res, { job_id: req.params.jobId, status: 'queued' }, 'Đã đưa deletion job vào hàng đợi retry', 202);
   } catch (err) { next(err); }
 }
@@ -101,9 +177,29 @@ export async function assignGroupsController(req: Request, res: Response, next: 
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
     const user = await usersService.getUserById(req.params.id);
-    await usersService.assignPermissionGroups(req.params.id, parsed.data.permission_group_ids);
+    await usersService.assignPermissionGroups(
+      req.params.id,
+      parsed.data.permission_group_ids,
+      {
+        ...createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'user_permission_groups',
+          {
+            code: 'user.updated',
+            changes: [{
+              field: 'permission_groups',
+              before: user.permission_groups.length,
+              after: parsed.data.permission_group_ids.length,
+            }],
+          },
+          req.params.id,
+          user.username,
+        ),
+        tenantId: user.tenant_id || null,
+      },
+    );
     invalidatePermissionCache(req.params.id);
-    auditFromReq(req, 'UPDATE', 'user_permission_groups', req.params.id, user.username, 'Gán permission groups');
     sendSuccess(res, null, 'Gán nhóm quyền thành công');
   } catch (err) { next(err); }
 }

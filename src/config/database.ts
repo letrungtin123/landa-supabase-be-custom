@@ -4,9 +4,20 @@
 // ═══════════════════════════════════════════════════════════════
 
 import pg from 'pg';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from './env.js';
 
 const { Pool } = pg;
+
+/**
+ * Keeps ordinary `query()` calls on the transaction that owns the current
+ * request flow. This lets existing services participate in a caller-owned
+ * atomic unit without passing a client through every layer.
+ *
+ * `getClient()` deliberately remains a raw pool client for legacy services
+ * which manage their own BEGIN/COMMIT lifecycle.
+ */
+const transactionClientStorage = new AsyncLocalStorage<pg.PoolClient>();
 
 /**
  * Connection pool — chia sẻ connections cho toàn bộ app.
@@ -33,7 +44,34 @@ export async function query<T extends pg.QueryResultRow = any>(
   text: string,
   params?: unknown[],
 ): Promise<pg.QueryResult<T>> {
-  return pool.query<T>(text, params);
+  const activeClient = transactionClientStorage.getStore();
+  return activeClient
+    ? activeClient.query<T>(text, params)
+    : pool.query<T>(text, params);
+}
+
+/**
+ * Executes a unit of work atomically. Nested calls reuse the surrounding
+ * transaction; only the outermost owner is allowed to BEGIN/COMMIT/ROLLBACK.
+ */
+export async function withDatabaseTransaction<T>(
+  work: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const existingClient = transactionClientStorage.getStore();
+  if (existingClient) return work(existingClient);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await transactionClientStorage.run(client, () => work(client));
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 /**

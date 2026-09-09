@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import * as service from './tenant-badges.service.js';
 import { updateTenantBadgeRuleSchema } from './tenant-badges.validator.js';
@@ -56,14 +56,14 @@ export async function updateBadge(req: Request, res: Response, next: NextFunctio
       req.user.id,
       parsed.data,
       req.user.role === 'superadmin',
-    );
-    auditFromReq(
-      req,
-      'UPDATE',
-      'badge_setting',
-      tenantId,
-      result.audit.badge_name,
-      JSON.stringify(result.audit),
+      ({ badgeName, previousEnabled, nextEnabled, courseCount }) => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'badge_setting',
+        { code: 'badge.rule.updated', context: { affected_count: courseCount }, changes: previousEnabled !== nextEnabled ? [{ field: 'is_enabled', before: previousEnabled, after: nextEnabled }] : [] },
+        req.params.badgeId,
+        badgeName,
+      ),
     );
     sendSuccess(res, result.badge, 'Cập nhật cấu hình huy hiệu thành công');
   } catch (error) {

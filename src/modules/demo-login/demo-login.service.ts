@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
@@ -293,6 +294,7 @@ export async function replaceDemoLoginAccounts(
   tenantId: string,
   input: ReplaceDemoLoginAccountsInput,
   actorId: string | null,
+  auditEntry?: TransactionalAuditEntry,
 ) {
   const settings = await ensureSettings(tenantId);
   const uniqueUserIds = [...new Set(input.accounts.map((account) => account.user_id))];
@@ -343,6 +345,7 @@ export async function replaceDemoLoginAccounts(
       );
     }
 
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -355,13 +358,17 @@ export async function replaceDemoLoginAccounts(
   return getDemoLoginConfig(tenantId);
 }
 
-export async function deleteDemoLoginAccount(tenantId: string, publicId: string): Promise<void> {
-  const result = await query(
-    'DELETE FROM tenant_demo_login_accounts WHERE tenant_id = $1 AND public_id = $2',
+export async function deleteDemoLoginAccount(tenantId: string, publicId: string): Promise<{ username: string }> {
+  const result = await query<{ username: string }>(
+    `DELETE FROM tenant_demo_login_accounts a
+     USING users u
+     WHERE a.user_id = u.id AND a.tenant_id = $1 AND a.public_id = $2
+     RETURNING u.username`,
     [tenantId, publicId],
   );
   if (result.rowCount === 0) throw new AppError('Tài khoản demo không tồn tại', 404);
   await invalidateTenantPublicDomainCaches(tenantId, ['demo-login']);
+  return result.rows[0];
 }
 
 export async function listPublicDemoLoginAccounts(domain: string) {

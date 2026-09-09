@@ -4,7 +4,8 @@
 // Ảnh upload vào Supabase Storage: {tenantId}/branding/{key}.ext
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
@@ -130,39 +131,57 @@ export async function uploadBrandingImage(
   fileBuffer: Buffer,
   originalName: string,
   mimeType: string,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<{ storage_path: string }> {
-  const branding = await readBrandingSettings(tenantId);
-
   const isCarousel = imageKey.startsWith('carousel_');
   const ext = originalName.substring(originalName.lastIndexOf('.')) || '.png';
   // Thêm timestamp để path luôn unique → tránh browser/CDN cache
   const ts = Date.now();
   const storagePath = `${tenantId}/branding/${imageKey}_${ts}${ext}`;
 
-  // Xóa file cũ nếu là single image key
-  if (!isCarousel && branding[imageKey]) {
-    try { await deleteFile(branding[imageKey] as string); } catch { /* ignore */ }
-  }
-
-  // Upload file mới (upsert)
+  // Upload first. The new object is deleted again if the DB/audit transaction
+  // cannot commit, while the existing public image remains untouched.
   await uploadFile(storagePath, fileBuffer, mimeType, true);
+  const client = await getClient();
+  let pathsToDelete: string[] = [];
+  try {
+    await client.query('BEGIN');
+    const tenant = await client.query<{ settings: Record<string, unknown> }>(
+      'SELECT settings FROM tenants WHERE id = $1 FOR UPDATE',
+      [tenantId],
+    );
+    if (tenant.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+    const branding = ((tenant.rows[0].settings || {}) as { branding?: BrandingConfig }).branding || {};
 
-  // Cập nhật settings
-  if (isCarousel) {
-    const carousels = branding.carousels || [];
-    // Tìm index từ key (carousel_1 → index 0)
-    const idx = parseInt(imageKey.split('_')[1]) - 1;
-    // Xóa file cũ tại vị trí này nếu có
-    if (carousels[idx]) {
-      try { await deleteFile(carousels[idx]); } catch { /* ignore */ }
+    if (isCarousel) {
+      const carousels = [...(branding.carousels || [])];
+      const idx = parseInt(imageKey.split('_')[1]) - 1;
+      if (carousels[idx]) pathsToDelete.push(carousels[idx]);
+      carousels[idx] = storagePath;
+      branding.carousels = carousels;
+    } else {
+      const oldPath = branding[imageKey];
+      if (typeof oldPath === 'string' && oldPath) pathsToDelete.push(oldPath);
+      branding[imageKey] = storagePath;
     }
-    carousels[idx] = storagePath;
-    branding.carousels = carousels;
-  } else {
-    branding[imageKey] = storagePath;
+
+    await client.query(
+      `UPDATE tenants
+       SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{branding}', $1::jsonb), updated_at = now()
+       WHERE id = $2`,
+      [JSON.stringify(branding), tenantId],
+    );
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    await deleteFile(storagePath).catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 
-  await writeBrandingSettings(tenantId, branding);
+  await Promise.allSettled(pathsToDelete.filter((path) => path !== storagePath).map((path) => deleteFile(path)));
   await Promise.all([
     bumpCacheVersion(...cacheVersions.tenantResource(tenantId, 'branding')),
     invalidateTenantPublicDomainCaches(tenantId, ['branding']),
@@ -176,28 +195,51 @@ export async function uploadBrandingImage(
 /**
  * Xóa ảnh branding.
  */
-export async function deleteBrandingImage(tenantId: string, imageKey: string): Promise<void> {
-  const branding = await readBrandingSettings(tenantId);
-
+export async function deleteBrandingImage(
+  tenantId: string,
+  imageKey: string,
+  auditEntry?: TransactionalAuditEntry,
+): Promise<void> {
   const isCarousel = imageKey.startsWith('carousel_');
+  const client = await getClient();
+  let pathsToDelete: string[] = [];
+  try {
+    await client.query('BEGIN');
+    const tenant = await client.query<{ settings: Record<string, unknown> }>(
+      'SELECT settings FROM tenants WHERE id = $1 FOR UPDATE',
+      [tenantId],
+    );
+    if (tenant.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+    const branding = ((tenant.rows[0].settings || {}) as { branding?: BrandingConfig }).branding || {};
 
-  if (isCarousel) {
-    const carousels = branding.carousels || [];
-    const idx = parseInt(imageKey.split('_')[1]) - 1;
-    if (carousels[idx]) {
-      try { await deleteFile(carousels[idx]); } catch { /* ignore */ }
+    if (isCarousel) {
+      const carousels = [...(branding.carousels || [])];
+      const idx = parseInt(imageKey.split('_')[1]) - 1;
+      if (carousels[idx]) pathsToDelete.push(carousels[idx]);
       carousels.splice(idx, 1);
       branding.carousels = carousels;
-    }
-  } else {
-    const path = branding[imageKey] as string | undefined;
-    if (path) {
-      try { await deleteFile(path); } catch { /* ignore */ }
+    } else {
+      const path = branding[imageKey];
+      if (typeof path === 'string' && path) pathsToDelete.push(path);
       delete branding[imageKey];
     }
+
+    await client.query(
+      `UPDATE tenants
+       SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{branding}', $1::jsonb), updated_at = now()
+       WHERE id = $2`,
+      [JSON.stringify(branding), tenantId],
+    );
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
 
-  await writeBrandingSettings(tenantId, branding);
+  await Promise.allSettled(pathsToDelete.map((path) => deleteFile(path)));
   await Promise.all([
     bumpCacheVersion(...cacheVersions.tenantResource(tenantId, 'branding')),
     invalidateTenantPublicDomainCaches(tenantId, ['branding']),

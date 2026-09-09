@@ -1,5 +1,8 @@
 import type { NextFunction, Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import {
+  createTransactionalAuditEntry,
+  runAuditedTransaction,
+} from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import * as ssoService from './sso.service.js';
 import { exchangeSsoCodeSchema, providerParamSchema, updateSsoConfigSchema } from './sso.validator.js';
@@ -24,9 +27,31 @@ export async function updateConfigController(req: Request, res: Response, next: 
     const bodyParsed = updateSsoConfigSchema.safeParse(req.body);
     if (!bodyParsed.success) { sendError(res, bodyParsed.error.errors[0].message, 400); return; }
 
-    const result = await ssoService.updateConfig(tenantId, providerParsed.data.provider, bodyParsed.data);
-    auditFromReq(req, 'UPDATE', 'sso_config', tenantId, providerParsed.data.provider, 'Cập nhật cấu hình SSO');
-    sendSuccess(res, result, 'Cập nhật SSO thành công');
+    const result = await runAuditedTransaction(
+      async () => {
+        const before = await ssoService.getConfigAuditState(tenantId, providerParsed.data.provider);
+        const after = await ssoService.updateConfig(tenantId, providerParsed.data.provider, bodyParsed.data);
+        return { before, after };
+      },
+      ({ before, after }) => {
+        const changes = [] as Array<{ field: string; before: boolean; after: boolean }>;
+        if (before.is_enabled !== after.is_enabled) changes.push({ field: 'is_enabled', before: before.is_enabled, after: after.is_enabled });
+        if (before.has_secret !== after.has_secret) changes.push({ field: 'secret_status', before: before.has_secret, after: after.has_secret });
+        return createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'sso_config',
+          {
+            code: 'sso_config.updated',
+            context: { related_entity_name: after.label, related_entity_type: 'sso_provider' },
+            changes,
+          },
+          `${tenantId}:${after.provider}`,
+          after.label,
+        );
+      },
+    );
+    sendSuccess(res, result.after, 'Cập nhật SSO thành công');
   } catch (err) { next(err); }
 }
 
@@ -38,8 +63,20 @@ export async function deleteConfigController(req: Request, res: Response, next: 
     const providerParsed = providerParamSchema.safeParse(req.params);
     if (!providerParsed.success) { sendError(res, providerParsed.error.errors[0].message, 400); return; }
 
-    await ssoService.deleteConfig(tenantId, providerParsed.data.provider);
-    auditFromReq(req, 'DELETE', 'sso_config', tenantId, providerParsed.data.provider, 'Xóa cấu hình SSO');
+    await runAuditedTransaction(
+      () => ssoService.deleteConfig(tenantId, providerParsed.data.provider),
+      () => createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'sso_config',
+        {
+          code: 'sso_config.deleted',
+          context: { related_entity_name: providerParsed.data.provider, related_entity_type: 'sso_provider' },
+        },
+        `${tenantId}:${providerParsed.data.provider}`,
+        providerParsed.data.provider,
+      ),
+    );
     sendSuccess(res, null, 'Xóa SSO thành công');
   } catch (err) { next(err); }
 }

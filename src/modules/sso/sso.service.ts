@@ -152,6 +152,19 @@ export async function listConfigs(tenantId: string) {
   }));
 }
 
+/** Safe audit snapshot: never return or log client IDs, encrypted secrets or URLs. */
+export async function getConfigAuditState(tenantId: string, provider: SsoProvider): Promise<{ is_enabled: boolean; has_secret: boolean }> {
+  const result = await query<{ is_enabled: boolean; client_secret_enc: string | null }>(
+    `SELECT is_enabled, client_secret_enc
+     FROM tenant_sso_configs
+     WHERE tenant_id = $1 AND provider = $2
+     LIMIT 1`,
+    [tenantId, provider],
+  );
+  const row = result.rows[0];
+  return { is_enabled: row?.is_enabled === true, has_secret: Boolean(row?.client_secret_enc) };
+}
+
 export async function updateConfig(tenantId: string, provider: SsoProvider, input: UpdateSsoConfigInput) {
   const existing = await query<SsoConfigRow>(
     'SELECT * FROM tenant_sso_configs WHERE tenant_id = $1 AND provider = $2 LIMIT 1',

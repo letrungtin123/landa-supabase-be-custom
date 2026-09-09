@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
 
@@ -113,51 +114,46 @@ export async function getActiveLessonAuthorTemplate(): Promise<PromptTemplate | 
 }
 
 async function setLessonAuthorTemplate(id: string, enabled: boolean): Promise<PromptTemplate | null> {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  // query() participates in runAuditedTransaction through AsyncLocalStorage.
+  // A transaction-scoped advisory lock serializes the singleton even when no
+  // current lesson-author row exists; the partial unique index remains the
+  // database backstop.
+  await query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['system_prompt_templates:lesson_author']);
+  const existing = await query<PromptTemplate>(
+    `SELECT * FROM system_prompt_templates WHERE id = $1 FOR UPDATE`,
+    [id],
+  );
+  if (!existing.rows[0]) return null;
 
-    const existing = await client.query<PromptTemplate>(
-      `SELECT * FROM system_prompt_templates WHERE id = $1 FOR UPDATE`,
+  if (enabled) {
+    await query(
+      `UPDATE system_prompt_templates
+       SET is_lesson_author = false, updated_at = now()
+       WHERE is_lesson_author = true AND id <> $1`,
       [id],
     );
-    if (!existing.rows[0]) {
-      await client.query('ROLLBACK');
-      return null;
-    }
-
-    if (enabled) {
-      await client.query(
-        `UPDATE system_prompt_templates
-         SET is_lesson_author = false, updated_at = now()
-         WHERE is_lesson_author = true AND id <> $1`,
-        [id],
-      );
-    }
-
-    const updated = await client.query<PromptTemplate>(
-      `UPDATE system_prompt_templates
-       SET is_lesson_author = $2,
-           is_active = CASE WHEN $2 = true THEN false ELSE is_active END,
-           updated_at = now()
-       WHERE id = $1
-       RETURNING *`,
-      [id, enabled],
-    );
-
-    await client.query('COMMIT');
-    return updated.rows[0] || null;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
   }
+
+  const updated = await query<PromptTemplate>(
+    `UPDATE system_prompt_templates
+     SET is_lesson_author = $2,
+         is_active = CASE WHEN $2 = true THEN false ELSE is_active END,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING *`,
+    [id, enabled],
+  );
+  return updated.rows[0] || null;
+}
+
+async function lockPromptTemplateCapacity(): Promise<void> {
+  await query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['system_prompt_templates:capacity']);
 }
 
 export async function createTemplate(input: CreateTemplateInput, userId: string): Promise<PromptTemplate> {
   // Enforce max active
   if (input.is_active && !input.is_lesson_author) {
+    await lockPromptTemplateCapacity();
     const activeCount = await getActiveCount();
     if (activeCount >= MAX_ACTIVE) {
       throw new Error(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`);
@@ -187,6 +183,9 @@ export async function createTemplate(input: CreateTemplateInput, userId: string)
 }
 
 export async function updateTemplate(id: string, input: UpdateTemplateInput): Promise<PromptTemplate | null> {
+  if (input.is_active !== undefined || input.is_lesson_author !== undefined) {
+    await lockPromptTemplateCapacity();
+  }
   const current = await getTemplate(id);
   if (!current) return null;
 
@@ -231,19 +230,29 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
   return getTemplate(id);
 }
 
-export async function deleteTemplate(id: string): Promise<boolean> {
-  // Clean up storage files
-  const tpl = await getTemplate(id);
-  if (tpl) {
-    if (tpl.avatar_url) await deleteFileByUrl(tpl.avatar_url).catch(() => {});
-    if (tpl.fullbody_url) await deleteFileByUrl(tpl.fullbody_url).catch(() => {});
+export async function deleteTemplate(id: string, auditEntry?: TransactionalAuditEntry): Promise<boolean> {
+  const client = await getClient();
+  let removed: Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'> | null = null;
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'>>(
+      'SELECT avatar_url, fullbody_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (current.rowCount === 0) { await client.query('COMMIT'); return false; }
+    removed = current.rows[0];
+    await client.query('DELETE FROM system_prompt_templates WHERE id = $1', [id]);
+    if (auditEntry) await appendAuditLog(client, auditEntry);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const result = await query(
-    `DELETE FROM system_prompt_templates WHERE id = $1`,
-    [id],
-  );
-  return (result.rowCount || 0) > 0;
+  if (removed?.avatar_url) await deleteFileByUrl(removed.avatar_url).catch(() => undefined);
+  if (removed?.fullbody_url) await deleteFileByUrl(removed.fullbody_url).catch(() => undefined);
+  return true;
 }
 
 // ── Image Uploads ──
@@ -263,43 +272,77 @@ function validateImage(file: { mimetype: string; size: number }): void {
 export async function uploadAvatar(
   id: string,
   file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+  auditEntry?: (template: PromptTemplate) => TransactionalAuditEntry,
 ): Promise<PromptTemplate | null> {
   validateImage(file);
-  const tpl = await getTemplate(id);
-  if (!tpl) return null;
-
-  // Delete old
-  if (tpl.avatar_url) await deleteFileByUrl(tpl.avatar_url).catch(() => {});
-
   const fileName = buildFileName(file.originalname);
   const storagePath = `system/prompt-mascots/avatars/${fileName}`;
   await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  const result = await query<PromptTemplate>(
-    `UPDATE system_prompt_templates SET avatar_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
-    [storagePath, id],
-  );
-  return result.rows[0] || null;
+  const client = await getClient();
+  let oldPath: string | null = null;
+  let updated: PromptTemplate | null = null;
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<{ avatar_url: string | null }>(
+      'SELECT avatar_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    oldPath = current.rows[0].avatar_url;
+    const result = await client.query<PromptTemplate>(
+      `UPDATE system_prompt_templates SET avatar_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+      [storagePath, id],
+    );
+    updated = result.rows[0] || null;
+    if (!updated) throw new Error('Không thể cập nhật ảnh đại diện');
+    if (auditEntry) await appendAuditLog(client, auditEntry(updated));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    await deleteFileByUrl(storagePath).catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  return updated;
 }
 
 export async function uploadFullbody(
   id: string,
   file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+  auditEntry?: (template: PromptTemplate) => TransactionalAuditEntry,
 ): Promise<PromptTemplate | null> {
   validateImage(file);
-  const tpl = await getTemplate(id);
-  if (!tpl) return null;
-
-  // Delete old
-  if (tpl.fullbody_url) await deleteFileByUrl(tpl.fullbody_url).catch(() => {});
-
   const fileName = buildFileName(file.originalname);
   const storagePath = `system/prompt-mascots/fullbody/${fileName}`;
   await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  const result = await query<PromptTemplate>(
-    `UPDATE system_prompt_templates SET fullbody_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
-    [storagePath, id],
-  );
-  return result.rows[0] || null;
+  const client = await getClient();
+  let oldPath: string | null = null;
+  let updated: PromptTemplate | null = null;
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<{ fullbody_url: string | null }>(
+      'SELECT fullbody_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    oldPath = current.rows[0].fullbody_url;
+    const result = await client.query<PromptTemplate>(
+      `UPDATE system_prompt_templates SET fullbody_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+      [storagePath, id],
+    );
+    updated = result.rows[0] || null;
+    if (!updated) throw new Error('Không thể cập nhật ảnh toàn thân');
+    if (auditEntry) await appendAuditLog(client, auditEntry(updated));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    await deleteFileByUrl(storagePath).catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  return updated;
 }

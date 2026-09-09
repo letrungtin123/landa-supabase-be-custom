@@ -22,7 +22,9 @@
     "test:tenant-data-quota:integration": "tsx src/scripts/test-tenant-data-quota-integration.ts",
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",
     "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts",
-    "test:deletion": "tsx --test src/modules/deletion/storage-manifest.logic.test.ts"
+    "test:deletion": "tsx --test src/modules/deletion/storage-manifest.logic.test.ts",
+    "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
+    "verify:audit-event-usage": "tsx src/scripts/verify-audit-event-usage.ts"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

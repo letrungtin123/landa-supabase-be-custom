@@ -306,12 +306,14 @@ export async function bulkEnroll(
   return { enrolled, skipped: uniqueRequested - enrolled };
 }
 
-export async function unenrollUser(userId: string, courseId: string): Promise<boolean> {
+export async function unenrollUser(userId: string, courseId: string, tenantId: string): Promise<boolean> {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể hủy ghi danh learner demo iframe đang hoạt động');
 
   const result = await query(
-    `UPDATE enrollments SET is_active = false WHERE user_id = $1 AND course_id = $2 AND is_active = true`,
-    [userId, courseId],
+    `UPDATE enrollments
+     SET is_active = false
+     WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3::uuid AND is_active = true`,
+    [userId, courseId, tenantId],
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -321,25 +323,41 @@ export async function unenrollUser(userId: string, courseId: string): Promise<bo
 export async function updateProgress(
   userId: string,
   courseId: string,
+  tenantId: string,
   progress: number,
-): Promise<void> {
+): Promise<{ previousProgress: number | null; progress: number | null }> {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật tiến độ cho learner demo iframe đang hoạt động');
 
   const isCompleted = progress >= 100;
 
-  await query(
+  const current = await query<{ progress: number }>(
+    `SELECT cp.progress
+     FROM course_progress cp
+     JOIN enrollments e ON e.id = cp.enrollment_id
+     WHERE e.user_id = $1 AND e.course_id = $2 AND e.tenant_id = $3::uuid AND e.is_active = true
+     FOR UPDATE OF cp`,
+    [userId, courseId, tenantId],
+  );
+
+  const result = await query<{ progress: number }>(
     `UPDATE course_progress cp SET
-       progress = $3,
-       is_completed = $4,
-       completed_at = CASE WHEN $4 AND cp.completed_at IS NULL THEN now() ELSE cp.completed_at END,
+       progress = $4,
+       is_completed = $5,
+       completed_at = CASE WHEN $5 AND cp.completed_at IS NULL THEN now() ELSE cp.completed_at END,
        last_activity_at = now()
      FROM enrollments e
      WHERE cp.enrollment_id = e.id
        AND e.user_id = $1
        AND e.course_id = $2
-       AND e.is_active = true`,
-    [userId, courseId, Math.min(100, Math.max(0, progress)), isCompleted],
+       AND e.tenant_id = $3::uuid
+       AND e.is_active = true
+     RETURNING cp.progress`,
+    [userId, courseId, tenantId, Math.min(100, Math.max(0, progress)), isCompleted],
   );
+  return {
+    previousProgress: current.rows[0]?.progress ?? null,
+    progress: result.rows[0]?.progress ?? null,
+  };
 }
 
 export async function recordStudySession(

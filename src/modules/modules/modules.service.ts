@@ -55,6 +55,11 @@ export async function updateModule(moduleId: string, input: UpdateModuleInput) {
 }
 
 async function updateModuleFromDb(moduleId: string, input: UpdateModuleInput) {
+  const before = await query<{ name: string; sort_order: number; is_active: boolean }>(
+    'SELECT name, sort_order, is_active FROM modules WHERE id = $1 FOR UPDATE',
+    [moduleId],
+  );
+  if (before.rowCount === 0) throw new AppError('Module không tồn tại', 404);
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
@@ -74,5 +79,5 @@ async function updateModuleFromDb(moduleId: string, input: UpdateModuleInput) {
   );
 
   if (result.rowCount === 0) throw new AppError('Module không tồn tại', 404);
-  return result.rows[0];
+  return { ...result.rows[0], previous: before.rows[0] };
 }

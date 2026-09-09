@@ -10,6 +10,13 @@ import {
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
+import {
+  appendAuditLogViewerScopeFilter,
+  AUDIT_LOG_PUBLIC_SELECT_COLUMNS,
+  AUDIT_LOG_RETENTION_DAYS,
+} from '../audit-logs/audit-logs.service.js';
+import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
   enqueueTeamMemberAddedEmails,
@@ -29,6 +36,7 @@ import {
 interface AddTeamMembersOptions {
   tenantId: string;
   actorUserId: string;
+  auditEntry?: (result: { teamName: string; added: number }) => TransactionalAuditEntry | null;
 }
 
 interface CourseCategorySummary {
@@ -89,21 +97,32 @@ export async function createOrgGroup(tenantId: string, input: { name: string; de
   return result.rows[0];
 }
 
-export async function updateOrgGroup(id: string, input: { name?: string; description?: string }) {
+export async function updateOrgGroup(id: string, tenantId: string, input: { name?: string; description?: string }) {
+  const before = await query<{ name: string }>(
+    'SELECT name FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE',
+    [id, tenantId],
+  );
+  if (before.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;
   if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
   if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
   if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
-  params.push(id);
-  const result = await query(`UPDATE org_groups SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, name`, params);
+  params.push(id, tenantId);
+  const result = await query(
+    `UPDATE org_groups SET ${sets.join(', ')} WHERE id = $${idx} AND tenant_id = $${idx + 1}::uuid RETURNING id, name`,
+    params,
+  );
   if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
-  return result.rows[0];
+  return { ...result.rows[0], previousName: before.rows[0].name };
 }
 
-export async function deleteOrgGroup(id: string) {
-  const result = await query('DELETE FROM org_groups WHERE id = $1 RETURNING id, name', [id]);
+export async function deleteOrgGroup(id: string, tenantId: string) {
+  const result = await query(
+    'DELETE FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid RETURNING id, name',
+    [id, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
   return result.rows[0];
 }
@@ -125,11 +144,14 @@ export async function listSubGroups(orgGroupId: string, queryParams: Record<stri
   return { subgroups: result.rows, total: result.rowCount || 0 };
 }
 
-export async function createSubGroup(orgGroupId: string, input: { name: string }) {
+export async function createSubGroup(orgGroupId: string, tenantId: string, input: { name: string }) {
   const result = await query(
-    'INSERT INTO sub_groups (org_group_id, name) VALUES ($1, $2) RETURNING id, name',
-    [orgGroupId, input.name],
+    `INSERT INTO sub_groups (org_group_id, name)
+     SELECT id, $3 FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid
+     RETURNING id, name`,
+    [orgGroupId, tenantId, input.name],
   );
+  if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
   return result.rows[0];
 }
 
@@ -184,14 +206,33 @@ export async function getSubGroupDetail(sgId: string) {
   };
 }
 
-export async function updateSubGroup(id: string, input: { name: string }) {
-  const result = await query('UPDATE sub_groups SET name = $1 WHERE id = $2 RETURNING id, name', [input.name, id]);
+export async function updateSubGroup(id: string, tenantId: string, input: { name: string }) {
+  const before = await query<{ name: string }>(
+    `SELECT sg.name
+     FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE sg.id = $1 AND og.tenant_id = $2::uuid FOR UPDATE OF sg`,
+    [id, tenantId],
+  );
+  if (before.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
+  const result = await query(
+    `UPDATE sub_groups sg SET name = $1
+     FROM org_groups og
+     WHERE sg.id = $2 AND sg.org_group_id = og.id AND og.tenant_id = $3::uuid
+     RETURNING sg.id, sg.name`,
+    [input.name, id, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
-  return result.rows[0];
+  return { ...result.rows[0], previousName: before.rows[0].name };
 }
 
-export async function deleteSubGroup(id: string) {
-  const result = await query('DELETE FROM sub_groups WHERE id = $1 RETURNING id, name', [id]);
+export async function deleteSubGroup(id: string, tenantId: string) {
+  const result = await query(
+    `DELETE FROM sub_groups sg
+     USING org_groups og
+     WHERE sg.id = $1 AND sg.org_group_id = og.id AND og.tenant_id = $2::uuid
+     RETURNING sg.id, sg.name`,
+    [id, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
   return result.rows[0];
 }
@@ -216,11 +257,17 @@ export async function listTeams(subgroupId: string, queryParams: Record<string, 
   return { teams: result.rows, total: result.rowCount || 0 };
 }
 
-export async function createTeam(subgroupId: string, input: { name: string }) {
+export async function createTeam(subgroupId: string, tenantId: string, input: { name: string }) {
   const result = await query(
-    'INSERT INTO teams (sub_group_id, name) VALUES ($1, $2) RETURNING id, name',
-    [subgroupId, input.name],
+    `INSERT INTO teams (sub_group_id, name)
+     SELECT sg.id, $3
+     FROM sub_groups sg
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE sg.id = $1 AND og.tenant_id = $2::uuid
+     RETURNING id, name`,
+    [subgroupId, tenantId, input.name],
   );
+  if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
   return result.rows[0];
 }
 
@@ -415,14 +462,39 @@ export async function listTeamCourseCategories(
   };
 }
 
-export async function updateTeam(id: string, input: { name: string }) {
-  const result = await query('UPDATE teams SET name = $1 WHERE id = $2 RETURNING id, name', [input.name, id]);
+export async function updateTeam(id: string, tenantId: string, input: { name: string }) {
+  const before = await query<{ name: string }>(
+    `SELECT t.name
+     FROM teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.id = $1 AND og.tenant_id = $2::uuid FOR UPDATE OF t`,
+    [id, tenantId],
+  );
+  if (before.rowCount === 0) throw new AppError('Team không tồn tại', 404);
+  const result = await query(
+    `UPDATE teams t SET name = $1
+     FROM sub_groups sg
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.id = $2 AND t.sub_group_id = sg.id AND og.tenant_id = $3::uuid
+     RETURNING t.id, t.name`,
+    [input.name, id, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Team không tồn tại', 404);
-  return result.rows[0];
+  return { ...result.rows[0], previousName: before.rows[0].name };
 }
 
-export async function deleteTeam(id: string) {
-  const result = await query('DELETE FROM teams WHERE id = $1 RETURNING id, name', [id]);
+export async function deleteTeam(id: string, tenantId: string) {
+  const result = await query(
+    `DELETE FROM teams t
+     USING sub_groups sg, org_groups og
+     WHERE t.id = $1
+       AND t.sub_group_id = sg.id
+       AND sg.org_group_id = og.id
+       AND og.tenant_id = $2::uuid
+     RETURNING t.id, t.name`,
+    [id, tenantId],
+  );
   if (result.rowCount === 0) throw new AppError('Team không tồn tại', 404);
   return result.rows[0];
 }
@@ -615,6 +687,11 @@ export async function addTeamMembers(
       }
     }
 
+    if (added > 0 && options.auditEntry) {
+      const entry = options.auditEntry({ teamName, added });
+      if (entry) await appendAuditLog(client, entry);
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -640,16 +717,18 @@ export async function addTeamMembers(
   };
 }
 
-export async function removeTeamMember(teamId: string, userId: string) {
+export async function removeTeamMember(teamId: string, userId: string, tenantId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật team membership cho learner demo iframe đang hoạt động');
   const context = await query<{ team_name: string; username: string }>(
     `SELECT t.name AS team_name, u.username
      FROM teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
      JOIN users u ON u.id = $2
-     WHERE t.id = $1`,
-    [teamId, userId],
+     WHERE t.id = $1 AND og.tenant_id = $3::uuid`,
+    [teamId, userId, tenantId],
   );
-  const result = await removeTeamMemberFromDb(teamId, userId);
+  const result = await removeTeamMemberFromDb(teamId, userId, tenantId);
   await invalidateUserMembershipCaches([userId]);
   return {
     ...result,
@@ -658,8 +737,17 @@ export async function removeTeamMember(teamId: string, userId: string) {
   };
 }
 
-async function removeTeamMemberFromDb(teamId: string, userId: string) {
-  const r = await query('DELETE FROM team_members WHERE team_id = $1 AND user_id = $2 RETURNING user_id', [teamId, userId]);
+async function removeTeamMemberFromDb(teamId: string, userId: string, tenantId: string) {
+  const r = await query(
+    `DELETE FROM team_members tm
+     USING teams t, sub_groups sg, org_groups og
+     WHERE tm.team_id = t.id
+       AND t.sub_group_id = sg.id
+       AND sg.org_group_id = og.id
+       AND tm.team_id = $1 AND tm.user_id = $2 AND og.tenant_id = $3::uuid
+     RETURNING tm.user_id`,
+    [teamId, userId, tenantId],
+  );
   if (r.rowCount === 0) throw new AppError('Thành viên không thuộc team', 404);
   return { success: true };
 }
@@ -712,7 +800,12 @@ async function revokeTeamCourseFromDb(teamId: string, courseId: string, tenantId
 
 // ═══ Team Document Categories ═══
 
-export async function assignTeamDocCategories(teamId: string, categoryIds: string[], tenantId: string) {
+export async function assignTeamDocCategories(
+  teamId: string,
+  categoryIds: string[],
+  tenantId: string,
+  auditEntry?: (result: { teamName: string; assigned: number }) => TransactionalAuditEntry | null,
+) {
   const normalizedCategoryIds = Array.from(new Set(
     categoryIds
       .filter((cid): cid is string => typeof cid === 'string')
@@ -742,6 +835,11 @@ export async function assignTeamDocCategories(teamId: string, categoryIds: strin
         [teamId, cid, tenantId],
       );
       if (r.rowCount! > 0) assigned++; else skipped++;
+    }
+
+    if (assigned > 0 && auditEntry) {
+      const entry = auditEntry({ teamName, assigned });
+      if (entry) await appendAuditLog(client, entry);
     }
 
     await client.query('COMMIT');
@@ -868,7 +966,13 @@ async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string
 
 // ═══ Group Audit Logs ═══
 
-export async function getGroupAuditLogs(tenantId: string | null, queryParams: Record<string, unknown>) {
+export async function getGroupAuditLogs(
+  tenantId: string | null,
+  viewerRole: UserRole,
+  queryParams: Record<string, unknown>,
+) {
+  if (!tenantId) throw new AppError('Chưa xác định được doanh nghiệp đang sử dụng', 403);
+
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
   const params: unknown[] = [];
@@ -877,13 +981,15 @@ export async function getGroupAuditLogs(tenantId: string | null, queryParams: Re
   // Chỉ lấy audit logs liên quan đến groups
   conditions.push(`a.entity_type IN ('org_group', 'sub_group', 'team', 'team_member', 'team_course', 'team_category', 'team_course_category')`);
 
-  if (tenantId) { params.push(tenantId); conditions.push(`a.tenant_id = $${params.length}`); }
+  params.push(tenantId);
+  conditions.push(`a.tenant_id = $${params.length}`);
+  appendAuditLogViewerScopeFilter(viewerRole, params, conditions);
   if (search && search.length >= 2) { params.push(`%${search}%`); conditions.push(`(a.entity_name ILIKE $${params.length} OR a.actor_username ILIKE $${params.length})`); }
   const actionFilter = queryParams.action as string;
   if (actionFilter && actionFilter !== 'all') { params.push(actionFilter); conditions.push(`a.action = $${params.length}`); }
   const dateFrom = queryParams.date_from as string;
   if (dateFrom) { params.push(dateFrom); conditions.push(`a.created_at >= $${params.length}::timestamptz`); }
-  else { conditions.push(`a.created_at >= now() - interval '30 days'`); }
+  else { conditions.push(`a.created_at >= now() - (${AUDIT_LOG_RETENTION_DAYS} * interval '1 day')`); }
   const dateTo = queryParams.date_to as string;
   if (dateTo) { params.push(dateTo); conditions.push(`a.created_at <= $${params.length}::timestamptz`); }
 
@@ -891,7 +997,10 @@ export async function getGroupAuditLogs(tenantId: string | null, queryParams: Re
   const [countR, dataR] = await Promise.all([
     query<{ count: string }>(`SELECT COUNT(*) AS count FROM audit_logs a ${where}`, params),
     query(
-      `SELECT a.* FROM audit_logs a ${where} ORDER BY a.created_at DESC, a.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS}
+       FROM audit_logs a ${where}
+       ORDER BY a.created_at DESC, a.id DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, offset],
     ),
   ]);

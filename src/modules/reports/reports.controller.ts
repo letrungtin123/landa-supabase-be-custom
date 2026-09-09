@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
@@ -459,7 +459,10 @@ export async function getUserStudyTime(req: Request, res: Response) {
 /** POST /api/reports/refresh — Manually refresh materialized view */
 export async function refreshSummary(req: Request, res: Response) {
   await svc.refreshReportSummary();
-  auditFromReq(req, 'UPDATE', 'tenant', req.user!.tenantId || undefined, undefined, 'Refresh report summary');
+  await runAuditedTransaction(
+    () => Promise.resolve(),
+    () => createTransactionalAuditEntry(req, 'UPDATE', 'report_summary', { code: 'report.summary.refreshed' }, req.user!.tenantId || undefined, 'report_summary'),
+  );
   sendSuccess(res, { message: 'Report summary refreshed' });
 }
 

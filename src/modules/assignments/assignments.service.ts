@@ -10,6 +10,7 @@ import {
   uploadFile,
 } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { isLearnerRole } from '../../types/index.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
 import type { AuthUser } from '../../types/express.js';
@@ -47,6 +48,26 @@ interface CourseRow {
   tenant_id: string;
   visible_to_staff_only: boolean;
   is_public: boolean;
+}
+
+export interface AssignmentAuditSnapshot {
+  id: string;
+  course_id: string;
+  course_name: string;
+  title: string;
+  allow_resubmission: boolean;
+  deadline_at: string | Date | null;
+  submission_unlock_mode: string | null;
+  has_attachment: boolean;
+}
+
+export interface AssignmentFeedbackAuditContext {
+  submissionId: string;
+  assignmentId: string;
+  assignmentTitle: string;
+  courseId: string;
+  courseName: string;
+  learnerName: string;
 }
 
 interface UploadedAssignmentFile extends AssignmentFileMeta {
@@ -217,6 +238,19 @@ async function getAssignmentForAdmin(assignmentId: string, tenantId: string) {
   return result.rows[0];
 }
 
+function toAssignmentAuditSnapshot(row: any, courseName?: string): AssignmentAuditSnapshot {
+  return {
+    id: String(row.id),
+    course_id: String(row.course_id),
+    course_name: String(courseName || row.course_name || ''),
+    title: String(row.title),
+    allow_resubmission: row.allow_resubmission === true,
+    deadline_at: row.deadline_at ?? null,
+    submission_unlock_mode: row.submission_unlock_mode ?? null,
+    has_attachment: Boolean(normalizeAttachmentFile(row.attachment_file)),
+  };
+}
+
 async function uploadAssignmentFiles(
   files: Express.Multer.File[] | undefined,
   tenantId: string,
@@ -358,6 +392,7 @@ export async function createAssignment(
   userId: string,
   input: CreateAssignmentInput,
   attachmentFile?: Express.Multer.File,
+  auditEntry?: (assignment: AssignmentAuditSnapshot) => TransactionalAuditEntry,
 ) {
   const course = await ensureCourseForAdmin(courseId, tenantId);
   const existing = await query<{ id: string }>(
@@ -501,6 +536,7 @@ export async function createAssignment(
       }
     }
 
+    if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(assignment, course.display_name)));
     await client.query('COMMIT');
 
     await scheduleCourseProgressRecalculation({
@@ -535,6 +571,7 @@ export async function updateAssignment(
   userId: string,
   input: UpdateAssignmentInput,
   attachmentFile?: Express.Multer.File,
+  auditEntry?: (before: AssignmentAuditSnapshot, after: AssignmentAuditSnapshot) => TransactionalAuditEntry,
 ) {
   const current = await getAssignmentForAdmin(assignmentId, tenantId);
   const currentDeadlineMode = normalizeDeadlineMode(
@@ -610,11 +647,22 @@ export async function updateAssignment(
       params,
     );
 
+    const updated = result.rows[0];
+    if (!updated) throw new AppError('Assignment khong ton tai', 404);
+    if (auditEntry) {
+      await appendAuditLog(
+        client,
+        auditEntry(
+          toAssignmentAuditSnapshot(current),
+          toAssignmentAuditSnapshot(updated, current.course_name),
+        ),
+      );
+    }
     await client.query('COMMIT');
     if (oldAttachmentPath) {
       await deleteFile(oldAttachmentPath).catch(() => undefined);
     }
-    return normalizeAssignmentRow(result.rows[0]);
+    return normalizeAssignmentRow(updated);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     if (uploadedAttachment) {
@@ -626,7 +674,11 @@ export async function updateAssignment(
   }
 }
 
-export async function deleteAssignment(assignmentId: string, tenantId: string) {
+export async function deleteAssignment(
+  assignmentId: string,
+  tenantId: string,
+  auditEntry?: (assignment: AssignmentAuditSnapshot) => TransactionalAuditEntry,
+) {
   const current = await getAssignmentForAdmin(assignmentId, tenantId);
   const client = await getClient();
   try {
@@ -639,6 +691,7 @@ export async function deleteAssignment(assignmentId: string, tenantId: string) {
       [assignmentId, tenantId],
     );
     if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
+    if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(current)));
     await client.query('COMMIT');
 
     await scheduleCourseProgressRecalculation({
@@ -662,7 +715,12 @@ export async function deleteAssignment(assignmentId: string, tenantId: string) {
   }
 }
 
-export async function reorderAssignments(courseId: string, tenantId: string, assignmentIds: string[]) {
+export async function reorderAssignments(
+  courseId: string,
+  tenantId: string,
+  assignmentIds: string[],
+  auditEntry?: (course: CourseRow, affectedCount: number) => TransactionalAuditEntry | null,
+) {
   const course = await ensureCourseForAdmin(courseId, tenantId);
   const existing = await query<{ id: string }>(
     `SELECT id
@@ -685,6 +743,10 @@ export async function reorderAssignments(courseId: string, tenantId: string, ass
          WHERE id = $2 AND tenant_id = $3 AND course_id = $4`,
         [i, assignmentIds[i], tenantId, courseId],
       );
+    }
+    if (auditEntry) {
+      const entry = auditEntry(course, assignmentIds.length);
+      if (entry) await appendAuditLog(client, entry);
     }
     await client.query('COMMIT');
   } catch (err) {
@@ -1221,6 +1283,7 @@ export async function feedbackSubmission(
   adminId: string,
   input: FeedbackAssignmentInput,
   files?: Express.Multer.File[],
+  auditEntry?: (context: AssignmentFeedbackAuditContext, beforeScore: number | null, afterScore: number | null) => TransactionalAuditEntry,
 ) {
   const submission = await query<{
     id: string;
@@ -1288,8 +1351,9 @@ export async function feedbackSubmission(
       status: 'submitted' | 'feedback_given';
       feedback_at: string | null;
       feedback_files: unknown;
+      score: number | null;
     }>(
-      `SELECT status::text AS status, feedback_at, feedback_files
+      `SELECT status::text AS status, feedback_at, feedback_files, score
        FROM assignment_submissions
        WHERE id = $1 AND tenant_id = $2
        FOR UPDATE`,
@@ -1401,6 +1465,17 @@ export async function feedbackSubmission(
       feedbackByEmail,
       score,
     });
+
+    if (auditEntry) {
+      await appendAuditLog(client, auditEntry({
+        submissionId: ctx.id,
+        assignmentId: ctx.assignment_id,
+        assignmentTitle: ctx.assignment_title,
+        courseId: ctx.course_id,
+        courseName: ctx.course_name,
+        learnerName: ctx.learner_name,
+      }, current.rows[0].score, score));
+    }
 
     await client.query('COMMIT');
   } catch (err) {

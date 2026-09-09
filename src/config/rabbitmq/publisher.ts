@@ -11,5 +11,10 @@ import { getChannel } from './connection.js';
 export async function publish(queue: string, payload: Record<string, unknown>): Promise<void> {
   const channel = getChannel();
   const buffer = Buffer.from(JSON.stringify(payload));
-  channel.sendToQueue(queue, buffer, { persistent: true });
+  await new Promise<void>((resolve, reject) => {
+    channel.sendToQueue(queue, buffer, { persistent: true }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }

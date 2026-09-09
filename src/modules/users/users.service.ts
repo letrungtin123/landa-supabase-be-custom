@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query, getClient } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { normalizeEmail } from '../../utils/email.js';
@@ -371,7 +372,11 @@ async function assertUserIsNotPendingDeletion(userId: string): Promise<void> {
 /**
  * Gán user vào permission groups (replace toàn bộ).
  */
-export async function assignPermissionGroups(userId: string, groupIds: string[]) {
+export async function assignPermissionGroups(
+  userId: string,
+  groupIds: string[],
+  auditEntry?: TransactionalAuditEntry,
+) {
   await assertUserIsNotPendingDeletion(userId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật quyền');
 
@@ -394,6 +399,8 @@ export async function assignPermissionGroups(userId: string, groupIds: string[])
         [userId, groupId],
       );
     }
+
+    if (auditEntry) await appendAuditLog(client, auditEntry);
 
     await client.query('COMMIT');
   } catch (err) {

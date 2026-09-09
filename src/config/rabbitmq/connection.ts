@@ -4,12 +4,14 @@
 // ═══════════════════════════════════════════════════════════════
 
 import amqp from 'amqplib';
-import type { Channel } from 'amqplib';
+import type { Channel, ConfirmChannel } from 'amqplib';
 
 type AmqpConnection = Awaited<ReturnType<typeof amqp.connect>>;
 
 let connection: AmqpConnection | null = null;
-let channel: Channel | null = null;
+// Publisher confirmations mean a queued DB job is acknowledged by RabbitMQ,
+// not merely accepted into the Node process buffer.
+let channel: ConfirmChannel | null = null;
 let isShuttingDown = false;
 
 /**
@@ -21,7 +23,7 @@ export async function connectRabbitMQ(url: string): Promise<void> {
     console.log('[RabbitMQ] Connecting...');
     const conn = await amqp.connect(url);
     connection = conn;
-    channel = await conn.createChannel();
+    channel = await conn.createConfirmChannel();
     console.log('[RabbitMQ] Connected successfully');
 
     // Crash on unexpected close so the process manager restarts the full
@@ -47,18 +49,18 @@ export async function connectRabbitMQ(url: string): Promise<void> {
 /**
  * Lấy channel hiện tại. Throw nếu chưa connected.
  */
-export function getChannel(): Channel {
+export function getChannel(): ConfirmChannel {
   if (!channel) {
     throw new Error('[RabbitMQ] Channel not available — not connected');
   }
   return channel;
 }
 
-export async function createRabbitChannel(): Promise<Channel> {
+export async function createRabbitChannel(): Promise<ConfirmChannel> {
   if (!connection) {
     throw new Error('[RabbitMQ] Connection not available - not connected');
   }
-  return connection.createChannel();
+  return connection.createConfirmChannel();
 }
 
 /**

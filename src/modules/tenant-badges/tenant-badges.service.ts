@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
@@ -183,6 +184,7 @@ export async function updateTenantBadgeRule(
   actorId: string,
   input: UpdateTenantBadgeRuleInput,
   allowWhenDisabled = false,
+  createAuditEntry?: (context: { badgeName: string; previousEnabled: boolean; nextEnabled: boolean; courseCount: number }) => TransactionalAuditEntry,
 ) {
   await assertModuleEnabled(tenantId, allowWhenDisabled);
 
@@ -266,6 +268,13 @@ export async function updateTenantBadgeRule(
       }
     }
 
+    const auditEntry = createAuditEntry?.({
+      badgeName: badgeResult.rows[0].name,
+      previousEnabled,
+      nextEnabled: input.is_enabled,
+      courseCount: nextCourseIds.length,
+    });
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');

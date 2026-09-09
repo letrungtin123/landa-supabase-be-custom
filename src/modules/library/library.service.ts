@@ -6,6 +6,7 @@
 import { getClient, query } from '../../config/database.js';
 import { invalidateTenantLibraryCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 
 type DocumentMutationInput = {
@@ -16,6 +17,22 @@ type DocumentMutationInput = {
 };
 
 type BulkDocumentAction = 'show' | 'hide' | 'set_category';
+
+export interface DocumentCategoryAuditSnapshot {
+  id: string;
+  tenant_id: string;
+  name: string;
+  is_public: boolean;
+}
+
+export interface DocumentAuditSnapshot {
+  id: string;
+  title: string;
+  file_size: number;
+  category_id: string | null;
+  is_visible: boolean;
+  is_public: boolean;
+}
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
 
@@ -190,12 +207,21 @@ export async function createDocCategory(tenantId: string, input: { name: string 
   return result.rows[0];
 }
 
-export async function updateDocCategory(catId: string, tenantId: string, input: { name?: string; is_public?: boolean }) {
+export async function updateDocCategory(
+  catId: string,
+  tenantId: string,
+  input: { name?: string; is_public?: boolean },
+  auditEntry?: (
+    before: DocumentCategoryAuditSnapshot,
+    after: DocumentCategoryAuditSnapshot,
+    removedAssignments: number,
+  ) => TransactionalAuditEntry,
+) {
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
-    const current = await client.query<{ id: string; tenant_id: string; name: string; is_public: boolean }>(
+    const current = await client.query<DocumentCategoryAuditSnapshot>(
       `SELECT id, tenant_id, name, COALESCE(is_public, false) AS is_public
        FROM document_categories
        WHERE id = $1::uuid AND tenant_id = $2::uuid
@@ -231,7 +257,7 @@ export async function updateDocCategory(catId: string, tenantId: string, input: 
     }
 
     params.push(catId, tenantId);
-    const result = await client.query(
+    const result = await client.query<DocumentCategoryAuditSnapshot & { slug: string; sort_order: number }>(
       `UPDATE document_categories
        SET ${sets.join(', ')}
        WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid
@@ -239,9 +265,13 @@ export async function updateDocCategory(catId: string, tenantId: string, input: 
       params,
     );
 
+    const updated = result.rows[0];
+    if (!updated) throw new AppError('Danh mục tài liệu không tồn tại', 404);
+    if (auditEntry) await appendAuditLog(client, auditEntry(current.rows[0], updated, removedAssignments));
+
     await client.query('COMMIT');
     await invalidateTenantLibraryCaches(tenantId);
-    return { ...result.rows[0], removed_assignments: removedAssignments };
+    return { ...updated, removed_assignments: removedAssignments };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
@@ -320,7 +350,7 @@ export async function listDocuments(tenantId: string | null, queryParams: Record
 export async function createDocument(tenantId: string, input: {
   title: string; file_url: string; file_size?: number; extension?: string;
   category_id?: string | null; is_visible?: boolean; is_public?: boolean;
-}, uploadedBy: string, options: { invalidateCache?: boolean } = {}) {
+}, uploadedBy: string, options: { invalidateCache?: boolean } = {}, auditEntry?: (document: DocumentAuditSnapshot) => TransactionalAuditEntry) {
   const client = await getClient();
   let document: any;
   try {
@@ -338,6 +368,8 @@ export async function createDocument(tenantId: string, input: {
       [tenantId, input.title, input.file_url, input.file_size || 0, input.extension || '', categoryId, isVisible, isPublic, uploadedBy],
     );
     document = result.rows[0];
+    if (!document) throw new AppError('Không thể tạo tài liệu', 500);
+    if (auditEntry) await appendAuditLog(client, auditEntry(document));
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -356,13 +388,23 @@ export async function invalidateLibraryCache(tenantId: string) {
   await invalidateTenantLibraryCaches(tenantId);
 }
 
-export async function updateDocument(docId: string, tenantId: string, input: DocumentMutationInput) {
-  const document = await updateDocumentFromDb(docId, tenantId, input);
+export async function updateDocument(
+  docId: string,
+  tenantId: string,
+  input: DocumentMutationInput,
+  auditEntry?: (before: DocumentAuditSnapshot, after: DocumentAuditSnapshot, categoryName: string | null) => TransactionalAuditEntry,
+) {
+  const document = await updateDocumentFromDb(docId, tenantId, input, auditEntry);
   await invalidateTenantLibraryCaches(tenantId);
   return document;
 }
 
-async function updateDocumentFromDb(docId: string, tenantId: string, input: DocumentMutationInput) {
+async function updateDocumentFromDb(
+  docId: string,
+  tenantId: string,
+  input: DocumentMutationInput,
+  auditEntry?: (before: DocumentAuditSnapshot, after: DocumentAuditSnapshot, categoryName: string | null) => TransactionalAuditEntry,
+) {
   if (
     input.title === undefined &&
     input.is_visible === undefined &&
@@ -378,14 +420,8 @@ async function updateDocumentFromDb(docId: string, tenantId: string, input: Docu
   try {
     await client.query('BEGIN');
 
-    const currentResult = await client.query<{
-      id: string;
-      title: string;
-      category_id: string | null;
-      is_visible: boolean;
-      is_public: boolean;
-    }>(
-      `SELECT id, title, category_id, is_visible, COALESCE(is_public, false) AS is_public
+    const currentResult = await client.query<DocumentAuditSnapshot>(
+      `SELECT id, title, file_size, category_id, is_visible, COALESCE(is_public, false) AS is_public
        FROM documents
        WHERE id = $1::uuid AND tenant_id = $2::uuid
        FOR UPDATE`,
@@ -401,8 +437,14 @@ async function updateDocumentFromDb(docId: string, tenantId: string, input: Docu
 
     const rawCategoryId = input.category_id !== undefined ? input.category_id : current.category_id;
     const nextCategoryId = await normalizeDocumentCategory(client, tenantId, rawCategoryId);
+    const nextCategory = nextCategoryId
+      ? await client.query<{ name: string }>(
+        'SELECT name FROM document_categories WHERE id = $1::uuid AND tenant_id = $2::uuid',
+        [nextCategoryId, tenantId],
+      )
+      : null;
 
-    const result = await client.query(
+    const result = await client.query<DocumentAuditSnapshot & { file_url: string; extension: string }>(
       `UPDATE documents
        SET title = $3,
            is_visible = $4,
@@ -413,8 +455,11 @@ async function updateDocumentFromDb(docId: string, tenantId: string, input: Docu
       [docId, tenantId, nextTitle, nextIsVisible, nextIsPublic, nextCategoryId],
     );
 
+    const updated = result.rows[0];
+    if (!updated) throw new AppError('Tài liệu không tồn tại', 404);
+    if (auditEntry) await appendAuditLog(client, auditEntry(current, updated, nextCategory?.rows[0]?.name ?? null));
     await client.query('COMMIT');
-    return result.rows[0];
+    return updated;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
@@ -431,7 +476,7 @@ export async function deleteDocument(docId: string, tenantId: string) {
 
 async function deleteDocumentFromDb(docId: string, tenantId: string) {
   const result = await query(
-    'DELETE FROM documents WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id, title, file_url',
+    'DELETE FROM documents WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id, title, file_url, file_size',
     [docId, tenantId],
   );
   if (result.rowCount === 0) throw new AppError('Tài liệu không tồn tại', 404);
@@ -457,6 +502,7 @@ export async function bulkDocumentAction(
   tenantId: string,
   action: string,
   categoryId?: string | null,
+  auditEntry?: (result: { updated: number; detached: number; categoryName: string | null }) => TransactionalAuditEntry | null,
 ) {
   const normalizedIds = normalizeIds(ids);
   if (normalizedIds.length === 0) return { updated: 0, detached: 0 };
@@ -465,7 +511,7 @@ export async function bulkDocumentAction(
     throw new AppError('Action không hợp lệ', 400);
   }
 
-  const result = await bulkDocumentActionFromDb(normalizedIds, tenantId, normalizedAction, categoryId);
+  const result = await bulkDocumentActionFromDb(normalizedIds, tenantId, normalizedAction, categoryId, auditEntry);
   if (result.updated > 0) {
     await invalidateTenantLibraryCaches(tenantId);
   }
@@ -477,39 +523,47 @@ async function bulkDocumentActionFromDb(
   tenantId: string,
   action: BulkDocumentAction,
   categoryId?: string | null,
+  auditEntry?: (result: { updated: number; detached: number; categoryName: string | null }) => TransactionalAuditEntry | null,
 ) {
 
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    let result: { updated: number; detached: number; categoryName: string | null };
 
     if (action === 'show') {
       const r = await client.query('UPDATE documents SET is_visible = true WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])', [tenantId, ids]);
-      await client.query('COMMIT');
-      return { updated: r.rowCount || 0, detached: 0 };
-    }
-
-    if (action === 'hide') {
+      result = { updated: r.rowCount || 0, detached: 0, categoryName: null };
+    } else if (action === 'hide') {
       const r = await client.query('UPDATE documents SET is_visible = false, is_public = false WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])', [tenantId, ids]);
-      await client.query('COMMIT');
-      return { updated: r.rowCount || 0, detached: 0 };
+      result = { updated: r.rowCount || 0, detached: 0, categoryName: null };
+    } else {
+      const nextCategoryId = categoryId || null;
+      if (!nextCategoryId) {
+        const r = await client.query('UPDATE documents SET category_id = NULL WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])', [tenantId, ids]);
+        result = { updated: r.rowCount || 0, detached: r.rowCount || 0, categoryName: null };
+      } else {
+        const category = await client.query<{ name: string }>(
+          'SELECT name FROM document_categories WHERE id = $1::uuid AND tenant_id = $2::uuid LIMIT 1',
+          [nextCategoryId, tenantId],
+        );
+        if (category.rowCount === 0) {
+          throw new AppError('Danh mục tài liệu không tồn tại hoặc không thuộc tenant hiện tại', 404);
+        }
+        const r = await client.query(
+          'UPDATE documents SET category_id = $3::uuid WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])',
+          [tenantId, ids, nextCategoryId],
+        );
+        result = { updated: r.rowCount || 0, detached: 0, categoryName: category.rows[0].name };
+      }
     }
 
-
-    const nextCategoryId = categoryId || null;
-    if (!nextCategoryId) {
-      const r = await client.query('UPDATE documents SET category_id = NULL WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])', [tenantId, ids]);
-      await client.query('COMMIT');
-      return { updated: r.rowCount || 0, detached: 0 };
+    if (result.updated > 0 && auditEntry) {
+      const entry = auditEntry(result);
+      if (entry) await appendAuditLog(client, entry);
     }
-
-    await assertDocumentCategoryInTenant(client, tenantId, nextCategoryId);
-    const r = await client.query(
-      'UPDATE documents SET category_id = $3::uuid WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])',
-      [tenantId, ids, nextCategoryId],
-    );
     await client.query('COMMIT');
-    return { updated: r.rowCount || 0, detached: 0 };
+    return result;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;

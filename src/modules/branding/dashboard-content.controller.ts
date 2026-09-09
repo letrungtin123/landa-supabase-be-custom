@@ -4,7 +4,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response, NextFunction } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import {
+  createTransactionalAuditEntry,
+  runAuditedTransaction,
+} from '../../middleware/audit-log.js';
 import * as service from './dashboard-content.service.js';
 import { upsertDashboardContentSchema } from './dashboard-content.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
@@ -58,8 +61,20 @@ export async function upsertController(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const result = await service.upsertDashboardContent(tenantId, parsed.data);
-    auditFromReq(req, 'UPDATE', 'dashboard_content', tenantId, undefined, 'Cập nhật nội dung dashboard');
+    const result = await runAuditedTransaction(
+      () => service.upsertDashboardContent(tenantId, parsed.data),
+      (updated) => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'dashboard_content',
+        {
+          code: 'dashboard_content.updated',
+          context: { affected_count: updated.tips?.length || 0 },
+        },
+        tenantId,
+        'Nội dung trang chủ',
+      ),
+    );
     sendSuccess(res, result, 'Cập nhật thành công');
   } catch (err) { next(err); }
 }

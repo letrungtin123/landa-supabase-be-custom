@@ -7,7 +7,10 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
 import { bulkEnrollSchema } from './enrollments.validator.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import {
+  createTransactionalAuditEntry,
+  runAuditedTransaction,
+} from '../../middleware/audit-log.js';
 
 const VALID_GRANULARITIES = new Set(['day', 'month', 'year']);
 
@@ -22,19 +25,56 @@ export async function enroll(req: Request, res: Response) {
   if (Array.isArray(user_ids) && user_ids.length > 0) {
     const parsed = bulkEnrollSchema.safeParse({ user_ids, course_id });
     if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
-    const result = await svc.bulkEnroll(parsed.data.user_ids, parsed.data.course_id, tenantId);
-    const courseName = await svc.getCourseAuditName(parsed.data.course_id, tenantId);
-    auditFromReq(req, 'CREATE', 'enrollment', parsed.data.course_id, courseName, `Bulk enroll: ${result.enrolled} learner, skipped ${result.skipped}`);
-    return sendSuccess(res, result, undefined, 201);
+    const result = await runAuditedTransaction(
+      async () => {
+        const enrollment = await svc.bulkEnroll(parsed.data.user_ids, parsed.data.course_id, tenantId);
+        const courseName = await svc.getCourseAuditName(parsed.data.course_id, tenantId);
+        return { enrollment, courseName };
+      },
+      ({ enrollment, courseName }) => enrollment.enrolled > 0
+        ? createTransactionalAuditEntry(
+          req,
+          'CREATE',
+          'enrollment',
+          {
+            code: 'enrollment.bulk.created',
+            context: { course_id: parsed.data.course_id, course_name: courseName, affected_count: enrollment.enrolled },
+          },
+          parsed.data.course_id,
+          courseName,
+        )
+        : null,
+    );
+    return sendSuccess(res, result.enrollment, undefined, 201);
   }
 
   // Single enroll
   if (!user_id) return sendError(res, 'user_id or user_ids is required', 400);
 
-  const result = await svc.enrollUser(user_id, course_id, tenantId);
-  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
-  auditFromReq(req, result.already_enrolled ? 'UPDATE' : 'CREATE', 'enrollment', result.enrollment_id, auditContext.course_name, `Ghi danh ${auditContext.username}`);
-  sendSuccess(res, result, undefined, result.already_enrolled ? 200 : 201);
+  const result = await runAuditedTransaction(
+    async () => {
+      const enrollment = await svc.enrollUser(user_id, course_id, tenantId);
+      const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
+      return { enrollment, auditContext };
+    },
+    ({ enrollment, auditContext }) => createTransactionalAuditEntry(
+      req,
+      enrollment.already_enrolled ? 'UPDATE' : 'CREATE',
+      'enrollment',
+      {
+        code: 'enrollment.created',
+        context: {
+          course_id,
+          course_name: auditContext.course_name,
+          related_entity_name: auditContext.username,
+          related_entity_type: 'learner',
+        },
+      },
+      enrollment.enrollment_id,
+      auditContext.course_name,
+    ),
+  );
+  sendSuccess(res, result.enrollment, undefined, result.enrollment.already_enrolled ? 200 : 201);
 }
 
 /** DELETE /api/enrollments — Unenroll user from course */
@@ -42,10 +82,33 @@ export async function unenroll(req: Request, res: Response) {
   const { user_id, course_id } = req.body;
   if (!user_id || !course_id) return sendError(res, 'user_id and course_id are required', 400);
 
-  const success = await svc.unenrollUser(user_id, course_id);
-  if (!success) return sendError(res, 'Enrollment not found', 404);
-  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, req.user!.tenantId!);
-  auditFromReq(req, 'DELETE', 'enrollment', `${user_id}:${course_id}`, auditContext.course_name, `Hủy ghi danh ${auditContext.username}`);
+  const tenantId = req.user!.tenantId!;
+  const result = await runAuditedTransaction(
+    async () => {
+      const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
+      const success = await svc.unenrollUser(user_id, course_id, tenantId);
+      return { success, auditContext };
+    },
+    ({ success, auditContext }) => success
+      ? createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'enrollment',
+        {
+          code: 'enrollment.removed',
+          context: {
+            course_id,
+            course_name: auditContext.course_name,
+            related_entity_name: auditContext.username,
+            related_entity_type: 'learner',
+          },
+        },
+        `${user_id}:${course_id}`,
+        auditContext.course_name,
+      )
+      : null,
+  );
+  if (!result.success) return sendError(res, 'Enrollment not found', 404);
   sendSuccess(res, { success: true });
 }
 
@@ -56,9 +119,33 @@ export async function updateProgress(req: Request, res: Response) {
     return sendError(res, 'user_id, course_id, progress are required', 400);
   }
 
-  await svc.updateProgress(user_id, course_id, progress);
-  const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, req.user!.tenantId!);
-  auditFromReq(req, 'UPDATE', 'enrollment', `${user_id}:${course_id}`, auditContext.course_name, `Cập nhật tiến độ ${auditContext.username}: ${progress}%`);
+  const tenantId = req.user!.tenantId!;
+  await runAuditedTransaction(
+    async () => {
+      const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
+      const update = await svc.updateProgress(user_id, course_id, tenantId, progress);
+      return { auditContext, update };
+    },
+    ({ auditContext, update }) => update.progress !== null
+      ? createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'enrollment',
+        {
+          code: 'enrollment.progress.updated',
+          context: {
+            course_id,
+            course_name: auditContext.course_name,
+            related_entity_name: auditContext.username,
+            related_entity_type: 'learner',
+          },
+          changes: [{ field: 'progress', before: update.previousProgress, after: update.progress }],
+        },
+        `${user_id}:${course_id}`,
+        auditContext.course_name,
+      )
+      : null,
+  );
   sendSuccess(res, { success: true });
 }
 

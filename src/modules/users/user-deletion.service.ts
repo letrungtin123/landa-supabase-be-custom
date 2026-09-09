@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { parseExpiresIn } from '../../utils/jwt.js';
@@ -26,12 +27,16 @@ type UserDeletionJobRow = {
 
 type TargetUserRow = {
   id: string;
-  username: string;
-  email: string;
+  username: string | null;
+  email: string | null;
+  full_name: string | null;
   role: string;
   tenant_id: string | null;
   avatar_url: string | null;
 };
+
+/** Narrow snapshot passed to the audit writer while the target row is locked. */
+export type UserDeletionAuditTarget = Pick<TargetUserRow, 'username' | 'email' | 'full_name' | 'role'>;
 
 const ROLE_LEVEL: Record<string, number> = {
   learner: 0,
@@ -73,6 +78,11 @@ export async function requestUserDeletion(
   callerId: string,
   callerRole: string,
   callerTenantId: string | null,
+  auditEntry?: (
+    jobId: string,
+    targetTenantId: string | null,
+    target: UserDeletionAuditTarget,
+  ) => TransactionalAuditEntry,
 ): Promise<{ jobId: string; deletedUserName: string }> {
   const client = await getClient();
   let response: { jobId: string; deletedUserName: string } | null = null;
@@ -81,7 +91,11 @@ export async function requestUserDeletion(
   try {
     await client.query('BEGIN');
     const targetResult = await client.query<TargetUserRow>(
-      `SELECT id, username, email, role, tenant_id, avatar_url
+      `SELECT id,
+              NULLIF(btrim(username), '') AS username,
+              NULLIF(lower(btrim(email)), '') AS email,
+              NULLIF(btrim(full_name), '') AS full_name,
+              role, tenant_id, avatar_url
        FROM users
        WHERE id = $1
        FOR UPDATE`,
@@ -154,6 +168,14 @@ export async function requestUserDeletion(
        WHERE id = $1::uuid`,
       [targetId, jobId],
     );
+    if (auditEntry) {
+      await appendAuditLog(client, auditEntry(jobId, target.tenant_id, {
+        username: target.username,
+        email: target.email,
+        full_name: target.full_name,
+        role: target.role,
+      }));
+    }
     await client.query('COMMIT');
     response = { jobId, deletedUserName: target.username || target.email || target.id };
     revocationExpiresAt = expiresAt;
@@ -380,24 +402,11 @@ async function purgeUserDatabase(userId: string): Promise<Record<string, number>
      ) DELETE FROM email_outbox e USING doomed WHERE e.ctid = doomed.ctid`,
     [userId],
   );
-  stats.auditActorLogs = await deleteInBatches(
-    `WITH doomed AS (
-       SELECT ctid
-       FROM audit_logs
-       WHERE actor_id = $1::uuid
-       LIMIT $2::int
-     ) DELETE FROM audit_logs a USING doomed WHERE a.ctid = doomed.ctid`,
-    [userId],
-  );
-  stats.auditUserEntityLogs = await deleteInBatches(
-    `WITH doomed AS (
-       SELECT ctid
-       FROM audit_logs
-       WHERE entity_type = 'user' AND entity_id = $1::text
-       LIMIT $2::int
-     ) DELETE FROM audit_logs a USING doomed WHERE a.ctid = doomed.ctid`,
-    [userId],
-  );
+  // Audit rows are retained for the agreed 30-day window. The FK on actor_id
+  // sets it to NULL when the user is purged; immutable actor snapshots keep
+  // the operational history intelligible until the retention cleanup runs.
+  stats.auditActorLogsRetained = 0;
+  stats.auditUserEntityLogsRetained = 0;
   stats.chatConversations = await deleteInBatches(
     `WITH doomed AS (
        SELECT ctid FROM chat_conversations WHERE user_id = $1::uuid LIMIT $2::int

@@ -42,7 +42,9 @@ export interface CourseOutlineResponse {
 export interface BlockInfo {
   id: string;
   course_id: string;
+  course_name: string;
   parent_id: string | null;
+  parent_name: string | null;
   block_type: string;
   display_name: string;
   data: any;
@@ -588,11 +590,14 @@ export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
        FROM course_blocks parent
        JOIN ancestors a ON parent.id = a.parent_id
      )
-     SELECT b.id, b.course_id, b.parent_id, b.block_type, b.display_name,
+     SELECT b.id, b.course_id, c.display_name AS course_name,
+            b.parent_id, parent.display_name AS parent_name,
+            b.block_type, b.display_name,
             b.data, b.metadata, b.sort_order, b.is_published, b.has_draft_changes,
             b.created_at, b.updated_at
      FROM course_blocks b
      JOIN courses c ON c.id = b.course_id
+     LEFT JOIN course_blocks parent ON parent.id = b.parent_id AND parent.deleted_at IS NULL
      WHERE b.id = $1
        AND b.deleted_at IS NULL
        AND c.deleted_at IS NULL
@@ -600,6 +605,18 @@ export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
     [blockId],
   );
   if (result.rowCount === 0) throw new Error('Block not found');
+  return result.rows[0];
+}
+
+/** Minimal, allowlist-safe course context for structured audit events. */
+export async function getCourseAuditContext(courseId: string): Promise<{ course_id: string; course_name: string }> {
+  const result = await query<{ course_id: string; course_name: string }>(
+    `SELECT id AS course_id, display_name AS course_name
+       FROM courses
+      WHERE id = $1 AND deleted_at IS NULL`,
+    [courseId],
+  );
+  if (result.rowCount === 0) throw new AppError('Course not found', 404);
   return result.rows[0];
 }
 
@@ -676,7 +693,7 @@ export async function updateBlock(
     invalidateBlockReadCaches([block.id]),
     tenantCourseInvalidation ?? Promise.resolve(),
   ]);
-  return block;
+  return getBlockInfo(block.id);
 }
 
 /**

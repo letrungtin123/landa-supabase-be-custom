@@ -2,12 +2,13 @@ import app from './app.js';
 import { env } from './config/env.js';
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
-import { query } from './config/database.js';
+import { getClient, query } from './config/database.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
+import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
@@ -53,24 +54,49 @@ async function cleanupCompletedDeletionJobs(): Promise<number> {
  * Chạy 1 lần khi start + mỗi 24 giờ.
  */
 async function cleanupOldAuditLogs(): Promise<number> {
+  const client = await getClient();
+  const lockKey = 'audit_logs:retention-cleanup';
+  let lockHeld = false;
   let totalDeleted = 0;
-  for (let batch = 0; batch < AUDIT_LOG_RETENTION_MAX_BATCHES; batch += 1) {
-    const result = await query(
-      `DELETE FROM audit_logs
-       WHERE ctid IN (
-         SELECT ctid
-         FROM audit_logs
-         WHERE created_at < now() - ($1::int * interval '1 day')
-         ORDER BY created_at ASC
-         LIMIT $2::int
-       )`,
-      [AUDIT_LOG_RETENTION_DAYS, AUDIT_LOG_RETENTION_BATCH_SIZE],
+  try {
+    const lock = await client.query<{ acquired: boolean }>(
+      `SELECT pg_try_advisory_lock(hashtext($1)) AS acquired`,
+      [lockKey],
     );
-    const deleted = result.rowCount || 0;
-    totalDeleted += deleted;
-    if (deleted < AUDIT_LOG_RETENTION_BATCH_SIZE) break;
+    lockHeld = lock.rows[0]?.acquired === true;
+    if (!lockHeld) return 0;
+
+    for (let batch = 0; batch < AUDIT_LOG_RETENTION_MAX_BATCHES; batch += 1) {
+      const result = await client.query(
+        `DELETE FROM audit_logs
+         WHERE ctid IN (
+           SELECT ctid
+           FROM audit_logs
+           WHERE created_at < now() - ($1::int * interval '1 day')
+           ORDER BY created_at ASC, id ASC
+           LIMIT $2::int
+         )`,
+        [AUDIT_LOG_RETENTION_DAYS, AUDIT_LOG_RETENTION_BATCH_SIZE],
+      );
+      const deleted = result.rowCount || 0;
+      totalDeleted += deleted;
+      if (deleted < AUDIT_LOG_RETENTION_BATCH_SIZE) break;
+    }
+    return totalDeleted;
+  } finally {
+    if (lockHeld) await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [lockKey]).catch(() => undefined);
+    client.release();
   }
-  return totalDeleted;
+}
+
+async function runAuditLogRetentionCleanup(trigger: 'startup' | 'daily'): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const deleted = await cleanupOldAuditLogs();
+    console.log(`[Audit] Retention cleanup (${trigger}) completed: deleted=${deleted}, duration_ms=${Date.now() - startedAt}`);
+  } catch (err) {
+    console.error(`[Audit] Retention cleanup (${trigger}) failed:`, err);
+  }
 }
 
 /**
@@ -93,6 +119,7 @@ async function initRabbitMQ(): Promise<void> {
     await startUploadWorker();
     await startDeleteWorker();
     await startRestoreWorker();
+    await startKbOperationWorker();
     await startCourseDeletionWorker();
     await startUserDeletionWorker();
     await startCourseProgressRecalculationWorker();
@@ -151,11 +178,8 @@ async function bootstrap() {
       if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
     } catch { /* ignore */ }
 
-    // Dọn audit logs cũ ngay khi start
-    try {
-      const deleted = await cleanupOldAuditLogs();
-      if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} audit logs older than 30 days`);
-    } catch { /* ignore */ }
+    // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
+    await runAuditLogRetentionCleanup('startup');
   });
 }
 
@@ -198,14 +222,7 @@ setInterval(async function cleanupAccessRevocations() {
 
 // Dọn audit logs cũ hơn 30 ngày — chạy mỗi 24 giờ
 setInterval(async function cleanupAuditLogs() {
-  try {
-    const deleted = await cleanupOldAuditLogs();
-    if (deleted > 0) {
-      console.log(`[Cleanup] Removed ${deleted} audit logs older than 30 days`);
-    }
-  } catch (err) {
-    console.error('[Cleanup] Audit cleanup error:', err);
-  }
+  await runAuditLogRetentionCleanup('daily');
 }, 24 * 60 * 60 * 1000);
 
 // Graceful shutdown

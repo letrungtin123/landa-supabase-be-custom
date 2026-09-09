@@ -10,6 +10,8 @@ interface HelpDocMutationResult {
   id: string;
   title: string;
   storagePathsToDelete: string[];
+  previousTitle?: string;
+  previousPublished?: boolean;
 }
 
 const STORAGE_PROXY_PREFIX = '/api/storage/';
@@ -117,6 +119,11 @@ export async function createFolder(tenantId: string, input: { title: string; ico
 }
 
 export async function updateFolder(folderId: string, tenantId: string, input: { title?: string; icon?: string }) {
+  const current = await query<{ id: string; title: string }>(
+    `SELECT id, title FROM help_folders WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+    [folderId, tenantId],
+  );
+  if (current.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
   const sets: string[] = ['updated_at = NOW()'];
   const params: unknown[] = [];
   let idx = 1;
@@ -125,7 +132,7 @@ export async function updateFolder(folderId: string, tenantId: string, input: { 
   params.push(folderId, tenantId);
   const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx} RETURNING id, title`, params);
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
-  return result.rows[0];
+  return { ...result.rows[0], previousTitle: current.rows[0].title };
 }
 
 export async function deleteFolder(folderId: string, tenantId: string): Promise<HelpDocMutationResult> {
@@ -227,11 +234,12 @@ export async function updatePage(
   input: { title?: string; content?: string; is_published?: boolean },
   userId: string,
 ): Promise<HelpDocMutationResult> {
-  const current = await query<{ id: string; title: string; content: string | null }>(
-    `SELECT hp.id, hp.title, hp.content
+  const current = await query<{ id: string; title: string; content: string | null; is_published: boolean }>(
+    `SELECT hp.id, hp.title, hp.content, hp.is_published
      FROM help_pages hp
      JOIN help_folders hf ON hf.id = hp.folder_id
-     WHERE hp.id = $1 AND hf.tenant_id = $2`,
+     WHERE hp.id = $1 AND hf.tenant_id = $2
+     FOR UPDATE OF hp`,
     [pageId, tenantId],
   );
   if (current.rowCount === 0) throw new AppError('Page không tồn tại', 404);
@@ -264,6 +272,8 @@ export async function updatePage(
   return {
     ...result.rows[0],
     storagePathsToDelete: await getUnreferencedHelpDocImagePaths(tenantId, removedPaths),
+    previousTitle: current.rows[0].title,
+    previousPublished: current.rows[0].is_published,
   };
 }
 

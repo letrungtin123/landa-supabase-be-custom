@@ -4,7 +4,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+import { query } from '../../config/database.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as chatService from './chat.service.js';
@@ -87,8 +88,10 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
 
   try {
     const bot = await botService.getBot(bot_id, tenantId);
-    await chatService.assignBot(tenantId, target, bot_id);
-    auditFromReq(req, 'UPDATE', 'bot_assignment', target, bot?.name || bot_id, `Gán bot cho ${target}`);
+    await runAuditedTransaction(
+      () => chatService.assignBot(tenantId, target, bot_id),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: bot?.name || bot_id, related_entity_type: 'chatbot' } }, target, bot?.name || bot_id),
+    );
     sendSuccess(res, { message: 'Đã gán bot' });
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -103,9 +106,11 @@ export async function unassignBot(req: Request, res: Response): Promise<void> {
 
   try {
     const active = await chatService.getActiveBot(tenantId, target);
-    const deleted = await chatService.unassignBot(tenantId, target);
+    const deleted = await runAuditedTransaction(
+      () => chatService.unassignBot(tenantId, target),
+      (didDelete) => didDelete ? createTransactionalAuditEntry(req, 'DELETE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: active?.bot_name || target, related_entity_type: 'chatbot' } }, target, active?.bot_name || target) : null,
+    );
     if (!deleted) { sendError(res, 'Không có bot nào được gán cho target này', 404); return; }
-    auditFromReq(req, 'DELETE', 'bot_assignment', target, active?.bot_name || target, `Bỏ gán bot khỏi ${target}`);
     sendSuccess(res, { message: 'Đã bỏ gán bot' });
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -130,8 +135,10 @@ export async function assignLessonAuthorKb(req: Request, res: Response): Promise
 
   try {
     const kb = await kbService.getKnowledgebase(kb_id, tenantId);
-    await chatService.assignLessonAuthorKb(tenantId, kb_id);
-    auditFromReq(req, 'UPDATE', 'lesson_author_kb_assignment', tenantId, kb?.name || kb_id, 'Gán KB chuyên gia bài học');
+    await runAuditedTransaction(
+      () => chatService.assignLessonAuthorKb(tenantId, kb_id),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: kb?.name || kb_id, related_entity_type: 'knowledgebase' } }, tenantId, kb?.name || kb_id),
+    );
     sendSuccess(res, { message: 'Đã gán KB chuyên gia bài học' });
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -140,9 +147,11 @@ export async function unassignLessonAuthorKb(req: Request, res: Response): Promi
   const tenantId = req.user!.tenantId!;
   try {
     const activeKb = await chatService.getActiveKbAssignment(tenantId);
-    const deleted = await chatService.unassignLessonAuthorKb(tenantId);
+    const deleted = await runAuditedTransaction(
+      () => chatService.unassignLessonAuthorKb(tenantId),
+      (didDelete) => didDelete ? createTransactionalAuditEntry(req, 'DELETE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: activeKb?.kb_name || tenantId, related_entity_type: 'knowledgebase' } }, tenantId, activeKb?.kb_name || tenantId) : null,
+    );
     if (!deleted) { sendError(res, 'Chưa có KB active', 404); return; }
-    auditFromReq(req, 'DELETE', 'lesson_author_kb_assignment', tenantId, activeKb?.kb_name || tenantId, 'Bỏ gán KB chuyên gia bài học');
     sendSuccess(res, { message: 'Đã bỏ gán KB chuyên gia bài học' });
   } catch (err: any) { sendError(res, err.message, 400); }
 }
@@ -157,8 +166,20 @@ export async function applyLessonAuthorJob(req: Request, res: Response): Promise
   }
 
   try {
-    const result = await chatService.applyLessonAuthorJob(jobId, userId, tenantId);
-    auditFromReq(req, 'UPDATE', 'lesson_author_job', result.course_id, undefined, `Áp dụng job ${jobId}: tạo ${result.created_count}, cập nhật ${result.updated_count}`);
+    const result = await runAuditedTransaction(
+      () => chatService.applyLessonAuthorJob(jobId, userId, tenantId),
+      async (updated) => {
+        const course = await query<{ display_name: string }>(
+          'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2',
+          [updated.course_id, tenantId],
+        );
+        return createTransactionalAuditEntry(
+          req, 'UPDATE', 'lesson_author_job',
+          { code: 'lesson_author.job.applied', context: { course_id: updated.course_id, course_name: course.rows[0]?.display_name, affected_count: updated.created_count + updated.updated_count } },
+          jobId, course.rows[0]?.display_name,
+        );
+      },
+    );
     sendSuccess(res, result);
   } catch (err: any) { sendError(res, err.message, 400); }
 }

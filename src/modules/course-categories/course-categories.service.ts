@@ -5,7 +5,16 @@
 import { getClient, query } from '../../config/database.js';
 import { invalidateCourseReadCaches, invalidateTenantCourseCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+
+export interface CourseCategoryAuditSnapshot {
+  id: string;
+  tenant_id: string;
+  name: string;
+  sort_order: number;
+  is_public: boolean;
+}
 
 type CourseCategoryPublicImpactRow = {
   group_id: string;
@@ -169,13 +178,18 @@ export async function updateCourseCategory(
   catId: string,
   tenantId: string,
   input: { name?: string; description?: string; sort_order?: number; is_public?: boolean },
+  auditEntry?: (
+    before: CourseCategoryAuditSnapshot,
+    after: CourseCategoryAuditSnapshot,
+    removedAssignments: number,
+  ) => TransactionalAuditEntry,
 ) {
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
-    const current = await client.query<{ id: string; tenant_id: string; name: string; is_public: boolean }>(
-      `SELECT id, tenant_id, name, COALESCE(is_public, false) AS is_public
+    const current = await client.query<CourseCategoryAuditSnapshot>(
+      `SELECT id, tenant_id, name, sort_order, COALESCE(is_public, false) AS is_public
        FROM course_categories
        WHERE id = $1::uuid AND tenant_id = $2::uuid
        FOR UPDATE`,
@@ -212,7 +226,7 @@ export async function updateCourseCategory(
     }
 
     params.push(catId, tenantId);
-    const result = await client.query(
+    const result = await client.query<CourseCategoryAuditSnapshot & { slug: string; description: string }>(
       `UPDATE course_categories
        SET ${sets.join(', ')}
        WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid
@@ -220,9 +234,13 @@ export async function updateCourseCategory(
       params,
     );
 
+    const updated = result.rows[0];
+    if (!updated) throw new AppError('Danh mục khóa học không tồn tại', 404);
+    if (auditEntry) await appendAuditLog(client, auditEntry(current.rows[0], updated, removedAssignments));
+
     await client.query('COMMIT');
     await invalidateTenantCourseCaches(tenantId);
-    return { ...result.rows[0], removed_assignments: removedAssignments };
+    return { ...updated, removed_assignments: removedAssignments };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;

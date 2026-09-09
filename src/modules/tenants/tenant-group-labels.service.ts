@@ -1,4 +1,5 @@
 import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -126,6 +127,7 @@ export async function replaceTenantGroupLabels(
   tenantId: string,
   input: unknown,
   actorId: string | null,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<GroupLabelMap> {
   const labels = sanitizeGroupLabels(input);
   const entries = Object.entries(labels) as [GroupLabelKey, string][];
@@ -147,6 +149,7 @@ export async function replaceTenantGroupLabels(
       );
     }
 
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
     await invalidateTenantGroupLabelsCache(tenantId);
     return labels;

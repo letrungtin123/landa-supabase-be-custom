@@ -1,4 +1,5 @@
 import { query, getClient } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import {
   invalidateBlockReadCaches,
@@ -317,6 +318,7 @@ export async function requestCourseDeletion(
   courseId: string,
   tenantId: string,
   requestedBy: string,
+  auditEntry?: (jobId: string) => TransactionalAuditEntry,
 ): Promise<{ jobId: string }> {
   const client = await getClient();
   let jobId = '';
@@ -354,6 +356,8 @@ export async function requestCourseDeletion(
       [courseId, tenantId, jobId, requestedBy],
     );
 
+    if (auditEntry) await appendAuditLog(client, auditEntry(jobId));
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -374,6 +378,7 @@ export async function requestBlockDeletion(
   blockId: string,
   tenantId: string,
   requestedBy: string,
+  auditEntry?: TransactionalAuditEntry,
 ): Promise<{ jobId: string; courseId: string }> {
   const client = await getClient();
   let jobId = '';
@@ -419,6 +424,8 @@ export async function requestBlockDeletion(
        WHERE id = $1`,
       [blockId, jobId, requestedBy],
     );
+
+    if (auditEntry) await appendAuditLog(client, auditEntry);
 
     await client.query('COMMIT');
   } catch (err) {
@@ -755,26 +762,6 @@ async function deleteCourseReferenceInBatches(
   return rowsDeleted;
 }
 
-async function deleteCourseAuditLogsInBatches(courseId: string): Promise<number> {
-  let rowsDeleted = 0;
-  while (true) {
-    const result = await query(
-      `WITH doomed AS (
-         SELECT ctid
-         FROM audit_logs
-         WHERE entity_type = 'course' AND entity_id = $1::text
-         LIMIT $2
-       )
-       DELETE FROM audit_logs logs
-       USING doomed
-       WHERE logs.ctid = doomed.ctid`,
-      [courseId, DELETE_BATCH_SIZE],
-    );
-    if (result.rowCount === 0) return rowsDeleted;
-    rowsDeleted += result.rowCount || 0;
-  }
-}
-
 async function deleteCourseOutboxInBatches(courseId: string): Promise<number> {
   let rowsDeleted = 0;
   while (true) {
@@ -825,10 +812,9 @@ async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeSt
     'tenant_badge_rule_courses',
   ];
 
-  // Do not retain course title/details in audit rows or personalized queued
-  // mail. Both operations are bounded to avoid one large WAL/lock spike.
-  let linkedRowsDeleted = await deleteCourseAuditLogsInBatches(courseId);
-  linkedRowsDeleted += await deleteCourseOutboxInBatches(courseId);
+  // Audit rows stay available until their fixed 30-day retention cleanup.
+  // Other related data remains bounded to avoid one large WAL/lock spike.
+  let linkedRowsDeleted = await deleteCourseOutboxInBatches(courseId);
   for (const tableName of directCourseTables) {
     linkedRowsDeleted += await deleteCourseReferenceInBatches(tableName, courseId);
   }

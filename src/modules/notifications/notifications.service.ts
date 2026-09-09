@@ -6,6 +6,7 @@
 
 import { query, getClient } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
   enqueueCourseNotificationEmailJob,
@@ -74,6 +75,7 @@ export async function sendCourseNotification(
   title: string,
   message: string,
   sentBy: string,
+  auditEntry?: (result: { notificationId: string; recipientCount: number; courseId: string; courseName: string }) => TransactionalAuditEntry,
 ): Promise<{
   success: boolean;
   notification_id: string;
@@ -86,8 +88,8 @@ export async function sendCourseNotification(
   const sendEmail = smtpStatus.can_send_email;
   const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
 
-  const courseCheck = await query<{ visible_to_staff_only: boolean; is_public: boolean }>(
-    `SELECT visible_to_staff_only,
+  const courseCheck = await query<{ visible_to_staff_only: boolean; is_public: boolean; display_name: string }>(
+    `SELECT display_name, visible_to_staff_only,
             EXISTS (
               SELECT 1
               FROM course_category_courses ccc
@@ -199,6 +201,15 @@ export async function sendCourseNotification(
         courseId,
       });
       emailJobQueued = jobCount > 0;
+    }
+
+    if (auditEntry) {
+      await appendAuditLog(client, auditEntry({
+        notificationId,
+        recipientCount,
+        courseId,
+        courseName: courseCheck.rows[0].display_name,
+      }));
     }
 
     await client.query('COMMIT');

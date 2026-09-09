@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response, NextFunction } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import * as brandingService from './branding.service.js';
 import { uploadBrandingSchema, ACCEPTED_MIME_TYPES, MAX_FILE_SIZE } from './branding.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
@@ -72,14 +72,12 @@ export async function uploadController(req: Request, res: Response, next: NextFu
     }
 
     const result = await brandingService.uploadBrandingImage(
-      tenantId,
-      parsed.data.image_key,
-      file.buffer,
-      file.originalname,
-      file.mimetype,
+      tenantId, parsed.data.image_key, file.buffer, file.originalname, file.mimetype,
+      createTransactionalAuditEntry(
+        req, 'UPDATE', 'branding_image',
+        { code: 'branding.image.updated', context: { related_entity_name: parsed.data.image_key, related_entity_type: 'branding_image' } }, tenantId, parsed.data.image_key,
+      ),
     );
-
-    auditFromReq(req, 'UPDATE', 'branding_image', tenantId, undefined, `Upload ${parsed.data.image_key}: ${result.storage_path}`);
     sendSuccess(res, result, 'Upload thành công');
   } catch (err) { next(err); }
 }
@@ -96,8 +94,13 @@ export async function deleteController(req: Request, res: Response, next: NextFu
     const { imageKey } = req.params;
     if (!imageKey) { sendError(res, 'imageKey không được để trống', 400); return; }
 
-    await brandingService.deleteBrandingImage(tenantId, imageKey);
-    auditFromReq(req, 'DELETE', 'branding_image', tenantId, undefined, `Xóa ảnh branding ${imageKey}`);
+    await brandingService.deleteBrandingImage(
+      tenantId, imageKey,
+      createTransactionalAuditEntry(
+        req, 'DELETE', 'branding_image',
+        { code: 'branding.image.deleted', context: { related_entity_name: imageKey, related_entity_type: 'branding_image' } }, tenantId, imageKey,
+      ),
+    );
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }

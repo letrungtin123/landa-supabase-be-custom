@@ -3,7 +3,8 @@
 // Chỉ superadmin mới gọi được
 // ═══════════════════════════════════════════════════════════════
 
-import { query, getClient } from '../../config/database.js';
+import { query, getClient, withDatabaseTransaction } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import {
@@ -32,6 +33,8 @@ type UpdatedTenantRow = {
   is_active: boolean;
   previous_data_limit_bytes?: string | null;
 };
+
+export type TenantAuditSnapshot = Omit<UpdatedTenantRow, 'previous_data_limit_bytes'>;
 
 function getGeminiKeyFromSettings(settings: unknown): string | null {
   if (!settings || typeof settings !== 'object') return null;
@@ -118,7 +121,10 @@ export async function getTenantById(id: string) {
 /**
  * Tạo tenant mới + tự động bật tất cả modules (trừ tenant_management).
  */
-export async function createTenant(input: CreateTenantInput) {
+export async function createTenant(
+  input: CreateTenantInput,
+  auditEntry?: (tenant: TenantAuditSnapshot) => TransactionalAuditEntry,
+) {
   // Kiểm tra slug trùng
   const existing = await query('SELECT id FROM tenants WHERE slug = $1', [input.slug]);
   if (existing.rowCount! > 0) throw new AppError('Slug đã tồn tại', 409);
@@ -130,7 +136,7 @@ export async function createTenant(input: CreateTenantInput) {
     const result = await client.query(
       `INSERT INTO tenants (name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, settings)
        VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8)
-       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes`,
+       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active`,
       [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, input.data_limit_bytes ?? null, JSON.stringify(input.settings || {})],
     );
     const tenant = result.rows[0];
@@ -143,6 +149,8 @@ export async function createTenant(input: CreateTenantInput) {
        WHERE code NOT IN ('tenant_management', 'badge_management') AND is_active = true`,
       [tenant.id],
     );
+
+    if (auditEntry) await appendAuditLog(client, auditEntry(tenant));
 
     await client.query('COMMIT');
     await Promise.all([
@@ -215,38 +223,33 @@ async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
-  params.push(id);
-  const tenantFields = 'id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active';
-  const result = input.data_limit_bytes === undefined
-    ? await query<UpdatedTenantRow>(
+  return withDatabaseTransaction(async () => {
+    const tenantFields = 'id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active';
+    const current = await query<TenantAuditSnapshot>(
+      `SELECT ${tenantFields}
+         FROM tenants
+        WHERE id = $1
+        FOR UPDATE`,
+      [id],
+    );
+    if (current.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+
+    params.push(id);
+    const result = await query<UpdatedTenantRow>(
       `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${tenantFields}`,
       params,
-    )
-    : await query<UpdatedTenantRow>(
-      `WITH current AS (
-         SELECT data_limit_bytes
-         FROM tenants
-         WHERE id = $${idx}
-         FOR UPDATE
-       )
-       UPDATE tenants AS tenant
-       SET ${sets.join(', ')}
-       FROM current
-       WHERE tenant.id = $${idx}
-       RETURNING tenant.id, tenant.name, tenant.slug, tenant.domain_learner,
-                 tenant.domain_admin, tenant.max_users, tenant.max_courses,
-                 tenant.data_limit_bytes, tenant.is_active,
-                 current.data_limit_bytes AS previous_data_limit_bytes`,
-      params,
     );
+    if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
 
-  if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
-  const row = result.rows[0];
-  const { previous_data_limit_bytes: previousDataLimitBytes = null, ...tenant } = row;
-  return {
-    tenant,
-    previousDataLimitBytes: previousDataLimitBytes === null ? null : String(previousDataLimitBytes),
-  };
+    const tenant = result.rows[0] as TenantAuditSnapshot;
+    return {
+      tenant,
+      previousTenant: current.rows[0],
+      previousDataLimitBytes: current.rows[0].data_limit_bytes === null
+        ? null
+        : String(current.rows[0].data_limit_bytes),
+    };
+  });
 }
 
 /**
@@ -287,7 +290,11 @@ export async function getTenantModules(tenantId: string) {
 /**
  * Cập nhật ma trận modules cho tenant (bulk upsert).
  */
-export async function updateTenantModules(tenantId: string, modules: { module_id: string; is_enabled: boolean }[]) {
+export async function updateTenantModules(
+  tenantId: string,
+  modules: { module_id: string; is_enabled: boolean }[],
+  auditEntry?: TransactionalAuditEntry,
+) {
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -300,6 +307,8 @@ export async function updateTenantModules(tenantId: string, modules: { module_id
         [tenantId, mod.module_id, mod.is_enabled],
       );
     }
+
+    if (auditEntry) await appendAuditLog(client, auditEntry);
 
     await client.query('COMMIT');
   } catch (err) {
@@ -370,10 +379,20 @@ export async function getUserTenants(userId: string) {
  * Gán user quản lý nhiều tenants (superadmin gọi).
  * Thay thế toàn bộ — xóa cũ + insert mới.
  */
-export async function setUserTenants(userId: string, tenantIds: string[]) {
+export async function setUserTenants(
+  userId: string,
+  tenantIds: string[],
+  createAuditEntry?: (user: { username: string }) => TransactionalAuditEntry,
+) {
   const client = await getClient();
   try {
     await client.query('BEGIN');
+
+    const user = await client.query<{ username: string }>(
+      'SELECT username FROM users WHERE id = $1 FOR UPDATE',
+      [userId],
+    );
+    if (user.rowCount === 0) throw new AppError('Người dùng không tồn tại', 404);
 
     // Xóa tất cả assign cũ
     await client.query('DELETE FROM user_tenants WHERE user_id = $1', [userId]);
@@ -386,6 +405,8 @@ export async function setUserTenants(userId: string, tenantIds: string[]) {
       );
     }
 
+    const auditEntry = createAuditEntry?.(user.rows[0]);
+    if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
     await invalidateUserMembershipCaches([userId]);
     return { updated: tenantIds.length };

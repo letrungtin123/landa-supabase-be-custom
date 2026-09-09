@@ -11,20 +11,34 @@ import * as tenantCourseComponentsService from './tenant-course-components.servi
 import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema, updateTenantCourseComponentPermissionsSchema } from './tenants.validator.js';
 import { updateTenantSmtpSchema } from './tenant-smtp.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { invalidateTenantCache } from '../../middleware/tenant-context.js';
 
-function formatQuotaLimitForAudit(bytes: string | null): string {
-  if (bytes === null) return 'Không giới hạn';
-  try {
-    const gigabyte = 1_000_000_000n;
-    const hundredths = (BigInt(bytes) * 100n + gigabyte / 2n) / gigabyte;
-    const whole = hundredths / 100n;
-    const fraction = (hundredths % 100n).toString().padStart(2, '0');
-    return fraction === '00' ? `${whole} GB` : `${whole}.${fraction} GB`;
-  } catch {
-    return 'Không xác định';
+function quotaLimitGbForAudit(bytes: string | null): number | null {
+  if (bytes === null) return null;
+  try { return Number(BigInt(bytes)) / 1_000_000_000; }
+  catch { return null; }
+}
+
+function tenantUpdateChanges(
+  before: tenantsService.TenantAuditSnapshot,
+  after: tenantsService.TenantAuditSnapshot,
+) {
+  const fields: Array<keyof tenantsService.TenantAuditSnapshot> = [
+    'name', 'slug', 'domain_admin', 'domain_learner', 'is_active', 'max_users', 'max_courses',
+  ];
+  const changes: Array<{ field: string; before: string | number | boolean | null; after: string | number | boolean | null }> = fields
+    .filter((field) => before[field] !== after[field])
+    .map((field) => ({ field, before: before[field], after: after[field] }));
+
+  if (before.data_limit_bytes !== after.data_limit_bytes) {
+    changes.push({
+      field: 'data_limit_gb',
+      before: quotaLimitGbForAudit(before.data_limit_bytes),
+      after: quotaLimitGbForAudit(after.data_limit_bytes),
+    });
   }
+  return changes;
 }
 
 /** GET /api/tenants */
@@ -49,8 +63,20 @@ export async function createController(req: Request, res: Response, next: NextFu
     const parsed = createTenantSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const tenant = await tenantsService.createTenant(parsed.data);
-    auditFromReq(req, 'CREATE', 'tenant', tenant.id, tenant.name);
+    const tenant = await tenantsService.createTenant(
+      parsed.data,
+      (created) => ({
+        ...createTransactionalAuditEntry(
+          req,
+          'CREATE',
+          'tenant',
+          { code: 'tenant.created' },
+          created.id,
+          created.name,
+        ),
+        tenantId: created.id,
+      }),
+    );
     sendSuccess(res, tenant, 'Tạo tenant thành công', 201);
   } catch (err) { next(err); }
 }
@@ -61,21 +87,22 @@ export async function updateController(req: Request, res: Response, next: NextFu
     const parsed = updateTenantSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const update = await tenantsService.updateTenant(req.params.id, parsed.data);
-    const { tenant, previousDataLimitBytes } = update;
-    invalidateTenantCache(req.params.id);
-    const didChangeDataLimit = parsed.data.data_limit_bytes !== undefined
-      && previousDataLimitBytes !== tenant.data_limit_bytes;
-    auditFromReq(
-      req,
-      'UPDATE',
-      'tenant',
-      tenant.id,
-      tenant.name,
-      didChangeDataLimit
-        ? `Cập nhật dung lượng lưu trữ: ${formatQuotaLimitForAudit(previousDataLimitBytes)} → ${formatQuotaLimitForAudit(tenant.data_limit_bytes)}`
-        : undefined,
+    const update = await runAuditedTransaction(
+      () => tenantsService.updateTenant(req.params.id, parsed.data),
+      ({ tenant, previousTenant }) => ({
+        ...createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'tenant',
+          { code: 'tenant.updated', changes: tenantUpdateChanges(previousTenant, tenant) },
+          tenant.id,
+          tenant.name,
+        ),
+        tenantId: tenant.id,
+      }),
     );
+    const { tenant } = update;
+    invalidateTenantCache(req.params.id);
     sendSuccess(res, tenant, 'Cập nhật thành công');
   } catch (err) { next(err); }
 }
@@ -83,9 +110,18 @@ export async function updateController(req: Request, res: Response, next: NextFu
 /** DELETE /api/tenants/:id */
 export async function deleteController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const tenant = await tenantsService.deleteTenant(req.params.id);
+    const tenant = await runAuditedTransaction(
+      () => tenantsService.deleteTenant(req.params.id),
+      (deleted) => createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'tenant',
+        { code: 'tenant.deleted' },
+        deleted.id,
+        deleted.name,
+      ),
+    );
     invalidateTenantCache(req.params.id);
-    auditFromReq(req, 'DELETE', 'tenant', req.params.id, tenant.name);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
@@ -104,8 +140,22 @@ export async function updateModulesController(req: Request, res: Response, next:
     const parsed = updateTenantModulesSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    await tenantsService.updateTenantModules(req.params.id, parsed.data.modules);
-    auditFromReq(req, 'UPDATE', 'tenant_modules', req.params.id, undefined, 'Cập nhật modules tenant');
+    const tenant = await tenantsService.getTenantById(req.params.id);
+    await tenantsService.updateTenantModules(
+      req.params.id,
+      parsed.data.modules,
+      {
+        ...createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'tenant_modules',
+          { code: 'tenant.modules.updated', context: { affected_count: parsed.data.modules.length } },
+          req.params.id,
+          tenant.name,
+        ),
+        tenantId: req.params.id,
+      },
+    );
     sendSuccess(res, null, 'Cập nhật modules thành công');
   } catch (err) { next(err); }
 }
@@ -124,11 +174,21 @@ export async function updateCourseComponentPermissionsController(req: Request, r
     const parsed = updateTenantCourseComponentPermissionsSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const permissions = await tenantCourseComponentsService.updateTenantCourseComponentPermissions(
-      req.params.id,
-      parsed.data.allowed_component_types,
+    const tenant = await tenantsService.getTenantById(req.params.id);
+    const permissions = await runAuditedTransaction(
+      () => tenantCourseComponentsService.updateTenantCourseComponentPermissions(
+        req.params.id,
+        parsed.data.allowed_component_types,
+      ),
+      () => ({
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant_course_component_permissions',
+          { code: 'tenant.settings.updated', context: { related_entity_name: 'course_component_permissions', related_entity_type: 'tenant_setting', affected_count: parsed.data.allowed_component_types.length } },
+          req.params.id, tenant.name,
+        ),
+        tenantId: req.params.id,
+      }),
     );
-    auditFromReq(req, 'UPDATE', 'tenant_course_component_permissions', req.params.id, undefined, 'Cap nhat component duoc them trong khoa hoc');
     sendSuccess(res, permissions, 'Cập nhật quyền component khóa học thành công');
   } catch (err) { next(err); }
 }
@@ -144,12 +204,17 @@ export async function getRoleLabelsController(req: Request, res: Response, next:
 export async function updateRoleLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const labelsInput = req.body?.labels ?? req.body?.role_labels ?? {};
+    const tenant = await tenantsService.getTenantById(req.params.id);
     const labels = await roleLabelsService.replaceTenantRoleLabels(
-      req.params.id,
-      labelsInput,
-      req.user?.id ?? null,
+      req.params.id, labelsInput, req.user?.id ?? null,
+      {
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant_role_labels',
+          { code: 'tenant.settings.updated', context: { related_entity_name: 'role_labels', related_entity_type: 'tenant_setting', affected_count: Object.keys(labelsInput).length } },
+          req.params.id, tenant.name,
+        ), tenantId: req.params.id,
+      },
     );
-    auditFromReq(req, 'UPDATE', 'tenant_role_labels', req.params.id, undefined, 'Cap nhat ten hien thi role tenant');
     sendSuccess(res, { labels }, 'Cap nhat ten role thanh cong');
   } catch (err) { next(err); }
 }
@@ -164,12 +229,17 @@ export async function getGroupLabelsController(req: Request, res: Response, next
 export async function updateGroupLabelsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const labelsInput = req.body?.labels ?? req.body?.group_labels ?? {};
+    const tenant = await tenantsService.getTenantById(req.params.id);
     const labels = await groupLabelsService.replaceTenantGroupLabels(
-      req.params.id,
-      labelsInput,
-      req.user?.id ?? null,
+      req.params.id, labelsInput, req.user?.id ?? null,
+      {
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant_group_labels',
+          { code: 'tenant.settings.updated', context: { related_entity_name: 'group_labels', related_entity_type: 'tenant_setting', affected_count: Object.keys(labelsInput).length } },
+          req.params.id, tenant.name,
+        ), tenantId: req.params.id,
+      },
     );
-    auditFromReq(req, 'UPDATE', 'tenant_group_labels', req.params.id, undefined, 'Cap nhat ten hien thi group hierarchy tenant');
     sendSuccess(res, { labels }, 'Cap nhat ten group hierarchy thanh cong');
   } catch (err) { next(err); }
 }
@@ -218,8 +288,18 @@ export async function setUserTenantsController(req: Request, res: Response, next
       sendError(res, 'tenant_ids phải là mảng', 400);
       return;
     }
-    const result = await tenantsService.setUserTenants(req.params.userId, tenant_ids);
-    auditFromReq(req, 'UPDATE', 'user_tenants', req.params.userId, undefined, `Gán ${result.updated} tenants`);
+    const result = await tenantsService.setUserTenants(
+      req.params.userId,
+      tenant_ids,
+      (user) => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'user_tenants',
+        { code: 'tenant.user_tenants.updated', context: { affected_count: tenant_ids.length } },
+        req.params.userId,
+        user.username,
+      ),
+    );
     sendSuccess(res, result, 'Gán tenants thành công');
   } catch (err) { next(err); }
 }
@@ -238,8 +318,17 @@ export async function updateSmtpController(req: Request, res: Response, next: Ne
     const parsed = updateTenantSmtpSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const config = await smtpService.updateTenantSmtpConfig(req.params.id, parsed.data);
-    auditFromReq(req, 'UPDATE', 'tenant_smtp_config', req.params.id, undefined, 'Cap nhat SMTP tenant');
+    const tenant = await tenantsService.getTenantById(req.params.id);
+    const config = await runAuditedTransaction(
+      () => smtpService.updateTenantSmtpConfig(req.params.id, parsed.data),
+      () => ({
+        ...createTransactionalAuditEntry(
+          req, 'UPDATE', 'tenant_smtp_config',
+          { code: 'tenant.settings.updated', context: { related_entity_name: 'smtp', related_entity_type: 'tenant_setting' } },
+          req.params.id, tenant.name,
+        ), tenantId: req.params.id,
+      }),
+    );
     sendSuccess(res, config, 'Cap nhat SMTP thanh cong');
   } catch (err) { next(err); }
 }

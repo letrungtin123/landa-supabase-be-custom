@@ -2,7 +2,8 @@
 // Bot Service — Chatbot CRUD + Bot Personas
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { getClient, query } from '../../config/database.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateBotCaches, invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
@@ -253,26 +254,41 @@ export async function uploadBotAvatar(
   botId: string,
   tenantId: string,
   file: { buffer: Buffer; originalname: string; mimetype: string },
+  auditEntry?: (bot: Chatbot) => TransactionalAuditEntry,
 ): Promise<Chatbot | null> {
-  const bot = await getBot(botId, tenantId);
-  if (!bot) return null;
-
-  // Delete old avatar if exists
-  if (bot.avatar_url) {
-    try { await deleteFileByUrl(bot.avatar_url); } catch { /* ignore */ }
-  }
-
   const fileName = buildFileName(file.originalname);
   const storagePath = buildStoragePath(tenantId, 'avatars', fileName);
   await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  const result = await query<Chatbot>(
-    `UPDATE chatbots SET avatar_url = $1, updated_at = now()
-     WHERE id = $2 AND tenant_id = $3 RETURNING *`,
-    [storagePath, botId, tenantId],
-  );
-  if (result.rows[0]) await invalidateBotConfigCaches(tenantId, botId);
-  return result.rows[0] || null;
+  const client = await getClient();
+  let oldPath: string | null = null;
+  let updated: Chatbot | null = null;
+  try {
+    await client.query('BEGIN');
+    const current = await client.query<{ avatar_url: string | null }>(
+      'SELECT avatar_url FROM chatbots WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+      [botId, tenantId],
+    );
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    oldPath = current.rows[0].avatar_url;
+    const result = await client.query<Chatbot>(
+      `UPDATE chatbots SET avatar_url = $1, updated_at = now()
+       WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+      [storagePath, botId, tenantId],
+    );
+    updated = result.rows[0] || null;
+    if (!updated) throw new Error('Không thể cập nhật ảnh đại diện trợ lý AI');
+    if (auditEntry) await appendAuditLog(client, auditEntry(updated));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    await deleteFileByUrl(storagePath).catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  await invalidateBotConfigCaches(tenantId, botId);
+  return updated;
 }
 
 // ═══════════════════════════════════════════════════════════════

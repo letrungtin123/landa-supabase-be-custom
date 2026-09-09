@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
-import { auditFromReq } from '../../middleware/audit-log.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './course-authoring.service.js';
@@ -13,6 +13,20 @@ import { initializeCourseMentorSectionDefaults, recordCourseMentorAssignmentHist
 import { reorderSchema } from './course-authoring.validator.js';
 import { uploadFile, uploadFileFromPath, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
+
+function componentAuditContext(block: {
+  course_id: string;
+  course_name: string;
+  block_type: string;
+  parent_name?: string | null;
+}) {
+  return {
+    course_id: block.course_id,
+    course_name: block.course_name,
+    component_type: block.block_type,
+    ...(block.parent_name ? { parent_name: block.parent_name } : {}),
+  };
+}
 
 function extractYoutubeId(input: unknown): string {
   const value = typeof input === 'string' ? input.trim() : '';
@@ -451,19 +465,30 @@ export async function createBlock(req: Request, res: Response) {
     await svc.assertImageChoiceQuizImageAssets(finalCourseId, tenantId, sanitizedCreateData);
   }
 
-  const result = await svc.createBlock(
-    finalCourseId,
-    resolvedParentId,
-    resolvedType,
-    display_name,
-    sanitizedCreateData,
-    resolvedType === 'la_media_quiz'
-      ? { ...(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
-      : metadata,
-    boilerplate,
+  const result = await runAuditedTransaction(
+    () => svc.createBlock(
+      finalCourseId,
+      resolvedParentId,
+      resolvedType,
+      display_name,
+      sanitizedCreateData,
+      resolvedType === 'la_media_quiz'
+        ? { ...(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
+        : metadata,
+      boilerplate,
+    ),
+    async (created) => {
+      const block = await svc.getBlockInfo(created.id);
+      return createTransactionalAuditEntry(
+        req,
+        'CREATE',
+        'course_block',
+        { code: 'course.component.created', context: componentAuditContext(block) },
+        block.id,
+        block.display_name,
+      );
+    },
   );
-
-  auditFromReq(req, 'CREATE', 'course_block', result.id, display_name || resolvedType, `Khóa học ${finalCourseId}`);
   // Return edX-compatible response
   sendSuccess(res, { locator: result.id, courseKey: finalCourseId, ...result }, undefined, 201);
 }
@@ -475,23 +500,77 @@ export async function updateBlock(req: Request, res: Response) {
 
     // Handle publish action
     if (publish === 'make_public') {
-      const result = await svc.publishBlock(req.params.blockId);
-      auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name, 'Publish block');
+      let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
+      const result = await runAuditedTransaction(
+        async () => {
+          before = await svc.getBlockInfo(req.params.blockId);
+          return svc.publishBlock(req.params.blockId);
+        },
+        (updated) => createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'course_block',
+          {
+            code: 'course.component.updated',
+            context: componentAuditContext(updated),
+            changes: [{
+              field: 'publication_status',
+              before: before?.is_published ? 'published' : 'draft',
+              after: 'published',
+            }],
+          },
+          updated.id,
+          updated.display_name,
+        ),
+      );
       return sendSuccess(res, result);
     }
 
     // Handle discard draft (rollback to published version)
     if (publish === 'discard_changes') {
-      const result = await svc.discardDraftCascade(req.params.blockId);
-      auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name, 'Discard draft block');
+      let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
+      const result = await runAuditedTransaction(
+        async () => {
+          before = await svc.getBlockInfo(req.params.blockId);
+          return svc.discardDraftCascade(req.params.blockId);
+        },
+        (updated) => createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'course_block',
+          {
+            code: 'course.component.updated',
+            context: componentAuditContext(updated),
+            changes: before?.has_draft_changes
+              ? [{ field: 'content_status', before: 'draft', after: 'published_version' }]
+              : [],
+          },
+          updated.id,
+          updated.display_name,
+        ),
+      );
       return sendSuccess(res, result);
     }
 
     // Handle reorder
     if (Array.isArray(children)) {
-      await svc.reorderChildren(req.params.blockId, children);
-      const block = await svc.getBlockInfo(req.params.blockId);
-      auditFromReq(req, 'UPDATE', 'course_block', block.id, block.display_name, `Sắp xếp ${children.length} block con`);
+      const block = await runAuditedTransaction(
+        async () => {
+          await svc.reorderChildren(req.params.blockId, children);
+          return svc.getBlockInfo(req.params.blockId);
+        },
+        (parent) => createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'course_block',
+          {
+            code: 'course.component.reordered',
+            context: { ...componentAuditContext(parent), affected_count: children.length },
+          },
+          parent.id,
+          parent.display_name,
+        ),
+      );
       return sendSuccess(res, block);
     }
 
@@ -518,12 +597,31 @@ export async function updateBlock(req: Request, res: Response) {
       }
     }
 
-    const result = await svc.updateBlock(req.params.blockId, {
-      display_name: resolvedName,
-      data: sanitizedData,
-      metadata: sanitizedMetadata,
-    });
-    auditFromReq(req, 'UPDATE', 'course_block', result.id, result.display_name);
+    let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
+    const result = await runAuditedTransaction(
+      async () => {
+        before = await svc.getBlockInfo(req.params.blockId);
+        return svc.updateBlock(req.params.blockId, {
+          display_name: resolvedName,
+          data: sanitizedData,
+          metadata: sanitizedMetadata,
+        });
+      },
+      (updated) => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'course_block',
+        {
+          code: 'course.component.updated',
+          context: componentAuditContext(updated),
+          changes: before && before.display_name !== updated.display_name
+            ? [{ field: 'display_name', before: before.display_name, after: updated.display_name }]
+            : [],
+        },
+        updated.id,
+        updated.display_name,
+      ),
+    );
     sendSuccess(res, result);
   } catch (err: any) {
     sendError(res, err.message, 404);
@@ -536,8 +634,19 @@ export async function deleteBlock(req: Request, res: Response) {
     const tenantId = req.user!.tenantId;
     if (!tenantId) return sendError(res, 'tenant_id is required', 400);
     const block = await svc.getBlockInfo(req.params.blockId);
-    await requestBlockDeletion(req.params.blockId, tenantId, req.user!.id);
-    auditFromReq(req, 'DELETE', 'course_block', block.id, block.display_name, 'Delete requested');
+    await requestBlockDeletion(
+      req.params.blockId,
+      tenantId,
+      req.user!.id,
+      createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'course_block',
+        { code: 'course.component.deleted', context: componentAuditContext(block) },
+        block.id,
+        block.display_name,
+      ),
+    );
     sendSuccess(res, { success: true });
   } catch (err: any) {
     sendError(res, err.message, 404);
@@ -549,9 +658,23 @@ export async function reorderChildren(req: Request, res: Response) {
   const parsed = reorderSchema.safeParse(req.body);
   if (!parsed.success) return sendError(res, parsed.error.errors[0].message, 400);
 
-  await svc.reorderChildren(req.params.blockId, parsed.data.children);
-  const block = await svc.getBlockInfo(req.params.blockId);
-  auditFromReq(req, 'UPDATE', 'course_block', block.id, block.display_name, `Sắp xếp ${parsed.data.children.length} block con`);
+  await runAuditedTransaction(
+    async () => {
+      await svc.reorderChildren(req.params.blockId, parsed.data.children);
+      return svc.getBlockInfo(req.params.blockId);
+    },
+    (block) => createTransactionalAuditEntry(
+      req,
+      'UPDATE',
+      'course_block',
+      {
+        code: 'course.component.reordered',
+        context: { ...componentAuditContext(block), affected_count: parsed.data.children.length },
+      },
+      block.id,
+      block.display_name,
+    ),
+  );
   sendSuccess(res, { success: true });
 }
 
@@ -570,9 +693,31 @@ export async function studioSubmit(req: Request, res: Response) {
       if (media) req.body.problem_media = media;
       else delete req.body.problem_media;
     }
-    const result = await svc.studioSubmit(req.params.blockId, req.body);
-    const block = result?.block;
-    auditFromReq(req, 'UPDATE', 'course_block', req.params.blockId, block?.display_name, 'Studio submit');
+    let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
+    const result = await runAuditedTransaction(
+      async () => {
+        before = await svc.getBlockInfo(req.params.blockId);
+        return svc.studioSubmit(req.params.blockId, req.body);
+      },
+      (submitted) => {
+        const block = submitted.block;
+        if (!block) throw new Error('Studio submit did not return the updated component');
+        return createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'course_block',
+          {
+            code: 'course.component.updated',
+            context: componentAuditContext(block),
+            changes: before && before.display_name !== block.display_name
+              ? [{ field: 'display_name', before: before.display_name, after: block.display_name }]
+              : [],
+          },
+          block.id,
+          block.display_name,
+        );
+      },
+    );
     sendSuccess(res, result);
   } catch (err: any) {
     sendError(res, err.message, 400);
@@ -631,12 +776,31 @@ export async function uploadAsset(req: Request, res: Response) {
     storageUploaded = true;
 
     // DB lưu storagePath cho cả storage_path VÀ url columns
-    const asset = await svc.createAssetRecord(
-      courseId, tenantId, originalName, file.mimetype,
-      file.size, storagePath, storagePath, userId,
+    const { asset } = await runAuditedTransaction(
+      async () => {
+        const created = await svc.createAssetRecord(
+          courseId, tenantId, originalName, file.mimetype,
+          file.size, storagePath, storagePath, userId,
+        );
+        const course = await svc.getCourseAuditContext(courseId);
+        return { asset: created, course };
+      },
+      ({ asset, course }) => createTransactionalAuditEntry(
+        req,
+        'CREATE',
+        'course_asset',
+        {
+          code: 'course.asset.uploaded',
+          context: {
+            ...course,
+            file_name: asset.display_name,
+            file_size_bytes: file.size,
+          },
+        },
+        asset.id,
+        asset.display_name,
+      ),
     );
-
-    auditFromReq(req, 'CREATE', 'course_asset', asset.id, asset.display_name, `Khóa học ${courseId}`);
     sendSuccess(res, asset, undefined, 201);
   } catch (err) {
     if (storageUploaded && storagePath) {
@@ -652,19 +816,41 @@ export async function uploadAsset(req: Request, res: Response) {
 export async function deleteAsset(req: Request, res: Response) {
   const { courseId, assetId } = req.params;
   const tenantId = req.user!.tenantId!;
-  const result = await svc.deleteAsset(assetId, courseId, tenantId);
-  if (!result) return sendError(res, 'Asset not found', 404);
+  const result = await runAuditedTransaction(
+    async () => {
+      const deleted = await svc.deleteAsset(assetId, courseId, tenantId);
+      const course = deleted?.deleted ? await svc.getCourseAuditContext(courseId) : null;
+      return { deleted, course };
+    },
+    ({ deleted, course }) => {
+      if (!deleted?.deleted || !course) return null;
+      const asset = deleted.asset;
+      return createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'course_asset',
+        {
+          code: 'course.asset.deleted',
+          context: {
+            ...course,
+            file_name: asset?.display_name || assetId,
+            file_size_bytes: Number(asset?.file_size) || 0,
+          },
+        },
+        assetId,
+        asset?.display_name,
+      );
+    },
+  );
+  if (!result.deleted) return sendError(res, 'Asset not found', 404);
 
-  await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
-  if (result.deleted) {
-    auditFromReq(req, 'DELETE', 'course_asset', assetId, result.asset?.display_name, `Khóa học ${courseId}`);
-  }
+  await Promise.allSettled(result.deleted.storagePathsToDelete.map((path) => deleteFile(path)));
 
   sendSuccess(res, {
     success: true,
-    deleted: result.deleted ? 1 : 0,
-    pending_delete: result.pendingPublishedReferences,
-    published_reference_count: result.publishedReferenceCount,
+    deleted: result.deleted.deleted ? 1 : 0,
+    pending_delete: result.deleted.pendingPublishedReferences,
+    published_reference_count: result.deleted.publishedReferenceCount,
   });
 }
 
@@ -682,18 +868,39 @@ export async function deleteAssetByPath(req: Request, res: Response) {
     return sendError(res, 'Invalid storage path', 400);
   }
 
-  const result = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
-  await Promise.allSettled(result.storagePathsToDelete.map((path) => deleteFile(path)));
-  if (result.deletedRows.length > 0) {
-    const first = result.deletedRows[0];
-    auditFromReq(req, 'DELETE', 'course_asset', first.storage_path, first.display_name || first.storage_path, `Xóa ${result.deletedRows.length} asset theo path`);
-  }
+  const result = await runAuditedTransaction(
+    async () => {
+      const deleted = await svc.deleteAssetByStoragePath(courseId, tenantId, storagePath);
+      const course = deleted.deletedRows.length > 0 ? await svc.getCourseAuditContext(courseId) : null;
+      return { deleted, course };
+    },
+    ({ deleted, course }) => {
+      if (!course || deleted.deletedRows.length === 0) return null;
+      const first = deleted.deletedRows[0];
+      return createTransactionalAuditEntry(
+        req,
+        'DELETE',
+        'course_asset',
+        {
+          code: 'course.asset.deleted',
+          context: {
+            ...course,
+            file_name: first.display_name || first.storage_path,
+            affected_count: deleted.deletedRows.length,
+          },
+        },
+        first.storage_path,
+        first.display_name || first.storage_path,
+      );
+    },
+  );
+  await Promise.allSettled(result.deleted.storagePathsToDelete.map((path) => deleteFile(path)));
 
   sendSuccess(res, {
     success: true,
-    deleted: result.deletedRows.length,
-    pending_delete: result.pendingPublishedReferences,
-    published_reference_count: result.publishedReferenceCount,
+    deleted: result.deleted.deletedRows.length,
+    pending_delete: result.deleted.pendingPublishedReferences,
+    published_reference_count: result.deleted.publishedReferenceCount,
   });
 }
 
@@ -715,25 +922,36 @@ export async function createCourse(req: Request, res: Response) {
   const safeRun = run || 'default';
   const courseId = `course-v1:${safeOrg}+${safeNumber}+${safeRun}`;
 
-  // ── Kiểm tra quota course cho tenant ──
-  const { checkQuota } = await import('../tenants/tenants.service.js');
-  await checkQuota(tenantId, 'courses');
+  await runAuditedTransaction(
+    async () => {
+      // ── Kiểm tra quota course cho tenant ──
+      const { checkQuota } = await import('../tenants/tenants.service.js');
+      await checkQuota(tenantId, 'courses');
 
-  // Insert into courses table
-  const { query: dbQuery } = await import('../../config/database.js');
-  await dbQuery(
-    `INSERT INTO courses (id, tenant_id, display_name, description, org, start_date, created_by, mentor_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
-    [courseId, tenantId, safeDisplayName, safeDescription, safeOrg, start || '2020-01-01', req.user!.id],
+      // Insert into courses table
+      const { query: dbQuery } = await import('../../config/database.js');
+      await dbQuery(
+        `INSERT INTO courses (id, tenant_id, display_name, description, org, start_date, created_by, mentor_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+        [courseId, tenantId, safeDisplayName, safeDescription, safeOrg, start || '2020-01-01', req.user!.id],
+      );
+
+      await initializeCourseMentorSectionDefaults(courseId, tenantId, req.user!.id);
+      await recordCourseMentorAssignmentHistory(courseId, tenantId, req.user!.id, req.user!.id, 'assign');
+
+      // Initialize course structure with root block
+      await svc.initializeCourseStructure(courseId, safeDisplayName, tenantId);
+      return undefined;
+    },
+    () => createTransactionalAuditEntry(
+      req,
+      'CREATE',
+      'course',
+      { code: 'course.created' },
+      courseId,
+      safeDisplayName,
+    ),
   );
-
-  await initializeCourseMentorSectionDefaults(courseId, tenantId, req.user!.id);
-  await recordCourseMentorAssignmentHistory(courseId, tenantId, req.user!.id, req.user!.id, 'assign');
-
-  // Initialize course structure with root block
-  await svc.initializeCourseStructure(courseId, safeDisplayName, tenantId);
-
-  auditFromReq(req, 'CREATE', 'course', courseId, safeDisplayName);
   sendSuccess(res, {
     id: courseId,
     display_name: safeDisplayName,
@@ -751,8 +969,25 @@ export async function updateAssetReference(req: Request, res: Response) {
     const { assetIds, is_reference } = req.body;
     if (!Array.isArray(assetIds)) return sendError(res, 'assetIds must be an array', 400);
     
-    await svc.updateCourseAssetReference(req.params.courseId, assetIds, Boolean(is_reference), tenantId);
-    auditFromReq(req, 'UPDATE', 'course_asset', req.params.courseId, undefined, `Cập nhật reference ${assetIds.length} asset`);
+    if (assetIds.length > 0) {
+      await runAuditedTransaction(
+        async () => {
+          await svc.updateCourseAssetReference(req.params.courseId, assetIds, Boolean(is_reference), tenantId);
+          return svc.getCourseAuditContext(req.params.courseId);
+        },
+        (course) => createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'course_asset',
+          {
+            code: 'course.asset.references.updated',
+            context: { ...course, affected_count: assetIds.length },
+          },
+          req.params.courseId,
+          course.course_name,
+        ),
+      );
+    }
     sendSuccess(res, { success: true });
   } catch (err: any) {
     sendError(res, err.message, 400);
