@@ -18,6 +18,7 @@ import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-h
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
 import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';
 import { getTenantDataQuota } from './tenant-data-quota.service.js';
+import { removeAiSecretsFromTenantSettings } from '../ai-chatbot/ai-settings.service.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
 
@@ -74,9 +75,21 @@ export async function listTenants(queryParams: Record<string, unknown>) {
             COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
             COALESCE(quota.state, 'initializing') AS data_quota_state,
             quota.last_verified_at AS data_quota_last_verified_at,
+            COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
+            ai_settings.monthly_token_limit::text AS ai_monthly_token_limit,
+            COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
+            COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
+            COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,
+            ai_transition.to_engine AS ai_pending_engine,
             COUNT(*) OVER() AS full_count
      FROM tenants t
      LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
+     LEFT JOIN tenant_ai_settings ai_settings ON ai_settings.tenant_id = t.id
+     LEFT JOIN ai_token_monthly_usage ai_usage
+       ON ai_usage.tenant_id = t.id
+      AND ai_usage.period_start = date_trunc('month', now() AT TIME ZONE COALESCE(ai_settings.token_timezone, 'Asia/Saigon'))::date
+     LEFT JOIN ai_engine_transition_jobs ai_transition
+       ON ai_transition.id = ai_settings.active_transition_job_id
      ${where}
      ORDER BY t.created_at DESC
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -88,6 +101,7 @@ export async function listTenants(queryParams: Record<string, unknown>) {
   return {
     data: result.rows.map((r: any) => {
       const { full_count, ...rest } = r;
+      rest.settings = removeAiSecretsFromTenantSettings(rest.settings);
       return rest;
     }),
     total,
@@ -108,14 +122,28 @@ export async function getTenantById(id: string) {
             COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
             COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
             COALESCE(quota.state, 'initializing') AS data_quota_state,
-            quota.last_verified_at AS data_quota_last_verified_at
+            quota.last_verified_at AS data_quota_last_verified_at,
+            COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
+            ai_settings.monthly_token_limit::text AS ai_monthly_token_limit,
+            COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
+            COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
+            COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,
+            ai_transition.to_engine AS ai_pending_engine
      FROM tenants t
      LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
+     LEFT JOIN tenant_ai_settings ai_settings ON ai_settings.tenant_id = t.id
+     LEFT JOIN ai_token_monthly_usage ai_usage
+       ON ai_usage.tenant_id = t.id
+      AND ai_usage.period_start = date_trunc('month', now() AT TIME ZONE COALESCE(ai_settings.token_timezone, 'Asia/Saigon'))::date
+     LEFT JOIN ai_engine_transition_jobs ai_transition
+       ON ai_transition.id = ai_settings.active_transition_job_id
      WHERE t.id = $1`,
     [id],
   );
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
-  return result.rows[0];
+  const tenant = result.rows[0] as Record<string, unknown>;
+  tenant.settings = removeAiSecretsFromTenantSettings(tenant.settings);
+  return tenant;
 }
 
 /**
@@ -140,6 +168,13 @@ export async function createTenant(
       [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, input.data_limit_bytes ?? null, JSON.stringify(input.settings || {})],
     );
     const tenant = result.rows[0];
+
+    await client.query(
+      `INSERT INTO tenant_ai_settings (tenant_id, chat_model, lesson_author_model)
+       VALUES ($1, $2, $2)
+       ON CONFLICT (tenant_id) DO NOTHING`,
+      [tenant.id, process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash'],
+    );
 
     // Tenant management và badge management cần được superadmin cấp riêng.
     await client.query(

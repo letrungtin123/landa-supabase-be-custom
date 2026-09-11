@@ -56,6 +56,8 @@ router.post('/deletion-jobs/:jobId/retry', checkPermission('account', 'can_delet
 router.get('/:id', checkPermission('account', 'can_view'), getByIdController);
 router.put('/:id', checkPermission('account', 'can_edit'), updateController);
 router.delete('/:id', checkPermission('account', 'can_delete'), deleteController);
-router.put('/:id/permission-groups', checkPermission('account', 'can_edit'), assignGroupsController);
+// Membership changes are part of the Permission Groups feature itself.  A
+// staff permission matrix must never grant access to this management surface.
+router.put('/:id/permission-groups', authorize('superuser', 'superadmin'), assignGroupsController);
 
 export default router;

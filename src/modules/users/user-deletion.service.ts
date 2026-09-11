@@ -7,7 +7,7 @@ import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import {
   deleteStorageManifest,
   registerStorageManifestPaths,
-  registerStoragePrefixManifestPaths,
+  registerUserAvatarStemManifestPaths,
 } from '../deletion/storage-manifest.service.js';
 import { extractStoragePath } from '../../config/storage.js';
 import { cacheUserAccessRevocation } from '../auth/auth-revocation.service.js';
@@ -230,7 +230,9 @@ export async function markUserDeletionJobRetryable(jobId: string, error: unknown
          is_terminal = attempts >= $3::int,
          lease_expires_at = NULL,
          next_attempt_at = CASE
-           WHEN attempts >= $3::int THEN NULL
+           -- The schema deliberately keeps this non-null. Terminal jobs are
+           -- excluded by is_terminal, so a timestamp here cannot requeue one.
+           WHEN attempts >= $3::int THEN now()
            ELSE now() + (
              LEAST(
                $4::numeric * power(2::numeric, GREATEST(attempts - 1, 0)),
@@ -285,7 +287,7 @@ async function markJobSucceeded(jobId: string, stats: Record<string, number>): P
            is_terminal = false,
            lease_expires_at = NULL,
            finished_at = now(),
-           next_attempt_at = NULL,
+           next_attempt_at = now(),
            stats = $2::jsonb,
            last_error = NULL,
            updated_at = now()
@@ -352,7 +354,7 @@ async function createUserStorageManifest(job: UserDeletionJobRow): Promise<void>
   const rawPaths = [avatarPath, ...filePaths].filter((value): value is string => Boolean(value));
   await registerStorageManifestPaths('user', job.id, tenantId, rawPaths);
   // Catches a successfully-uploaded avatar whose DB profile update failed.
-  await registerStoragePrefixManifestPaths('user', job.id, tenantId, `${tenantId}/avatars/${job.user_id}.`);
+  await registerUserAvatarStemManifestPaths(job.id, tenantId, job.user_id);
 
   const feedbackRows = await query<{ feedback_files: unknown }>(
     `SELECT feedback_files

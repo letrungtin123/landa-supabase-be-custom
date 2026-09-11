@@ -8,6 +8,10 @@ import { GoogleGenAI } from '@google/genai';
 import { getClient, query } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import fs from 'fs/promises';
+import {
+  getGoogleAiStudioApiKey,
+  getOptionalGoogleAiStudioApiKeyFingerprint,
+} from './ai-settings.service.js';
 
 // ── Constants ──
 const LRO_POLL_INTERVAL = 5_000;   // 5 seconds
@@ -48,19 +52,11 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 }
 
 /**
- * Get Gemini API key for a tenant from tenants.settings.gemini_api_key.
+ * Get the tenant Google AI Studio API key through the central AI settings service.
  * Throws if key not configured.
  */
 export async function getGeminiApiKey(tenantId: string): Promise<string> {
-  const result = await query<{ api_key: string | null }>(
-    `SELECT settings->>'gemini_api_key' AS api_key FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  const key = result.rows[0]?.api_key?.trim();
-  if (!key) {
-    throw new Error('Gemini API key chưa được cấu hình cho tenant này. Vui lòng nhập API key trong Tenant Management.');
-  }
-  return key;
+  return getGoogleAiStudioApiKey(tenantId);
 }
 
 export function fingerprintGeminiApiKey(apiKey: string): string {
@@ -72,12 +68,7 @@ export async function getGeminiApiKeyFingerprint(tenantId: string): Promise<stri
 }
 
 export async function getOptionalGeminiApiKeyFingerprint(tenantId: string): Promise<string | null> {
-  const result = await query<{ api_key: string | null }>(
-    `SELECT settings->>'gemini_api_key' AS api_key FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  const key = result.rows[0]?.api_key?.trim();
-  return key ? fingerprintGeminiApiKey(key) : null;
+  return getOptionalGoogleAiStudioApiKeyFingerprint(tenantId);
 }
 
 export async function markTenantGeminiStoresKeyChanged(

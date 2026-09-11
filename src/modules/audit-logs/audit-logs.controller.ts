@@ -16,7 +16,11 @@ export async function detailController(req: Request, res: Response, next: NextFu
     sendSuccess(res, await svc.getAuditLogDetail(
       req.params.id,
       req.user!.tenantId,
-      req.user!.role,
+      {
+        id: req.user!.id,
+        username: req.user!.username,
+        role: req.user!.role,
+      },
       req.query as Record<string, unknown>,
     ));
   } catch (err) { next(err); }

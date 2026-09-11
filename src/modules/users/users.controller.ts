@@ -4,6 +4,7 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as usersService from './users.service.js';
+import * as permissionGroupsService from '../permissions/permissions.service.js';
 import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
@@ -36,7 +37,7 @@ export async function listController(req: Request, res: Response, next: NextFunc
 /** GET /api/users/:id */
 export async function getByIdController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const user = await usersService.getUserById(req.params.id);
+    const user = await usersService.getUserById(req.params.id, req.user!.tenantId);
     sendSuccess(res, user);
   } catch (err) { next(err); }
 }
@@ -75,8 +76,12 @@ export async function updateController(req: Request, res: Response, next: NextFu
     let before: Awaited<ReturnType<typeof usersService.getUserById>> | undefined;
     const user = await runAuditedTransaction(
       async () => {
-        before = await usersService.getUserById(req.params.id);
-        return usersService.updateUser(req.params.id, parsed.data);
+        before = await usersService.getUserById(req.params.id, req.user!.tenantId);
+        return usersService.updateUser(req.params.id, parsed.data, {
+          id: req.user!.id,
+          username: req.user!.username,
+          role: req.user!.role,
+        }, req.user!.tenantId);
       },
       (updated) => {
         if (!before) throw new Error('Missing user snapshot for audit');
@@ -175,32 +180,24 @@ export async function assignGroupsController(req: Request, res: Response, next: 
   try {
     const parsed = assignGroupsSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-
-    const user = await usersService.getUserById(req.params.id);
-    await usersService.assignPermissionGroups(
+    if (req.params.id === req.user!.id) {
+      sendError(res, 'Không thể tự thay đổi nhóm quyền của chính bạn', 403);
+      return;
+    }
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) {
+      sendError(res, 'Vui lòng chọn doanh nghiệp trước khi cập nhật nhóm quyền', 400);
+      return;
+    }
+    const groupId = parsed.data.permission_group_ids[0] || null;
+    const result = await permissionGroupsService.replaceUserPermissionGroup(
       req.params.id,
-      parsed.data.permission_group_ids,
-      {
-        ...createTransactionalAuditEntry(
-          req,
-          'UPDATE',
-          'user_permission_groups',
-          {
-            code: 'user.updated',
-            changes: [{
-              field: 'permission_groups',
-              before: user.permission_groups.length,
-              after: parsed.data.permission_group_ids.length,
-            }],
-          },
-          req.params.id,
-          user.username,
-        ),
-        tenantId: user.tenant_id || null,
-      },
+      groupId,
+      tenantId,
+      { id: req.user!.id, username: req.user!.username, role: req.user!.role },
     );
-    invalidatePermissionCache(req.params.id);
-    sendSuccess(res, null, 'Gán nhóm quyền thành công');
+    for (const userId of result.affectedUserIds) invalidatePermissionCache(userId);
+    sendSuccess(res, { changed: result.changed }, result.changed ? 'Đã cập nhật nhóm quyền' : 'Nhóm quyền không thay đổi');
   } catch (err) { next(err); }
 }
 

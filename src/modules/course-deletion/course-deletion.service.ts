@@ -489,7 +489,7 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
            is_terminal = false,
            finished_at = now(),
            lease_expires_at = NULL,
-           next_attempt_at = NULL,
+           next_attempt_at = now(),
            updated_at = now(),
            stats = $2::jsonb,
            last_error = NULL
@@ -512,7 +512,9 @@ export async function markJobRetryable(jobId: string, error: unknown): Promise<v
          is_terminal = attempts >= $3::int,
          lease_expires_at = NULL,
          next_attempt_at = CASE
-           WHEN attempts >= $3::int THEN NULL
+           -- Terminal jobs are filtered by is_terminal; retain a valid
+           -- timestamp to conform to the NOT NULL retry schedule column.
+           WHEN attempts >= $3::int THEN now()
            ELSE now() + (
              LEAST(
                $4::numeric * power(2::numeric, GREATEST(attempts - 1, 0)),

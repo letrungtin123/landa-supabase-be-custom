@@ -16,8 +16,12 @@ import {
   updateModulesController,
   getCourseComponentPermissionsController,
   updateCourseComponentPermissionsController,
+  getAiSettingsController,
+  updateAiSettingsController,
   getQuotaController,
   getCurrentDataQuotaController,
+  listAiPricingRateCardsController,
+  createAiPricingRateCardController,
   getGroupLabelsController,
   getRoleLabelsController,
   listSimpleController,
@@ -40,6 +44,8 @@ router.get('/simple', authorize('superadmin'), listSimpleController);
 // Tenant đang active được lấy từ JWT; superadmin chỉ có thể đổi qua X-Tenant-Id
 // vốn đã được tenantContext kiểm tra. Không nhận tenant id tùy ý từ URL.
 router.get('/current/data-quota', tenantContext, getCurrentDataQuotaController);
+router.get('/ai-pricing/rate-cards', authorize('superadmin'), listAiPricingRateCardsController);
+router.post('/ai-pricing/rate-cards', authorize('superadmin'), createAiPricingRateCardController);
 
 // ── CRUD + modules — superadmin only ──
 router.get('/', authorize('superadmin'), listController);
@@ -51,6 +57,8 @@ router.get('/:id/modules', authorize('superadmin'), getModulesController);
 router.put('/:id/modules', authorize('superadmin'), updateModulesController);
 router.get('/:id/course-component-permissions', authorize('superadmin'), getCourseComponentPermissionsController);
 router.put('/:id/course-component-permissions', authorize('superadmin'), updateCourseComponentPermissionsController);
+router.get('/:id/ai-settings', authorize('superadmin'), getAiSettingsController);
+router.put('/:id/ai-settings', authorize('superadmin'), updateAiSettingsController);
 router.get('/:id/role-labels', authorize('superadmin'), getRoleLabelsController);
 router.put('/:id/role-labels', authorize('superadmin'), updateRoleLabelsController);
 router.get('/:id/group-labels', authorize('superadmin'), getGroupLabelsController);

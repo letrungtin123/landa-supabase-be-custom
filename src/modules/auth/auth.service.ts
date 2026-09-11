@@ -579,10 +579,13 @@ async function resolvePermissions(userId: string, role: string, tenantId: string
             bool_or(pgm.can_edit) AS can_edit,
             bool_or(pgm.can_delete) AS can_delete
      FROM user_permission_groups upg
-     JOIN permission_group_modules pgm ON pgm.permission_group_id = upg.permission_group_id
+     JOIN permission_group_modules pgm
+       ON pgm.permission_group_id = upg.permission_group_id
+      AND pgm.tenant_id = upg.tenant_id
      JOIN modules m ON m.id = pgm.module_id
      JOIN permission_groups pg ON pg.id = upg.permission_group_id
      WHERE upg.user_id = $1
+       AND upg.tenant_id = $2
        AND pg.tenant_id = $2
      GROUP BY m.code`,
     [userId, tenantId],

@@ -101,10 +101,13 @@ export function checkPermission(moduleCode: string, action: PermissionAction) {
       const result = await query<Record<string, boolean>>(
         `SELECT bool_or(pgm.${action}) AS allowed
          FROM user_permission_groups upg
-         JOIN permission_group_modules pgm ON pgm.permission_group_id = upg.permission_group_id
+         JOIN permission_group_modules pgm
+           ON pgm.permission_group_id = upg.permission_group_id
+          AND pgm.tenant_id = upg.tenant_id
          JOIN modules m ON m.id = pgm.module_id
          JOIN permission_groups pg ON pg.id = upg.permission_group_id
          WHERE upg.user_id = $1
+           AND upg.tenant_id = $3
            AND m.code = $2
            AND pg.tenant_id = $3`,
         [userId, moduleCode, tenantId],

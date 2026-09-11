@@ -52,7 +52,22 @@ export const updateTenantCourseComponentPermissionsSchema = z.object({
   allowed_component_types: z.array(z.enum(COURSE_COMPONENT_TYPES)),
 });
 
+export const updateTenantAiSettingsSchema = z.object({
+  active_engine: z.enum(['gemini_file_search', 'self_built_rag']).optional(),
+  monthly_token_limit: z.string()
+    .regex(/^\d+$/, 'Hạn mức token phải là số nguyên không âm')
+    .nullable()
+    .optional(),
+  google_ai_studio_api_key: z.string().trim().min(1).nullable().optional(),
+  clear_google_ai_studio_api_key: z.boolean().optional(),
+  chat_model: z.string().trim().min(1).max(100).optional(),
+  lesson_author_model: z.string().trim().min(1).max(100).optional(),
+  embedding_model: z.string().trim().min(1).max(100).optional(),
+  embedding_dimensions: z.number().int().positive().optional(),
+});
+
 export type CreateTenantInput = z.infer<typeof createTenantSchema>;
 export type UpdateTenantInput = z.infer<typeof updateTenantSchema>;
 export type UpdateTenantModulesInput = z.infer<typeof updateTenantModulesSchema>;
 export type UpdateTenantCourseComponentPermissionsInput = z.infer<typeof updateTenantCourseComponentPermissionsSchema>;
+export type UpdateTenantAiSettingsInput = z.infer<typeof updateTenantAiSettingsSchema>;

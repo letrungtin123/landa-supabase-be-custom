@@ -7,6 +7,14 @@ import { env } from '../../config/env.js';
 import { getClient, query } from '../../config/database.js';
 import { deleteFile, downloadToTempFile } from '../../config/storage.js';
 import { deleteFromStore, ensureStore, getGeminiApiKeyFingerprint, getGeminiClient, uploadToStore } from './gemini.service.js';
+import { getTenantAiRuntimeSettings, getGoogleAiStudioApiKey } from './ai-settings.service.js';
+import { deleteRagDocument, deleteRagKnowledgebase, indexRagDocument } from './ai-rag-client.service.js';
+import {
+  estimateTokensFromText,
+  finalizeTenantAiTokens,
+  releaseTenantAiTokenReservation,
+  reserveTenantAiTokens,
+} from './ai-token-quota.service.js';
 import {
   completeKbOperation,
   claimDueKbOperations,
@@ -33,6 +41,19 @@ function errorMessage(error: unknown): string {
 function previousFilePath(job: KbOperationJob): string | null {
   const value = job.payload?.previous_file_path;
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function sourceSize(sourceInfo: Record<string, unknown> | null | undefined): number {
+  const value = sourceInfo?.size;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function estimateDocumentIndexTokens(doc: { content: string | null; name: string; source_info: Record<string, unknown> | null }): number {
+  const extractedContentEstimate = estimateTokensFromText(doc.content, doc.name);
+  // A source file may not have extracted text in kb_documents yet. Keep the
+  // same conservative byte-based guard used by the transition worker.
+  const sourceFileEstimate = Math.ceil(sourceSize(doc.source_info) / 8);
+  return Math.max(env.AI_INDEX_TOKEN_RESERVE_ESTIMATE, extractedContentEstimate, sourceFileEstimate);
 }
 
 async function assertLease(job: KbOperationJob): Promise<void> {
@@ -91,6 +112,63 @@ async function uploadDocumentToGemini(job: KbOperationJob): Promise<void> {
   }
 }
 
+async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
+  if (!job.document_id) throw new Error('KB document operation is missing document_id');
+  const doc = await getDocument(job.document_id, job.tenant_id);
+  if (!doc) return;
+  if (!doc.file_path) throw new Error('Document has no file_path');
+
+  const settings = await getTenantAiRuntimeSettings(job.tenant_id);
+  let reservationId: string | null = null;
+  try {
+    const reservation = await reserveTenantAiTokens({
+      tenantId: job.tenant_id,
+      userId: null,
+      conversationId: null,
+      target: 'admin',
+      engine: 'self_built_rag',
+      provider: settings.provider,
+      model: settings.embeddingModel,
+      operation: 'indexing',
+      estimatedTokens: estimateDocumentIndexTokens(doc),
+    });
+    reservationId = reservation.id;
+    await assertLease(job);
+    const result = await indexRagDocument({
+      tenantId: job.tenant_id,
+      kbId: job.kb_id,
+      documentId: doc.id,
+      embeddingModel: settings.embeddingModel,
+      embeddingDimensions: settings.embeddingDimensions,
+    });
+    if (result.status !== 'learned') {
+      throw new Error(result.error_reason || 'AI RAG không thể học tài liệu này');
+    }
+    await assertLease(job);
+    await finalizeTenantAiTokens({
+      reservationId,
+      tenantId: job.tenant_id,
+      embeddingModel: settings.embeddingModel,
+      usage: {
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        embeddingTokens: result.usage?.embeddingTokens ?? 0,
+        totalTokens: result.usage?.totalTokens ?? result.usage?.embeddingTokens ?? 0,
+      },
+      source: { kb_id: job.kb_id, document_id: doc.id, operation_id: job.id },
+      metadata: { chunk_count: result.chunk_count, engine: 'self_built_rag' },
+    });
+    const previous = previousFilePath(job);
+    if (job.operation === 'document_reupload' && previous && previous !== doc.file_path) {
+      await deleteFile(previous);
+    }
+    await updateDocumentStatus(doc.id, 'learned');
+  } catch (error) {
+    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function deleteDocumentResources(job: KbOperationJob): Promise<void> {
   const paths = Array.isArray(job.payload?.gemini_paths)
     ? job.payload.gemini_paths.filter((value): value is string => typeof value === 'string' && value.length > 0)
@@ -101,6 +179,15 @@ async function deleteDocumentResources(job: KbOperationJob): Promise<void> {
   }
   const filePath = typeof job.payload?.file_path === 'string' ? job.payload.file_path : null;
   if (filePath) await deleteFile(filePath);
+  if (job.target_document_id) {
+    await deleteRagDocument({
+      tenantId: job.tenant_id,
+      kbId: job.kb_id,
+      documentId: job.target_document_id,
+    }).catch((error) => {
+      console.warn(`[KbOperationWorker] RAG document cache cleanup skipped for ${job.target_document_id}: ${errorMessage(error)}`);
+    });
+  }
   await assertLease(job);
   await invalidateTenantAiCaches(job.tenant_id);
 }
@@ -111,6 +198,9 @@ async function deleteKnowledgebaseResources(job: KbOperationJob): Promise<void> 
     [job.kb_id, job.tenant_id],
   );
   await deleteKbGeminiRemoteResources(job.kb_id, job.tenant_id);
+  await deleteRagKnowledgebase({ tenantId: job.tenant_id, kbId: job.kb_id }).catch((error) => {
+    console.warn(`[KbOperationWorker] RAG KB cache cleanup skipped for ${job.kb_id}: ${errorMessage(error)}`);
+  });
   for (const document of documents.rows) {
     if (document.file_path) await deleteFile(document.file_path);
   }
@@ -157,7 +247,13 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
     await lockClient.query(`SELECT ${lockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
     await assertLease(job);
     if (job.operation === 'document_upload' || job.operation === 'document_reupload') {
-      await uploadDocumentToGemini(job);
+      const settings = await getTenantAiRuntimeSettings(job.tenant_id);
+      await getGoogleAiStudioApiKey(job.tenant_id);
+      if (settings.activeEngine === 'self_built_rag') {
+        await uploadDocumentToRag(job);
+      } else {
+        await uploadDocumentToGemini(job);
+      }
     } else if (job.operation === 'document_delete') {
       await deleteDocumentResources(job);
     } else {

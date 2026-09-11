@@ -9,6 +9,7 @@ import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, buildStoragePath, buildFileName, deleteFile } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { getRedisClient } from '../../config/redis.js';
+import { AppError } from '../../middleware/error-handler.js';
 import type { CreateKbInput, UpdateKbInput, CreateArticleInput, UpdateArticleInput } from './kb.validator.js';
 import * as XLSX from 'xlsx';
 import fs from 'fs/promises';
@@ -22,6 +23,7 @@ import {
   getGeminiClient,
   getOptionalGeminiApiKeyFingerprint,
 } from './gemini.service.js';
+import type { AiEngine } from './ai-engine.types.js';
 
 const LOCAL_SOURCE_CONTENT_EXTENSIONS = new Set(['.txt', '.md', '.csv']);
 const MAX_STORED_SOURCE_CONTENT_CHARS = 200_000;
@@ -53,9 +55,14 @@ export interface Knowledgebase {
   restore_required?: boolean;
   restore_reason?: string | null;
   restore_progress?: KbRestoreProgress | null;
+  ai_active_engine?: AiEngine;
+  ai_transition_state?: KbAiTransitionState;
+  ai_pending_engine?: AiEngine | null;
+  ai_transition_progress?: KbAiTransitionProgress | null;
 }
 
 type KbRestoreState = 'idle' | 'queued' | 'restoring' | 'uploading' | 'completed' | 'failed';
+type KbAiTransitionState = 'idle' | 'queued' | 'running' | 'failed';
 
 interface KbRestoreProgress {
   total_docs: number;
@@ -63,6 +70,14 @@ interface KbRestoreProgress {
   learned_docs: number;
   failed_docs: number;
   skipped_docs: number;
+}
+
+interface KbAiTransitionProgress {
+  phase: string | null;
+  total_documents: number;
+  processed_documents: number;
+  cleanup_processed_documents: number;
+  last_error: string | null;
 }
 
 export interface KbDocument {
@@ -241,6 +256,11 @@ function mapKnowledgebaseRow<T extends Record<string, any>>(row: T): Knowledgeba
     learned_docs,
     failed_docs,
     skipped_docs,
+    ai_transition_phase,
+    ai_transition_total_documents,
+    ai_transition_processed_documents,
+    ai_transition_cleanup_processed_documents,
+    ai_transition_last_error,
     ...rest
   } = row;
   const progress =
@@ -253,12 +273,44 @@ function mapKnowledgebaseRow<T extends Record<string, any>>(row: T): Knowledgeba
           skipped_docs: Number(skipped_docs) || 0,
         }
       : null;
+  const aiTransitionProgress =
+    ai_transition_total_documents !== undefined && ai_transition_total_documents !== null
+      ? {
+          phase: ai_transition_phase ?? null,
+          total_documents: Number(ai_transition_total_documents) || 0,
+          processed_documents: Number(ai_transition_processed_documents) || 0,
+          cleanup_processed_documents: Number(ai_transition_cleanup_processed_documents) || 0,
+          last_error: ai_transition_last_error ?? null,
+        }
+      : null;
   return {
     ...(rest as unknown as Knowledgebase),
     restore_required: Boolean(rest.restore_required),
     restore_reason: rest.restore_reason ?? null,
     restore_progress: progress,
+    ai_transition_progress: aiTransitionProgress,
   };
+}
+
+async function assertNoActiveAiEngineTransition(
+  tenantId: string,
+  actionLabel = 'thay doi tai lieu',
+): Promise<void> {
+  const transition = await query<{ transition_state: string | null }>(
+    `SELECT transition_state
+     FROM tenant_ai_settings
+     WHERE tenant_id = $1
+       AND transition_state IN ('queued', 'running')
+     LIMIT 1`,
+    [tenantId],
+  );
+  if (transition.rows[0]) {
+    throw new AppError(
+      `Hệ thống AI đang chuyển dữ liệu, tạm thời không thể ${actionLabel}.`,
+      409,
+      'AI_ENGINE_TRANSITION_ACTIVE',
+    );
+  }
 }
 
 async function assertKnowledgebaseMutable(
@@ -290,6 +342,7 @@ async function assertKnowledgebaseMutable(
   if (await hasQueuedKnowledgebaseDeletion(kbId, tenantId)) {
     throw new Error(`Kho tri thuc dang duoc xoa, tam thoi khong the ${actionLabel}.`);
   }
+  await assertNoActiveAiEngineTransition(tenantId, actionLabel);
   const reason = getRestoreReasonFromStore(
     row.remote_status
       ? {
@@ -347,6 +400,14 @@ export async function listKnowledgebases(
               ELSE NULL
             END AS restore_reason,
             j.total_docs, j.enqueued_docs, j.learned_docs, j.failed_docs, j.skipped_docs,
+            tas.active_engine AS ai_active_engine,
+            tas.transition_state AS ai_transition_state,
+            aitj.to_engine AS ai_pending_engine,
+            aitj.phase AS ai_transition_phase,
+            aitj.total_documents::text AS ai_transition_total_documents,
+            aitj.processed_documents::text AS ai_transition_processed_documents,
+            aitj.cleanup_processed_documents::text AS ai_transition_cleanup_processed_documents,
+            aitj.last_error AS ai_transition_last_error,
             COUNT(*) OVER() AS full_count
      FROM knowledgebases kb
      LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
@@ -354,6 +415,8 @@ export async function listKnowledgebases(
        SELECT kb_id, COUNT(*)::int AS cnt FROM kb_documents GROUP BY kb_id
      ) dc ON dc.kb_id = kb.id
      LEFT JOIN kb_restore_jobs j ON j.id = kb.active_restore_job_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = kb.tenant_id
+     LEFT JOIN ai_engine_transition_jobs aitj ON aitj.id = tas.active_transition_job_id
      WHERE ${where}
      ORDER BY kb.created_at DESC
      LIMIT $${idx++} OFFSET $${idx++}`,
@@ -376,13 +439,23 @@ export async function getKnowledgebase(id: string, tenantId: string): Promise<Kn
                 COALESCE(kgs.remote_error_reason, 'Gemini API key changed or cannot access the current store.')
               ELSE NULL
             END AS restore_reason,
-            j.total_docs, j.enqueued_docs, j.learned_docs, j.failed_docs, j.skipped_docs
+            j.total_docs, j.enqueued_docs, j.learned_docs, j.failed_docs, j.skipped_docs,
+            tas.active_engine AS ai_active_engine,
+            tas.transition_state AS ai_transition_state,
+            aitj.to_engine AS ai_pending_engine,
+            aitj.phase AS ai_transition_phase,
+            aitj.total_documents::text AS ai_transition_total_documents,
+            aitj.processed_documents::text AS ai_transition_processed_documents,
+            aitj.cleanup_processed_documents::text AS ai_transition_cleanup_processed_documents,
+            aitj.last_error AS ai_transition_last_error
      FROM knowledgebases kb
      LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
      LEFT JOIN (
        SELECT kb_id, COUNT(*)::int AS cnt FROM kb_documents GROUP BY kb_id
      ) dc ON dc.kb_id = kb.id
      LEFT JOIN kb_restore_jobs j ON j.id = kb.active_restore_job_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = kb.tenant_id
+     LEFT JOIN ai_engine_transition_jobs aitj ON aitj.id = tas.active_transition_job_id
      WHERE kb.id = $1 AND kb.tenant_id = $2
      LIMIT 1`,
     [id, tenantId, currentFingerprint],
@@ -1957,6 +2030,7 @@ export async function queueKnowledgebaseDeletion(id: string, tenantId: string): 
     [id, tenantId],
   );
   if (!kb.rows[0]) return false;
+  await assertNoActiveAiEngineTransition(tenantId, 'xoa Kho tri thuc');
   if (isRestoreActiveState(kb.rows[0].restore_state)) {
     throw new Error('Không thể xoá Kho tri thức đang được khôi phục');
   }

@@ -76,6 +76,10 @@ export function appendAuditLogViewerScopeFilter(
   if (viewerRole === 'superadmin') return;
   params.push('tenant');
   conditions.push(`${alias}.viewer_scope = $${params.length}`);
+  params.push('superadmin');
+  conditions.push(
+    `NOT EXISTS (SELECT 1 FROM users audit_actor WHERE audit_actor.id = ${alias}.actor_id AND audit_actor.role = $${params.length})`,
+  );
 }
 
 /**
@@ -89,11 +93,12 @@ export function assertLegacyAuditOffset(offset: number): void {
 }
 
 /**
- * Email is personal data. Tenant staff may inspect permitted audit details,
- * but only privileged operators receive actor/subject email fields.
+ * Email is personal data. It is returned only after an authorized operator
+ * explicitly opens one tenant-scoped audit detail; list and cursor responses
+ * never contain it.
  */
 export function canViewAuditLogSensitivePii(viewerRole: UserRole): boolean {
-  return viewerRole === 'superuser' || viewerRole === 'superadmin';
+  return viewerRole === 'staff' || viewerRole === 'superuser' || viewerRole === 'superadmin';
 }
 
 export function getAuditLogDetailPiiColumns(viewerRole: UserRole): string {
@@ -104,6 +109,46 @@ export function getAuditLogDetailPiiColumns(viewerRole: UserRole): string {
 
   return `COALESCE(NULLIF(a.actor_email, ''), NULLIF(lower(actor.email), '')) AS actor_email,
             a.subject_email`;
+}
+
+export interface AuditLogDetailViewer {
+  id: string;
+  username: string;
+  role: UserRole;
+}
+
+/**
+ * Old audit rows can lack a usable actor snapshot and point to an actor that
+ * no longer resolves. In that narrow case, an authorized viewer may receive
+ * their own email only when the persisted actor username matches their
+ * current authenticated username. This never looks up an email by username,
+ * so it cannot disclose another user's email or cross a tenant boundary.
+ */
+export function getAuditLogDetailPiiProjection(
+  viewer: AuditLogDetailViewer,
+  params: unknown[],
+): { columns: string; viewerJoin: string } {
+  if (!canViewAuditLogSensitivePii(viewer.role)) {
+    return { columns: getAuditLogDetailPiiColumns(viewer.role), viewerJoin: '' };
+  }
+
+  params.push(viewer.id, viewer.username);
+  const viewerIdParam = params.length - 1;
+  const viewerUsernameParam = params.length;
+
+  return {
+    columns: `COALESCE(
+              NULLIF(a.actor_email, ''),
+              NULLIF(lower(actor.email), ''),
+              CASE
+                WHEN (a.actor_id IS NULL OR actor.id IS NULL)
+                  AND a.actor_username = $${viewerUsernameParam}::text
+                THEN NULLIF(lower(audit_viewer.email), '')
+              END
+            ) AS actor_email,
+            a.subject_email`,
+    viewerJoin: `LEFT JOIN users audit_viewer ON audit_viewer.id = $${viewerIdParam}::uuid`,
+  };
 }
 
 function addBaseFilters(
@@ -265,11 +310,12 @@ export async function listAuditLogs(
 export async function getAuditLogDetail(
   auditLogId: string,
   tenantId: string | null,
-  viewerRole: UserRole,
+  viewer: AuditLogDetailViewer,
   queryParams: Record<string, unknown>,
 ) {
   if (!UUID_PATTERN.test(auditLogId)) throw new AppError('Mã nhật ký không hợp lệ', 400);
-  const { params, conditions } = addBaseFilters(tenantId, viewerRole, queryParams);
+  const { params, conditions } = addBaseFilters(tenantId, viewer.role, queryParams);
+  const piiProjection = getAuditLogDetailPiiProjection(viewer, params);
   params.push(auditLogId);
   conditions.push(`a.id = $${params.length}::uuid`);
 
@@ -295,12 +341,13 @@ export async function getAuditLogDetail(
   }>(
     `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS},
             COALESCE(NULLIF(a.actor_display_name, ''), NULLIF(actor.full_name, ''), a.actor_username) AS actor_display_name,
-            ${getAuditLogDetailPiiColumns(viewerRole)},
+            ${piiProjection.columns},
             a.subject_display_name,
             a.subject_username,
             a.subject_role
      FROM audit_logs a
      LEFT JOIN users actor ON actor.id = a.actor_id
+     ${piiProjection.viewerJoin}
      WHERE ${conditions.join(' AND ')}
      LIMIT 1`,
     params,

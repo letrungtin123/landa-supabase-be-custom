@@ -3,8 +3,7 @@
 // Tối ưu: parameterized queries, index trên tenant_id + role
 // ═══════════════════════════════════════════════════════════════
 
-import { query, getClient } from '../../config/database.js';
-import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
+import { query } from '../../config/database.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { normalizeEmail } from '../../utils/email.js';
@@ -14,6 +13,8 @@ import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 import { isLearnerRole } from '../../types/index.js';
 import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
 import { assertUserNotActiveDemoIframeAccount, getActiveDemoIframeUserIds } from '../demo-login/demo-iframe.service.js';
+import { replaceUserPermissionGroup } from '../permissions/permissions.service.js';
+import type { PermissionGroupHistoryActor } from '../permissions/permission-group-history.service.js';
 
 function isPgUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === '23505';
@@ -100,7 +101,17 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
   const permGroupFilter = queryParams.permission_group_id as string;
   if (permGroupFilter) {
     params.push(permGroupFilter);
-    conditions.push(`EXISTS (SELECT 1 FROM user_permission_groups upg WHERE upg.user_id = u.id AND upg.permission_group_id = $${params.length})`);
+    conditions.push(
+      `EXISTS (
+         SELECT 1
+         FROM user_permission_groups upg
+         JOIN permission_groups pg_filter ON pg_filter.id = upg.permission_group_id
+         WHERE upg.user_id = u.id
+           AND upg.permission_group_id = $${params.length}
+           AND upg.tenant_id = u.tenant_id
+           AND pg_filter.tenant_id = u.tenant_id
+       )`,
+    );
   }
 
   const includeTeamAssignments = queryParams.include_team_assignments === 'true' || queryParams.include_team_assignments === true;
@@ -120,8 +131,8 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
               pg.name AS permission_group_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
-       LEFT JOIN user_permission_groups upg ON upg.user_id = u.id
-       LEFT JOIN permission_groups pg ON pg.id = upg.permission_group_id
+       LEFT JOIN user_permission_groups upg ON upg.user_id = u.id AND upg.tenant_id = u.tenant_id
+       LEFT JOIN permission_groups pg ON pg.id = upg.permission_group_id AND pg.tenant_id = u.tenant_id
        ${where}
        ORDER BY u.created_at DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -210,7 +221,7 @@ export async function listUsers(tenantId: string | null, queryParams: Record<str
 /**
  * Chi tiết user + danh sách permission groups đã gán.
  */
-export async function getUserById(userId: string) {
+export async function getUserById(userId: string, tenantScopeId: string | null = null) {
   const [userResult, groupsResult] = await Promise.all([
     query(
       `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
@@ -218,16 +229,22 @@ export async function getUserById(userId: string) {
               t.name AS tenant_name
        FROM users u
        LEFT JOIN tenants t ON t.id = u.tenant_id
-       WHERE u.id = $1 AND u.deletion_requested_at IS NULL`,
-      [userId],
+       WHERE u.id = $1
+         AND u.deletion_requested_at IS NULL
+         AND ($2::uuid IS NULL OR u.tenant_id = $2::uuid)`,
+      [userId, tenantScopeId],
     ),
     query(
       `SELECT pg.id, pg.name
        FROM user_permission_groups upg
        JOIN permission_groups pg ON pg.id = upg.permission_group_id
+       JOIN users u ON u.id = upg.user_id
        WHERE upg.user_id = $1
+         AND upg.tenant_id = u.tenant_id
+         AND pg.tenant_id = u.tenant_id
+         AND ($2::uuid IS NULL OR u.tenant_id = $2::uuid)
        ORDER BY pg.name`,
-      [userId],
+      [userId, tenantScopeId],
     ),
   ]);
 
@@ -278,21 +295,52 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
 /**
  * Cập nhật user — partial update.
  */
-export async function updateUser(userId: string, input: UpdateUserInput) {
-  await assertUserIsNotPendingDeletion(userId);
+export async function updateUser(
+  userId: string,
+  input: UpdateUserInput,
+  permissionHistoryActor?: PermissionGroupHistoryActor,
+  tenantScopeId: string | null = null,
+) {
+  await assertUserIsNotPendingDeletion(userId, tenantScopeId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật');
 
   // Check if role is changing FROM learner → remove from teams
   let oldRole: string | null = null;
+  let userTenantId: string | null = null;
   if (input.role !== undefined) {
-    const current = await query<{ role: string }>('SELECT role FROM users WHERE id = $1', [userId]);
+    const current = await query<{ role: string; tenant_id: string | null }>(
+      `SELECT role, tenant_id
+       FROM users
+       WHERE id = $1
+         AND deletion_requested_at IS NULL
+         AND ($2::uuid IS NULL OR tenant_id = $2::uuid)`,
+      [userId, tenantScopeId],
+    );
     if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
     oldRole = current.rows[0].role;
+    userTenantId = current.rows[0].tenant_id;
+
+    // Permission-group writes acquire this lock before the user row. Take it
+    // before UPDATE as well when a role change will remove group membership,
+    // otherwise a simultaneous matrix save can deadlock on the same user.
+    if (isLearnerRole(input.role) && !isLearnerRole(oldRole)) {
+      await query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 20260911))`,
+        [userId],
+      );
+    }
   }
 
   const normalizedEmail = input.email !== undefined ? normalizeEmail(input.email) : undefined;
   if ((input.username !== undefined || normalizedEmail !== undefined) && input.role === undefined) {
-    const current = await query<{ id: string }>('SELECT id FROM users WHERE id = $1 LIMIT 1', [userId]);
+    const current = await query<{ id: string }>(
+      `SELECT id FROM users
+       WHERE id = $1
+         AND deletion_requested_at IS NULL
+         AND ($2::uuid IS NULL OR tenant_id = $2::uuid)
+       LIMIT 1`,
+      [userId, tenantScopeId],
+    );
     if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
   }
   await assertUsernameOrEmailAvailable(input.username, normalizedEmail, userId);
@@ -318,11 +366,13 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
-  params.push(userId);
+  params.push(userId, tenantScopeId);
   let result;
   try {
     result = await query(
-      `UPDATE users SET ${sets.join(', ')} WHERE id = $${idx}
+      `UPDATE users SET ${sets.join(', ')}
+       WHERE id = $${idx}
+         AND ($${idx + 1}::uuid IS NULL OR tenant_id = $${idx + 1}::uuid)
        RETURNING id, username, email, full_name, role, is_active`,
       params,
     );
@@ -333,10 +383,16 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
 
-  // If role changed FROM learner/learner_plus → non-learner: remove from teams + permission groups
+  // A staff member moving to a learner role must lose their group immediately.
+  // The removal is recorded in the independent Permission Group history when
+  // the caller supplied an actor; older internal callers retain safe cleanup.
   if (isLearnerRole(input.role!) && oldRole && !isLearnerRole(oldRole)) {
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
-    await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
+    if (permissionHistoryActor && userTenantId) {
+      await replaceUserPermissionGroup(userId, null, userTenantId, permissionHistoryActor);
+    } else {
+      await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
+    }
   } else if (oldRole && isLearnerRole(oldRole) && !isLearnerRole(input.role!)) {
     // From learner/learner_plus → staff/superuser: remove from teams
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
@@ -359,55 +415,17 @@ export async function updateUser(userId: string, input: UpdateUserInput) {
   return result.rows[0];
 }
 
-async function assertUserIsNotPendingDeletion(userId: string): Promise<void> {
+async function assertUserIsNotPendingDeletion(userId: string, tenantScopeId: string | null = null): Promise<void> {
   const result = await query<{ id: string }>(
-    `SELECT id FROM users WHERE id = $1 AND deletion_requested_at IS NULL`,
-    [userId],
+    `SELECT id
+     FROM users
+     WHERE id = $1
+       AND deletion_requested_at IS NULL
+       AND ($2::uuid IS NULL OR tenant_id = $2::uuid)`,
+    [userId, tenantScopeId],
   );
   if (result.rowCount === 0) {
     throw new AppError('User đang được xóa vĩnh viễn hoặc không tồn tại', 409);
-  }
-}
-
-/**
- * Gán user vào permission groups (replace toàn bộ).
- */
-export async function assignPermissionGroups(
-  userId: string,
-  groupIds: string[],
-  auditEntry?: TransactionalAuditEntry,
-) {
-  await assertUserIsNotPendingDeletion(userId);
-  await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật quyền');
-
-  // Enforce max 1 group per staff/superuser
-  if (groupIds.length > 1) {
-    throw new AppError('Mỗi staff chỉ được gán tối đa 1 nhóm quyền', 400);
-  }
-
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-
-    // Xóa tất cả gán cũ
-    await client.query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
-
-    // Gán mới (max 1)
-    for (const groupId of groupIds) {
-      await client.query(
-        'INSERT INTO user_permission_groups (user_id, permission_group_id) VALUES ($1, $2)',
-        [userId, groupId],
-      );
-    }
-
-    if (auditEntry) await appendAuditLog(client, auditEntry);
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
   }
 }
 

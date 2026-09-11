@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { query } from '../../config/database.js';
 import { disableRedisForProcess, getRedisClient } from '../../config/redis.js';
 
@@ -5,6 +6,29 @@ const REVOCATION_KEY_PREFIX = 'auth:revoked:';
 
 function revocationKey(userId: string): string {
   return `${REVOCATION_KEY_PREFIX}${userId}`;
+}
+
+/**
+ * A successful PING only proves that Redis accepted a connection. Production
+ * deployments that require Redis for revocation must also prove the exact
+ * keyspace commands used by the fast path before accepting traffic.
+ */
+export async function assertAuthRevocationRedisReady(): Promise<void> {
+  const client = getRedisClient();
+  if (!client) throw new Error('Redis is unavailable for access-token revocation');
+
+  const probeKey = `${REVOCATION_KEY_PREFIX}__capability_probe__:${randomUUID()}`;
+  try {
+    await client.set(probeKey, '1', { EX: 15 });
+    const value = await client.get(probeKey);
+    if (value !== '1') throw new Error('Redis revocation capability probe returned an unexpected value');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    disableRedisForProcess(`Redis access-token revocation capability check failed: ${reason}`);
+    throw new Error('Redis must permit GET and SET on auth:revoked:* when production revocation enforcement is enabled');
+  } finally {
+    await client.del(probeKey).catch(() => undefined);
+  }
 }
 
 /** Cache a durable database revocation after the transaction commits. */

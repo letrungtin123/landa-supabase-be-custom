@@ -63,6 +63,7 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   },
   'tenant.deleted': { context: [], changes: [] },
   'tenant.modules.updated': { context: ['affected_count'], changes: [] },
+  'ai.pricing_rate_card.created': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
   'user.created': { context: [], changes: [] },
   'user.updated': { context: [], changes: ['username', 'role', 'is_active', 'permission_groups'] },
   'user.deleted': { context: [], changes: [] },

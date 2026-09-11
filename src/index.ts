@@ -9,11 +9,12 @@ import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
+import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
-import { cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
+import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
 import fs from 'fs/promises';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
@@ -120,6 +121,7 @@ async function initRabbitMQ(): Promise<void> {
     await startDeleteWorker();
     await startRestoreWorker();
     await startKbOperationWorker();
+    await startAiEngineTransitionWorker();
     await startCourseDeletionWorker();
     await startUserDeletionWorker();
     await startCourseProgressRecalculationWorker();
@@ -141,6 +143,9 @@ async function bootstrap() {
   await connectRedis();
   if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION && !getRedisClient()) {
     throw new Error('Redis is required in production for constant-time durable access-token revocation. Configure REDIS_URL or explicitly set AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION=false after accepting the database fallback load.');
+  }
+  if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION) {
+    await assertAuthRevocationRedisReady();
   }
 
   // 2. Ensure temp dir for Gemini worker

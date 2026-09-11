@@ -27,7 +27,7 @@ export const updateUserSchema = z.object({
 
 /** Schema gán user vào permission groups */
 export const assignGroupsSchema = z.object({
-  permission_group_ids: z.array(z.string().uuid()),
+  permission_group_ids: z.array(z.string().uuid()).max(1, 'Mỗi thành viên chỉ được thuộc tối đa một nhóm quyền'),
 });
 
 export type CreateUserInput = z.infer<typeof createUserSchema>;

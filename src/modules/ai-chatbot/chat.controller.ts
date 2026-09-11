@@ -125,6 +125,17 @@ export async function getLessonAuthorSettings(req: Request, res: Response): Prom
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
+export async function getLessonAuthorChatSettings(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const settings = await chatService.getLessonAuthorSettings(tenantId);
+    sendSuccess(res, {
+      ...settings,
+      active_kb: settings.active_kb ? { ...settings.active_kb, store_name: null } : null,
+    });
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
 export async function assignLessonAuthorKb(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const { kb_id } = req.body ?? {};
@@ -197,13 +208,8 @@ export async function getActiveBotPersonas(req: Request, res: Response): Promise
   const tenantId = req.user!.tenantId!;
   const target = resolveTarget(req);
 
-  if (target !== 'learner') {
-    sendError(res, 'Endpoint này chỉ hỗ trợ target learner', 400);
-    return;
-  }
-
   try {
-    const bot = await chatService.getActiveBot(tenantId, 'learner');
+    const bot = await chatService.getActiveBot(tenantId, target);
     if (!bot) {
       sendSuccess(res, []);
       return;
@@ -211,6 +217,18 @@ export async function getActiveBotPersonas(req: Request, res: Response): Promise
 
     const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
     sendSuccess(res, personas.map(toPublicPersonaPreview));
+  } catch (err: any) { sendError(res, err.message, 400); }
+}
+
+export async function listLessonAuthorSourceDocuments(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+  const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : NaN;
+  const limit = Number.isFinite(rawLimit) ? rawLimit : undefined;
+
+  try {
+    const documents = await chatService.listLessonAuthorSourceDocuments(tenantId, { search, limit });
+    sendSuccess(res, documents);
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
@@ -346,7 +364,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content, mode, outline_mentions, source_documents, input_mode } = req.body ?? {};
+  const { content, mode, outline_mentions, source_documents, input_mode, locale } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
   if (isDemoIframeSession(req.user)) {
@@ -362,6 +380,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
   if (input_mode !== undefined && input_mode !== 'text' && input_mode !== 'voice') {
     sendError(res, 'input_mode không hợp lệ', 400); return;
+  }
+  if (locale !== undefined && locale !== 'vi' && locale !== 'en') {
+    sendError(res, 'locale không hợp lệ', 400); return;
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
 
@@ -420,6 +441,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
       sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
       inputMode,
+      locale: locale === 'en' ? 'en' : 'vi',
     },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });
@@ -432,7 +454,11 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     },
     (err: Error) => {
       if (!clientDisconnected) {
-        writeSSE({ type: 'error', message: err.message });
+        writeSSE({
+          type: 'error',
+          message: err.message,
+          ...((err as { code?: string }).code ? { code: (err as { code?: string }).code } : {}),
+        });
         endSSE();
       }
     },

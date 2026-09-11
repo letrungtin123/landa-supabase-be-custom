@@ -8,11 +8,27 @@ import * as roleLabelsService from './tenant-role-labels.service.js';
 import * as groupLabelsService from './tenant-group-labels.service.js';
 import * as smtpService from './tenant-smtp.service.js';
 import * as tenantCourseComponentsService from './tenant-course-components.service.js';
-import { createTenantSchema, updateTenantSchema, updateTenantModulesSchema, updateTenantCourseComponentPermissionsSchema } from './tenants.validator.js';
+import {
+  createTenantSchema,
+  updateTenantSchema,
+  updateTenantModulesSchema,
+  updateTenantCourseComponentPermissionsSchema,
+  updateTenantAiSettingsSchema,
+} from './tenants.validator.js';
 import { updateTenantSmtpSchema } from './tenant-smtp.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { invalidateTenantCache } from '../../middleware/tenant-context.js';
+import {
+  getTenantAiAdminSettings,
+  updateTenantAiSettings,
+} from '../ai-chatbot/ai-settings.service.js';
+import {
+  createAiPricingRateCardController,
+  listAiPricingRateCardsController,
+} from '../ai-chatbot/ai-report.controller.js';
+
+export { createAiPricingRateCardController, listAiPricingRateCardsController };
 
 function quotaLimitGbForAudit(bytes: string | null): number | null {
   if (bytes === null) return null;
@@ -39,6 +55,30 @@ function tenantUpdateChanges(
     });
   }
   return changes;
+}
+
+function getAuditTenantName(tenant: Record<string, unknown>, fallback: string): string {
+  return typeof tenant.name === 'string' && tenant.name.trim() ? tenant.name : fallback;
+}
+
+const RETRYABLE_WRITE_SQLSTATES = new Set(['40P01', '40001']);
+
+function isRetryableWriteError(err: unknown): boolean {
+  const code = typeof err === 'object' && err !== null
+    ? (err as { code?: unknown }).code
+    : undefined;
+  return typeof code === 'string' && RETRYABLE_WRITE_SQLSTATES.has(code);
+}
+
+async function runRetryableTenantWrite<T>(work: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await work();
+    } catch (err) {
+      if (attempt >= 2 || !isRetryableWriteError(err)) throw err;
+      await new Promise(resolve => setTimeout(resolve, 75 * (attempt + 1)));
+    }
+  }
 }
 
 /** GET /api/tenants */
@@ -151,7 +191,7 @@ export async function updateModulesController(req: Request, res: Response, next:
           'tenant_modules',
           { code: 'tenant.modules.updated', context: { affected_count: parsed.data.modules.length } },
           req.params.id,
-          tenant.name,
+          getAuditTenantName(tenant, req.params.id),
         ),
         tenantId: req.params.id,
       },
@@ -175,19 +215,21 @@ export async function updateCourseComponentPermissionsController(req: Request, r
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
     const tenant = await tenantsService.getTenantById(req.params.id);
-    const permissions = await runAuditedTransaction(
-      () => tenantCourseComponentsService.updateTenantCourseComponentPermissions(
-        req.params.id,
-        parsed.data.allowed_component_types,
-      ),
-      () => ({
-        ...createTransactionalAuditEntry(
-          req, 'UPDATE', 'tenant_course_component_permissions',
-          { code: 'tenant.settings.updated', context: { related_entity_name: 'course_component_permissions', related_entity_type: 'tenant_setting', affected_count: parsed.data.allowed_component_types.length } },
-          req.params.id, tenant.name,
+    const permissions = await runRetryableTenantWrite(() =>
+      runAuditedTransaction(
+        () => tenantCourseComponentsService.updateTenantCourseComponentPermissions(
+          req.params.id,
+          parsed.data.allowed_component_types,
         ),
-        tenantId: req.params.id,
-      }),
+        () => ({
+          ...createTransactionalAuditEntry(
+            req, 'UPDATE', 'tenant',
+            { code: 'tenant.settings.updated', context: { related_entity_name: 'course_component_permissions', related_entity_type: 'tenant_setting', affected_count: parsed.data.allowed_component_types.length } },
+            req.params.id, getAuditTenantName(tenant, req.params.id),
+          ),
+          tenantId: req.params.id,
+        }),
+      ),
     );
     sendSuccess(res, permissions, 'Cập nhật quyền component khóa học thành công');
   } catch (err) { next(err); }
@@ -211,7 +253,7 @@ export async function updateRoleLabelsController(req: Request, res: Response, ne
         ...createTransactionalAuditEntry(
           req, 'UPDATE', 'tenant_role_labels',
           { code: 'tenant.settings.updated', context: { related_entity_name: 'role_labels', related_entity_type: 'tenant_setting', affected_count: Object.keys(labelsInput).length } },
-          req.params.id, tenant.name,
+          req.params.id, getAuditTenantName(tenant, req.params.id),
         ), tenantId: req.params.id,
       },
     );
@@ -236,7 +278,7 @@ export async function updateGroupLabelsController(req: Request, res: Response, n
         ...createTransactionalAuditEntry(
           req, 'UPDATE', 'tenant_group_labels',
           { code: 'tenant.settings.updated', context: { related_entity_name: 'group_labels', related_entity_type: 'tenant_setting', affected_count: Object.keys(labelsInput).length } },
-          req.params.id, tenant.name,
+          req.params.id, getAuditTenantName(tenant, req.params.id),
         ), tenantId: req.params.id,
       },
     );
@@ -256,6 +298,46 @@ export async function getQuotaController(req: Request, res: Response, next: Next
   try {
     const usage = await tenantsService.getTenantQuotaUsage(req.params.id);
     sendSuccess(res, usage);
+  } catch (err) { next(err); }
+}
+
+/** GET /api/tenants/:id/ai-settings — AI engine + token usage (superadmin only) */
+export async function getAiSettingsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const settings = await getTenantAiAdminSettings(req.params.id);
+    sendSuccess(res, settings);
+  } catch (err) { next(err); }
+}
+
+/** PUT /api/tenants/:id/ai-settings — update AI engine/key/token limit (superadmin only) */
+export async function updateAiSettingsController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = updateTenantAiSettingsSchema.safeParse(req.body);
+    if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
+    const tenant = await tenantsService.getTenantById(req.params.id);
+    const settings = await runAuditedTransaction(
+      () => updateTenantAiSettings(req.params.id, {
+        activeEngine: parsed.data.active_engine,
+        monthlyTokenLimit: parsed.data.monthly_token_limit,
+        googleAiStudioApiKey: parsed.data.google_ai_studio_api_key,
+        clearGoogleAiStudioApiKey: parsed.data.clear_google_ai_studio_api_key,
+        chatModel: parsed.data.chat_model,
+        lessonAuthorModel: parsed.data.lesson_author_model,
+        embeddingModel: parsed.data.embedding_model,
+        embeddingDimensions: parsed.data.embedding_dimensions,
+        requestedBy: req.user?.id ?? null,
+      }),
+      () => createTransactionalAuditEntry(
+        req,
+        'UPDATE',
+        'tenant',
+        { code: 'tenant.settings.updated', context: { related_entity_name: 'ai_settings', related_entity_type: 'tenant_setting' } },
+        req.params.id,
+        (tenant as { name?: string }).name,
+      ),
+    );
+    invalidateTenantCache(req.params.id);
+    sendSuccess(res, settings, 'Cập nhật cấu hình AI thành công');
   } catch (err) { next(err); }
 }
 
@@ -325,7 +407,7 @@ export async function updateSmtpController(req: Request, res: Response, next: Ne
         ...createTransactionalAuditEntry(
           req, 'UPDATE', 'tenant_smtp_config',
           { code: 'tenant.settings.updated', context: { related_entity_name: 'smtp', related_entity_type: 'tenant_setting' } },
-          req.params.id, tenant.name,
+          req.params.id, getAuditTenantName(tenant, req.params.id),
         ), tenantId: req.params.id,
       }),
     );

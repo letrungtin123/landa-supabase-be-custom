@@ -7,32 +7,37 @@ import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission } from '../../middleware/authorize.js';
+import { sendError } from '../../utils/response.js';
 import * as kbCtrl from './kb.controller.js';
 import * as botCtrl from './bot.controller.js';
 import * as chatCtrl from './chat.controller.js';
+import { getAiOverviewController } from './ai-report.controller.js';
 
 const router = Router();
-const chatViewPermission = checkPermission('ai_chatbot', 'can_view');
 
-function getExplicitChatTarget(req: Request): string | undefined {
+function getRuntimeChatTarget(req: Request): string {
   const queryTarget = req.query.target;
   if (typeof queryTarget === 'string') return queryTarget;
 
   const body = req.body as { target?: unknown } | undefined;
-  return typeof body?.target === 'string' ? body.target : undefined;
+  return typeof body?.target === 'string' ? body.target : 'admin';
 }
 
-function isLearnerChatRole(role: string | undefined): boolean {
+function isLearnerRole(role: string | undefined): boolean {
   return role === 'learner' || role === 'learner_plus';
 }
 
-function allowLearnerChatOrPermission(req: Request, res: Response, next: NextFunction): void {
-  if (getExplicitChatTarget(req) === 'learner' && isLearnerChatRole(req.user?.role)) {
-    next();
+/**
+ * Runtime chat is deliberately independent from the ai_chatbot management module.
+ * Learners remain confined to the learner deployment; all tenant and bot ownership
+ * checks are enforced by tenantContext and chat.service.
+ */
+function allowRuntimeChatTarget(req: Request, res: Response, next: NextFunction): void {
+  if (isLearnerRole(req.user?.role) && getRuntimeChatTarget(req) !== 'learner') {
+    sendError(res, 'Bạn chỉ có thể sử dụng chatbot dành cho học viên', 403);
     return;
   }
-
-  void chatViewPermission(req, res, next);
+  next();
 }
 
 // Multer — memory storage, 50MB limit
@@ -47,6 +52,7 @@ router.use(tenantContext);
 
 // ── Knowledge Base CRUD ──
 router.get('/kb', checkPermission('ai_chatbot', 'can_view'), kbCtrl.listKbs);
+router.get('/reports/overview', checkPermission('ai_chatbot', 'can_view'), getAiOverviewController);
 router.get('/kb/:id', checkPermission('ai_chatbot', 'can_view'), kbCtrl.getKb);
 router.post('/kb', checkPermission('ai_chatbot', 'can_add'), kbCtrl.createKb);
 router.put('/kb/:id', checkPermission('ai_chatbot', 'can_edit'), kbCtrl.updateKb);
@@ -96,14 +102,18 @@ router.put('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'can_e
 router.post('/bots/:id/personas/:personaId/reset', checkPermission('ai_chatbot', 'can_edit'), botCtrl.resetPersona);
 router.delete('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'can_delete'), botCtrl.removePersona);
 
-// ── Chat — conversations + messages (SSE stream) ──
+// ── Chat runtime — bot deployment, not the management module, controls access.
+// Every handler still requires authentication + an active tenant context. The service
+// additionally binds the conversation to its current tenant bot assignment.
 router.get('/chat/demo-iframe-preview', chatCtrl.getDemoIframePreview);
-router.get('/chat/active-bot', allowLearnerChatOrPermission, chatCtrl.getActiveBot);
-router.get('/chat/active-bot/personas', allowLearnerChatOrPermission, chatCtrl.getActiveBotPersonas);
-router.get('/chat/conversations', allowLearnerChatOrPermission, chatCtrl.listConversations);
-router.post('/chat/conversations', allowLearnerChatOrPermission, chatCtrl.createConversation);
-router.delete('/chat/conversations/:id', allowLearnerChatOrPermission, chatCtrl.deleteConversation);
-router.get('/chat/conversations/:id/messages', allowLearnerChatOrPermission, chatCtrl.getMessages);
-router.post('/chat/conversations/:id/messages', allowLearnerChatOrPermission, chatCtrl.sendMessage);
+router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
+router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
+router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
+router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversations);
+router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);
+router.delete('/chat/conversations/:id', allowRuntimeChatTarget, chatCtrl.deleteConversation);
+router.get('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.getMessages);
+router.post('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.sendMessage);
 
 export default router;

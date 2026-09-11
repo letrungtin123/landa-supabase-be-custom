@@ -11,6 +11,7 @@ import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { getRedisClient } from '../../config/redis.js';
+import { AppError } from '../../middleware/error-handler.js';
 import {
   applyLessonAuthorProposalToCourse,
   type LessonAuthorChapterProposal,
@@ -26,13 +27,33 @@ import {
   isGeminiPermissionDeniedError,
   markKbGeminiStoreRemoteProblem,
 } from './gemini.service.js';
+import type { AiOperation, AiUsage } from './ai-engine.types.js';
+import {
+  getTenantAiRuntimeSettings,
+} from './ai-settings.service.js';
+import {
+  estimateTokensFromText,
+  finalizeTenantAiTokens,
+  normalizeAiUsage,
+  releaseTenantAiTokenReservation,
+  reserveTenantAiTokens,
+} from './ai-token-quota.service.js';
+import {
+  generateRagLessonAuthorProposal,
+  sendRagChat,
+  type RagChatMessage,
+  type RagRetrievalDiagnostics,
+} from './ai-rag-client.service.js';
 import { runStoredInputFilter } from './input-filter/input-filter.service.js';
 import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
 import type { FilterResult } from './input-filter/core/index.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
-const HISTORY_CONTEXT_LIMIT = 20;         // Last N messages sent to Gemini
+const HISTORY_CONTEXT_LIMIT = 20;         // Last N messages sent to a provider
+const HISTORY_MESSAGE_MAX_CHARS = 1_800;
+const RAG_HISTORY_CONTEXT_LIMIT = 12;
+const RAG_HISTORY_MESSAGE_MAX_CHARS = 1_800;
 const MAX_USER_MESSAGE_LENGTH = 5000;
 const GEMINI_MODEL = env.GEMINI_CHAT_MODEL;
 const MESSAGES_PAGE_SIZE = 50;            // Cursor-based pagination
@@ -50,6 +71,11 @@ const MAX_UNIT_HTML_CHARS = 6000;
 const MIN_UNIT_HTML_TEXT_CHARS = 180;
 const MAX_SOURCE_DOCUMENTS = 5;
 const MAX_SOURCE_DOCUMENT_EXCERPT_CHARS = 2400;
+const RAG_CHAT_MIN_OUTPUT_TOKENS = 256;
+const RAG_CHAT_MAX_OUTPUT_TOKENS = 2048;
+const RAG_LESSON_AUTHOR_MIN_OUTPUT_TOKENS = 1024;
+const RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS = 8192;
+const RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET = 6000;
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -411,7 +437,7 @@ export interface LessonAuthorSourceDocument {
   type: string;
   status: string;
   source_info: Record<string, unknown> | null;
-  gemini_path: string;
+  gemini_path: string | null;
   content_excerpt: string | null;
 }
 
@@ -432,6 +458,8 @@ interface BotAssignment {
   bot_name: string;
   bot_avatar_url: string | null;
   bot_kb_id: string | null;
+  bot_kb_name: string | null;
+  ai_active_engine: 'gemini_file_search' | 'self_built_rag';
 }
 
 export interface KbAssignment {
@@ -467,6 +495,11 @@ export interface LessonAuthorSettings {
   active_persona: PersonaAssignment | null;
 }
 
+export interface ListLessonAuthorSourceDocumentsOptions {
+  search?: string;
+  limit?: number;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Bot Assignments
 // ═══════════════════════════════════════════════════════════════
@@ -482,9 +515,12 @@ export async function getAssignments(tenantId: string): Promise<BotAssignment[]>
 
 async function getAssignmentsFromDb(tenantId: string): Promise<BotAssignment[]> {
   const result = await query<BotAssignment>(
-    `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id
+    `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id, kb.name AS bot_kb_name,
+            COALESCE(tas.active_engine, 'gemini_file_search') AS ai_active_engine
      FROM tenant_bot_assignments tba
-     JOIN chatbots c ON c.id = tba.bot_id
+     JOIN chatbots c ON c.id = tba.bot_id AND c.tenant_id = tba.tenant_id
+     LEFT JOIN knowledgebases kb ON kb.id = c.kb_id AND kb.tenant_id = c.tenant_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = tba.tenant_id
      WHERE tba.tenant_id = $1
      ORDER BY tba.target ASC`,
     [tenantId],
@@ -503,11 +539,12 @@ export async function getActiveBot(tenantId: string, target: ChatTarget): Promis
 
 async function getActiveBotFromDb(tenantId: string, target: ChatTarget): Promise<BotAssignment | null> {
   const result = await query<BotAssignment>(
-    `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id
+    `SELECT tba.*, c.name AS bot_name, c.avatar_url AS bot_avatar_url, c.kb_id AS bot_kb_id, kb.name AS bot_kb_name,
+            COALESCE(tas.active_engine, 'gemini_file_search') AS ai_active_engine
      FROM tenant_bot_assignments tba
-     JOIN tenant_modules tm ON tm.tenant_id = tba.tenant_id AND tm.is_enabled = true
-     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
-     JOIN chatbots c ON c.id = tba.bot_id
+     JOIN chatbots c ON c.id = tba.bot_id AND c.tenant_id = tba.tenant_id
+     LEFT JOIN knowledgebases kb ON kb.id = c.kb_id AND kb.tenant_id = c.tenant_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = tba.tenant_id
      WHERE tba.tenant_id = $1 AND tba.target = $2`,
     [tenantId, target],
   );
@@ -690,6 +727,41 @@ async function getLessonAuthorSettingsFromDb(tenantId: string): Promise<LessonAu
   return { active_bot: activeBot, active_kb: activeKb, active_persona: activePersona };
 }
 
+export async function listLessonAuthorSourceDocuments(
+  tenantId: string,
+  options: ListLessonAuthorSourceDocumentsOptions = {},
+): Promise<LessonAuthorSourceDocument[]> {
+  const [activeBot, activeKb] = await Promise.all([
+    getActiveBot(tenantId, LESSON_AUTHOR_TARGET),
+    getActiveKbAssignment(tenantId),
+  ]);
+  if (!activeBot || !activeKb) return [];
+
+  const search = options.search?.trim() || '';
+  const requestedLimit = Number.isFinite(options.limit || NaN) ? Number(options.limit) : 20;
+  const limit = Math.min(Math.max(requestedLimit, 1), 50);
+  const result = await query<LessonAuthorSourceDocument>(
+    `SELECT d.id::text AS document_id,
+            d.kb_id::text AS kb_id,
+            d.name,
+            d.type,
+            d.status,
+            d.source_info,
+            NULL::text AS gemini_path,
+            NULL::text AS content_excerpt
+     FROM kb_documents d
+     WHERE d.tenant_id = $1
+       AND d.kb_id = $2
+       AND d.type = 'file'
+       AND d.status = 'learned'
+       AND ($3 = '' OR d.name ILIKE '%' || $3 || '%')
+     ORDER BY d.updated_at DESC, d.created_at DESC
+     LIMIT $4`,
+    [tenantId, activeKb.kb_id, search, limit],
+  );
+  return result.rows;
+}
+
 export async function assignLessonAuthorKb(tenantId: string, kbId: string): Promise<void> {
   if (!isValidUUID(kbId)) throw new Error('kb_id không hợp lệ');
 
@@ -743,6 +815,11 @@ export async function listConversations(
             lm.content AS last_message,
             lm.created_at AS last_message_at
      FROM chat_conversations cc
+     JOIN tenant_bot_assignments tba
+       ON tba.tenant_id = cc.tenant_id
+      AND tba.target = cc.target
+      AND tba.bot_id = cc.bot_id
+     JOIN chatbots c ON c.id = cc.bot_id AND c.tenant_id = cc.tenant_id
      JOIN bot_personas bp ON bp.id = cc.persona_id
      JOIN system_prompt_templates spt ON spt.id = bp.template_id
      LEFT JOIN LATERAL (
@@ -781,7 +858,7 @@ export async function createConversation(
   if (!personaId || !isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
 
   // Single CTE: count + validate persona in one round-trip
-  const result = await query<ChatConversation & { conv_count: number; persona_valid: boolean }>(
+  const result = await query<ChatConversation & { conv_count: number; persona_valid: boolean; assignment_valid: boolean }>(
     `WITH counts AS (
        SELECT COUNT(*)::int AS cnt
        FROM chat_conversations
@@ -792,13 +869,25 @@ export async function createConversation(
          AND (($6::text IS NULL AND course_id IS NULL) OR course_id = $6)
      ), persona_check AS (
        SELECT EXISTS(SELECT 1 FROM bot_personas WHERE id = $4 AND bot_id = $3) AS valid
+     ), assignment_check AS (
+       SELECT EXISTS(
+         SELECT 1
+         FROM tenant_bot_assignments tba
+         JOIN chatbots c ON c.id = tba.bot_id AND c.tenant_id = tba.tenant_id
+         WHERE tba.tenant_id = $2
+           AND tba.target = $5
+           AND tba.bot_id = $3
+       ) AS valid
      )
-     SELECT counts.cnt AS conv_count, persona_check.valid AS persona_valid
-     FROM counts, persona_check`,
+     SELECT counts.cnt AS conv_count,
+            persona_check.valid AS persona_valid,
+            assignment_check.valid AS assignment_valid
+     FROM counts, persona_check, assignment_check`,
     [userId, tenantId, botId, personaId, target, courseId ?? null],
   );
 
-  const { conv_count, persona_valid } = result.rows[0];
+  const { conv_count, persona_valid, assignment_valid } = result.rows[0];
+  if (!assignment_valid) throw new Error('Chưa có bot nào được triển khai cho khu vực này');
   if (conv_count >= MAX_CONVERSATIONS_PER_USER) {
     throw new Error(`Tối đa ${MAX_CONVERSATIONS_PER_USER} cuộc hội thoại. Vui lòng xoá bớt.`);
   }
@@ -822,13 +911,15 @@ export async function deleteConversation(
 
   const result = await query(
     `DELETE FROM chat_conversations
-     USING tenant_modules tm
-     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
+     USING tenant_bot_assignments tba, chatbots c
      WHERE chat_conversations.id = $1
        AND chat_conversations.user_id = $2
        AND chat_conversations.tenant_id = $3
-       AND tm.tenant_id = chat_conversations.tenant_id
-       AND tm.is_enabled = true
+       AND tba.tenant_id = chat_conversations.tenant_id
+       AND tba.target = chat_conversations.target
+       AND tba.bot_id = chat_conversations.bot_id
+       AND c.id = chat_conversations.bot_id
+       AND c.tenant_id = chat_conversations.tenant_id
        AND ($4::text IS NULL OR chat_conversations.target = $4)`,
     [conversationId, userId, tenantId, expectedTarget ?? null],
   );
@@ -900,8 +991,11 @@ export async function getConversationMessages(
   // Validate ownership + tenant in one query
   const convCheck = await query<{ id: string }>(
     `SELECT cc.id FROM chat_conversations cc
-     JOIN tenant_modules tm ON tm.tenant_id = cc.tenant_id AND tm.is_enabled = true
-     JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
+     JOIN tenant_bot_assignments tba
+       ON tba.tenant_id = cc.tenant_id
+      AND tba.target = cc.target
+      AND tba.bot_id = cc.bot_id
+     JOIN chatbots c ON c.id = cc.bot_id AND c.tenant_id = cc.tenant_id
      WHERE cc.id = $1
        AND cc.user_id = $2
        AND cc.tenant_id = $3
@@ -1003,9 +1097,11 @@ async function loadConversationContext(
     `WITH conv AS (
        SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.course_id, c.kb_id AS bot_kb_id, c.config AS bot_config, cc.persona_id
        FROM chat_conversations cc
-       JOIN tenant_modules tm ON tm.tenant_id = cc.tenant_id AND tm.is_enabled = true
-       JOIN modules m ON m.id = tm.module_id AND m.code = 'ai_chatbot' AND m.is_active = true
-       JOIN chatbots c ON c.id = cc.bot_id
+       JOIN tenant_bot_assignments tba
+         ON tba.tenant_id = cc.tenant_id
+        AND tba.target = cc.target
+        AND tba.bot_id = cc.bot_id
+       JOIN chatbots c ON c.id = cc.bot_id AND c.tenant_id = cc.tenant_id
        WHERE cc.id = $1
          AND cc.user_id = $2
          AND cc.tenant_id = $3
@@ -1101,7 +1197,9 @@ async function loadHistory(conversationId: string): Promise<{ role: string; part
   );
   return result.rows.reverse().map(m => ({
     role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
+    // Prompt context is intentionally bounded independently of message storage.
+    // This prevents a single historical answer from silently consuming a tenant's full quota.
+    parts: [{ text: m.content.slice(0, HISTORY_MESSAGE_MAX_CHARS) }],
   }));
 }
 
@@ -1124,6 +1222,8 @@ function redactGeminiApiKeys(value: string): string {
 }
 
 function sanitizeGeminiError(err: any): Error {
+  if (err instanceof AppError) return err;
+
   const rawMsg = err?.message || err?.toString() || '';
   const msg = redactGeminiApiKeys(rawMsg);
   const status = err?.status || err?.code || 0;
@@ -1179,6 +1279,7 @@ export interface ChatStreamOptions {
   outlineMentions?: LessonAuthorOutlineMention[];
   sourceDocuments?: LessonAuthorSourceDocumentInput[];
   inputMode?: 'text' | 'voice';
+  locale?: 'vi' | 'en';
 }
 
 export interface LessonAuthorOutlineMention {
@@ -1478,6 +1579,7 @@ async function validateLessonAuthorSourceDocuments(
   ctx: ConversationContext,
   kbId: string | null,
   inputs: LessonAuthorSourceDocumentInput[] = [],
+  options: { requireGeminiMapping?: boolean } = {},
 ): Promise<LessonAuthorSourceDocument[]> {
   const ids = normalizeSourceDocumentIds(inputs);
   if (ids.length === 0) return [];
@@ -1526,7 +1628,7 @@ async function validateLessonAuthorSourceDocuments(
     if (row.status !== 'learned') {
       throw new Error(`File "${row.name}" chưa học xong. Vui lòng chờ trạng thái Đã học rồi thử lại.`);
     }
-    if (!row.gemini_path) {
+    if (options.requireGeminiMapping !== false && !row.gemini_path) {
       throw new Error(`File "${row.name}" chưa có mapping Gemini File Search. Vui lòng retry tài liệu này trong KB.`);
     }
     const contentText = row.content ? stripHtml(row.content).replace(/\s+/g, ' ').trim() : '';
@@ -1557,7 +1659,7 @@ function formatSourceDocumentsForPrompt(docs: LessonAuthorSourceDocument[]): str
     lines.push(`${index + 1}. ${doc.name}`);
     lines.push(`   document_id: ${doc.document_id}`);
     lines.push(`   kb_id: ${doc.kb_id}`);
-    lines.push(`   gemini_path: ${doc.gemini_path}`);
+    if (doc.gemini_path) lines.push(`   gemini_path: ${doc.gemini_path}`);
     if (sourceInfo) lines.push(`   source_info: ${sourceInfo}`);
     if (doc.content_excerpt) lines.push(`   local_excerpt: ${doc.content_excerpt}`);
   });
@@ -1770,18 +1872,100 @@ function buildCurrentTurnText(
   ].filter(Boolean).join('\n\n');
 }
 
-function replaceLatestUserTurn(
-  history: { role: string; parts: { text: string }[] }[],
-  currentTurnText: string,
-): { role: string; parts: { text: string }[] }[] {
-  const next = history.map(item => ({ ...item, parts: item.parts.map(part => ({ ...part })) }));
-  for (let index = next.length - 1; index >= 0; index -= 1) {
-    if (next[index].role === 'user') {
-      next[index] = { role: 'user', parts: [{ text: currentTurnText }] };
-      return next;
-    }
+function toRagChatHistory(history: { role: string; parts: { text: string }[] }[]): RagChatMessage[] {
+  return history.slice(-RAG_HISTORY_CONTEXT_LIMIT).map((item) => {
+    const role: RagChatMessage['role'] = item.role === 'model' ? 'assistant' : 'user';
+    return {
+      role,
+      content: item.parts.map(part => part.text).join('\n').trim().slice(0, RAG_HISTORY_MESSAGE_MAX_CHARS),
+    };
+  }).filter(item => item.content.length > 0);
+}
+
+function toRagSourceDocuments(docs: LessonAuthorSourceDocument[]) {
+  return docs.map(doc => ({
+    document_id: doc.document_id,
+    kb_id: doc.kb_id,
+    name: doc.name,
+    type: doc.type,
+    status: doc.status,
+  }));
+}
+
+function emitTextAsSseChunks(text: string, onChunk: (chunk: string) => void): void {
+  const chunkSize = 900;
+  for (let index = 0; index < text.length; index += chunkSize) {
+    onChunk(text.slice(index, index + chunkSize));
   }
-  return [...next, { role: 'user', parts: [{ text: currentTurnText }] }];
+}
+
+function estimateAiTurnUsage(inputParts: Array<string | null | undefined>, outputText: string): AiUsage {
+  return normalizeAiUsage({
+    inputTokens: estimateTokensFromText(...inputParts),
+    outputTokens: estimateTokensFromText(outputText),
+  });
+}
+
+interface AiTurnTokenBudget {
+  fixedInputTokens: number;
+  embeddingTokens: number;
+  minimumOutputTokens: number;
+  targetOutputTokens: number;
+  minimumTokens: number;
+  maximumTokens: number;
+}
+
+function buildAiTurnTokenBudget(input: {
+  engine: 'gemini_file_search' | 'self_built_rag';
+  operation: AiOperation;
+  promptParts: Array<string | null | undefined>;
+}): AiTurnTokenBudget {
+  const isLessonAuthor = input.operation === 'lesson_author';
+  const minimumOutputTokens = isLessonAuthor
+    ? RAG_LESSON_AUTHOR_MIN_OUTPUT_TOKENS
+    : RAG_CHAT_MIN_OUTPUT_TOKENS;
+  const targetOutputTokens = isLessonAuthor
+    ? RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS
+    : RAG_CHAT_MAX_OUTPUT_TOKENS;
+  const baseInputTokens = estimateTokensFromText(...input.promptParts);
+  const fixedInputTokens = input.engine === 'self_built_rag'
+    ? baseInputTokens + RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET
+    : isLessonAuthor
+      // File Search can make a skeleton call plus multiple content calls.
+      ? Math.max(10_000, baseInputTokens + 2_000)
+      : baseInputTokens + Math.min(2_000, Math.max(500, Math.ceil(baseInputTokens / 2)));
+  const embeddingTokens = input.engine === 'self_built_rag'
+    ? estimateTokensFromText(input.promptParts[1])
+    : 0;
+  const minimumTokens = fixedInputTokens + embeddingTokens + minimumOutputTokens;
+  const modelBudget = fixedInputTokens + embeddingTokens + targetOutputTokens;
+  const configuredMaximum = isLessonAuthor
+    ? env.AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE
+    : env.AI_CHAT_TOKEN_RESERVE_ESTIMATE;
+  return {
+    fixedInputTokens,
+    embeddingTokens,
+    minimumOutputTokens,
+    targetOutputTokens,
+    minimumTokens,
+    maximumTokens: Math.max(minimumTokens, Math.min(configuredMaximum, modelBudget)),
+  };
+}
+
+function grantedOutputTokenLimit(budget: AiTurnTokenBudget, reservedTokens: number): number {
+  const availableForOutput = Math.max(0, reservedTokens - budget.fixedInputTokens - budget.embeddingTokens);
+  return Math.max(
+    budget.minimumOutputTokens,
+    Math.min(budget.targetOutputTokens, availableForOutput),
+  );
+}
+
+function getLessonAuthorOutputSchemaHint(): string {
+  return [
+    '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select|dropdown|numerical|short_text","question":"string","choices":[{"text":"string","correct":true}],"options":["string"],"answer":"string|number","tolerance":"5%","explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
+    `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons total, ${MAX_PROPOSAL_UNITS} units total, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
+    'Use Vietnamese content by default. Return JSON only.',
+  ].join('\n');
 }
 
 function extractJsonObject(text: string): unknown {
@@ -3275,6 +3459,7 @@ async function generateLessonAuthorProposal(
   mentionContext = '',
   targetScopeInstruction = '',
   sourceDocuments: LessonAuthorSourceDocument[] = [],
+  maxOutputTokens = RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS,
 ): Promise<LessonAuthorProposal> {
   const sourceDocumentContext = formatSourceDocumentsForPrompt(sourceDocuments);
   logLessonAuthorFlow('proposal_generate_start', {
@@ -3361,6 +3546,7 @@ async function generateLessonAuthorProposal(
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         systemInstruction: `${ctx.systemPrompt}\n\nYou are a lesson authoring expert for the current admin dashboard course. Produce practical course structure, not conversational prose.`,
+        maxOutputTokens,
         tools: [{ fileSearch: { fileSearchStoreNames: [storeName] } }],
       } as any,
     });
@@ -3370,14 +3556,6 @@ async function generateLessonAuthorProposal(
       conversation_id: ctx.conversationId,
       attempt: attempt + 1,
       response_chars: lastResponseText.length,
-    });
-
-    // ── DEBUG: log raw LLM response for troubleshooting ──
-    logLessonAuthorFlow('proposal_gemini_raw_response_debug', {
-      conversation_id: ctx.conversationId,
-      attempt: attempt + 1,
-      response_first_2000: lastResponseText.slice(0, 2000),
-      response_last_500: lastResponseText.slice(-500),
     });
 
     try {
@@ -3436,6 +3614,7 @@ async function generateProposalSkeleton(
   mentionContext: string,
   targetScopeInstruction: string,
   sourceDocuments: LessonAuthorSourceDocument[],
+  maxOutputTokens: number,
 ): Promise<LessonAuthorProposal> {
   const aiClient = await getGeminiClient(ctx.tenantId);
   const storeName = await getCachedStoreName(kbId, ctx.tenantId);
@@ -3476,6 +3655,7 @@ async function generateProposalSkeleton(
     contents: [{ role: 'user', parts: [{ text: skeletonPrompt }] }],
     config: {
       systemInstruction: `${ctx.systemPrompt}\n\nYou are creating a structural outline ONLY. No content yet.`,
+      maxOutputTokens,
       tools: [{ fileSearch: { fileSearchStoreNames: [storeName] } }],
     } as any,
   });
@@ -3502,6 +3682,7 @@ async function generateUnitContentBatch(
   batch: UnitBatchItem[],
   courseName: string,
   sourceDocuments: LessonAuthorSourceDocument[],
+  maxOutputTokens: number,
 ): Promise<LessonAuthorUnitProposal[]> {
   const aiClient = await getGeminiClient(ctx.tenantId);
   const storeName = await getCachedStoreName(kbId, ctx.tenantId);
@@ -3541,6 +3722,7 @@ async function generateUnitContentBatch(
     contents: [{ role: 'user', parts: [{ text: contentPrompt }] }],
     config: {
       systemInstruction: `${ctx.systemPrompt}\n\nYou are generating detailed lesson content for specific units. Follow Instructional Design best practices. Return JSON array only.`,
+      maxOutputTokens,
       tools: [{ fileSearch: { fileSearchStoreNames: [storeName] } }],
     } as any,
   });
@@ -3564,6 +3746,7 @@ async function generateLessonAuthorProposalV2(
   mentionContext: string,
   targetScopeInstruction: string,
   sourceDocuments: LessonAuthorSourceDocument[],
+  maxOutputTokens: number,
   onProgress?: (stage: string, detail: string) => void,
 ): Promise<LessonAuthorProposal> {
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
@@ -3578,7 +3761,7 @@ async function generateLessonAuthorProposalV2(
   if (!isLargeScope) {
     logLessonAuthorFlow('proposal_mode', { mode: 'single_shot', conversation_id: ctx.conversationId, reason: outlineMentions.length === 0 ? 'no_mention' : 'small_scope' });
     onProgress?.('generating', 'Đang tạo nội dung...');
-    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments);
+    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments, maxOutputTokens);
   }
 
   // Stage 1: Generate skeleton
@@ -3586,10 +3769,11 @@ async function generateLessonAuthorProposalV2(
   onProgress?.('skeleton', 'Đang lên cấu trúc bài học...');
 
   let skeleton: LessonAuthorProposal | null = null;
+  const skeletonOutputTokens = Math.min(1_536, Math.max(256, Math.floor(maxOutputTokens / 4)));
   try {
     skeleton = await generateProposalSkeleton(
       ctx, userPrompt, kbId, course,
-      outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments,
+      outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments, skeletonOutputTokens,
     );
   } catch (err) {
     logLessonAuthorFlow('staged_skeleton_failed', {
@@ -3662,7 +3846,7 @@ async function generateLessonAuthorProposalV2(
       reason: allUnits.length === 0 ? 'skeleton_parse_empty' : 'below_threshold',
     });
     onProgress?.('generating', 'Đang tạo nội dung...');
-    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments);
+    return generateLessonAuthorProposal(ctx, userPrompt, kbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments, maxOutputTokens);
   }
 
   // Stage 2: Generate content per batch
@@ -3671,6 +3855,10 @@ async function generateLessonAuthorProposalV2(
   for (let i = 0; i < allUnits.length; i += MAX_UNITS_PER_CONTENT_BATCH) {
     batches.push(allUnits.slice(i, i + MAX_UNITS_PER_CONTENT_BATCH));
   }
+  const contentOutputTokens = Math.max(
+    128,
+    Math.floor(Math.max(0, maxOutputTokens - skeletonOutputTokens) / Math.max(1, batches.length)),
+  );
 
   for (const [batchIndex, batch] of batches.entries()) {
     const progress = `${batchIndex + 1}/${batches.length}`;
@@ -3679,7 +3867,7 @@ async function generateLessonAuthorProposalV2(
 
     try {
       const generated = await generateUnitContentBatch(
-        ctx, kbId, batch, course.courseName, sourceDocuments,
+        ctx, kbId, batch, course.courseName, sourceDocuments, contentOutputTokens,
       );
 
       for (let i = 0; i < batch.length && i < generated.length; i++) {
@@ -4043,6 +4231,27 @@ export async function sendMessageStream(
   streamLocks.add(conversationId);
 
   let ctxForError: ConversationContext | null = null;
+  let aiReservationId: string | null = null;
+  let aiReservationTenantId: string | null = null;
+  let aiReservationEmbeddingModel: string | null = null;
+  let aiReservationFinalized = false;
+  const finalizeAiReservation = async (
+    usage: AiUsage,
+    source: Record<string, unknown>,
+    metadata: Record<string, unknown> = {},
+  ) => {
+    if (!aiReservationId || !aiReservationTenantId || aiReservationFinalized) return;
+    await finalizeTenantAiTokens({
+      reservationId: aiReservationId,
+      tenantId: aiReservationTenantId,
+      usage,
+      embeddingModel: aiReservationEmbeddingModel,
+      source,
+      metadata,
+    });
+    aiReservationFinalized = true;
+  };
+
   try {
     // 1. Load context (CTE: 1 query for conversation + persona + prompt + msg count)
     const ctx = await loadConversationContext(conversationId, userId, tenantId, options.target);
@@ -4104,6 +4313,32 @@ export async function sendMessageStream(
       });
     }
 
+    const aiSettings = await getTenantAiRuntimeSettings(ctx.tenantId);
+    if (!aiSettings.hasGoogleAiStudioKey) {
+      throw new AppError(
+        'Chưa cấu hình API key Google AI Studio cho doanh nghiệp này.',
+        400,
+        'AI_PROVIDER_KEY_MISSING',
+      );
+    }
+    logLessonAuthorFlow('ai_runtime_settings_loaded', {
+      conversation_id: conversationId,
+      tenant_id: ctx.tenantId,
+      target: ctx.target,
+      active_engine: aiSettings.activeEngine,
+      transition_state: aiSettings.transitionState,
+      chat_model: aiSettings.chatModel,
+      lesson_author_model: aiSettings.lessonAuthorModel,
+      embedding_model: aiSettings.embeddingModel,
+    });
+    if (aiSettings.activeEngine === 'self_built_rag' && ctx.target !== LESSON_AUTHOR_TARGET && !ctx.botKbId) {
+      throw new AppError(
+        'Bot này chưa được gắn Kho tri thức. Vui lòng gắn Kho tri thức cho bot trước khi chat bằng AI RAG.',
+        400,
+        'AI_RAG_KB_NOT_ASSIGNED',
+      );
+    }
+
     const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
     // Pre-classify intent to decide carry-forward (delete intent should never carry forward)
     const preClassify = ctx.target === LESSON_AUTHOR_TARGET
@@ -4124,7 +4359,12 @@ export async function sendMessageStream(
     const mentionContextRows = await getOutlineMentionContextRows(ctx, outlineMentions);
     const mentionContext = formatMentionContextRowsForPrompt(mentionContextRows);
     const targetScopeInstruction = buildTargetLockedProposalInstruction(trimmed, outlineMentions, mentionContextRows);
-    const requestedSourceDocuments = await validateLessonAuthorSourceDocuments(ctx, ctx.botKbId, options.sourceDocuments ?? []);
+    const requestedSourceDocuments = await validateLessonAuthorSourceDocuments(
+      ctx,
+      ctx.botKbId,
+      options.sourceDocuments ?? [],
+      { requireGeminiMapping: aiSettings.activeEngine === 'gemini_file_search' },
+    );
     const carriedSourceDocuments = requestedSourceDocuments.length === 0 && shouldCarryForwardLessonAuthorSourceDocuments(trimmed)
       ? await getLatestConversationSourceDocuments(ctx)
       : [];
@@ -4153,6 +4393,80 @@ export async function sendMessageStream(
       source: sourceDocumentSource,
       document_ids: sourceDocuments.map(doc => doc.document_id),
       source_context_chars: sourceDocumentContext.length,
+    });
+
+    // Read and bound the existing conversation before reserving quota. The
+    // current user turn is added in memory so a rejected request is never
+    // persisted merely because its token reservation failed.
+    const currentTurnText = buildCurrentTurnText(trimmed, outlineMentions, mentionContext, sourceDocuments);
+    const historyBeforeCurrent = (await loadHistory(conversationId)).slice(-(HISTORY_CONTEXT_LIMIT - 1));
+    const historyForTurn = [
+      ...historyBeforeCurrent,
+      { role: 'user', parts: [{ text: currentTurnText }] },
+    ];
+
+    const aiOperation: AiOperation = ctx.target === LESSON_AUTHOR_TARGET && preClassify?.intent === 'draft_lesson'
+      ? 'lesson_author'
+      : 'chat';
+    const aiModel = aiOperation === 'lesson_author'
+      ? aiSettings.lessonAuthorModel
+      : aiSettings.chatModel;
+    const historyPromptParts = aiSettings.activeEngine === 'gemini_file_search' && aiOperation === 'lesson_author'
+      ? []
+      : historyBeforeCurrent.map((message) => message.parts.map((part) => part.text).join('\n'));
+    const aiTurnBudget = buildAiTurnTokenBudget({
+      engine: aiSettings.activeEngine,
+      operation: aiOperation,
+      promptParts: [
+        ctx.systemPrompt,
+        currentTurnText,
+        mentionContext,
+        targetScopeInstruction,
+        sourceDocumentContext,
+        ...historyPromptParts,
+      ],
+    });
+    aiReservationTenantId = ctx.tenantId;
+    aiReservationEmbeddingModel = aiSettings.activeEngine === 'self_built_rag'
+      ? aiSettings.embeddingModel
+      : null;
+    const aiReservation = await reserveTenantAiTokens({
+      tenantId: ctx.tenantId,
+      userId,
+      conversationId,
+      target: ctx.target,
+      engine: aiSettings.activeEngine,
+      provider: aiSettings.provider,
+      model: aiModel,
+      operation: aiOperation,
+      minimumTokens: aiTurnBudget.minimumTokens,
+      maximumTokens: aiTurnBudget.maximumTokens,
+      budget: {
+        inputTokens: aiTurnBudget.fixedInputTokens,
+        outputTokens: aiTurnBudget.targetOutputTokens,
+        embeddingTokens: aiTurnBudget.embeddingTokens,
+        maxOutputTokens: aiTurnBudget.targetOutputTokens,
+        metadata: {
+          budget_version: 1,
+          operation: aiOperation,
+          engine: aiSettings.activeEngine,
+        },
+      },
+    });
+    aiReservationId = aiReservation.id;
+    const maxOutputTokens = grantedOutputTokenLimit(aiTurnBudget, aiReservation.reservedTokens);
+    logLessonAuthorFlow('ai_token_reserved', {
+      conversation_id: conversationId,
+      tenant_id: ctx.tenantId,
+      target: ctx.target,
+      active_engine: aiSettings.activeEngine,
+      operation: aiOperation,
+      model: aiModel,
+      minimum_tokens: aiTurnBudget.minimumTokens,
+      reserved_tokens: aiReservation.reservedTokens,
+      maximum_tokens: aiTurnBudget.maximumTokens,
+      max_output_tokens: maxOutputTokens,
+      partial_grant: aiReservation.isPartialGrant,
     });
 
     // 2. Mark rate limit AFTER validation passes
@@ -4200,11 +4514,14 @@ export async function sendMessageStream(
       let proposal: LessonAuthorProposal | null = null;
       let jobId: string | null = null;
       let assistantText = '';
+      let draftUsage: Partial<AiUsage> | null = null;
+      let draftRetrieval: RagRetrievalDiagnostics | null = null;
 
       logLessonAuthorFlow('draft_branch_enter', {
         conversation_id: conversationId,
         course_id: ctx.courseId,
         kb_id: ctx.botKbId,
+        active_engine: aiSettings.activeEngine,
       });
       try {
         // Delete guard: NEVER allow draft_lesson when delete intent detected
@@ -4212,12 +4529,57 @@ export async function sendMessageStream(
           throw new Error('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.');
         }
         if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
-        proposal = await generateLessonAuthorProposalV2(
-          ctx, trimmed, ctx.botKbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments,
-          (stage, detail) => {
-            onSideEvent?.({ type: 'progress', stage, detail } as any);
-          },
-        );
+        if (aiSettings.activeEngine === 'self_built_rag') {
+          onSideEvent?.({ type: 'progress', stage: 'retrieving', detail: 'Đang tìm tài liệu liên quan...' } as any);
+          const course = await getDraftCourseOutlineForPrompt(ctx.courseId!, ctx.tenantId);
+          const ragHistory = toRagChatHistory(historyForTurn.slice(0, -1));
+          const ragResponse = await generateRagLessonAuthorProposal({
+            tenant_id: ctx.tenantId,
+            kb_id: ctx.botKbId,
+            conversation_id: conversationId,
+            target: ctx.target,
+            model: aiSettings.lessonAuthorModel,
+            max_output_tokens: maxOutputTokens,
+            embedding_model: aiSettings.embeddingModel,
+            embedding_dimensions: aiSettings.embeddingDimensions,
+            system_prompt: `${ctx.systemPrompt}\n\nYou are an Instructional Design expert. Build rigorous learner-centered course content from the provided source material. Return only a pending proposal for approval.`,
+            user_message: trimmed,
+            history: ragHistory,
+            source_documents: toRagSourceDocuments(sourceDocuments),
+            course_context: course.outline,
+            outline_context: [
+              outlineMentions.length > 0 ? formatOutlineMentionsForPrompt(outlineMentions.slice(0, 1)) : '',
+              mentionContext,
+            ].filter(Boolean).join('\n\n'),
+            target_scope_instruction: targetScopeInstruction,
+            output_schema_hint: getLessonAuthorOutputSchemaHint(),
+            locale: options.locale ?? 'vi',
+          });
+          draftUsage = ragResponse.usage ?? null;
+          draftRetrieval = ragResponse.retrieval ?? null;
+          proposal = constrainAdditiveComponentProposal(
+            normalizeLessonAuthorProposal(ragResponse.proposal),
+            trimmed,
+            outlineMentions.slice(0, 1),
+          );
+          logLessonAuthorFlow('draft_branch_rag_retrieval', {
+            conversation_id: conversationId,
+            kb_id: ctx.botKbId,
+            retrieved_count: draftRetrieval?.retrieved_count ?? null,
+            returned_source_count: draftRetrieval?.returned_source_count ?? null,
+            top_score: draftRetrieval?.top_score ?? null,
+            methods: draftRetrieval?.methods ?? [],
+            reason: draftRetrieval?.reason ?? null,
+          });
+        } else {
+          proposal = await generateLessonAuthorProposalV2(
+            ctx, trimmed, ctx.botKbId, outlineMentions, mentionContext, targetScopeInstruction, sourceDocuments,
+            maxOutputTokens,
+            (stage, detail) => {
+              onSideEvent?.({ type: 'progress', stage, detail } as any);
+            },
+          );
+        }
         jobId = await createLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId, proposal, sourceDocuments);
         assistantText = formatProposalPreview(proposal, jobId);
         logLessonAuthorFlow('draft_branch_proposal_ready', {
@@ -4256,6 +4618,7 @@ export async function sendMessageStream(
             lesson_author_job_id: jobId,
             kind: proposal ? 'lesson_author_proposal' : 'lesson_author_generation_failed',
             ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
+            ...(draftRetrieval ? { rag_retrieval: draftRetrieval } : {}),
           },
         ],
       );
@@ -4264,6 +4627,13 @@ export async function sendMessageStream(
         job_id: jobId,
         success: Boolean(proposal),
       });
+      await finalizeAiReservation(
+        draftUsage
+          ? normalizeAiUsage(draftUsage)
+          : estimateAiTurnUsage([ctx.systemPrompt, trimmed, mentionContext, targetScopeInstruction, sourceDocumentContext], assistantText),
+        { service: aiSettings.activeEngine, operation: 'lesson_author' },
+        { lesson_author_job_id: jobId, source_document_count: sourceDocuments.length, ...(draftRetrieval ? { rag_retrieval: draftRetrieval } : {}) },
+      );
 
       if (ctx.messageCount === 0) {
         const title = trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : '');
@@ -4282,9 +4652,8 @@ export async function sendMessageStream(
       return;
     }
 
-    // 4. Load history (includes the just-saved user message)
-    const currentTurnText = buildCurrentTurnText(trimmed, outlineMentions, mentionContext, sourceDocuments);
-    const history = replaceLatestUserTurn(await loadHistory(conversationId), currentTurnText);
+    // 4. Use the bounded history that was included in the reservation.
+    const history = historyForTurn;
     logLessonAuthorFlow('chat_branch_enter', {
       conversation_id: conversationId,
       target: ctx.target,
@@ -4301,7 +4670,7 @@ export async function sendMessageStream(
 
     // Build fileSearch tools — separate from function calling (Gemini doesn't allow combining)
     const fileSearchTools: any[] = [];
-    if (ctx.botKbId) {
+    if (ctx.botKbId && aiSettings.activeEngine === 'gemini_file_search') {
       const storeName = await getCachedStoreName(ctx.botKbId, ctx.tenantId);
       logLessonAuthorFlow('chat_branch_store_resolved', {
         conversation_id: conversationId,
@@ -4321,9 +4690,11 @@ export async function sendMessageStream(
 
     // 5b. Course context — inject outline + function calling tool
     let enrichedPrompt = ctx.systemPrompt;
+    let ragSystemPrompt = ctx.systemPrompt;
+    let ragCourseContext: string | null = null;
     let hasCourseContext = false;
     if (ctx.target === LESSON_AUTHOR_TARGET) {
-      enrichedPrompt += [
+      const lessonAuthorRules = [
         '',
         '',
         'LESSON AUTHOR DASHBOARD RULES:',
@@ -4331,8 +4702,12 @@ export async function sendMessageStream(
         '- Never claim that content has been added, created, updated, integrated, sent to a design team, or queued outside this system unless the backend approval flow has actually applied it.',
         '- If the admin asks to create, add, edit, update, or improve course content, answer in terms of the pending proposal / admin approval workflow. Do not invent a manual handoff process.',
       ].join('\n');
+      enrichedPrompt += lessonAuthorRules;
+      ragSystemPrompt += lessonAuthorRules;
       if (sourceDocumentContext) {
-        enrichedPrompt += `\n\n${sourceDocumentContext}\n\nThe selected source files above are for the CURRENT TURN only and override older file selections in chat history.`;
+        const sourceDocumentRule = `\n\n${sourceDocumentContext}\n\nThe selected source files above are for the CURRENT TURN only and override older file selections in chat history.`;
+        enrichedPrompt += sourceDocumentRule;
+        ragSystemPrompt += sourceDocumentRule;
       }
     }
     if (courseId && typeof courseId === 'string' && courseId.length > 0) {
@@ -4350,7 +4725,9 @@ export async function sendMessageStream(
         });
         if (courseOutline) {
           hasCourseContext = true;
-          enrichedPrompt += `\n\n${courseOutline.outline}\n\nQUAN TRỌNG: Người dùng HIỆN TẠI đang xem khóa học "${courseOutline.courseName}". Khi người dùng hỏi về "phần", "bài", hoặc nội dung học, hãy LUÔN dùng tool get_lesson_content để lấy nội dung chi tiết bài học TRƯỚC KHI trả lời. Bỏ qua mọi ngữ cảnh khóa học khác trong lịch sử hội thoại — chỉ dùng khóa học hiện tại ở trên. Nếu câu hỏi không liên quan đến khóa học, trả lời bình thường.`;
+          const courseScopeRule = `Người dùng hiện tại đang xem khóa học "${courseOutline.courseName}". Bỏ qua mọi ngữ cảnh khóa học cũ trong lịch sử hội thoại và chỉ dùng khóa học hiện tại khi câu hỏi có liên quan.`;
+          enrichedPrompt += `\n\n${courseOutline.outline}\n\nQUAN TRỌNG: ${courseScopeRule} Khi người dùng hỏi về "phần", "bài", hoặc nội dung học, hãy LUÔN dùng tool get_lesson_content để lấy nội dung chi tiết bài học TRƯỚC KHI trả lời.`;
+          ragCourseContext = `${courseOutline.outline}\n\n${courseScopeRule}`;
         }
       } catch (err) {
         logChatCourseFlow('course_outline_error', {
@@ -4361,7 +4738,9 @@ export async function sendMessageStream(
       }
     }
     if (ctx.target === LESSON_AUTHOR_TARGET && outlineMentions.length > 0) {
-      enrichedPrompt += `\n\nADMIN SELECTED OUTLINE TARGETS FOR THE CURRENT TURN:\n${formatOutlineMentionsForPrompt(outlineMentions)}\n${mentionContext}\nThese current @mentions override older @mentions and older answers in the chat history. If the current target conflicts with prior conversation context, follow the current target. If the admin is only chatting or asking a question, answer naturally using this current target scope. If the admin asks to create or edit lesson content, do not modify unrelated outline nodes.`;
+      const outlineTargetRule = `\n\nADMIN SELECTED OUTLINE TARGETS FOR THE CURRENT TURN:\n${formatOutlineMentionsForPrompt(outlineMentions)}\n${mentionContext}\nThese current @mentions override older @mentions and older answers in the chat history. If the current target conflicts with prior conversation context, follow the current target. If the admin is only chatting or asking a question, answer naturally using this current target scope. If the admin asks to create or edit lesson content, do not modify unrelated outline nodes.`;
+      enrichedPrompt += outlineTargetRule;
+      ragSystemPrompt += outlineTargetRule;
     }
 
     // 6. Stream Gemini response with retry on 503
@@ -4379,134 +4758,183 @@ export async function sendMessageStream(
       fullResponse += text;
       if (!shouldBufferLessonAuthorChat) onChunk(text);
     };
+    let chatUsage: Partial<AiUsage> | null = null;
+    let chatSources: Array<Record<string, unknown>> = [];
+    let chatRetrieval: RagRetrievalDiagnostics | null = null;
 
-    for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
-      try {
-        if (attempt > 0) {
-          const suggestedDelay = parseRetryDelay(lastError);
-          const delay = suggestedDelay || (GEMINI_RETRY_DELAY_MS * attempt);
-          logChatCourseFlow('retry_wait', {
-            conversation_id: conversationId,
-            attempt,
-            max_retries: GEMINI_MAX_RETRIES,
-            wait_seconds: Math.round(delay / 1000),
-            last_error: lastError?.message ?? null,
-          });
-          await sleep(delay);
-        }
-
-        if (hasCourseContext) {
-          logChatCourseFlow('function_router_start', {
-            conversation_id: conversationId,
-            target: ctx.target,
-            course_id: courseId ?? null,
-            attempt,
-          });
-          // ── Two-step flow: forced function calling (mode=ANY) ──
-          // Gemini MUST choose: get_lesson_content OR respond_directly
-          const firstResponse = await aiClient.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: history,
-            config: {
-              systemInstruction: enrichedPrompt,
-              tools: [COURSE_TOOLS] as any,
-              toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
-            },
-          });
-
-          const fnCallPart = firstResponse.candidates?.[0]?.content?.parts?.find((part: any) => part.functionCall) as any;
-          const fnCall = fnCallPart?.functionCall ?? firstResponse.functionCalls?.[0];
-          logChatCourseFlow('function_router_chosen', {
-            conversation_id: conversationId,
-            function_name: fnCall?.name || 'none',
-            args: fnCall?.args || {},
-            has_thought_signature: Boolean(fnCallPart?.thoughtSignature),
-          });
-
-          if (fnCall?.name === 'get_lesson_content' && fnCall.args?.lesson_id) {
-            // Gemini identified a course-related question → fetch lesson content
-            const lessonContent = await fetchLessonContent(
-              courseId!,
-              fnCall.args.lesson_id as string,
-              ctx.target === LESSON_AUTHOR_TARGET,
-            );
-            logChatCourseFlow('lesson_content_fetched', {
+    if (aiSettings.activeEngine === 'self_built_rag') {
+      logChatCourseFlow('rag_chat_start', {
+        conversation_id: conversationId,
+        target: ctx.target,
+        kb_id: ctx.botKbId,
+        has_course_context: hasCourseContext,
+        source_documents: sourceDocuments.length,
+      });
+      const ragResponse = await sendRagChat({
+        tenant_id: ctx.tenantId,
+        kb_id: ctx.botKbId,
+        conversation_id: conversationId,
+        target: ctx.target,
+        model: aiSettings.chatModel,
+        max_output_tokens: maxOutputTokens,
+        embedding_model: aiSettings.embeddingModel,
+        embedding_dimensions: aiSettings.embeddingDimensions,
+        system_prompt: ragSystemPrompt,
+        user_message: trimmed,
+        // The current message is passed separately as user_message. Keeping it
+        // out of history avoids paying for the same input twice.
+        history: toRagChatHistory(history.slice(0, -1)),
+        source_documents: toRagSourceDocuments(sourceDocuments),
+        course_context: ragCourseContext,
+        locale: options.locale ?? 'vi',
+      });
+      fullResponse = ragResponse.text ?? '';
+      chatUsage = ragResponse.usage ?? null;
+      chatSources = ragResponse.sources ?? [];
+      chatRetrieval = ragResponse.retrieval ?? null;
+      if (!shouldBufferLessonAuthorChat && fullResponse) emitTextAsSseChunks(fullResponse, onChunk);
+      logChatCourseFlow('rag_chat_done', {
+        conversation_id: conversationId,
+        response_chars: fullResponse.length,
+        source_count: chatSources.length,
+        retrieved_count: chatRetrieval?.retrieved_count ?? null,
+        returned_source_count: chatRetrieval?.returned_source_count ?? null,
+        top_score: chatRetrieval?.top_score ?? null,
+        methods: chatRetrieval?.methods ?? [],
+        reason: chatRetrieval?.reason ?? null,
+      });
+    } else {
+      for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+        try {
+          if (attempt > 0) {
+            const suggestedDelay = parseRetryDelay(lastError);
+            const delay = suggestedDelay || (GEMINI_RETRY_DELAY_MS * attempt);
+            logChatCourseFlow('retry_wait', {
               conversation_id: conversationId,
+              attempt,
+              max_retries: GEMINI_MAX_RETRIES,
+              wait_seconds: Math.round(delay / 1000),
+              last_error: lastError?.message ?? null,
+            });
+            await sleep(delay);
+          }
+
+          if (hasCourseContext) {
+            logChatCourseFlow('function_router_start', {
+              conversation_id: conversationId,
+              target: ctx.target,
               course_id: courseId ?? null,
-              lesson_id: fnCall.args.lesson_id,
-              include_draft: ctx.target === LESSON_AUTHOR_TARGET,
-              content_chars: lessonContent.length,
+              attempt,
+            });
+            // ── Two-step flow: forced function calling (mode=ANY) ──
+            // Gemini MUST choose: get_lesson_content OR respond_directly
+            const firstResponse = await aiClient.models.generateContent({
+              model: aiSettings.chatModel,
+              contents: history,
+              config: {
+                systemInstruction: enrichedPrompt,
+                maxOutputTokens,
+                tools: [COURSE_TOOLS] as any,
+                toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
+              },
             });
 
-            // Step 2: streaming with function result (no tools needed)
-            const secondResponse = await aiClient.models.generateContentStream({
-              model: GEMINI_MODEL,
-              contents: [
-                ...history,
-                { role: 'model', parts: [fnCallPart ?? { functionCall: fnCall }] },
-                { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
-              ],
-              config: { systemInstruction: enrichedPrompt },
+            const fnCallPart = firstResponse.candidates?.[0]?.content?.parts?.find((part: any) => part.functionCall) as any;
+            const fnCall = fnCallPart?.functionCall ?? firstResponse.functionCalls?.[0];
+            logChatCourseFlow('function_router_chosen', {
+              conversation_id: conversationId,
+              function_name: fnCall?.name || 'none',
+              args: fnCall?.args || {},
+              has_thought_signature: Boolean(fnCallPart?.thoughtSignature),
             });
 
-            for await (const chunk of secondResponse) {
-              const text = chunk.text ?? '';
-              appendChatChunk(text);
+            if (fnCall?.name === 'get_lesson_content' && fnCall.args?.lesson_id) {
+              // Gemini identified a course-related question → fetch lesson content
+              const lessonContent = await fetchLessonContent(
+                courseId!,
+                fnCall.args.lesson_id as string,
+                ctx.target === LESSON_AUTHOR_TARGET,
+              );
+              logChatCourseFlow('lesson_content_fetched', {
+                conversation_id: conversationId,
+                course_id: courseId ?? null,
+                lesson_id: fnCall.args.lesson_id,
+                include_draft: ctx.target === LESSON_AUTHOR_TARGET,
+                content_chars: lessonContent.length,
+              });
+
+              // Step 2: streaming with function result (no tools needed)
+              const secondResponse = await aiClient.models.generateContentStream({
+                model: aiSettings.chatModel,
+                contents: [
+                  ...history,
+                  { role: 'model', parts: [fnCallPart ?? { functionCall: fnCall }] },
+                  { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
+                ],
+                config: { systemInstruction: enrichedPrompt, maxOutputTokens },
+              });
+
+              for await (const chunk of secondResponse) {
+                const text = chunk.text ?? '';
+                appendChatChunk(text);
+              }
+            } else {
+              // respond_directly OR no function call → not about course content
+              // Stream with fileSearch KB (if available)
+              logChatCourseFlow('stream_fallback_with_filesearch', {
+                conversation_id: conversationId,
+                file_search_enabled: fileSearchTools.length > 0,
+              });
+              const fallbackConfig: any = {
+                systemInstruction: enrichedPrompt,
+                maxOutputTokens,
+                ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
+              };
+              const fallbackResponse = await aiClient.models.generateContentStream({
+                model: aiSettings.chatModel,
+                contents: history,
+                config: fallbackConfig,
+              });
+
+              for await (const chunk of fallbackResponse) {
+                const text = chunk.text ?? '';
+                appendChatChunk(text);
+              }
             }
           } else {
-            // respond_directly OR no function call → not about course content
-            // Stream with fileSearch KB (if available)
-            logChatCourseFlow('stream_fallback_with_filesearch', {
+            // ── Original flow: direct streaming with fileSearch (no course context) ──
+            logChatCourseFlow('direct_stream_start', {
               conversation_id: conversationId,
               file_search_enabled: fileSearchTools.length > 0,
+              has_course_context: hasCourseContext,
             });
-            const fallbackConfig: any = {
+            const config: any = {
               systemInstruction: enrichedPrompt,
+              maxOutputTokens,
               ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
             };
-            const fallbackResponse = await aiClient.models.generateContentStream({
-              model: GEMINI_MODEL,
+            const response = await aiClient.models.generateContentStream({
+              model: aiSettings.chatModel,
               contents: history,
-              config: fallbackConfig,
+              config,
             });
 
-            for await (const chunk of fallbackResponse) {
+            for await (const chunk of response) {
               const text = chunk.text ?? '';
               appendChatChunk(text);
             }
           }
-        } else {
-          // ── Original flow: direct streaming with fileSearch (no course context) ──
-          logChatCourseFlow('direct_stream_start', {
-            conversation_id: conversationId,
-            file_search_enabled: fileSearchTools.length > 0,
-            has_course_context: hasCourseContext,
-          });
-          const config: any = {
-            systemInstruction: enrichedPrompt,
-            ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
-          };
-          const response = await aiClient.models.generateContentStream({
-            model: GEMINI_MODEL,
-            contents: history,
-            config,
-          });
 
-          for await (const chunk of response) {
-            const text = chunk.text ?? '';
-            appendChatChunk(text);
-          }
+          lastError = null;
+          break; // Success — exit retry loop
+
+        } catch (err: any) {
+          lastError = err;
+          const status = err?.status || err?.code || 0;
+          // Only retry on 503 (service unavailable) or 429 (rate limited)
+          if (status !== 503 && status !== 429) break;
+          if (attempt === GEMINI_MAX_RETRIES) break;
         }
-
-        lastError = null;
-        break; // Success — exit retry loop
-
-      } catch (err: any) {
-        lastError = err;
-        const status = err?.status || err?.code || 0;
-        // Only retry on 503 (service unavailable) or 429 (rate limited)
-        if (status !== 503 && status !== 429) break;
-        if (attempt === GEMINI_MAX_RETRIES) break;
       }
     }
 
@@ -4533,6 +4961,13 @@ export async function sendMessageStream(
       }
       if (assistantContent.trim()) onChunk(assistantContent);
     }
+    assistantMetadata = {
+      ...assistantMetadata,
+      ai_engine: aiSettings.activeEngine,
+      ai_model: aiSettings.chatModel,
+      ...(chatSources.length > 0 ? { rag_sources: chatSources } : {}),
+      ...(chatRetrieval ? { rag_retrieval: chatRetrieval } : {}),
+    };
 
     // 7. Save assistant message (only if we got content)
     if (assistantContent.trim()) {
@@ -4553,6 +4988,18 @@ export async function sendMessageStream(
         target: ctx.target,
       });
     }
+    await finalizeAiReservation(
+      chatUsage
+        ? normalizeAiUsage(chatUsage)
+        : estimateAiTurnUsage([enrichedPrompt, currentTurnText, sourceDocumentContext], assistantContent || fullResponse),
+      { service: aiSettings.activeEngine, operation: 'chat' },
+      {
+        source_document_count: sourceDocuments.length,
+        has_course_context: hasCourseContext,
+        rag_source_count: chatSources.length,
+        ...(chatRetrieval ? { rag_retrieval: chatRetrieval } : {}),
+      },
+    );
 
     // 8. Auto-title on first message pair ONLY (using pre-loaded msg_count from CTE)
     if (ctx.messageCount === 0) {
@@ -4570,6 +5017,11 @@ export async function sendMessageStream(
     });
     onDone();
   } catch (err: any) {
+    if (aiReservationId && aiReservationTenantId && !aiReservationFinalized) {
+      await releaseTenantAiTokenReservation(aiReservationId, aiReservationTenantId).catch((releaseErr: any) => {
+        console.error('[AI Chatbot] Failed to release token reservation:', releaseErr?.message || String(releaseErr));
+      });
+    }
     await markKbStorePermissionProblemFromChat(ctxForError, err);
     logLessonAuthorFlow('stream_error', {
       conversation_id: conversationId,
