@@ -673,6 +673,7 @@ export async function deleteDocument(docId: string, kbId: string, tenantId: stri
 
   // 2. Delete from Gemini FIRST (synchronous, not queue)
   await deleteDocumentGeminiMappingsStrict([docId], tenantId);
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
 
   // 3. Delete from DB (CASCADE handles mapping table)
   const result = await query(
@@ -722,6 +723,7 @@ export async function bulkDeleteDocuments(
 
   // 3. Delete from Gemini FIRST. If this fails, do not delete DB/storage.
   await deleteDocumentGeminiMappingsStrict(safeIds, tenantId);
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, safeIds);
 
   // 4. Bulk delete from DB
   const result = await query(
@@ -1728,6 +1730,8 @@ export async function updateArticle(
       client.release();
     }
 
+    await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
+
     if (existing.file_path && existing.file_path !== storagePath) {
       try { await deleteFile(existing.file_path); } catch { /* ignore */ }
     }
@@ -1910,6 +1914,73 @@ export async function createQueuedDocumentFromStagedSource(
   return document;
 }
 
+const BLUEPRINT_SOURCE_CHANGED_REASON = 'Tài liệu nguồn trong Kho tri thức đã thay đổi hoặc bị xóa. Vui lòng tạo lại bản thiết kế khóa học.';
+
+function isLessonAuthorBlueprintSchemaUnavailable(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+  return code === '42P01';
+}
+
+/**
+ * A Blueprint is a review snapshot, not a live course specification.  Mark it
+ * stale before a source mutation commits so an old source can never be used to
+ * generate a later chapter. Empty source_documents means the Blueprint used
+ * the whole KB, so every document mutation invalidates it deliberately.
+ */
+async function supersedeLessonAuthorBlueprintsForDocuments(
+  tenantId: string,
+  kbId: string,
+  documentIds: readonly string[],
+): Promise<void> {
+  if (documentIds.length === 0) return;
+  try {
+    await query(
+      `UPDATE lesson_author_blueprints blueprint
+       SET status = 'superseded',
+           error_reason = $4,
+           updated_at = now()
+       WHERE blueprint.tenant_id = $1
+         AND blueprint.kb_id = $2
+         AND blueprint.status = 'proposed'
+         AND (
+           jsonb_array_length(blueprint.source_documents) = 0
+           OR EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(blueprint.source_documents) AS source(document)
+             WHERE source.document ->> 'document_id' = ANY($3::text[])
+           )
+         )`,
+      [tenantId, kbId, [...documentIds], BLUEPRINT_SOURCE_CHANGED_REASON],
+    );
+  } catch (error) {
+    // Safe rolling deployment: old database nodes do not have this additive
+    // table yet. All other database failures must stop the source mutation.
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return;
+    throw error;
+  }
+}
+
+async function supersedeLessonAuthorBlueprintsForKnowledgebase(
+  tenantId: string,
+  kbId: string,
+): Promise<void> {
+  try {
+    await query(
+      `UPDATE lesson_author_blueprints
+       SET status = 'superseded',
+           error_reason = $3,
+           updated_at = now()
+       WHERE tenant_id = $1 AND kb_id = $2 AND status = 'proposed'`,
+      [tenantId, kbId, BLUEPRINT_SOURCE_CHANGED_REASON],
+    );
+  } catch (error) {
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return;
+    throw error;
+  }
+}
+
 export async function queueDocumentDeletion(docId: string, kbId: string, tenantId: string): Promise<KbDocument | null> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   const current = await query<KbDocument>(
@@ -1925,6 +1996,7 @@ export async function queueDocumentDeletion(docId: string, kbId: string, tenantI
     `SELECT gemini_path FROM kb_doc_gemini_mapping WHERE document_id = $1`,
     [docId],
   );
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
   // Delete the tenant row before adding the small outbox/audit rows. At a hard
   // quota boundary this preserves the customer's ability to free space while
   // still rolling everything back if the outbox or Audit Log cannot be saved.
@@ -1971,6 +2043,11 @@ export async function queueBulkDocumentDeletion(
     paths.push(mapping.gemini_path);
     pathsByDocument.set(mapping.document_id, paths);
   }
+  await supersedeLessonAuthorBlueprintsForDocuments(
+    tenantId,
+    kbId,
+    documents.rows.map((document) => document.id),
+  );
   for (const document of documents.rows) {
     const removed = await query(
       `DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
@@ -2044,6 +2121,7 @@ export async function queueKnowledgebaseDeletion(id: string, tenantId: string): 
   );
   if ((bots.rows[0]?.cnt || 0) > 0) throw new Error(`Không thể xoá KB — đang có ${bots.rows[0].cnt} bot sử dụng`);
   if ((assignments.rows[0]?.cnt || 0) > 0) throw new Error('Không thể xoá KB đang được gán cho chuyên gia bài học');
+  await supersedeLessonAuthorBlueprintsForKnowledgebase(tenantId, id);
   await enqueueKbOperation({ tenantId, kbId: id, operation: 'knowledgebase_delete' });
   return true;
 }
@@ -2081,6 +2159,7 @@ export async function updateArticleFromStagedSource(
   );
   const document = updated.rows[0] || null;
   if (!document) return null;
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
   await enqueueKbOperation({
     tenantId,
     kbId,

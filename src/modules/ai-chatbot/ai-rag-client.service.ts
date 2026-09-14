@@ -48,6 +48,13 @@ export interface RagRetrievalDiagnostics {
   min_score?: number;
   keyword_min_score?: number;
   max_chunks_per_document?: number;
+  structure_source?: string | null;
+  structure_confidence?: number | null;
+  structure_node_count?: number;
+  source_structure_warnings?: string[];
+  known_source_ref_count?: number;
+  covered_source_ref_count?: number;
+  source_coverage_ratio?: number | null;
   reason: string | null;
 }
 
@@ -62,10 +69,24 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   outline_context: string;
   target_scope_instruction: string;
   output_schema_hint: string;
+  max_attempts?: number;
+}
+
+export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {
+  outline_context: string;
+  blueprint_schema_hint: string;
+  max_attempts?: number;
 }
 
 export interface RagLessonAuthorResponse {
   proposal: unknown;
+  usage?: Partial<AiUsage>;
+  sources?: Array<Record<string, unknown>>;
+  retrieval?: RagRetrievalDiagnostics;
+}
+
+export interface RagLessonAuthorBlueprintResponse {
+  blueprint: unknown;
   usage?: Partial<AiUsage>;
   sources?: Array<Record<string, unknown>>;
   retrieval?: RagRetrievalDiagnostics;
@@ -76,6 +97,46 @@ export interface RagIndexResponse {
   chunk_count: number;
   usage?: Partial<AiUsage>;
   error_reason?: string;
+}
+
+export class RagServiceError extends AppError {
+  public readonly usage?: Partial<AiUsage>;
+
+  constructor(
+    message: string,
+    statusCode: number,
+    code: string,
+    usage?: Partial<AiUsage>,
+  ) {
+    super(message, statusCode, code);
+    this.name = 'RagServiceError';
+    this.usage = usage;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readSafeUsage(value: unknown): Partial<AiUsage> | undefined {
+  const raw = asRecord(value);
+  if (!raw) return undefined;
+  const usage: Partial<AiUsage> = {};
+  for (const field of ['inputTokens', 'outputTokens', 'embeddingTokens', 'totalTokens'] as const) {
+    const candidate = raw[field];
+    if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) {
+      usage[field] = Math.floor(candidate);
+    }
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+function readSafeRagErrorCode(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const code = value.trim();
+  return /^[A-Z][A-Z0-9_]{2,95}$/.test(code) ? code : null;
 }
 
 function requireRagServiceUrl(): string {
@@ -149,13 +210,20 @@ async function postRagJson<T>(
     const response = await requestRagJson(path, body, timeoutMs);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const { payload } = response;
-      const message = payload && typeof payload === 'object' && 'detail' in payload
-        ? String((payload as { detail?: unknown }).detail || '')
-        : '';
-      throw new AppError(
+      const payloadRecord = asRecord(payload);
+      const detail = payloadRecord ? payloadRecord.detail : null;
+      const detailRecord = asRecord(detail);
+      const message = detailRecord && typeof detailRecord.message === 'string'
+        ? detailRecord.message.trim()
+        : typeof detail === 'string'
+          ? detail.trim()
+          : '';
+      const code = readSafeRagErrorCode(detailRecord?.code) ?? 'AI_RAG_SERVICE_ERROR';
+      throw new RagServiceError(
         message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.',
         response.statusCode >= 500 ? 503 : response.statusCode,
-        'AI_RAG_SERVICE_ERROR',
+        code,
+        readSafeUsage(detailRecord?.usage),
       );
     }
     return response.payload as T;
@@ -181,6 +249,16 @@ export async function generateRagLessonAuthorProposal(
 ): Promise<RagLessonAuthorResponse> {
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   return postRagJson<RagLessonAuthorResponse>('/v1/lesson-author/proposal', {
+    ...request,
+    api_key: apiKey,
+  });
+}
+
+export async function generateRagLessonAuthorBlueprint(
+  request: RagLessonAuthorBlueprintRequest,
+): Promise<RagLessonAuthorBlueprintResponse> {
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  return postRagJson<RagLessonAuthorBlueprintResponse>('/v1/lesson-author/blueprint', {
     ...request,
     api_key: apiKey,
   });

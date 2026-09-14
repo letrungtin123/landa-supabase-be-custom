@@ -6,6 +6,8 @@
 import type { Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { query } from '../../config/database.js';
+import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../config/cache-invalidation.js';
+import { AppError } from '../../middleware/error-handler.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import * as chatService from './chat.service.js';
@@ -14,6 +16,22 @@ import * as kbService from './kb.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function sendLessonAuthorApplyError(res: Response, error: unknown): void {
+  if (error instanceof AppError) {
+    res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+      ...(error.code ? { code: error.code } : {}),
+    });
+    return;
+  }
+
+  console.error('[LessonAuthorFlow] apply_request_failed', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+  sendError(res, 'Không thể áp dụng đề xuất vào cấu trúc khóa học. Vui lòng thử lại sau.', 500);
+}
 
 function getRawTarget(req: Request): string | undefined {
   const queryTarget = req.query.target;
@@ -180,6 +198,7 @@ export async function applyLessonAuthorJob(req: Request, res: Response): Promise
     const result = await runAuditedTransaction(
       () => chatService.applyLessonAuthorJob(jobId, userId, tenantId),
       async (updated) => {
+        if (updated.already_applied) return null;
         const course = await query<{ display_name: string }>(
           'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2',
           [updated.course_id, tenantId],
@@ -191,8 +210,24 @@ export async function applyLessonAuthorJob(req: Request, res: Response): Promise
         );
       },
     );
-    sendSuccess(res, result);
-  } catch (err: any) { sendError(res, err.message, 400); }
+    const { already_applied: _alreadyApplied, ...publicResult } = result;
+    const changedBlockIds = [...result.created_block_ids, ...result.updated_block_ids];
+    try {
+      await Promise.all([
+        invalidateCourseReadCaches(result.course_id, tenantId),
+        changedBlockIds.length > 0 ? invalidateBlockReadCaches(changedBlockIds) : Promise.resolve(),
+      ]);
+    } catch (cacheError) {
+      // The database transaction already committed. A cache miss is safer than
+      // returning an error that would make the client retry a completed Apply.
+      console.error('[LessonAuthorFlow] apply_cache_invalidation_failed', {
+        job_id: result.job_id,
+        course_id: result.course_id,
+        error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+      });
+    }
+    sendSuccess(res, publicResult);
+  } catch (err: unknown) { sendLessonAuthorApplyError(res, err); }
 }
 
 export async function getActiveBot(req: Request, res: Response): Promise<void> {
@@ -364,7 +399,16 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const { content, mode, outline_mentions, source_documents, input_mode, locale } = req.body ?? {};
+  const {
+    content,
+    mode,
+    outline_mentions,
+    source_documents,
+    blueprint_id,
+    blueprint_chapter_index,
+    input_mode,
+    locale,
+  } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
   if (isDemoIframeSession(req.user)) {
@@ -383,6 +427,13 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
   if (locale !== undefined && locale !== 'vi' && locale !== 'en') {
     sendError(res, 'locale không hợp lệ', 400); return;
+  }
+  if (blueprint_id !== undefined && (typeof blueprint_id !== 'string' || !UUID_REGEX.test(blueprint_id))) {
+    sendError(res, 'blueprint_id không hợp lệ', 400); return;
+  }
+  if (blueprint_chapter_index !== undefined
+    && (!Number.isInteger(blueprint_chapter_index) || blueprint_chapter_index < 0 || blueprint_chapter_index >= 12)) {
+    sendError(res, 'blueprint_chapter_index không hợp lệ', 400); return;
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
 
@@ -433,6 +484,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       courseId,
       mode: mode === 'draft_lesson'
         ? 'draft_lesson'
+        : mode === 'course_blueprint'
+          ? 'course_blueprint'
         : mode === 'chat'
           ? 'chat'
           : target === 'lesson_author'
@@ -440,6 +493,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
             : 'chat',
       outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
       sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
+      blueprintId: blueprint_id,
+      blueprintChapterIndex: blueprint_chapter_index,
       inputMode,
       locale: locale === 'en' ? 'en' : 'vi',
     },

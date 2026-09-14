@@ -727,6 +727,7 @@ type CourseReferenceTable =
   | 'chat_conversations'
   | 'assignment_feedback_history'
   | 'notification_email_jobs'
+  | 'lesson_author_blueprints'
   | 'lesson_author_jobs'
   | 'course_mentor_assignment_history'
   | 'course_mentor_sections'
@@ -738,10 +739,21 @@ type CourseReferenceTable =
   | 'section_modal_shown'
   | 'tenant_badge_rule_courses';
 
+async function isOptionalCourseReferenceTableAvailable(tableName: CourseReferenceTable): Promise<boolean> {
+  if (tableName !== 'lesson_author_blueprints') return true;
+  const result = await query<{ exists: boolean }>(
+    `SELECT to_regclass('public.lesson_author_blueprints') IS NOT NULL AS exists`,
+  );
+  return Boolean(result.rows[0]?.exists);
+}
+
 async function deleteCourseReferenceInBatches(
   tableName: CourseReferenceTable,
   courseId: string,
 ): Promise<number> {
+  // Keeps a rolling deployment safe when the application process comes up
+  // before the additive Blueprint migration has been run manually.
+  if (!(await isOptionalCourseReferenceTableAvailable(tableName))) return 0;
   let rowsDeleted = 0;
 
   while (true) {
@@ -801,6 +813,7 @@ async function touchJobLease(jobId: string): Promise<void> {
 async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeStats>> {
   const directCourseTables: readonly CourseReferenceTable[] = [
     'notification_email_jobs',
+    'lesson_author_blueprints',
     'lesson_author_jobs',
     'course_mentor_assignment_history',
     'course_mentor_sections',

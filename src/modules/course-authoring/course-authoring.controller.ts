@@ -396,7 +396,7 @@ export async function getOutline(req: Request, res: Response) {
 /** GET /api/course-authoring/blocks/:blockId */
 export async function getBlock(req: Request, res: Response) {
   try {
-    const block = await svc.getBlockInfo(req.params.blockId);
+    const block = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
     sendSuccess(res, block);
   } catch (err: any) {
     sendError(res, err.message, 404);
@@ -436,7 +436,7 @@ export async function createBlock(req: Request, res: Response) {
   let finalCourseId = resolvedCourseId;
   if (!finalCourseId && resolvedParentId) {
     try {
-      const parent = await svc.getBlockInfo(resolvedParentId);
+      const parent = await svc.getBlockInfo(resolvedParentId, req.user!.tenantId);
       finalCourseId = parent.course_id;
     } catch {
       return sendError(res, 'Parent block not found', 404);
@@ -476,9 +476,10 @@ export async function createBlock(req: Request, res: Response) {
         ? { ...(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
         : metadata,
       boilerplate,
+      req.user!.tenantId,
     ),
     async (created) => {
-      const block = await svc.getBlockInfo(created.id);
+      const block = await svc.getBlockInfo(created.id, req.user!.tenantId);
       return createTransactionalAuditEntry(
         req,
         'CREATE',
@@ -503,8 +504,8 @@ export async function updateBlock(req: Request, res: Response) {
       let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
       const result = await runAuditedTransaction(
         async () => {
-          before = await svc.getBlockInfo(req.params.blockId);
-          return svc.publishBlock(req.params.blockId);
+          before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
+          return svc.publishBlock(req.params.blockId, req.user!.tenantId);
         },
         (updated) => createTransactionalAuditEntry(
           req,
@@ -531,8 +532,8 @@ export async function updateBlock(req: Request, res: Response) {
       let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
       const result = await runAuditedTransaction(
         async () => {
-          before = await svc.getBlockInfo(req.params.blockId);
-          return svc.discardDraftCascade(req.params.blockId);
+          before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
+          return svc.discardDraftCascade(req.params.blockId, req.user!.tenantId);
         },
         (updated) => createTransactionalAuditEntry(
           req,
@@ -556,8 +557,8 @@ export async function updateBlock(req: Request, res: Response) {
     if (Array.isArray(children)) {
       const block = await runAuditedTransaction(
         async () => {
-          await svc.reorderChildren(req.params.blockId, children);
-          return svc.getBlockInfo(req.params.blockId);
+          await svc.reorderChildren(req.params.blockId, children, req.user!.tenantId);
+          return svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
         },
         (parent) => createTransactionalAuditEntry(
           req,
@@ -580,7 +581,7 @@ export async function updateBlock(req: Request, res: Response) {
     let sanitizedData = data;
     let sanitizedMetadata = sanitizeMetadata(metadata);
     if (data !== undefined) {
-      const currentBlock = await svc.getBlockInfo(req.params.blockId);
+      const currentBlock = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
       if (currentBlock.block_type === 'la_media_quiz') {
         sanitizedData = sanitizeMediaQuizData(data);
         sanitizedMetadata = {
@@ -600,7 +601,7 @@ export async function updateBlock(req: Request, res: Response) {
     let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
     const result = await runAuditedTransaction(
       async () => {
-        before = await svc.getBlockInfo(req.params.blockId);
+        before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
         return svc.updateBlock(req.params.blockId, {
           display_name: resolvedName,
           data: sanitizedData,
@@ -633,7 +634,7 @@ export async function deleteBlock(req: Request, res: Response) {
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) return sendError(res, 'tenant_id is required', 400);
-    const block = await svc.getBlockInfo(req.params.blockId);
+    const block = await svc.getBlockInfo(req.params.blockId, tenantId);
     await requestBlockDeletion(
       req.params.blockId,
       tenantId,
@@ -660,8 +661,8 @@ export async function reorderChildren(req: Request, res: Response) {
 
   await runAuditedTransaction(
     async () => {
-      await svc.reorderChildren(req.params.blockId, parsed.data.children);
-      return svc.getBlockInfo(req.params.blockId);
+      await svc.reorderChildren(req.params.blockId, parsed.data.children, req.user!.tenantId);
+      return svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
     },
     (block) => createTransactionalAuditEntry(
       req,
@@ -680,7 +681,7 @@ export async function reorderChildren(req: Request, res: Response) {
 
 /** GET /api/course-authoring/units/:unitId/children */
 export async function getUnitChildren(req: Request, res: Response) {
-  const result = await svc.getUnitChildren(req.params.unitId);
+  const result = await svc.getUnitChildren(req.params.unitId, req.user!.tenantId);
   sendSuccess(res, result);
 }
 
@@ -696,8 +697,8 @@ export async function studioSubmit(req: Request, res: Response) {
     let before: Awaited<ReturnType<typeof svc.getBlockInfo>> | undefined;
     const result = await runAuditedTransaction(
       async () => {
-        before = await svc.getBlockInfo(req.params.blockId);
-        return svc.studioSubmit(req.params.blockId, req.body);
+        before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
+        return svc.studioSubmit(req.params.blockId, req.body, req.user!.tenantId);
       },
       (submitted) => {
         const block = submitted.block;

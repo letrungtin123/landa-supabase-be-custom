@@ -4,7 +4,7 @@
 // Structure: course → chapter → sequential → vertical → components
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import {
   invalidateBlockReadCaches,
   invalidateCourseReadCaches,
@@ -17,6 +17,9 @@ import {
   getTenantAllowedCourseComponentTypeSet,
 } from '../tenants/tenant-course-components.service.js';
 import { deleteFile, extractStoragePath } from '../../config/storage.js';
+import { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
+import { normalizeDiagramData } from './diagram-data.logic.js';
+export { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
 
@@ -128,16 +131,19 @@ export interface LessonAuthorUnitProposal {
   title: string;
   html?: string;
   components?: LessonAuthorComponentProposal[];
+  source_refs?: string[];
 }
 
 export interface LessonAuthorLessonProposal {
   title: string;
   units: LessonAuthorUnitProposal[];
+  source_refs?: string[];
 }
 
 export interface LessonAuthorChapterProposal {
   title: string;
   lessons: LessonAuthorLessonProposal[];
+  source_refs?: string[];
 }
 
 export interface LessonAuthorProposal {
@@ -254,17 +260,22 @@ export async function createBlock(
   data?: any,
   metadata?: any,
   boilerplate?: string,
+  tenantId?: string | null,
 ): Promise<{ id: string }> {
   const courseCheck = await query<{ id: string; tenant_id: string }>(
-    `SELECT id, tenant_id FROM courses WHERE id = $1 AND deleted_at IS NULL`,
-    [courseId],
+    `SELECT id, tenant_id
+       FROM courses
+      WHERE id = $1
+        AND ($2::uuid IS NULL OR tenant_id = $2::uuid)
+        AND deleted_at IS NULL`,
+    [courseId, tenantId ?? null],
   );
   if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
 
   await assertTenantCanAddCourseComponent(courseCheck.rows[0].tenant_id, blockType);
 
   if (parentId) {
-    const parent = await getBlockInfo(parentId);
+    const parent = await getBlockInfo(parentId, tenantId);
     if (parent.course_id !== courseId) throw new AppError('Parent block not found', 404);
   }
 
@@ -579,7 +590,7 @@ function assertPublishableScenarioChatData(raw: any, label: string): void {
   });
 }
 
-export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
+export async function getBlockInfo(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
   const result = await query<BlockInfo>(
     `WITH RECURSIVE ancestors AS (
        SELECT id, parent_id, deleted_at
@@ -601,8 +612,9 @@ export async function getBlockInfo(blockId: string): Promise<BlockInfo> {
      WHERE b.id = $1
        AND b.deleted_at IS NULL
        AND c.deleted_at IS NULL
+       AND ($2::uuid IS NULL OR c.tenant_id = $2::uuid)
        AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
-    [blockId],
+    [blockId, tenantId ?? null],
   );
   if (result.rowCount === 0) throw new Error('Block not found');
   return result.rows[0];
@@ -793,8 +805,8 @@ export async function renameBlock(blockId: string, displayName: string): Promise
   return updateBlock(blockId, { display_name: displayName });
 }
 
-export async function publishBlock(blockId: string): Promise<BlockInfo> {
-  const block = await getBlockInfo(blockId);
+export async function publishBlock(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
+  const block = await getBlockInfo(blockId, tenantId);
   const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   const mediaQuizRows = await query<{ display_name: string; data: any }>(
@@ -914,7 +926,7 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
     invalidateBlockReadCaches(descendantIds),
   ]);
 
-  return getBlockInfo(blockId);
+  return getBlockInfo(blockId, tenantId);
 }
 
 /**
@@ -922,8 +934,8 @@ export async function publishBlock(blockId: string): Promise<BlockInfo> {
  * Reverse of publishBlock: copies published_data → data, published_metadata → metadata.
  * Non-recursive: only reverts the targeted block, not its children.
  */
-export async function discardDraft(blockId: string): Promise<BlockInfo> {
-  const block = await getBlockInfo(blockId);
+export async function discardDraft(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
+  const block = await getBlockInfo(blockId, tenantId);
 
   if (!block.has_draft_changes) {
     throw new AppError('Block has no draft changes to discard', 400);
@@ -956,11 +968,11 @@ export async function discardDraft(blockId: string): Promise<BlockInfo> {
     invalidateBlockReadCaches([blockId]),
   ]);
 
-  return getBlockInfo(blockId);
+  return getBlockInfo(blockId, tenantId);
 }
 
-export async function discardDraftCascade(blockId: string): Promise<BlockInfo> {
-  const block = await getBlockInfo(blockId);
+export async function discardDraftCascade(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
+  const block = await getBlockInfo(blockId, tenantId);
 
   if (!block.has_draft_changes) {
     throw new AppError('Block has no draft changes to discard', 400);
@@ -1043,7 +1055,7 @@ export async function discardDraftCascade(blockId: string): Promise<BlockInfo> {
     invalidateBlockReadCaches(descendantIds),
   ]);
 
-  return getBlockInfo(blockId);
+  return getBlockInfo(blockId, tenantId);
 }
 
 export async function deleteBlock(blockId: string): Promise<void> {
@@ -1054,9 +1066,10 @@ export async function deleteBlock(blockId: string): Promise<void> {
 export async function reorderChildren(
   parentId: string,
   childIds: string[],
+  tenantId?: string | null,
 ): Promise<void> {
   if (childIds.length === 0) return;
-  const parent = await getBlockInfo(parentId);
+  const parent = await getBlockInfo(parentId, tenantId);
 
   // Validate UUID format — chống SQL injection
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1087,8 +1100,8 @@ export async function reorderChildren(
 
 // ── Unit Children ──
 
-export async function getUnitChildren(unitId: string): Promise<{ children: UnitChild[] }> {
-  await getBlockInfo(unitId);
+export async function getUnitChildren(unitId: string, tenantId?: string | null): Promise<{ children: UnitChild[] }> {
+  await getBlockInfo(unitId, tenantId);
 
   const result = await query<UnitChild>(
     `SELECT id, id AS block_id, display_name, block_type,
@@ -1107,9 +1120,10 @@ export async function getUnitChildren(unitId: string): Promise<{ children: UnitC
 export async function studioSubmit(
   blockId: string,
   submitData: any,
+  tenantId?: string | null,
 ): Promise<any> {
   // Get current block
-  const block = await getBlockInfo(blockId);
+  const block = await getBlockInfo(blockId, tenantId);
   const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   // Extract display_name (FE gửi kèm trong submitData)
@@ -1152,10 +1166,10 @@ export async function studioSubmit(
     }
     case 'la_diagram': {
       const diagramRaw = restData.diagram_data;
-      const diagramParsed = typeof diagramRaw === 'string' ? safeJsonParse(diagramRaw) : diagramRaw;
+      const diagramData = normalizeDiagramData(diagramRaw);
       updatePayload = {
-        metadata: { ...block.metadata, diagram_data: diagramParsed || diagramRaw },
-        data: restData,
+        metadata: { ...block.metadata, diagram_data: diagramData },
+        data: { ...restData, diagram_data: diagramData },
       };
       break;
     }
@@ -1947,8 +1961,40 @@ function clampTitle(value: string, fallback: string): string {
   return (title || fallback).slice(0, 250);
 }
 
+async function moveFaqComponentsToUnitEnd(client: DbClient, courseId: string, unitId: string): Promise<void> {
+  // Reorder active children atomically after an AI proposal is applied. The
+  // secondary keys preserve the existing order of every non-FAQ component and
+  // the relative order of multiple FAQ blocks.
+  await client.query(
+    `WITH ordered_children AS (
+       SELECT id,
+              ROW_NUMBER() OVER (
+                ORDER BY CASE WHEN block_type = 'la_faq' THEN 1 ELSE 0 END,
+                         sort_order ASC NULLS LAST,
+                         created_at ASC,
+                         id ASC
+              ) - 1 AS new_sort_order
+       FROM course_blocks
+       WHERE course_id = $1
+         AND parent_id = $2
+         AND deleted_at IS NULL
+     )
+     UPDATE course_blocks cb
+     SET sort_order = ordered_children.new_sort_order::integer,
+         updated_at = now()
+     FROM ordered_children
+     WHERE cb.id = ordered_children.id
+       AND cb.course_id = $1
+       AND cb.parent_id = $2
+       AND cb.deleted_at IS NULL`,
+    [courseId, unitId],
+  );
+}
+
 function getLessonAuthorComponents(unit: LessonAuthorUnitProposal): LessonAuthorComponentProposal[] {
-  if (Array.isArray(unit.components) && unit.components.length > 0) return unit.components;
+  if (Array.isArray(unit.components) && unit.components.length > 0) {
+    return orderLessonAuthorComponents(unit.components);
+  }
   if (typeof unit.html === 'string' && unit.html.trim()) {
     return [{
       type: 'html',
@@ -1971,13 +2017,17 @@ function buildGeneratedComponentBlock(
   metadata: Record<string, unknown>;
 } {
   const displayName = clampTitle(component.title, `${unitTitle} component ${componentIndex + 1}`);
+  const componentData = component.type === 'la_diagram'
+    ? normalizeDiagramData(component.data)
+    : component.data;
   return {
     blockType: component.type,
     displayName,
-    data: component.data,
+    data: componentData,
     metadata: {
       ...(component.metadata ?? {}),
       ...baseMetadata,
+      ...(component.type === 'la_diagram' ? { diagram_data: componentData } : {}),
       ai_component_index: componentIndex,
       source: 'lesson_author_proposal',
     },
@@ -1986,6 +2036,25 @@ function buildGeneratedComponentBlock(
 
 function logLessonAuthorApply(stage: string, details: Record<string, unknown> = {}): void {
   console.log(`[LessonAuthorApply] ${stage}`, details);
+}
+
+export const LESSON_AUTHOR_OUTLINE_BUSY_CODE = 'LESSON_AUTHOR_OUTLINE_BUSY';
+
+function normalizeLessonAuthorApplyError(error: unknown): unknown {
+  if (error instanceof AppError) return error;
+
+  const databaseCode = (error as { code?: unknown })?.code;
+  // A short lock timeout prevents the widget from waiting for the global
+  // statement timeout when another course mutation owns the row lock.
+  if (databaseCode === '55P03' || databaseCode === '57014') {
+    return new AppError(
+      'Khóa học đang được cập nhật ở nơi khác. Vui lòng thử lại sau.',
+      409,
+      LESSON_AUTHOR_OUTLINE_BUSY_CODE,
+    );
+  }
+
+  return error;
 }
 
 function getProposalApplyMetrics(proposal: LessonAuthorProposal): Record<string, unknown> {
@@ -2018,9 +2087,8 @@ function getProposalApplyMetrics(proposal: LessonAuthorProposal): Record<string,
 export async function applyLessonAuthorProposalToCourse(
   input: ApplyLessonAuthorProposalInput,
 ): Promise<ApplyLessonAuthorProposalResult> {
-  const client = await getClient();
-
-  try {
+  const result = await withDatabaseTransaction(async (client) => {
+    try {
     logLessonAuthorApply('start', {
       course_id: input.courseId,
       tenant_id: input.tenantId,
@@ -2028,14 +2096,32 @@ export async function applyLessonAuthorProposalToCourse(
       kb_id: input.kbId ?? null,
       ...getProposalApplyMetrics(input.proposal),
     });
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`course:${input.tenantId}:${input.courseId}`]);
+    await client.query("SET LOCAL lock_timeout = '3000ms'");
+    logLessonAuthorApply('lock_timeout_configured', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+    });
+    const advisoryLock = await client.query<{ acquired: boolean }>(
+      'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',
+      [`course:${input.tenantId}:${input.courseId}`],
+    );
+    if (!advisoryLock.rows[0]?.acquired) {
+      throw new AppError(
+        'Khóa học đang được cập nhật ở nơi khác. Vui lòng thử lại sau.',
+        409,
+        LESSON_AUTHOR_OUTLINE_BUSY_CODE,
+      );
+    }
     logLessonAuthorApply('transaction_locked', {
       course_id: input.courseId,
       tenant_id: input.tenantId,
       job_id: input.jobId ?? null,
     });
 
+    logLessonAuthorApply('course_lock_start', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+    });
     const courseResult = await client.query<{ id: string; display_name: string }>(
       `SELECT id, display_name
        FROM courses
@@ -2044,8 +2130,21 @@ export async function applyLessonAuthorProposalToCourse(
       [input.courseId, input.tenantId],
     );
     if (courseResult.rowCount === 0) throw new AppError('Course not found', 404);
+    logLessonAuthorApply('course_locked', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+    });
     const allowedComponentTypes = await getTenantAllowedCourseComponentTypeSet(input.tenantId, client);
+    logLessonAuthorApply('component_permissions_loaded', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+      allowed_component_types: allowedComponentTypes.size,
+    });
 
+    logLessonAuthorApply('root_lock_start', {
+      course_id: input.courseId,
+      job_id: input.jobId ?? null,
+    });
     let rootResult = await client.query<{ id: string }>(
       `SELECT id
        FROM course_blocks
@@ -2177,6 +2276,7 @@ export async function applyLessonAuthorProposalToCourse(
               updated: componentBlock.updated,
             });
           }
+          await moveFaqComponentsToUnitEnd(client, input.courseId, verticalBlock.id);
         }
       }
     }
@@ -2188,31 +2288,24 @@ export async function applyLessonAuthorProposalToCourse(
       [rootId],
     );
 
-    await client.query('COMMIT');
-    logLessonAuthorApply('commit_done', {
+    logLessonAuthorApply('transaction_prepared', {
       course_id: input.courseId,
       job_id: input.jobId ?? null,
       created_count: createdBlockIds.length,
-      created_block_ids: createdBlockIds,
       updated_count: updatedBlockIds.length,
-      updated_block_ids: updatedBlockIds,
     });
-    await Promise.all([
-      invalidateCourseReadCaches(input.courseId, input.tenantId),
-      invalidateBlockReadCaches([rootId, ...createdBlockIds, ...updatedBlockIds]),
-    ]);
     return { created_block_ids: createdBlockIds, updated_block_ids: updatedBlockIds };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    logLessonAuthorApply('rollback_done', {
-      course_id: input.courseId,
-      job_id: input.jobId ?? null,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  } finally {
-    client.release();
-  }
+    } catch (error) {
+      const normalizedError = normalizeLessonAuthorApplyError(error);
+      logLessonAuthorApply('transaction_aborted', {
+        course_id: input.courseId,
+        job_id: input.jobId ?? null,
+        error: normalizedError instanceof Error ? normalizedError.message : String(normalizedError),
+      });
+      throw normalizedError;
+    }
+  });
+  return result;
 }
 
 export async function initializeCourseStructure(
