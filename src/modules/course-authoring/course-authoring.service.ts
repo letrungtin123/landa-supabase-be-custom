@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
+import { createHash } from 'node:crypto';
 import {
   invalidateBlockReadCaches,
   invalidateCourseReadCaches,
@@ -16,9 +17,15 @@ import {
   assertTenantCanAddCourseComponent,
   getTenantAllowedCourseComponentTypeSet,
 } from '../tenants/tenant-course-components.service.js';
+import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import { deleteFile, extractStoragePath } from '../../config/storage.js';
 import { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
+import {
+  formatChapterTitle,
+  stripLessonAuthorSourceRangeSuffix,
+  type LessonAuthorIntentPlan,
+} from '../ai-chatbot/lesson-author-intent.logic.js';
 export { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
@@ -149,6 +156,17 @@ export interface LessonAuthorChapterProposal {
 export interface LessonAuthorProposal {
   summary: string;
   chapters: LessonAuthorChapterProposal[];
+  operation_plan?: LessonAuthorOperationPlan;
+}
+
+export interface LessonAuthorOperationPlan extends LessonAuthorIntentPlan {
+  target_block_id: string;
+  target_path: string;
+  target_display_name: string;
+  target_updated_at: string;
+  requested_title?: string | null;
+  destination_block_id?: string | null;
+  target_snapshot?: string | null;
 }
 
 export interface ApplyLessonAuthorProposalInput {
@@ -1941,7 +1959,7 @@ async function getOrCreateGeneratedBlock(
   displayName: string,
   data: unknown,
   metadata: Record<string, unknown>,
-  options: { updateExisting?: boolean } = {},
+  options: { updateExisting?: boolean; requireExisting?: boolean } = {},
 ): Promise<{ id: string; created: boolean; updated: boolean }> {
   const existingId = await findExistingChildBlock(client, courseId, parentId, blockType, displayName);
   if (existingId) {
@@ -1952,6 +1970,10 @@ async function getOrCreateGeneratedBlock(
     return { id: existingId, created: false, updated: false };
   }
 
+  if (options.requireExisting) {
+    throw new AppError(`Không tìm thấy ${blockType} đã chọn trong outline. Vui lòng tạo lại đề xuất.`, 409);
+  }
+
   const id = await insertGeneratedBlock(client, courseId, parentId, blockType, displayName, data, metadata);
   return { id, created: true, updated: false };
 }
@@ -1959,6 +1981,19 @@ async function getOrCreateGeneratedBlock(
 function clampTitle(value: string, fallback: string): string {
   const title = typeof value === 'string' ? value.trim() : '';
   return (title || fallback).slice(0, 250);
+}
+
+function clampStructuralTitle(value: string, fallback: string): string {
+  let title = stripLessonAuthorSourceRangeSuffix(value);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const next = title.replace(
+      /^(?:chương|chuong|chapter|phần|phan|part|mục|muc|section|module|sequential|bài học|bai hoc|bài|bai|lesson|unit|vertical)\s+\d+(?:\.\d+){0,2}(?:\s*[:.)-]\s*|\s+)/iu,
+      '',
+    ).trim();
+    if (!next || next === title) break;
+    title = next;
+  }
+  return clampTitle(title, fallback);
 }
 
 async function moveFaqComponentsToUnitEnd(client: DbClient, courseId: string, unitId: string): Promise<void> {
@@ -2084,6 +2119,286 @@ function getProposalApplyMetrics(proposal: LessonAuthorProposal): Record<string,
   };
 }
 
+function operationTargetType(blockType: string): LessonAuthorOperationPlan['target_type'] {
+  if (blockType === 'course') return 'course';
+  if (blockType === 'chapter') return 'chapter';
+  if (blockType === 'sequential') return 'lesson';
+  if (blockType === 'vertical') return 'unit';
+  return 'component';
+}
+
+function operationTargetSnapshot(row: {
+  id: string;
+  parent_id: string | null;
+  block_type: string;
+  display_name: string;
+  sort_order: number;
+  data: unknown;
+  metadata: unknown;
+  updated_at: string | Date;
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    id: row.id,
+    parent_id: row.parent_id,
+    block_type: row.block_type,
+    display_name: row.display_name,
+    sort_order: row.sort_order,
+    data: row.data ?? null,
+    metadata: row.metadata ?? null,
+    updated_at: new Date(row.updated_at).toISOString(),
+  })).digest('hex');
+}
+
+async function applyLessonAuthorOperationPlanWithClient(
+  client: DbClient,
+  input: ApplyLessonAuthorProposalInput,
+  plan: LessonAuthorOperationPlan,
+): Promise<ApplyLessonAuthorProposalResult> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+    throw new AppError('Target block không hợp lệ', 400);
+  }
+
+  const targetResult = await client.query<{
+    id: string;
+    course_id: string;
+    parent_id: string | null;
+    block_type: string;
+    display_name: string;
+    sort_order: number;
+    data: unknown;
+    metadata: unknown;
+    updated_at: string | Date;
+  }>(
+    `SELECT cb.id::text AS id, cb.course_id, cb.parent_id::text AS parent_id,
+            cb.block_type, cb.display_name, cb.sort_order, cb.data, cb.metadata, cb.updated_at
+     FROM course_blocks cb
+     JOIN courses c ON c.id = cb.course_id
+     WHERE cb.id = $1
+       AND cb.course_id = $2
+       AND c.tenant_id = $3
+       AND c.deleted_at IS NULL
+       AND cb.deleted_at IS NULL
+     FOR UPDATE OF cb`,
+    [plan.target_block_id, input.courseId, input.tenantId],
+  );
+  const target = targetResult.rows[0];
+  if (!target) throw new AppError('Node trong cây outline không còn tồn tại.', 409);
+
+  const actualType = operationTargetType(target.block_type);
+  if (plan.target_type && plan.target_type !== actualType) {
+    throw new AppError('Node trong cây outline đã thay đổi loại. Vui lòng tạo lại đề xuất.', 409);
+  }
+  if (plan.target_snapshot && operationTargetSnapshot(target) !== plan.target_snapshot) {
+    throw new AppError('Node trong cây outline đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
+  }
+
+  if (plan.operation === 'rename') {
+    const rawTitle = typeof plan.requested_title === 'string' ? plan.requested_title : '';
+    const title = ['chapter', 'lesson', 'unit'].includes(actualType ?? '')
+      ? clampStructuralTitle(rawTitle, '')
+      : rawTitle.trim().slice(0, 250);
+    if (!title) throw new AppError('Tên tiêu đề mới không hợp lệ.', 400);
+    if (plan.title_strategy === 'prefix_chapter_number' && actualType === 'chapter') {
+      const siblingRankResult = await client.query<{ sibling_index: number }>(
+        `SELECT sibling_index
+         FROM (
+           SELECT cb.id::text AS id,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY cb.parent_id, cb.block_type
+                    ORDER BY cb.sort_order ASC, cb.id ASC
+                  )::int AS sibling_index
+           FROM course_blocks cb
+           WHERE cb.course_id = $1
+             AND cb.deleted_at IS NULL
+         ) ranked
+         WHERE ranked.id = $2`,
+        [input.courseId, target.id],
+      );
+      const siblingIndex = siblingRankResult.rows[0]?.sibling_index;
+      const expectedTitle = siblingIndex
+        ? formatChapterTitle(target.display_name, String(siblingIndex))
+        : null;
+      if (!expectedTitle || title !== expectedTitle) {
+        throw new AppError('Đề xuất định dạng tiêu đề đã cũ hoặc không khớp thứ tự Chương hiện tại. Vui lòng tạo lại đề xuất.', 409);
+      }
+    }
+    const updated = await client.query<{ id: string }>(
+      `UPDATE course_blocks
+       SET display_name = $2,
+           has_draft_changes = true,
+           updated_at = now()
+       WHERE id = $1 AND course_id = $3 AND deleted_at IS NULL
+       RETURNING id`,
+      [target.id, title, input.courseId],
+    );
+    if (updated.rowCount === 0) throw new AppError('Không thể đổi tiêu đề node trong outline.', 409);
+    if (actualType === 'course' && target.parent_id === null) {
+      await client.query(
+        `UPDATE courses
+         SET display_name = $2, updated_at = now()
+         WHERE id = $1 AND tenant_id = $3 AND deleted_at IS NULL`,
+        [input.courseId, title, input.tenantId],
+      );
+    }
+    await markAncestorsDirtyWithClient(client, target.id);
+    return { created_block_ids: [], updated_block_ids: [target.id] };
+  }
+
+  if (plan.operation === 'move') {
+    throw new AppError('Thao tác di chuyển cần chỉ rõ vị trí đích trước khi áp dụng.', 400);
+  }
+
+  throw new AppError('Operation của đề xuất không được phép áp dụng.', 400);
+}
+
+async function applyLessonAuthorComponentContentWithClient(
+  client: DbClient,
+  input: ApplyLessonAuthorProposalInput,
+  plan: LessonAuthorOperationPlan,
+  proposal: LessonAuthorProposal,
+  allowedComponentTypes: Set<CourseComponentType>,
+  baseMetadata: Record<string, unknown>,
+): Promise<ApplyLessonAuthorProposalResult | null> {
+  if (plan.operation !== 'update_content' || plan.target_type !== 'component') return null;
+
+  const targetResult = await client.query<{
+    id: string;
+    parent_id: string | null;
+    block_type: string;
+    display_name: string;
+    sort_order: number;
+    data: unknown;
+    metadata: unknown;
+    updated_at: string | Date;
+  }>(
+    `SELECT cb.id::text AS id, cb.parent_id::text AS parent_id, cb.block_type,
+            cb.display_name, cb.sort_order, cb.data, cb.metadata, cb.updated_at
+     FROM course_blocks cb
+     JOIN courses c ON c.id = cb.course_id
+     WHERE cb.id = $1
+       AND cb.course_id = $2
+       AND c.tenant_id = $3
+       AND c.deleted_at IS NULL
+       AND cb.deleted_at IS NULL
+     FOR UPDATE OF cb`,
+    [plan.target_block_id, input.courseId, input.tenantId],
+  );
+  const target = targetResult.rows[0];
+  if (!target) throw new AppError('Component trong cây outline không còn tồn tại.', 409);
+  if (operationTargetType(target.block_type) !== 'component') {
+    throw new AppError('Target trong đề xuất không còn là component. Vui lòng tạo lại đề xuất.', 409);
+  }
+  if (plan.target_snapshot && operationTargetSnapshot(target) !== plan.target_snapshot) {
+    throw new AppError('Component đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
+  }
+  if (!target.parent_id) throw new AppError('Component không có Mục cha hợp lệ.', 409);
+
+  const generatedComponents = getLessonAuthorComponents(
+    proposal.chapters[0]?.lessons[0]?.units[0] ?? { title: target.display_name },
+  );
+  if (proposal.chapters.length !== 1
+    || proposal.chapters[0]?.lessons.length !== 1
+    || proposal.chapters[0]?.lessons[0]?.units.length !== 1
+    || generatedComponents.length !== 1) {
+    throw new AppError('Proposal sửa component phải chỉ chứa đúng một component được chọn.', 400);
+  }
+  const generatedComponent = generatedComponents[0];
+  if (!generatedComponent) throw new AppError('Proposal không có nội dung component để áp dụng.', 400);
+  if (generatedComponent.type !== target.block_type) {
+    throw new AppError('Loại component trong proposal không khớp component đã chọn. Vui lòng tạo lại đề xuất.', 409);
+  }
+  const generated = buildGeneratedComponentBlock(
+    { ...generatedComponent, title: target.display_name },
+    target.display_name,
+    baseMetadata,
+    0,
+  );
+  assertCourseComponentTypeAllowed(allowedComponentTypes, generated.blockType);
+  await updateGeneratedBlockContent(
+    client,
+    target.id,
+    input.courseId,
+    target.parent_id,
+    target.block_type,
+    generated.data,
+    generated.metadata,
+  );
+  if (target.block_type === 'la_faq') await moveFaqComponentsToUnitEnd(client, input.courseId, target.parent_id);
+  return { created_block_ids: [], updated_block_ids: [target.id] };
+}
+
+async function assertLessonAuthorOperationTargetFreshWithClient(
+  client: DbClient,
+  input: ApplyLessonAuthorProposalInput,
+  plan: LessonAuthorOperationPlan,
+): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+    throw new AppError('Target block không hợp lệ', 400);
+  }
+  const result = await client.query<{
+    id: string;
+    parent_id: string | null;
+    block_type: string;
+    display_name: string;
+    sort_order: number;
+    data: unknown;
+    metadata: unknown;
+    updated_at: string | Date;
+  }>(
+    `SELECT cb.id::text AS id, cb.parent_id::text AS parent_id, cb.block_type,
+            cb.display_name, cb.sort_order, cb.data, cb.metadata, cb.updated_at
+     FROM course_blocks cb
+     JOIN courses c ON c.id = cb.course_id
+     WHERE cb.id = $1
+       AND cb.course_id = $2
+       AND c.tenant_id = $3
+       AND c.deleted_at IS NULL
+       AND cb.deleted_at IS NULL
+     FOR UPDATE OF cb`,
+    [plan.target_block_id, input.courseId, input.tenantId],
+  );
+  const target = result.rows[0];
+  if (!target) throw new AppError('Node trong cây outline không còn tồn tại.', 409);
+  if (plan.target_type === 'course') {
+    throw new AppError('Không thể áp dụng nội dung trực tiếp cho toàn khóa học. Hãy chọn một node cụ thể.', 409);
+  }
+  const actualType = operationTargetType(target.block_type);
+  if (actualType !== plan.target_type) {
+    throw new AppError('Node trong đề xuất đã đổi loại. Vui lòng tạo lại đề xuất.', 409);
+  }
+  if (plan.target_snapshot && operationTargetSnapshot(target) !== plan.target_snapshot) {
+    throw new AppError('Node trong cây outline đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
+  }
+}
+
+function lockLessonAuthorProposalToTarget(
+  proposal: LessonAuthorProposal,
+  plan: LessonAuthorOperationPlan,
+): LessonAuthorProposal {
+  if (plan.operation !== 'update_content' && plan.operation !== 'create') return proposal;
+  if (!proposal.chapters.length) throw new AppError('Proposal không có nội dung để áp dụng.', 400);
+
+  const pathParts = plan.target_path.split(' / ').map(part => part.trim()).filter(Boolean);
+  const chapters = proposal.chapters.slice(0, 1).map((chapter) => {
+    const chapterTitle = plan.target_type === 'chapter' || plan.target_type === 'course'
+      ? plan.target_display_name
+      : pathParts[0] || chapter.title;
+    const lessons = chapter.lessons.slice(0, plan.target_type === 'chapter' || plan.target_type === 'course' ? chapter.lessons.length : 1).map((lesson) => {
+      const lessonTitle = plan.target_type === 'lesson' ? plan.target_display_name : pathParts[1] || lesson.title;
+      const units = lesson.units.slice(0, plan.target_type === 'lesson' || plan.target_type === 'chapter' || plan.target_type === 'course' ? lesson.units.length : 1).map((unit) => {
+        const unitTitle = plan.target_type === 'unit' ? plan.target_display_name : pathParts[2] || unit.title;
+        const components = plan.target_type === 'component'
+          ? (unit.components ?? []).slice(0, 1).map(component => ({ ...component, title: plan.target_display_name }))
+          : unit.components;
+        return { ...unit, title: unitTitle, components };
+      });
+      return { ...lesson, title: lessonTitle, units };
+    });
+    return { ...chapter, title: chapterTitle, lessons };
+  });
+  return { ...proposal, chapters };
+}
+
 export async function applyLessonAuthorProposalToCourse(
   input: ApplyLessonAuthorProposalInput,
 ): Promise<ApplyLessonAuthorProposalResult> {
@@ -2140,6 +2455,51 @@ export async function applyLessonAuthorProposalToCourse(
       job_id: input.jobId ?? null,
       allowed_component_types: allowedComponentTypes.size,
     });
+    const baseMetadata = {
+      generated_by: 'lesson_author_ai',
+      job_id: input.jobId ?? null,
+      kb_id: input.kbId ?? null,
+      requested_by: input.requestedBy,
+      generated_at: new Date().toISOString(),
+    };
+    const operationPlan = input.proposal.operation_plan;
+    if (operationPlan
+      && !['rename', 'move', 'create', 'update_content'].includes(operationPlan.operation)) {
+      throw new AppError('Operation của đề xuất không được phép áp dụng.', 400);
+    }
+    if (operationPlan
+      && (operationPlan.operation === 'create' || operationPlan.operation === 'update_content')) {
+      await assertLessonAuthorOperationTargetFreshWithClient(client, input, operationPlan);
+    }
+
+    if (operationPlan
+      && (operationPlan.operation === 'rename' || operationPlan.operation === 'move')) {
+      const operationResult = await applyLessonAuthorOperationPlanWithClient(
+        client,
+        input,
+        operationPlan,
+      );
+      logLessonAuthorApply('operation_applied', {
+        course_id: input.courseId,
+        job_id: input.jobId ?? null,
+        operation: operationPlan.operation,
+        target_block_id: operationPlan.target_block_id,
+        updated_count: operationResult.updated_block_ids.length,
+      });
+      return operationResult;
+    }
+
+    if (operationPlan) {
+      const componentResult = await applyLessonAuthorComponentContentWithClient(
+        client,
+        input,
+        operationPlan,
+        input.proposal,
+        allowedComponentTypes,
+        baseMetadata,
+      );
+      if (componentResult) return componentResult;
+    }
 
     logLessonAuthorApply('root_lock_start', {
       course_id: input.courseId,
@@ -2179,16 +2539,20 @@ export async function applyLessonAuthorProposalToCourse(
     });
     const createdBlockIds: string[] = [];
     const updatedBlockIds: string[] = [];
-    const baseMetadata = {
-      generated_by: 'lesson_author_ai',
-      job_id: input.jobId ?? null,
-      kb_id: input.kbId ?? null,
-      requested_by: input.requestedBy,
-      generated_at: new Date().toISOString(),
-    };
+    const proposalForApply = operationPlan
+      ? lockLessonAuthorProposalToTarget(input.proposal, operationPlan)
+      : input.proposal;
+    const requireExistingChapter = Boolean(operationPlan);
+    const requireExistingLesson = operationPlan?.operation === 'update_content'
+      || operationPlan?.target_type === 'lesson'
+      || operationPlan?.target_type === 'unit'
+      || operationPlan?.target_type === 'component';
+    const requireExistingUnit = operationPlan?.operation === 'update_content'
+      || operationPlan?.target_type === 'unit'
+      || operationPlan?.target_type === 'component';
 
-    for (const [chapterIndex, chapter] of input.proposal.chapters.entries()) {
-      const chapterTitle = clampTitle(chapter.title, `Generated chapter ${chapterIndex + 1}`);
+    for (const [chapterIndex, chapter] of proposalForApply.chapters.entries()) {
+      const chapterTitle = clampStructuralTitle(chapter.title, `Generated chapter ${chapterIndex + 1}`);
       const chapterBlock = await getOrCreateGeneratedBlock(
         client,
         input.courseId,
@@ -2197,6 +2561,7 @@ export async function applyLessonAuthorProposalToCourse(
         chapterTitle,
         {},
         { ...baseMetadata, ai_index: chapterIndex },
+        { requireExisting: requireExistingChapter },
       );
       if (chapterBlock.created) createdBlockIds.push(chapterBlock.id);
       logLessonAuthorApply('chapter_ready', {
@@ -2207,7 +2572,7 @@ export async function applyLessonAuthorProposalToCourse(
       });
 
       for (const [lessonIndex, lesson] of chapter.lessons.entries()) {
-        const lessonTitle = clampTitle(lesson.title, `Generated lesson ${lessonIndex + 1}`);
+        const lessonTitle = clampStructuralTitle(lesson.title, `Generated lesson ${lessonIndex + 1}`);
         const sequentialBlock = await getOrCreateGeneratedBlock(
           client,
           input.courseId,
@@ -2216,6 +2581,7 @@ export async function applyLessonAuthorProposalToCourse(
           lessonTitle,
           {},
           { ...baseMetadata, ai_index: lessonIndex },
+          { requireExisting: requireExistingLesson },
         );
         if (sequentialBlock.created) createdBlockIds.push(sequentialBlock.id);
         logLessonAuthorApply('lesson_ready', {
@@ -2227,7 +2593,7 @@ export async function applyLessonAuthorProposalToCourse(
         });
 
         for (const [unitIndex, unit] of lesson.units.entries()) {
-          const unitTitle = clampTitle(unit.title, `Generated unit ${unitIndex + 1}`);
+          const unitTitle = clampStructuralTitle(unit.title, `Generated unit ${unitIndex + 1}`);
           const verticalBlock = await getOrCreateGeneratedBlock(
             client,
             input.courseId,
@@ -2236,6 +2602,7 @@ export async function applyLessonAuthorProposalToCourse(
             unitTitle,
             {},
             { ...baseMetadata, ai_index: unitIndex },
+            { requireExisting: requireExistingUnit },
           );
           if (verticalBlock.created) createdBlockIds.push(verticalBlock.id);
           logLessonAuthorApply('unit_ready', {

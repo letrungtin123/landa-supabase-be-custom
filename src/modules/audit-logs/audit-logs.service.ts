@@ -8,10 +8,35 @@ import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 
 export const AUDIT_LOG_RETENTION_DAYS = 30;
+/**
+ * Audit logs are queried frequently and can grow to millions of rows. Keep a
+ * deliberately small, fixed page-size contract instead of inheriting the
+ * generic list limit used by less sensitive endpoints.
+ */
+export const AUDIT_LOG_PAGE_SIZES = [5, 10, 15, 20] as const;
+export const DEFAULT_AUDIT_LOG_PAGE_SIZE = 10;
+type AuditLogPageSize = (typeof AUDIT_LOG_PAGE_SIZES)[number];
 const CURSOR_VERSION = 1;
 const MAX_LEGACY_AUDIT_OFFSET = 10_000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ACTIONS = new Set(['CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT']);
+
+/**
+ * Do not silently clamp this value. A malformed or manually crafted request
+ * must be visible to its caller, while an omitted value remains predictable.
+ */
+export function parseAuditLogPageSize(rawPageSize: unknown): AuditLogPageSize {
+  if (rawPageSize === undefined) return DEFAULT_AUDIT_LOG_PAGE_SIZE;
+
+  if (
+    typeof rawPageSize !== 'string'
+    || !/^(5|10|15|20)$/.test(rawPageSize)
+  ) {
+    throw new AppError('Số dòng mỗi trang chỉ có thể là 5, 10, 15 hoặc 20', 400);
+  }
+
+  return Number(rawPageSize) as AuditLogPageSize;
+}
 
 // Keep the persisted response-audience marker server-internal. API consumers
 // receive only the established audit DTO fields.
@@ -216,7 +241,8 @@ async function listLegacyAuditLogs(
   viewerRole: UserRole,
   queryParams: Record<string, unknown>,
 ) {
-  const { page, pageSize } = parsePagination(queryParams);
+  const { page } = parsePagination(queryParams);
+  const pageSize = parseAuditLogPageSize(queryParams.page_size);
   const offset = calcOffset(page, pageSize);
   assertLegacyAuditOffset(offset);
   const { params, conditions } = addBaseFilters(tenantId, viewerRole, queryParams);
@@ -249,7 +275,7 @@ async function listCursorAuditLogs(
   viewerRole: UserRole,
   queryParams: Record<string, unknown>,
 ) {
-  const { pageSize } = parsePagination(queryParams);
+  const pageSize = parseAuditLogPageSize(queryParams.page_size);
   const { params, conditions } = addBaseFilters(tenantId, viewerRole, queryParams);
   const cursor = decodeCursor(queryParams.cursor);
   if (cursor) {

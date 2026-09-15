@@ -21,6 +21,7 @@ import {
   type LessonAuthorComponentProposal,
   type LessonAuthorComponentType,
   type LessonAuthorLessonProposal,
+  type LessonAuthorOperationPlan,
   type LessonAuthorProposal,
   type LessonAuthorUnitProposal,
 } from '../course-authoring/course-authoring.service.js';
@@ -49,9 +50,20 @@ import {
   type RagChatMessage,
   type RagRetrievalDiagnostics,
 } from './ai-rag-client.service.js';
+import {
+  classifyLessonAuthorIntent,
+  detectLessonAuthorInputLocale,
+  extractRequestedTitle,
+  formatChapterTitle,
+  stripLessonAuthorStructuralPrefix,
+  stripLessonAuthorSourceRangeSuffix,
+  type LessonAuthorIntentPlan,
+} from './lesson-author-intent.logic.js';
+import { LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY } from './lesson-author-message.logic.js';
 import { runStoredInputFilter } from './input-filter/input-filter.service.js';
 import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
 import type { FilterResult } from './input-filter/core/index.js';
+import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -1020,12 +1032,7 @@ async function hydrateLessonAuthorProposalMessages(
   if (jobIds.length === 0) return messages;
 
   const result = await query<LessonAuthorMessageJobRow>(
-    `SELECT id::text, status, proposal, error_reason, created_block_ids, source_documents,
-            blueprint_id::text
-     FROM lesson_author_jobs
-     WHERE conversation_id = $1
-       AND tenant_id = $2
-       AND id = ANY($3::uuid[])`,
+    LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY,
     [conversationId, tenantId, jobIds],
   );
   const jobsById = new Map(result.rows.map(job => [job.id, job]));
@@ -1042,14 +1049,15 @@ async function hydrateLessonAuthorProposalMessages(
     const blueprintChapterIndex = readOptionalNonNegativeInteger(
       metadata.lesson_author_blueprint_chapter_index,
     );
+    const locale = readLessonAuthorLocale(metadata.locale);
 
     return {
       ...message,
-      content: formatProposalPreview(job.proposal, blueprintChapterIndex ?? 0),
+      content: formatProposalPreview(job.proposal, blueprintChapterIndex ?? 0, locale),
       metadata: {
         ...metadata,
         lesson_author_job_status: job.status,
-        lesson_author_proposal: toLessonAuthorDisplayProposal(job.proposal),
+        lesson_author_proposal: toLessonAuthorDisplayProposal(job.proposal, locale),
         lesson_author_error_reason: job.error_reason,
         lesson_author_created_block_ids: job.created_block_ids ?? [],
         lesson_author_source_documents: job.source_documents ?? [],
@@ -1158,6 +1166,26 @@ async function hydrateLessonAuthorBlueprintMessages(
   });
   if (!result) return messages;
   const blueprintsById = new Map(result.rows.map(blueprint => [blueprint.id, blueprint]));
+  const courseResult = await query<{ display_name: string }>(
+    `SELECT COALESCE(course_block.display_name, c.display_name) AS display_name
+     FROM chat_conversations cc
+     JOIN courses c ON c.id = cc.course_id
+     LEFT JOIN LATERAL (
+       SELECT cb.display_name
+       FROM course_blocks cb
+       WHERE cb.course_id = c.id
+         AND cb.block_type = 'course'
+         AND cb.deleted_at IS NULL
+       ORDER BY cb.sort_order ASC, cb.created_at ASC
+       LIMIT 1
+     ) course_block ON true
+     WHERE cc.id = $1
+       AND cc.tenant_id = $2
+       AND c.deleted_at IS NULL
+     LIMIT 1`,
+    [conversationId, tenantId],
+  );
+  const authoritativeCourseTitle = courseResult.rows[0]?.display_name?.trim() ?? '';
   const appliedChapterIndexesByBlueprintId = await getAppliedBlueprintChapterIndexes(
     conversationId,
     tenantId,
@@ -1173,14 +1201,15 @@ async function hydrateLessonAuthorBlueprintMessages(
     if (kind !== 'lesson_author_blueprint' || typeof blueprintId !== 'string') return message;
     const blueprint = blueprintsById.get(blueprintId);
     if (!blueprint) return message;
+    const hydratedBlueprint = withAuthoritativeCourseTitle(blueprint.blueprint, authoritativeCourseTitle);
 
     return {
       ...message,
-      content: formatBlueprintPreview(blueprint.blueprint, blueprint.quality_report),
+      content: formatBlueprintPreview(hydratedBlueprint, blueprint.quality_report, readLessonAuthorLocale(metadata.locale)),
       metadata: {
         ...metadata,
         lesson_author_blueprint_status: blueprint.status,
-        lesson_author_blueprint: blueprint.blueprint,
+        lesson_author_blueprint: hydratedBlueprint,
         lesson_author_blueprint_quality_report: blueprint.quality_report,
         lesson_author_blueprint_error_reason: blueprint.error_reason,
         lesson_author_blueprint_applied_chapter_indexes: appliedChapterIndexesByBlueprintId.get(blueprint.id) ?? [],
@@ -1565,6 +1594,14 @@ interface DraftCourseOutline {
   hasStructure: boolean;
   chapterCount: number;
   outline: string;
+}
+
+function withAuthoritativeCourseTitle(
+  blueprint: LessonAuthorBlueprint,
+  courseName: string,
+): LessonAuthorBlueprint {
+  const authoritativeTitle = courseName.trim();
+  return authoritativeTitle ? { ...blueprint, title: authoritativeTitle } : blueprint;
 }
 
 interface MentionContextRow {
@@ -2040,6 +2077,395 @@ async function getOutlineMentionContextRows(
   return result.rows;
 }
 
+interface LessonAuthorTargetRow {
+  id: string;
+  parent_id: string | null;
+  block_type: string;
+  display_name: string;
+  sort_order: number;
+  updated_at: string | Date;
+  data: unknown;
+  metadata: unknown;
+}
+
+interface CanonicalLessonAuthorTarget extends LessonAuthorTargetRow {
+  target_type: NonNullable<LessonAuthorOperationPlan['target_type']>;
+  path: string;
+  number_path: string | null;
+}
+
+interface LessonAuthorTargetChainRow extends LessonAuthorTargetRow {
+  depth: number;
+  sibling_index: number;
+}
+
+function lessonAuthorTargetType(blockType: string): NonNullable<LessonAuthorOperationPlan['target_type']> | null {
+  if (blockType === 'course') return 'course';
+  if (blockType === 'chapter') return 'chapter';
+  if (blockType === 'sequential') return 'lesson';
+  if (blockType === 'vertical') return 'unit';
+  return 'component';
+}
+
+function canonicalTargetSnapshot(target: LessonAuthorTargetRow): string {
+  return createHash('sha256').update(JSON.stringify({
+    id: target.id,
+    parent_id: target.parent_id,
+    block_type: target.block_type,
+    display_name: target.display_name,
+    sort_order: target.sort_order,
+    data: target.data ?? null,
+    metadata: target.metadata ?? null,
+    updated_at: new Date(target.updated_at).toISOString(),
+  })).digest('hex');
+}
+
+function buildCanonicalTargetRows(rows: LessonAuthorTargetRow[]): CanonicalLessonAuthorTarget[] {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  const children = new Map<string | null, LessonAuthorTargetRow[]>();
+  for (const row of rows) {
+    const list = children.get(row.parent_id) ?? [];
+    list.push(row);
+    children.set(row.parent_id, list);
+  }
+  for (const list of children.values()) {
+    list.sort((a, b) => a.sort_order - b.sort_order || a.id.localeCompare(b.id));
+  }
+
+  const roots = (children.get(null) ?? []).filter(row => row.block_type === 'course');
+  const startRows = roots.length > 0 ? roots : children.get(null) ?? [];
+  const result: CanonicalLessonAuthorTarget[] = [];
+  const visited = new Set<string>();
+
+  const walk = (row: LessonAuthorTargetRow, ancestorPath: string[], numberPath: number[]): void => {
+    if (visited.has(row.id)) return;
+    visited.add(row.id);
+    const type = lessonAuthorTargetType(row.block_type);
+    if (!type) return;
+    const nextPath = row.block_type === 'course' ? [] : [...ancestorPath, row.display_name || '(Không có tiêu đề)'];
+    const nextNumbers = row.block_type === 'course' ? [] : numberPath;
+    result.push({
+      ...row,
+      target_type: type,
+      path: nextPath.join(' / '),
+      number_path: nextNumbers.length > 0 ? nextNumbers.join('.') : null,
+    });
+
+    const childRows = children.get(row.id) ?? [];
+    const typeCounters = new Map<string, number>();
+    for (const child of childRows) {
+      const childType = child.block_type;
+      const childIndex = (typeCounters.get(childType) ?? 0) + 1;
+      typeCounters.set(childType, childIndex);
+      const childNumbers = childType === 'chapter'
+        ? [childIndex]
+        : childType === 'sequential'
+          ? [...nextNumbers.slice(0, 1), childIndex]
+          : childType === 'vertical'
+            ? [...nextNumbers.slice(0, 2), childIndex]
+            : nextNumbers;
+      walk(child, nextPath, childNumbers);
+    }
+  };
+
+  for (const root of startRows) walk(root, [], []);
+  for (const row of rows) {
+    if (!visited.has(row.id)) walk(row, [], []);
+  }
+  return result.filter(target => byId.has(target.id));
+}
+
+async function loadLessonAuthorTargetById(
+  ctx: ConversationContext,
+  blockId: string,
+): Promise<CanonicalLessonAuthorTarget | null> {
+  if (!ctx.courseId || !isValidUUID(blockId)) return null;
+  const result = await query<LessonAuthorTargetChainRow>(
+    `WITH RECURSIVE chain AS (
+       SELECT cb.id::text AS id, cb.parent_id::text AS parent_id, cb.block_type,
+              cb.display_name, cb.sort_order, cb.updated_at, cb.data, cb.metadata,
+              0 AS depth
+       FROM course_blocks cb
+       JOIN courses c ON c.id = cb.course_id
+       WHERE cb.id = $1
+         AND cb.course_id = $2
+         AND c.tenant_id = $3
+         AND c.deleted_at IS NULL
+         AND cb.deleted_at IS NULL
+       UNION ALL
+       SELECT parent.id::text, parent.parent_id::text, parent.block_type,
+              parent.display_name, parent.sort_order, parent.updated_at,
+              parent.data, parent.metadata, chain.depth + 1
+       FROM course_blocks parent
+       JOIN chain ON parent.id::text = chain.parent_id
+       WHERE parent.course_id = $2
+         AND parent.deleted_at IS NULL
+         AND chain.depth < 8
+     )
+     , ranked AS (
+       SELECT cb.id::text AS id,
+              ROW_NUMBER() OVER (
+                PARTITION BY cb.parent_id, cb.block_type
+                ORDER BY cb.sort_order ASC, cb.id ASC
+              )::int AS sibling_index
+       FROM course_blocks cb
+       WHERE cb.course_id = $2
+         AND cb.deleted_at IS NULL
+     )
+     SELECT chain.id, chain.parent_id, chain.block_type, chain.display_name,
+            chain.sort_order, chain.updated_at, chain.data, chain.metadata,
+            chain.depth, ranked.sibling_index
+     FROM chain
+     JOIN ranked ON ranked.id = chain.id
+     ORDER BY chain.depth DESC` ,
+    [blockId, ctx.courseId, ctx.tenantId],
+  );
+  const target = buildCanonicalTargetRows(result.rows).find(row => row.id === blockId);
+  if (!target) return null;
+
+  // The chain query intentionally avoids loading the whole course tree. Use
+  // the database-ranked sibling positions to preserve the real outline path
+  // (for example, a selected sixth chapter must remain Chapter 6).
+  const numberPath = result.rows
+    .filter(row => row.block_type !== 'course'
+      && ['chapter', 'sequential', 'vertical'].includes(row.block_type))
+    .sort((a, b) => b.depth - a.depth)
+    .map(row => String(row.sibling_index))
+    .join('.');
+
+  return {
+    ...target,
+    number_path: numberPath || target.number_path,
+  };
+}
+
+async function loadLessonAuthorTargetCandidates(
+  ctx: ConversationContext,
+  targetType: LessonAuthorOperationPlan['target_type'],
+): Promise<CanonicalLessonAuthorTarget[]> {
+  if (!ctx.courseId) return [];
+  // Structural resolution must stay bounded even when a course contains a
+  // very large number of learning components. Component targets are resolved
+  // separately because they are normally selected by @mention/ID.
+  const blockTypeFilter = targetType === 'component'
+    ? `block_type NOT IN ('course', 'chapter', 'sequential', 'vertical')`
+    : `block_type IN ('course', 'chapter', 'sequential', 'vertical')`;
+  const result = await query<LessonAuthorTargetRow>(
+    `SELECT id::text AS id, parent_id::text AS parent_id, block_type,
+            display_name, sort_order, updated_at,
+            NULL::jsonb AS data, NULL::jsonb AS metadata
+     FROM course_blocks
+     WHERE course_id = $1
+       AND deleted_at IS NULL
+       AND ${blockTypeFilter}
+     ORDER BY sort_order ASC, id ASC
+     LIMIT 10000`,
+    [ctx.courseId],
+  );
+  return buildCanonicalTargetRows(result.rows);
+}
+
+function findNumericTarget(
+  text: string,
+  targetType: LessonAuthorOperationPlan['target_type'],
+  candidates: CanonicalLessonAuthorTarget[],
+): CanonicalLessonAuthorTarget | null {
+  const patterns: Array<{ type: NonNullable<LessonAuthorOperationPlan['target_type']>; pattern: RegExp; depth: number }> = [
+    // The outline UI labels sequential as Mục/Section and vertical as
+    // Bài học/Lesson. Internal target types intentionally remain lesson/unit.
+    { type: 'unit', pattern: /(?:bai hoc|lesson|unit|vertical)\s*(?:so\s*)?(\d+\.\d+\.\d+)/i, depth: 3 },
+    // Older generated plans used "Bài 3.1" for the sequential node. Keep
+    // resolving that two-level form while the current UI displays Mục.
+    { type: 'lesson', pattern: /(?:muc|bai|section|module|sequential|lesson)\s*(?:so\s*)?(\d+\.\d+)(?!\.)/i, depth: 2 },
+    { type: 'chapter', pattern: /(?:chuong|chapter)\s*(?:so\s*)?(\d+)/i, depth: 1 },
+  ];
+  for (const item of patterns) {
+    if (targetType && targetType !== item.type) continue;
+    const match = text.match(item.pattern);
+    const numberPath = match?.[1];
+    if (!numberPath) continue;
+    const found = candidates.find(candidate => candidate.target_type === item.type && candidate.number_path === numberPath);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findNamedTargets(
+  text: string,
+  targetType: LessonAuthorOperationPlan['target_type'],
+  candidates: CanonicalLessonAuthorTarget[],
+): CanonicalLessonAuthorTarget[] {
+  const quoted = [...text.matchAll(/["“']([^"”']{2,180})["”']/g)]
+    .map(match => foldVietnameseText(match[1]));
+  const haystack = foldVietnameseText(text);
+  return candidates
+    .filter(candidate => !targetType || candidate.target_type === targetType)
+    .filter(candidate => {
+      const title = foldVietnameseText(candidate.display_name);
+      return quoted.includes(title) || (title.length >= 4 && haystack.includes(title));
+    })
+    .sort((a, b) => b.display_name.length - a.display_name.length);
+}
+
+async function resolveLessonAuthorOperationPlan(
+  ctx: ConversationContext,
+  plan: LessonAuthorIntentPlan,
+  userPrompt: string,
+  mentions: LessonAuthorOutlineMention[],
+): Promise<LessonAuthorOperationPlan | LessonAuthorIntentPlan> {
+  if (plan.operation === 'answer' || plan.operation === 'course_blueprint' || plan.operation === 'clarify') return plan;
+  if (plan.operation === 'move') {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Thao tác di chuyển cần chỉ rõ node đích; chưa tạo proposal để tránh đổi sai cấu trúc.'],
+    };
+  }
+
+  let target: CanonicalLessonAuthorTarget | null = null;
+  if (mentions[0]?.block_id) {
+    target = await loadLessonAuthorTargetById(ctx, mentions[0].block_id);
+  } else {
+    const candidates = await loadLessonAuthorTargetCandidates(ctx, plan.target_type);
+    target = findNumericTarget(foldVietnameseText(userPrompt), plan.target_type, candidates);
+    if (!target) {
+      const named = findNamedTargets(userPrompt, plan.target_type, candidates);
+      if (named.length === 1) target = named[0];
+      else if (named.length > 1) {
+        return {
+          ...plan,
+          operation: 'clarify',
+          ambiguity_reasons: ['Có nhiều node trong outline trùng tên; cần chọn đúng một node.'],
+        };
+      }
+    }
+    if (target) {
+      // Candidate lookup intentionally reads only structural columns. Reload
+      // the selected row with its full payload once for a precise snapshot.
+      target = await loadLessonAuthorTargetById(ctx, target.id);
+    }
+  }
+
+  if (!target || (plan.target_type && plan.target_type !== target.target_type)) {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Không xác định được đúng node trong cây outline cho yêu cầu này.'],
+    };
+  }
+
+  if (plan.operation === 'create' && target.target_type === 'component') {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Không thể thêm node con vào một component. Hãy chọn Chương, Mục hoặc Bài học để thêm học liệu; nếu muốn sửa component này, hãy nói rõ sửa nội dung.'],
+    };
+  }
+  if (plan.operation === 'create' && target.target_type === 'course') {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Không thể thêm nội dung trực tiếp vào toàn khóa học. Hãy chọn Chương, Mục hoặc Bài học cụ thể; nếu muốn thiết kế toàn khóa học, hãy yêu cầu Bản thiết kế khóa học.'],
+    };
+  }
+  if (plan.operation === 'update_content' && target.target_type === 'course') {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Yêu cầu cập nhật toàn bộ khóa học cần được chia rõ theo Chương, Mục hoặc Bài học để tránh ghi đè ngoài phạm vi.'],
+    };
+  }
+  if (plan.operation === 'delete' && target.target_type === 'course') {
+    return {
+      ...plan,
+      operation: 'clarify',
+      requires_confirmation: false,
+      ambiguity_reasons: ['Không hỗ trợ xóa toàn bộ khóa học từ Chuyên gia bài học. Hãy thực hiện thao tác này tại màn hình quản trị khóa học.'],
+    };
+  }
+
+  const explicitRequestedTitle = plan.operation === 'rename'
+    ? (plan.requested_title ?? extractRequestedTitle(userPrompt))
+    : plan.requested_title ?? null;
+  const requestedTitle = explicitRequestedTitle
+    ? stripLessonAuthorStructuralPrefix(stripLessonAuthorSourceRangeSuffix(explicitRequestedTitle))
+    : plan.operation === 'rename' && plan.title_strategy === 'prefix_chapter_number' && target.target_type === 'chapter'
+      ? formatChapterTitle(target.display_name, target.number_path ?? '')
+      : null;
+  if (plan.operation === 'rename' && !requestedTitle) {
+    return {
+      ...plan,
+      operation: 'clarify',
+      ambiguity_reasons: ['Chưa có tên tiêu đề mới cần áp dụng.'],
+    };
+  }
+
+  return {
+    ...plan,
+    target_block_id: target.id,
+    target_path: target.path || target.display_name,
+    target_number_path: target.number_path,
+    target_display_name: target.display_name,
+    target_updated_at: new Date(target.updated_at).toISOString(),
+    target_snapshot: canonicalTargetSnapshot(target),
+    target_type: target.target_type,
+    requested_title: requestedTitle,
+  };
+}
+
+function formatLessonAuthorIntentClarification(
+  plan: LessonAuthorIntentPlan,
+  locale: 'vi' | 'en',
+): string {
+  const rawReason = plan.ambiguity_reasons[0] || '';
+  const reason = locale === 'en'
+    ? rawReason
+      .replace('Chưa có tên tiêu đề mới cần áp dụng.', 'No new title was provided.')
+      .replace('Chưa xác định được phạm vi Chương/Mục/Bài học cần chỉnh sửa.', 'The Chapter, Section, or Lesson scope is not specific enough.')
+      .replace('Yêu cầu chứa nhiều thao tác thay đổi. Hãy gửi từng thao tác riêng để tránh áp dụng sai phạm vi.', 'This request contains multiple changes. Send each change separately to avoid applying the wrong scope.')
+      .replace('Không xác định được đúng node trong cây outline cho yêu cầu này.', 'I could not identify one exact node in the outline.')
+    : rawReason;
+  if (locale === 'en') {
+    if (plan.fields.includes('title')) return `I can rename the selected outline item, but I need the new title. ${reason || 'Please provide the new title.'}`;
+    return `I could not identify one exact outline item for this change. ${reason || 'Please select one Chapter, Section, Lesson, or component and try again.'}`;
+  }
+  if (plan.fields.includes('title')) return `Mình có thể đổi tiêu đề node đã chọn, nhưng cần tên mới. ${reason || 'Hãy nhập tên tiêu đề mới.'}`;
+  return `Mình chưa xác định được đúng một node trong cây outline để thực hiện yêu cầu. ${reason || 'Hãy chọn một Chương, Mục, Bài học hoặc component rồi thử lại.'}`;
+}
+
+function buildLessonAuthorOperationInstruction(plan: LessonAuthorIntentPlan): string {
+  const targetLabel = plan.target_type === 'chapter'
+    ? 'Chương/Chapter'
+    : plan.target_type === 'lesson'
+      ? 'Mục/Section'
+      : plan.target_type === 'unit'
+        ? 'Bài học/Lesson'
+        : plan.target_type || 'outline node';
+  if (plan.operation === 'update_content' && plan.target_block_id) {
+    return [
+      'SERVER-RESOLVED OPERATION: UPDATE_CONTENT.',
+      `User-facing target level: ${targetLabel}.`,
+      'Exact target: ' + plan.target_type + ' "' + plan.target_display_name + '" at "' + plan.target_path + '" (id=' + plan.target_block_id + ').',
+      'Update only the selected target scope. Do not create a new chapter, lesson, or unit and do not rename any structural title.',
+      'Preserve the exact existing Chương/Mục/Bài học titles from the target path. Return only the smallest chapter -> section -> lesson chain needed to carry the requested content update.',
+      plan.target_type === 'component'
+        ? 'The selected component is authoritative. Return exactly one component of the same type; the server will update that component by ID.'
+        : 'Keep all unrelated outline branches out of the proposal. Existing components not explicitly requested must not be copied or replaced.',
+    ].join('\n');
+  }
+  if (plan.operation === 'create' && plan.target_block_id) {
+    return [
+      'SERVER-RESOLVED OPERATION: CREATE_CONTENT.',
+      `User-facing parent level: ${targetLabel}.`,
+      'Exact parent target: ' + plan.target_type + ' "' + plan.target_display_name + '" at "' + plan.target_path + '" (id=' + plan.target_block_id + ').',
+      'Add only the requested learning content under this target. Do not create a new top-level chapter and do not rename existing structural titles.',
+      'Preserve exact existing Chương/Mục/Bài học titles in the selected path and return only the smallest required chain.',
+      'Do not copy unrelated existing components into the proposal; FAQ components must remain last in each unit.',
+    ].join('\n');
+  }
+  return '';
+}
+
 function formatMentionContextRowsForPrompt(rows: MentionContextRow[]): string {
   if (rows.length === 0) return '';
 
@@ -2365,7 +2791,10 @@ function getLessonAuthorOutputSchemaHint(): string {
     'Use Vietnamese content by default. Return JSON only.',
     'Structural integrity is mandatory: every lesson must contain at least one non-empty unit, and every unit must contain at least one valid learning component. If output space is limited, shorten the text or use one concise HTML component; never omit units or return an empty lesson.',
     'Title fields must be plain labels without chapter, lesson, or unit numbering. The system adds structural numbering from the selected course chapter.',
+    'Structural title fields must contain semantic names only. Never include trailing source-range metadata such as "(từ slide 30 đến slide 32)", "(trang 30 đến trang 32)", or "(from slide 30 to slide 32)" in chapter, lesson, or unit titles. Keep source_refs and source evidence separately.',
     'When source outline references are supplied, use only those exact refs at chapter, lesson, or unit scope. Omit source_refs when none are supplied; never invent refs.',
+    'The server classifies the request before generation. Distinguish rename-title requests from content updates: a rename must not generate replacement content, and a content update must not rename structural nodes.',
+    'Never turn an edit, rename, or delete request into a new course/chapter proposal. If the server does not provide an exact target scope, ask for clarification through the server flow and do not guess.',
   ].join('\n');
 }
 
@@ -2376,6 +2805,7 @@ function getLessonAuthorBlueprintSchemaHint(): string {
     'When SOURCE_OUTLINE provides source_refs, use only those exact refs for the supporting chapter/lesson. Omit source_refs when no source outline is provided; never invent refs.',
     'This is a review-only course blueprint. Do not return HTML, CMS blocks, component payloads, or detailed lesson content.',
     'Use Vietnamese content by default. Return JSON only.',
+    'Structural chapter and lesson titles must contain semantic names only; omit trailing source-range metadata such as "(từ slide 30 đến slide 32)". Preserve source_refs for provenance instead of putting ranges in titles.',
   ].join('\n');
 }
 
@@ -2400,6 +2830,8 @@ function getLessonAuthorBlueprintSystemInstruction(
     storedPromptBlock,
     'Treat source material as evidence only. Ground factual statements in it and list missing business inputs as assumptions rather than inventing them.',
     'When the source contains a table of contents or numbered headings, preserve its order and terminology as the initial course structure. If it has no reliable outline, infer a conservative thematic structure and state that limitation in assumptions. Never claim full coverage when only partial evidence was retrieved.',
+    'The existing course title in COURSE_CONTEXT is authoritative CMS data. Copy it exactly into the top-level title; never invent, shorten, translate, or rename the course title.',
+    'Structural titles must contain semantic names only. Omit trailing source-range metadata such as "(từ slide 30 đến slide 32)", "(trang 30 đến trang 32)", or "(from slide 30 to slide 32)" from chapter, lesson, and unit titles; preserve source_refs and source evidence separately.',
     'Keep the JSON concise: use short but meaningful text, avoid repeating source passages, and include only the structure required by the schema.',
     locale === 'vi'
       ? 'Trả toàn bộ giá trị văn bản trong JSON bằng tiếng Việt có dấu.'
@@ -2504,12 +2936,13 @@ function readOptionalNonNegativeInteger(value: unknown): number | null {
 type LessonAuthorTitleLevel = 'chapter' | 'lesson' | 'unit';
 
 function normalizeLessonAuthorTitle(value: unknown, level: LessonAuthorTitleLevel, fallback: string): string {
-  const original = readString(value, fallback, 180);
+  const safeFallback = stripLessonAuthorSourceRangeSuffix(readString(fallback, fallback, 250)).slice(0, 180);
+  const original = stripLessonAuthorSourceRangeSuffix(readString(value, safeFallback, 250)).slice(0, 180);
   const pattern = level === 'chapter'
     ? /^(?:chương|chuong|chapter|phần|phan|part)\s+[0-9ivxlcdm]+(?:\s*[:.)-]\s*|\s+)/i
     : level === 'lesson'
-      ? /^(?:bài|bai|lesson)\s+\d+(?:\.\d+)*(?:\s*[:.)-]\s*|\s+)/i
-      : /^(?:mục|muc|unit)\s+\d+(?:\.\d+)*(?:\s*[:.)-]\s*|\s+)/i;
+      ? /^(?:mục|muc|section|module|sequential|bài|bai|lesson)\s+\d+(?:\.\d+)*(?:\s*[:.)-]\s*|\s+)/i
+      : /^(?:bài\s+học|bai\s+hoc|lesson|unit|vertical|mục|muc)\s+\d+(?:\.\d+)*(?:\s*[:.)-]\s*|\s+)/i;
 
   let title = original;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -2517,7 +2950,7 @@ function normalizeLessonAuthorTitle(value: unknown, level: LessonAuthorTitleLeve
     if (!next || next === title) break;
     title = next;
   }
-  return title || original;
+  return title || safeFallback || original;
 }
 
 function readScalarString(value: unknown, fallback: string, maxLength: number): string {
@@ -3360,7 +3793,7 @@ function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal 
         }
 
         const unit = asRecord(unitValue);
-        const unitTitle = normalizeLessonAuthorTitle(unit.title, 'unit', `Unit ${unitIndex + 1}`);
+        const unitTitle = normalizeLessonAuthorTitle(unit.title, 'unit', `Nội dung bài học ${unitIndex + 1}`);
         const components = normalizeLessonAuthorUnitComponents(unit, unitTitle);
         componentCount += components.length;
         if (componentCount > MAX_PROPOSAL_COMPONENTS) {
@@ -3375,7 +3808,7 @@ function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal 
       });
 
       return {
-        title: normalizeLessonAuthorTitle(lesson.title, 'lesson', `Lesson ${lessonIndex + 1}`),
+        title: normalizeLessonAuthorTitle(lesson.title, 'lesson', `Nội dung mục ${lessonIndex + 1}`),
         units,
         source_refs: readStringArray(lesson.source_refs, 8, 32),
       };
@@ -3425,7 +3858,9 @@ function normalizeLessonAuthorBlueprint(rawValue: unknown): LessonAuthorBlueprin
 
   const chapters = rawChapters.map((chapterValue, chapterIndex): LessonAuthorBlueprintChapter => {
     const chapter = asRecord(chapterValue);
-    const title = readString(chapter.title, `Chương ${chapterIndex + 1}`, 180);
+    const title = stripLessonAuthorSourceRangeSuffix(
+      readString(chapter.title, `Chương ${chapterIndex + 1}`, 250),
+    ).slice(0, 180);
     const rawLessons = Array.isArray(chapter.lessons) ? chapter.lessons : [];
     if (rawLessons.length === 0) {
       throw new Error(`Blueprint chapter ${chapterIndex + 1} must contain lessons`);
@@ -3436,7 +3871,9 @@ function normalizeLessonAuthorBlueprint(rawValue: unknown): LessonAuthorBlueprin
 
     const lessons = rawLessons.map((lessonValue, lessonIndex): LessonAuthorBlueprintLesson => {
       const lesson = asRecord(lessonValue);
-      const lessonTitle = readString(lesson.title, `Bài học ${lessonIndex + 1}`, 180);
+      const lessonTitle = stripLessonAuthorSourceRangeSuffix(
+        readString(lesson.title, `Bài học ${lessonIndex + 1}`, 250),
+      ).slice(0, 180);
       const activities = readStringArray(
         lesson.learning_activities ?? lesson.activities,
         5,
@@ -3604,7 +4041,16 @@ function requestedComponentLimit(userPrompt: string): number | null {
   return /(^|\b)(1|mot|one|single)(\b|$)/i.test(folded) ? 1 : null;
 }
 
-function componentTypeLabel(type: string): string {
+function componentTypeLabel(type: string, locale: 'vi' | 'en' = 'vi'): string {
+  if (locale === 'en') {
+    if (type === 'html') return 'Theory content';
+    if (type === 'problem') return 'Knowledge check';
+    if (type === 'la_faq') return 'FAQ';
+    if (type === 'la_sortable') return 'Ordering activity';
+    if (type === 'la_crossword') return 'Crossword';
+    if (type === 'la_diagram') return 'Visual diagram';
+    return type;
+  }
   if (type === 'html') return 'Nội dung lý thuyết';
   if (type === 'problem') return 'Câu hỏi kiểm tra';
   if (type === 'la_faq') return 'Hỏi đáp';
@@ -3614,27 +4060,27 @@ function componentTypeLabel(type: string): string {
   return type;
 }
 
-function formatComponentTypeLabels(types: Iterable<string>): string {
+function formatComponentTypeLabels(types: Iterable<string>, locale: 'vi' | 'en' = 'vi'): string {
   const labels = Array.from(types)
-    .map(type => componentTypeLabel(type))
+    .map(type => componentTypeLabel(type, locale))
     .filter(Boolean);
   return Array.from(new Set(labels)).join(', ');
 }
 
-function humanizeLessonAuthorPlanText(value: string): string {
+function humanizeLessonAuthorPlanText(value: string, locale: 'vi' | 'en' = 'vi'): string {
   return value
-    .replace(/\bla_diagram\b/g, componentTypeLabel('la_diagram'))
-    .replace(/\bla_faq\b/g, componentTypeLabel('la_faq'))
-    .replace(/\bla_sortable\b/g, componentTypeLabel('la_sortable'))
-    .replace(/\bla_crossword\b/g, componentTypeLabel('la_crossword'))
-    .replace(/\bproblem\b/g, componentTypeLabel('problem'))
-    .replace(/\bhtml\b/g, componentTypeLabel('html'));
+    .replace(/\bla_diagram\b/g, componentTypeLabel('la_diagram', locale))
+    .replace(/\bla_faq\b/g, componentTypeLabel('la_faq', locale))
+    .replace(/\bla_sortable\b/g, componentTypeLabel('la_sortable', locale))
+    .replace(/\bla_crossword\b/g, componentTypeLabel('la_crossword', locale))
+    .replace(/\bproblem\b/g, componentTypeLabel('problem', locale))
+    .replace(/\bhtml\b/g, componentTypeLabel('html', locale));
 }
 
-function toLessonAuthorDisplayProposal(proposal: LessonAuthorProposal): LessonAuthorProposal {
+function toLessonAuthorDisplayProposal(proposal: LessonAuthorProposal, locale: 'vi' | 'en' = 'vi'): LessonAuthorProposal {
   return {
     ...proposal,
-    summary: humanizeLessonAuthorPlanText(proposal.summary),
+    summary: humanizeLessonAuthorPlanText(proposal.summary, locale),
   };
 }
 
@@ -3672,10 +4118,10 @@ function constrainAdditiveComponentProposal(
     .filter(chapter => chapter.lessons.length > 0);
 
   if (keptCount === 0 || chapters.length === 0) {
-    throw new Error(`AI proposal did not include requested component type: ${Array.from(requestedTypes).map(componentTypeLabel).join(', ')}`);
+    throw new Error(`AI proposal did not include requested component type: ${Array.from(requestedTypes).map(type => componentTypeLabel(type, 'vi')).join(', ')}`);
   }
 
-  const labels = Array.from(requestedTypes).map(componentTypeLabel).join(', ');
+  const labels = Array.from(requestedTypes).map(type => componentTypeLabel(type, 'vi')).join(', ');
   const target = outlineMentions[0]?.display_name || 'target đã chọn';
   return {
     summary: `Đề xuất thêm ${keptCount} component ${labels} vào "${target}". Không thay thế, xoá, hoặc ghi đè component hiện có.`,
@@ -3688,8 +4134,15 @@ function sanitizeInternalErrorReason(err: any): string {
   return redactGeminiApiKeys(String(msg)).slice(0, 2000);
 }
 
-function formatLessonAuthorFailurePreview(err: any): string {
+function formatLessonAuthorFailurePreview(err: any, locale: 'vi' | 'en' = 'vi'): string {
   const safeError = sanitizeGeminiError(err).message;
+  if (locale === 'en') {
+    return [
+      'I could not create a valid lesson proposal for this request.',
+      `Reason: ${safeError}`,
+      'No change has been applied to the lesson structure. Please make the target or learning goal more specific and try again.',
+    ].filter(Boolean).join('\n\n');
+  }
   return [
     'Mình chưa thể tạo đề xuất nội dung khóa học cho yêu cầu này.',
     `Lý do: ${safeError}`,
@@ -3933,21 +4386,175 @@ function getProposalMetrics(proposal: LessonAuthorProposal): { lessons: number; 
   return { lessons, units, components };
 }
 
-function formatProposalPreview(proposal: LessonAuthorProposal, chapterIndexOffset = 0): string {
-  const pendingSummary = humanizeLessonAuthorPlanText(proposal.summary)
-    .replace(/^đã tạo/i, 'Đề xuất tạo')
-    .replace(/^da tao/i, 'Đề xuất tạo')
-    .replace(/^đã cập nhật/i, 'Đề xuất cập nhật')
-    .replace(/^da cap nhat/i, 'Đề xuất cập nhật');
+function formatLessonAuthorActionPreview(
+  plan: LessonAuthorOperationPlan,
+  locale: 'vi' | 'en',
+): string {
+  const targetLabel = plan.target_type === 'chapter'
+    ? locale === 'vi' ? 'Chương' : 'Chapter'
+    : plan.target_type === 'lesson'
+      ? locale === 'vi' ? 'Mục' : 'Section'
+      : plan.target_type === 'unit'
+        ? locale === 'vi' ? 'Bài học' : 'Lesson'
+        : locale === 'vi' ? 'Component' : 'Component';
+  if (locale === 'en') {
+    const action = plan.operation === 'rename'
+      ? `Rename ${targetLabel} "${plan.target_display_name}" to "${plan.requested_title}".`
+      : plan.operation === 'delete'
+        ? `Delete ${targetLabel} "${plan.target_display_name}" and its nested content.`
+        : `Move ${targetLabel} "${plan.target_display_name}".`;
+    return [
+      'I prepared a change proposal. The course will not be changed until you click Apply.',
+      '',
+      '**Change summary**',
+      `- ${action}`,
+      `- **Target:** ${plan.target_path}`,
+      plan.operation === 'delete' ? '- **Confirmation required:** this is a destructive action.' : '',
+      '',
+      'Review the target carefully, then click **Apply** to confirm.',
+    ].filter(Boolean).join('\n');
+  }
+  const action = plan.operation === 'rename'
+    ? `Đổi tên ${targetLabel} "${plan.target_display_name}" thành "${plan.requested_title}".`
+    : plan.operation === 'delete'
+      ? `Xóa ${targetLabel} "${plan.target_display_name}" và toàn bộ nội dung bên trong.`
+      : `Thay đổi vị trí của ${targetLabel} "${plan.target_display_name}".`;
+  return [
+    'Mình đã chuẩn bị đề xuất thay đổi. Khóa học chưa bị thay đổi cho đến khi bạn bấm Áp dụng.',
+    '',
+    '**Tóm tắt thay đổi**',
+    `- ${action}`,
+    `- **Vị trí:** ${plan.target_path}`,
+    plan.operation === 'delete' ? '- **Cần xác nhận:** đây là thao tác xóa và không thể xem nhẹ.' : '',
+    '',
+    'Kiểm tra đúng node, sau đó bấm **Áp dụng** để xác nhận.',
+  ].filter(Boolean).join('\n');
+}
+
+async function assertLessonAuthorActionPlanFresh(
+  plan: LessonAuthorOperationPlan,
+  courseId: string,
+  tenantId: string,
+): Promise<void> {
+  const result = await query<{
+    id: string;
+    parent_id: string | null;
+    block_type: string;
+    display_name: string;
+    sort_order: number;
+    data: unknown;
+    metadata: unknown;
+    updated_at: string | Date;
+  }>(
+    `SELECT cb.id::text AS id, cb.parent_id::text AS parent_id, cb.block_type,
+            cb.display_name, cb.sort_order, cb.data, cb.metadata, cb.updated_at
+     FROM course_blocks cb
+     JOIN courses c ON c.id = cb.course_id
+     WHERE cb.id = $1
+       AND cb.course_id = $2
+       AND c.tenant_id = $3
+       AND c.deleted_at IS NULL
+       AND cb.deleted_at IS NULL
+     LIMIT 1`,
+    [plan.target_block_id, courseId, tenantId],
+  );
+  const target = result.rows[0];
+  if (!target) throw new AppError('Node trong cây outline không còn tồn tại.', 409);
+  if (plan.target_snapshot && canonicalTargetSnapshot(target) !== plan.target_snapshot) {
+    throw new AppError('Node trong cây outline đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
+  }
+}
+
+function readStoredLessonAuthorOperationPlan(value: unknown): LessonAuthorOperationPlan | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const plan = value as Partial<LessonAuthorOperationPlan>;
+  const operations = new Set(['rename', 'delete', 'move', 'create', 'update_content']);
+  const targetTypes = new Set(['course', 'chapter', 'lesson', 'unit', 'component']);
+  const fields = new Set(['title', 'content', 'components', 'sort_order']);
+  const targetSources = new Set(['mention', 'explicit_reference', 'conversation_context', 'none']);
+  if (plan.version !== 1) return null;
+  if (!operations.has(String(plan.operation))) return null;
+  if (!targetTypes.has(String(plan.target_type))) return null;
+  if (!isValidUUID(String(plan.target_block_id))) return null;
+  if (typeof plan.target_path !== 'string' || !plan.target_path.trim()) return null;
+  if (typeof plan.target_display_name !== 'string' || !plan.target_display_name.trim()) return null;
+  if (typeof plan.target_updated_at !== 'string' || !plan.target_updated_at.trim() || Number.isNaN(Date.parse(plan.target_updated_at))) return null;
+  if (typeof plan.confidence !== 'number' || !Number.isFinite(plan.confidence) || plan.confidence < 0 || plan.confidence > 1) return null;
+  if (typeof plan.requires_confirmation !== 'boolean') return null;
+  if (typeof plan.target_source !== 'string' || !targetSources.has(plan.target_source)) return null;
+  if (plan.title_strategy !== undefined && plan.title_strategy !== null
+    && plan.title_strategy !== 'prefix_chapter_number') return null;
+  if (!Array.isArray(plan.fields) || plan.fields.length === 0 || !plan.fields.every(field => typeof field === 'string' && fields.has(field))) return null;
+  if (!Array.isArray(plan.signals) || !plan.signals.every(signal => typeof signal === 'string')) return null;
+  if (!Array.isArray(plan.ambiguity_reasons) || !plan.ambiguity_reasons.every(reason => typeof reason === 'string')) return null;
+  if (plan.target_snapshot !== undefined && plan.target_snapshot !== null
+    && (typeof plan.target_snapshot !== 'string' || !/^[0-9a-f]{64}$/i.test(plan.target_snapshot))) return null;
+  if (plan.target_number_path !== undefined && plan.target_number_path !== null
+    && (typeof plan.target_number_path !== 'string' || !/^\d+(?:\.\d+){0,2}$/.test(plan.target_number_path))) return null;
+  if (plan.operation === 'delete' && plan.requires_confirmation !== true) return null;
+  if (plan.operation === 'rename'
+    && (typeof plan.requested_title !== 'string' || !plan.requested_title.trim() || plan.requested_title.trim().length > 180)) return null;
+  return plan as LessonAuthorOperationPlan;
+}
+
+function readLessonAuthorLocale(value: unknown): 'vi' | 'en' {
+  return value === 'en' ? 'en' : 'vi';
+}
+
+function formatProposalPreview(
+  proposal: LessonAuthorProposal,
+  chapterIndexOffset = 0,
+  locale: 'vi' | 'en' = 'vi',
+): string {
+  if (proposal.operation_plan
+    && (proposal.operation_plan.operation === 'rename'
+      || proposal.operation_plan.operation === 'delete'
+      || proposal.operation_plan.operation === 'move')) {
+    return formatLessonAuthorActionPreview(proposal.operation_plan, locale);
+  }
+  const pendingSummary = humanizeLessonAuthorPlanText(proposal.summary, locale)
+    .replace(/^đã tạo/i, locale === 'en' ? 'Proposed creation' : 'Đề xuất tạo')
+    .replace(/^da tao/i, locale === 'en' ? 'Proposed creation' : 'Đề xuất tạo')
+    .replace(/^đã cập nhật/i, locale === 'en' ? 'Proposed update' : 'Đề xuất cập nhật')
+    .replace(/^da cap nhat/i, locale === 'en' ? 'Proposed update' : 'Đề xuất cập nhật');
   const metrics = getProposalMetrics(proposal);
+  const resolvedChapterNumber = proposal.operation_plan?.target_number_path?.match(/^\d+/)?.[0];
+  const effectiveChapterIndexOffset = resolvedChapterNumber
+    ? Math.max(0, Number(resolvedChapterNumber) - 1)
+    : chapterIndexOffset;
+  const copy = locale === 'en'
+    ? {
+      intro: 'I prepared a detailed proposal. The course will not change until you click Apply.',
+      summary: 'Summary',
+      scope: `**Scope:** ${proposal.chapters.length} chapter(s), ${metrics.lessons} section(s), ${metrics.units} lesson(s).`,
+      details: 'Proposed learning content',
+      chapter: 'Chapter',
+      lesson: 'Section',
+      unit: 'Lesson',
+      material: 'Expected learning materials',
+      clipped: 'Details are shortened in this preview to keep the conversation readable.',
+      review: 'Review the proposal, then click **Apply** to update the lesson structure.',
+    }
+    : {
+      intro: 'Mình đã chuẩn bị bản đề xuất chi tiết. Nội dung khóa học chỉ được cập nhật sau khi bạn bấm Áp dụng.',
+      summary: 'Tóm tắt',
+      scope: `**Phạm vi:** ${proposal.chapters.length} chương, ${metrics.lessons} mục, ${metrics.units} bài học.`,
+      details: 'Chi tiết nội dung đề xuất',
+      chapter: 'Chương',
+      lesson: 'Mục',
+      unit: 'Bài học',
+      material: 'Học liệu dự kiến',
+      clipped: 'Chi tiết học liệu được rút gọn trong bản xem trước để cuộc trò chuyện gọn hơn.',
+      review: 'Kiểm tra bản đề xuất, sau đó bấm **Áp dụng** để cập nhật cấu trúc bài học.',
+    };
   const lines: string[] = [
-    'Mình đã chuẩn bị bản đề xuất chi tiết. Nội dung khóa học chỉ được cập nhật sau khi bạn bấm Áp dụng.',
+    copy.intro,
     '',
-    '**Tóm tắt**',
+    `**${copy.summary}**`,
     `- ${pendingSummary}`,
-    `- **Phạm vi:** ${proposal.chapters.length} chương, ${metrics.lessons} bài học, ${metrics.units} mục nội dung.`,
+    `- ${copy.scope}`,
     '',
-    '**Chi tiết nội dung đề xuất**',
+    `**${copy.details}**`,
   ];
   let detailedUnitCount = 0;
   let clipped = false;
@@ -3966,31 +4573,33 @@ function formatProposalPreview(proposal: LessonAuthorProposal, chapterIndexOffse
   };
 
   proposal.chapters.forEach((chapter, chapterIndex) => {
-    const displayChapterNumber = chapterIndexOffset + chapterIndex + 1;
+    const displayChapterNumber = effectiveChapterIndexOffset + chapterIndex + 1;
     pushLine('');
-    pushLine(`- **Chương ${displayChapterNumber}: ${normalizeLessonAuthorTitle(chapter.title, 'chapter', `Chương ${displayChapterNumber}`)}**`);
+    pushLine(`- **${copy.chapter} ${displayChapterNumber}: ${normalizeLessonAuthorTitle(chapter.title, 'chapter', `${copy.chapter} ${displayChapterNumber}`)}**`);
     chapter.lessons.forEach((lesson, lessonIndex) => {
       const componentTypes = new Set(
         lesson.units.flatMap(unit => (unit.components ?? []).map(component => component.type)),
       );
-      const typeText = formatComponentTypeLabels(componentTypes) || componentTypeLabel('html');
-      pushLine(`  - **Bài ${displayChapterNumber}.${lessonIndex + 1}: ${normalizeLessonAuthorTitle(lesson.title, 'lesson', `Bài ${displayChapterNumber}.${lessonIndex + 1}`)}**`);
-      pushLine(`    - Gồm ${lesson.units.length} mục nội dung; hình thức học liệu: ${typeText}.`);
+      const typeText = formatComponentTypeLabels(componentTypes, locale) || componentTypeLabel('html', locale);
+      pushLine(`  - **${copy.lesson} ${displayChapterNumber}.${lessonIndex + 1}: ${normalizeLessonAuthorTitle(lesson.title, 'lesson', `${copy.lesson} ${displayChapterNumber}.${lessonIndex + 1}`)}**`);
+      pushLine(locale === 'en'
+        ? `    - Contains ${lesson.units.length} lesson(s); learning formats: ${typeText}.`
+        : `    - Gồm ${lesson.units.length} bài học; hình thức học liệu: ${typeText}.`);
       lesson.units.forEach((unit, unitIndex) => {
         const components = unit.components ?? [];
-        const unitTypes = formatComponentTypeLabels(components.map(component => component.type)) || componentTypeLabel('html');
+        const unitTypes = formatComponentTypeLabels(components.map(component => component.type), locale) || componentTypeLabel('html', locale);
         const shouldShowDetails = detailedUnitCount < MAX_DETAILED_PLAN_UNITS;
-        pushLine(`    - **Mục ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}: ${normalizeLessonAuthorTitle(unit.title, 'unit', `Mục ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}`)}**`);
-        pushLine(`      - Học liệu dự kiến: ${unitTypes}.`);
+        pushLine(`    - **${copy.unit} ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}: ${normalizeLessonAuthorTitle(unit.title, 'unit', `${copy.unit} ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}`)}**`);
+        pushLine(`      - ${copy.material}: ${unitTypes}.`);
 
         if (!shouldShowDetails) {
-          pushLine('      - Chi tiết học liệu được rút gọn trong bản xem trước để tránh quá dài.');
+          pushLine(`      - ${copy.clipped}`);
           return;
         }
 
         detailedUnitCount += 1;
         components.forEach((component, componentIndex) => {
-          pushLine(`      - **${componentIndex + 1}. ${component.title || componentTypeLabel(component.type)}** (${componentTypeLabel(component.type)})`);
+          pushLine(`      - **${componentIndex + 1}. ${component.title || componentTypeLabel(component.type, locale)}** (${componentTypeLabel(component.type, locale)})`);
           for (const detail of formatComponentDetails(component)) {
             pushLine(`        - ${detail}`);
           }
@@ -4001,41 +4610,79 @@ function formatProposalPreview(proposal: LessonAuthorProposal, chapterIndexOffse
 
   if (clipped || metrics.units > MAX_DETAILED_PLAN_UNITS) {
     lines.push('');
-    lines.push(`> Bản xem trước đã rút gọn sau ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} mục nội dung đầu để cuộc trò chuyện gọn hơn. Đề xuất đầy đủ vẫn được lưu và sẽ được áp dụng khi bạn bấm Áp dụng.`);
+    lines.push(locale === 'en'
+      ? `> The preview is shortened after the first ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} lesson(s) to keep the conversation readable. The full proposal is saved and will be applied when you click Apply.`
+      : `> Bản xem trước đã rút gọn sau ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} bài học đầu để cuộc trò chuyện gọn hơn. Đề xuất đầy đủ vẫn được lưu và sẽ được áp dụng khi bạn bấm Áp dụng.`);
   }
 
   lines.push('');
-  lines.push('> Kiểm tra bản đề xuất, sau đó bấm **Áp dụng** để cập nhật cấu trúc bài học.');
+  lines.push(locale === 'en' ? `> ${copy.review}` : `> ${copy.review}`);
   return lines.join('\n');
 }
 
 function formatBlueprintPreview(
   blueprint: LessonAuthorBlueprint,
   qualityReport: LessonAuthorBlueprintQualityReport,
+  locale: 'vi' | 'en' = 'vi',
 ): string {
   const totalLessons = blueprint.chapters.reduce((total, chapter) => total + chapter.lessons.length, 0);
   const totalDuration = blueprint.chapters.reduce((total, chapter) => total + chapter.duration_minutes, 0);
+  const copy = locale === 'en'
+    ? {
+      intro: 'I prepared the course blueprint. This is a reviewable curriculum framework before detailed authoring.',
+      info: 'Course information',
+      courseName: 'Course title',
+      summary: 'Summary',
+      audience: 'Learners',
+      size: 'Scale',
+      quality: 'Design quality',
+      structure: 'Proposed structure',
+      chapter: 'Chapter',
+      lesson: 'Section',
+      review: 'Items to confirm before detailed authoring',
+      action: 'Choose “View lesson structure” to inspect chapters and sections, then choose “Draft this chapter” to generate detailed content.',
+    }
+    : {
+      intro: 'Mình đã chuẩn bị Bản thiết kế khóa học. Đây là khung chương trình để duyệt trước khi soạn nội dung chi tiết.',
+      info: 'Thông tin khóa học',
+      courseName: 'Tên khóa học',
+      summary: 'Tóm tắt',
+      audience: 'Đối tượng học',
+      size: 'Quy mô',
+      quality: 'Chất lượng thiết kế',
+      structure: 'Cấu trúc đề xuất',
+      chapter: 'Chương',
+      lesson: 'Mục',
+      review: 'Các điểm cần xác nhận trước khi soạn chi tiết',
+      action: 'Chọn “Xem cấu trúc bài học” để xem chi tiết từng chương và mục. Sau đó chọn “Soạn Chương này” để bắt đầu tạo nội dung chi tiết.',
+    };
   const lines = [
-    'Mình đã chuẩn bị Bản thiết kế khóa học. Đây là khung chương trình để duyệt trước khi soạn nội dung chi tiết.',
+    copy.intro,
     '',
-    '**Thông tin khóa học**',
-    `- **Tên khóa học:** ${blueprint.title}`,
-    `- **Tóm tắt:** ${blueprint.summary}`,
-    `- **Đối tượng học:** ${blueprint.target_audience}`,
-    `- **Quy mô:** ${blueprint.chapters.length} chương, ${totalLessons} bài học, khoảng ${totalDuration} phút.`,
-    `- **Chất lượng thiết kế:** ${qualityReport.score}/100.`,
+    `**${copy.info}**`,
+    `- **${copy.courseName}:** ${blueprint.title}`,
+    `- **${copy.summary}:** ${blueprint.summary}`,
+    `- **${copy.audience}:** ${blueprint.target_audience}`,
+    locale === 'en'
+      ? `- **${copy.size}:** ${blueprint.chapters.length} chapter(s), ${totalLessons} section(s), about ${totalDuration} minutes.`
+      : `- **${copy.size}:** ${blueprint.chapters.length} chương, ${totalLessons} mục, khoảng ${totalDuration} phút.`,
+    `- **${copy.quality}:** ${qualityReport.score}/100.`,
     '',
-    '**Cấu trúc đề xuất**',
+    `**${copy.structure}**`,
     ...blueprint.chapters.flatMap((chapter, chapterIndex) => [
-      `- **Chương ${chapterIndex + 1}: ${chapter.title}** (${chapter.duration_minutes} phút)`,
-      ...chapter.lessons.map((lesson, lessonIndex) => `  - **Bài ${chapterIndex + 1}.${lessonIndex + 1}: ${lesson.title}** (${lesson.duration_minutes} phút)`),
+      locale === 'en'
+        ? `- **${copy.chapter} ${chapterIndex + 1}: ${chapter.title}** (${chapter.duration_minutes} min)`
+        : `- **${copy.chapter} ${chapterIndex + 1}: ${chapter.title}** (${chapter.duration_minutes} phút)`,
+      ...chapter.lessons.map((lesson, lessonIndex) => locale === 'en'
+        ? `  - **${copy.lesson} ${chapterIndex + 1}.${lessonIndex + 1}: ${lesson.title}** (${lesson.duration_minutes} min)`
+        : `  - **${copy.lesson} ${chapterIndex + 1}.${lessonIndex + 1}: ${lesson.title}** (${lesson.duration_minutes} phút)`),
     ]),
   ];
   if (qualityReport.review_notes.length > 0) {
-    lines.push('', '**Các điểm cần xác nhận trước khi soạn chi tiết**');
+    lines.push('', `**${copy.review}**`);
     qualityReport.review_notes.forEach(note => lines.push(`- ${note}`));
   }
-  lines.push('', 'Chọn “Xem cấu trúc bài học” để xem chi tiết từng chương và bài học. Sau đó chọn “Soạn Chương 1” hoặc “Soạn chương này” để bắt đầu tạo nội dung chi tiết.');
+  lines.push('', copy.action);
   return lines.join('\n');
 }
 
@@ -4056,6 +4703,7 @@ async function convertLessonAuthorChatJsonToProposalMessage(
   prompt: string,
   rawResponse: string,
   sourceDocuments: LessonAuthorSourceDocument[],
+  locale: 'vi' | 'en' = 'vi',
 ): Promise<{
   content: string;
   metadata: Record<string, unknown>;
@@ -4075,15 +4723,16 @@ async function convertLessonAuthorChatJsonToProposalMessage(
       ...getLessonAuthorProposalMetrics(proposal),
     });
     return {
-      content: formatProposalPreview(proposal),
+      content: formatProposalPreview(proposal, 0, locale),
       metadata: {
         kind: 'lesson_author_proposal',
         lesson_author_job_id: jobId,
         lesson_author_job_status: 'proposed',
-        lesson_author_proposal: toLessonAuthorDisplayProposal(proposal),
+        locale,
+        lesson_author_proposal: toLessonAuthorDisplayProposal(proposal, locale),
         ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
       },
-      proposal: toLessonAuthorDisplayProposal(proposal),
+      proposal: toLessonAuthorDisplayProposal(proposal, locale),
       jobId,
     };
   } catch (err) {
@@ -4096,7 +4745,7 @@ async function convertLessonAuthorChatJsonToProposalMessage(
       error: errorReason,
     });
     return {
-      content: formatLessonAuthorFailurePreview(err),
+      content: formatLessonAuthorFailurePreview(err, locale),
       metadata: {
         kind: 'lesson_author_generation_failed',
         lesson_author_job_id: jobId,
@@ -4148,98 +4797,41 @@ interface IntentSignal {
 
 interface IntentClassificationResult {
   intent: LessonAuthorIntent;
+  operationPlan: LessonAuthorIntentPlan;
   signals: IntentSignal[];
   score: number;
+  input_locale: ReturnType<typeof detectLessonAuthorInputLocale>;
 }
 
 function classifyLessonAuthorIntentV2(
   userPrompt: string,
   outlineMentions: LessonAuthorOutlineMention[],
   mode: 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto',
+  mentionSource?: 'current' | 'carried_forward',
 ): IntentClassificationResult {
-  // FE forced mode → trả ngay
-  if (mode === 'draft_lesson') return { intent: 'draft_lesson', signals: [], score: 100 };
-  if (mode === 'course_blueprint') return { intent: 'course_blueprint', signals: [], score: 100 };
-  if (mode === 'chat') return { intent: 'chat', signals: [], score: -100 };
-
-  const folded = foldVietnameseText(userPrompt);
-  const signals: IntentSignal[] = [];
-
-  // ══ POSITIVE signals → draft ══
-
-  // +3: Strong create/write verb
-  const strongDraft = /(^|\b)(tao|soan|viet|thiet ke|xay dung|chia|generate|create|build|design|draft|de xuat|len plan|lap plan)(\b|$)/i.test(folded);
-  signals.push({ name: 'strong_draft_verb', weight: 3, matched: strongDraft });
-
-  // +2: Moderate edit verb
-  const moderateDraft = /(^|\b)(sua|chinh sua|cap nhat|bo sung|them|goi y|phan chia|add|insert|update|edit|improve|toi uu|cai thien|viet lai|lam lai|mo rong|dai ti|dai hon|ngan gon)(\b|$)/i.test(folded);
-  signals.push({ name: 'moderate_draft_verb', weight: 2, matched: moderateDraft });
-
-  // +2: Course structure object
-  const courseObj = /(^|\b)(bai hoc|noi dung bai hoc|lesson|unit|module|chapter|chuong|outline|cau truc|ly thuyet|bai tap|danh gia|muc tieu hoc tap|component|block|sequential|vertical)(\b|$)/i.test(folded);
-  signals.push({ name: 'course_object', weight: 2, matched: courseObj });
-
-  // +2: Component type keyword (specific types only, NOT generic words like "lý thuyết")
-  const compType = /(^|\b)(quiz|problem|cau hoi trac nghiem|trac nghiem|diagram|so do|faq|hoi dap|crossword|o chu|sortable|sap xep|html|text|video|infographic|audio|media)(\b|$)/i.test(folded);
-  signals.push({ name: 'component_type', weight: 2, matched: compType });
-
-  // +3: Instructional design / course planning language
-  const instructionalDesign = /(^|\b)(instructional design|phuong phap instructional design|thiet ke hoc tap|thiet ke noi dung|cau truc bai hoc|learning objective|muc tieu hoc tap|module hoc|hoc lieu)(\b|$)/i.test(folded);
-  signals.push({ name: 'instructional_design', weight: 3, matched: instructionalDesign });
-
-  // A course-wide request is intentionally routed to a blueprint. Detailed
-  // course content remains one chapter per approval for safe CMS application.
-  const courseScope = /(^|\b)(khoa hoc|chuong trinh dao tao|curriculum|course)(\b|$)/i.test(folded);
-  const explicitSingleScope = /(^|\b)(chuong|chapter|bai hoc|lesson|unit|module)\s+(so\s*)?(\d+|mot|một|dau tien|first|nay|this)(\b|$)/i.test(folded);
-  const courseBlueprintRequest = outlineMentions.length === 0
-    && !explicitSingleScope
-    && (
-      /(^|\b)(toan bo khoa hoc|toan khoa|ca khoa hoc|khung khoa hoc|course blueprint|curriculum|chuong trinh dao tao|thiet ke (mot |một )?khoa hoc|xay dung (mot |một )?khoa hoc|tao (mot |một )?khoa hoc|lap ke hoach (mot |một )?khoa hoc)(\b|$)/i.test(folded)
-      || (strongDraft && courseScope)
-    );
-  signals.push({ name: 'course_blueprint_request', weight: 4, matched: courseBlueprintRequest });
-
-  // +3: @mention present → rất mạnh
-  signals.push({ name: 'has_outline_mention', weight: 3, matched: outlineMentions.length > 0 });
-
-  // +1: Imperative (lam di, ok, cứ thế...)
-  const imperative = /(^|\b)(lam di|lam luon|cu the|tao di|them di|sua di|bat dau|go ahead|do it|proceed)(\b|$)/i.test(folded);
-  signals.push({ name: 'imperative_tone', weight: 1, matched: imperative });
-
-  // ══ NEGATIVE signals → chat ══
-
-  // -3: Question/explain intent
-  const chatIntent = /(^|\b)(la gi|giai thich|tom tat|hoi|cho biet|phan tich|doc|so sanh|tai sao|vi sao|nhu the nao|the nao|review|explain|summarize|what is|how|why)(\b|$)/i.test(folded);
-  signals.push({ name: 'strong_chat_intent', weight: -3, matched: chatIntent });
-
-  // -3: Question form (? or question starters) — rất mạnh, câu hỏi gần như chắc chắn là chat
-  // "Hãy" is a Vietnamese imperative. After accent folding it becomes "hay",
-  // so treating it as a question starter routed course-creation requests to chat.
-  const question = /\?$|^(ban co the|lieu|co nen|nen|co phai|theo ban|ban thay|ban nghi)/i.test(folded);
-  signals.push({ name: 'question_form', weight: -3, matched: question });
-
-  // -3: Evaluation/assessment questions ("đã ok chưa", "đủ chưa", "đánh giá")
-  const evalQuestion = /(^|\b)(da ok|da du|day du|da on|ok chua|du chua|on chua|danh gia|nhan xet|tot chua|duoc chua|hop ly|da xong)(\b|$)/i.test(folded);
-  signals.push({ name: 'evaluation_question', weight: -3, matched: evalQuestion });
-
-  // -2: Read/check verbs
-  const readVerb = /(^|\b)(kiem tra|xem|da co gi|hien tai|dang co|list|show|check|status)(\b|$)/i.test(folded);
-  signals.push({ name: 'read_verb', weight: -2, matched: readVerb });
-
-  // -2: Short ambiguous message (< 15 chars, no draft verbs) — likely conversational
-  const isShortAmbiguous = userPrompt.trim().length < 15 && !strongDraft && !moderateDraft;
-  signals.push({ name: 'short_ambiguous', weight: -2, matched: isShortAmbiguous });
-
-  // -99: DELETE INTENT → HARD BLOCK, luôn vào chat
-  const deleteIntent = /(^|\b)(xoa|delete|remove|bo di|go bo|huy|cancel|loai bo)(\b|$)/i.test(folded);
-  signals.push({ name: 'delete_intent', weight: -99, matched: deleteIntent });
-
-  const score = signals.filter(s => s.matched).reduce((sum, s) => sum + s.weight, 0);
-
+  const operationPlan = classifyLessonAuthorIntent({
+    message: userPrompt,
+    mode,
+    mention: outlineMentions[0] ?? null,
+    carriedTarget: outlineMentions.length > 0,
+    mentionSource,
+  });
+  const signals: IntentSignal[] = operationPlan.signals.map((name) => ({
+    name: name === 'delete_verb' ? 'delete_intent' : name,
+    weight: name === 'delete_verb' ? -99 : 1,
+    matched: true,
+  }));
+  const intent: LessonAuthorIntent = operationPlan.operation === 'course_blueprint'
+    ? 'course_blueprint'
+    : operationPlan.operation === 'answer' || operationPlan.operation === 'clarify'
+      ? 'chat'
+      : 'draft_lesson';
   return {
-    intent: score > 0 && courseBlueprintRequest ? 'course_blueprint' : score > 0 ? 'draft_lesson' : 'chat',
+    intent,
+    operationPlan,
     signals,
-    score,
+    score: intent === 'chat' ? -Math.round((1 - operationPlan.confidence) * 100) : Math.round(operationPlan.confidence * 100),
+    input_locale: detectLessonAuthorInputLocale(userPrompt),
   };
 }
 
@@ -4265,6 +4857,7 @@ async function generateLessonAuthorBlueprint(
     `<USER_REQUEST>\n${userPrompt}\n</USER_REQUEST>`,
     sourceDocumentContext ? `<SELECTED_SOURCE_DOCUMENTS>\n${sourceDocumentContext}\n</SELECTED_SOURCE_DOCUMENTS>` : '',
     `<COURSE_CONTEXT>\n${course.outline}\n</COURSE_CONTEXT>`,
+    'The course title in COURSE_CONTEXT is authoritative and already exists in the CMS. Copy it exactly into the top-level title; do not invent, shorten, translate, or rename it.',
     'Create a review-only course blueprint. This is not a CMS apply proposal and must not contain HTML, block payloads, component data, units, or detailed lesson prose.',
     'Use Backward Design: state measurable learner outcomes first, then assessment strategy, chapters, and learning activities. Keep every statement grounded in the active knowledge base. Put missing business inputs into assumptions.',
     'Return JSON only with the server schema:',
@@ -4375,11 +4968,13 @@ async function generateLessonAuthorProposal(
       ? `Admin selected exact outline target with @mention:\n${formatOutlineMentionsForPrompt(scopedOutlineMentions)}\n${mentionContext}\nUse this ID and the database subtree/context as the authoritative target scope. If the admin asks to edit, expand, add components, or improve content, produce proposal content ONLY for the selected target path unless the admin explicitly asks for a broader change within the same section. Preserve the selected target title when returning the matching chapter/lesson/unit so the apply step updates that area instead of creating duplicates.`
       : 'Admin did not select an exact @mention target. Infer the target from the request and current course outline. If the request is ambiguous, answer with a clarification instead of generating unrelated structure.',
     targetScopeInstruction,
+    'STRUCTURAL NUMBERING IS SERVER-OWNED. Never invent or repeat a chapter/section/lesson number in a title. The preview number comes from the current database outline and the selected target number path; an existing Chapter 6 must never be rendered as Chapter 1.',
     'If the admin asks for a specific next chapter number, create only that new chapter and place it after the existing chapters. Example: if the course already has 3 chapters and the admin asks for chapter 4, return exactly one new chapter for chapter 4.',
     'Return JSON only with this schema:',
     '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select|dropdown|numerical|short_text","question":"string","choices":[{"text":"string","correct":true}],"options":["string"],"answer":"string|number","tolerance":"5%","explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
     `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons total inside that section, ${MAX_PROPOSAL_UNITS} units total inside that section, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
     'Title fields must contain plain titles only. Never include structural numbering such as "Chương 5:", "Bài 5.1:", or "Mục 5.1.1:"; the system adds numbering in the preview and outline.',
+    'Chapter, lesson, and unit titles must contain semantic names only. Never include trailing source-range metadata such as "(từ slide 30 đến slide 32)", "(trang 30 đến trang 32)", or "(from slide 30 to slide 32)"; preserve source_refs separately.',
     'Use the active KB as the source of truth. Do not invent facts that are not supported by the KB.',
     'The summary must describe a pending proposal only. Do not say content was created, applied, inserted, or updated in the database/outline before admin approval.',
     'Each unit must contain 1-3 components. Usually start with one html component for explanation, then add one interactive component when it improves learning.',
@@ -4503,6 +5098,7 @@ async function generateProposalSkeleton(
       ? `Admin selected outline target:\n${formatOutlineMentionsForPrompt(scopedOutlineMentions)}\n${mentionContext}`
       : '',
     targetScopeInstruction,
+    'STRUCTURAL NUMBERING IS SERVER-OWNED. Return semantic titles only. The server derives Chương/Mục/Bài học numbering from the current outline; never output a guessed Chapter 1 or duplicate a structural prefix.',
     'STAGE 1 — SKELETON ONLY.',
     'Return JSON with chapter, lesson, unit titles and component TYPES only.',
     'Do NOT generate actual html content, quiz questions, FAQ items, or diagram data yet.',
@@ -4510,6 +5106,7 @@ async function generateProposalSkeleton(
     '{"summary":"string","chapters":[{"title":"string","lessons":[{"title":"string","units":[{"title":"string","components":[{"type":"html|problem|la_faq|la_sortable|la_crossword|la_diagram","title":"string"}]}]}]}]}',
     `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons inside that section, ${MAX_PROPOSAL_UNITS} units inside that section, ${MAX_COMPONENTS_PER_UNIT} components/unit.`,
     'Use KB as source of truth. Design structure following Instructional Design principles.',
+    'Use semantic chapter, lesson, and unit titles only; omit trailing source-range metadata such as "(từ slide 30 đến slide 32)".',
     'Do not output video, pdf, image, or unsupported component types.',
   ].filter(Boolean).join('\n\n');
 
@@ -5026,9 +5623,38 @@ async function loadLessonAuthorBlueprintForDraft(
     throw new Error(reason);
   }
 
-  const blueprint = normalizeLessonAuthorBlueprint(stored.blueprint);
-  const safeChapterIndex = Math.max(0, Math.min(blueprint.chapters.length - 1, Math.floor(chapterIndex)));
-  return { id: stored.id, chapterIndex: safeChapterIndex, blueprint, sourceDocuments };
+  const courseResult = await query<{ display_name: string }>(
+    `SELECT COALESCE(course_block.display_name, c.display_name) AS display_name
+     FROM courses c
+     LEFT JOIN LATERAL (
+       SELECT cb.display_name
+       FROM course_blocks cb
+       WHERE cb.course_id = c.id
+         AND cb.block_type = 'course'
+         AND cb.deleted_at IS NULL
+       ORDER BY cb.sort_order ASC, cb.created_at ASC
+       LIMIT 1
+     ) course_block ON true
+      WHERE c.id = $1
+        AND c.tenant_id = $2
+       AND c.deleted_at IS NULL
+     LIMIT 1`,
+    [ctx.courseId, ctx.tenantId],
+  );
+  const blueprint = withAuthoritativeCourseTitle(
+    normalizeLessonAuthorBlueprint(stored.blueprint),
+    courseResult.rows[0]?.display_name ?? '',
+  );
+  const requestedChapterIndex = Math.floor(chapterIndex);
+  if (
+    !Number.isInteger(chapterIndex)
+    || !Number.isFinite(chapterIndex)
+    || requestedChapterIndex < 0
+    || requestedChapterIndex >= blueprint.chapters.length
+  ) {
+    throw new Error('Chương trong bản thiết kế không còn hợp lệ. Vui lòng mở lại bản thiết kế và thử lại.');
+  }
+  return { id: stored.id, chapterIndex: requestedChapterIndex, blueprint, sourceDocuments };
 }
 
 function formatBlueprintDraftContext(context: BlueprintDraftContext): string {
@@ -5051,10 +5677,11 @@ function lockProposalToBlueprintChapter(
   context: BlueprintDraftContext,
 ): LessonAuthorProposal {
   const authoritativeChapter = context.blueprint.chapters[context.chapterIndex];
-  if (!authoritativeChapter || proposal.chapters.length === 0) return proposal;
+  const { operation_plan: _ignoredOperationPlan, ...proposalWithoutOperationPlan } = proposal;
+  if (!authoritativeChapter || proposal.chapters.length === 0) return proposalWithoutOperationPlan;
 
   return {
-    ...proposal,
+    ...proposalWithoutOperationPlan,
     chapters: proposal.chapters.map((chapter, index) => (
       index === 0
         ? { ...chapter, title: authoritativeChapter.title }
@@ -5067,7 +5694,7 @@ async function createLessonAuthorJob(
   ctx: ConversationContext,
   userId: string,
   prompt: string,
-  kbId: string,
+  kbId: string | null,
   proposal: LessonAuthorProposal,
   sourceDocuments: LessonAuthorSourceDocument[] = [],
   blueprintId: string | null = null,
@@ -5276,14 +5903,49 @@ export async function applyLessonAuthorJob(
       }
     }
 
-    const applied = await applyLessonAuthorProposalToCourse({
-      courseId: job.course_id,
-      tenantId,
-      requestedBy: userId,
-      proposal: job.proposal,
-      jobId: job.id,
-      kbId: job.kb_id,
-    });
+    const storedOperationPlanValue = job.proposal?.operation_plan;
+    const operationPlan = readStoredLessonAuthorOperationPlan(storedOperationPlanValue);
+    if (storedOperationPlanValue !== undefined && storedOperationPlanValue !== null && !operationPlan) {
+      throw new AppError('Đề xuất thao tác không hợp lệ hoặc đã bị thay đổi. Vui lòng tạo lại đề xuất.', 409);
+    }
+    let applied: { created_block_ids: string[]; updated_block_ids: string[] };
+    if (operationPlan?.operation === 'delete') {
+      const existingDeletion = await query<{ id: string; status: string }>(
+        `SELECT id::text AS id, status
+         FROM course_deletion_jobs
+         WHERE tenant_id = $1
+           AND course_id = $2
+           AND root_block_id = $3
+           AND target_type = 'block'
+           AND status IN ('queued', 'running', 'succeeded', 'failed')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [tenantId, job.course_id, operationPlan.target_block_id],
+      );
+      if (!existingDeletion.rows[0]) {
+        await assertLessonAuthorActionPlanFresh(operationPlan, job.course_id, tenantId);
+        await requestBlockDeletion(operationPlan.target_block_id, tenantId, userId);
+      }
+      applied = {
+        created_block_ids: [],
+        updated_block_ids: [operationPlan.target_block_id],
+      };
+      logLessonAuthorFlow('delete_operation_queued', {
+        job_id: job.id,
+        course_id: job.course_id,
+        target_block_id: operationPlan.target_block_id,
+        existing_deletion_job_id: existingDeletion.rows[0]?.id ?? null,
+      });
+    } else {
+      applied = await applyLessonAuthorProposalToCourse({
+        courseId: job.course_id,
+        tenantId,
+        requestedBy: userId,
+        proposal: job.proposal,
+        jobId: job.id,
+        kbId: job.kb_id,
+      });
+    }
     logLessonAuthorFlow('apply_course_blocks_done', {
       job_id: job.id,
       course_id: job.course_id,
@@ -5303,10 +5965,14 @@ export async function applyLessonAuthorJob(
       [job.id, applied.created_block_ids, applied.updated_block_ids, tenantId],
     );
 
-    const approvalText = [
-      'Đã áp dụng đề xuất vào cấu trúc khóa học.',
-      `Đã thêm ${applied.created_block_ids.length} mục nội dung và cập nhật ${applied.updated_block_ids.length} mục.`,
-    ].join('\n\n');
+    const approvalText = operationPlan?.operation === 'delete'
+      ? 'Đã đưa node được chọn vào hàng đợi xóa khỏi cấu trúc khóa học.'
+      : operationPlan?.operation === 'rename'
+        ? 'Đã đổi tiêu đề node được chọn trong cấu trúc khóa học.'
+        : [
+          'Đã áp dụng đề xuất vào cấu trúc khóa học.',
+          `Đã thêm ${applied.created_block_ids.length} mục nội dung và cập nhật ${applied.updated_block_ids.length} mục.`,
+        ].join('\n\n');
     await query(
       `INSERT INTO chat_messages (conversation_id, role, content, metadata)
        VALUES ($1, 'assistant', $2, $3)`,
@@ -5355,11 +6021,20 @@ export async function applyLessonAuthorJob(
       retryable,
       error: errorMessage,
     });
-    // This flow is owned by runAuditedTransaction in the controller. Once a
-    // database statement fails, PostgreSQL rejects further writes in the same
-    // transaction. Let the outer transaction roll back the `applying` claim so
-    // the proposal stays available for a safe retry and the original error
-    // reaches the widget unchanged.
+    await query(
+      `UPDATE lesson_author_jobs
+       SET status = 'proposed', updated_at = now()
+       WHERE id = $1 AND tenant_id = $2 AND status = 'applying'`,
+      [job.id, tenantId],
+    ).catch((resetError) => {
+      console.error('[LessonAuthorFlow] Failed to reset applying job after error', {
+        job_id: job.id,
+        error: resetError instanceof Error ? resetError.message : String(resetError),
+      });
+    });
+    // The claim is made in a separate short transaction from course mutation.
+    // Return the job to `proposed` after a failed apply so a transient error
+    // does not leave the approval button permanently stuck.
     throw err;
   }
 }
@@ -5521,22 +6196,36 @@ export async function sendMessageStream(
 
     const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
     // Pre-classify intent to decide carry-forward (delete intent should never carry forward)
-    const preClassify = ctx.target === LESSON_AUTHOR_TARGET
-      ? classifyLessonAuthorIntentV2(trimmed, requestedOutlineMentions, (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto')
+    const initialPreClassify = ctx.target === LESSON_AUTHOR_TARGET
+      ? classifyLessonAuthorIntentV2(
+        trimmed,
+        requestedOutlineMentions,
+        (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto',
+        requestedOutlineMentions.length > 0 ? 'current' : undefined,
+      )
       : null;
-    const isDeleteRequest = preClassify?.signals.some(s => s.name === 'delete_intent' && s.matched) ?? false;
+    const isDeleteRequest = initialPreClassify?.operationPlan.operation === 'delete'
+      || initialPreClassify?.operationPlan.signals.includes('delete_verb') === true;
     const carriedOutlineMentions = !isDeleteRequest
       && requestedOutlineMentions.length === 0
-      && preClassify?.intent !== 'course_blueprint'
+      && initialPreClassify?.intent !== 'course_blueprint'
       && shouldCarryForwardLessonAuthorTarget(trimmed)
         ? await getLatestConversationOutlineMentions(ctx)
         : [];
     const outlineMentions = requestedOutlineMentions.length > 0 ? requestedOutlineMentions : carriedOutlineMentions;
-    const outlineMentionSource = requestedOutlineMentions.length > 0
+    const outlineMentionSource: 'current' | 'carried_forward' | 'none' = requestedOutlineMentions.length > 0
       ? 'current'
       : outlineMentions.length > 0
         ? 'carried_forward'
         : 'none';
+    const preClassify = ctx.target === LESSON_AUTHOR_TARGET
+      ? classifyLessonAuthorIntentV2(
+        trimmed,
+        outlineMentions,
+        (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto',
+        outlineMentionSource === 'none' ? undefined : outlineMentionSource,
+      )
+      : null;
     const mentionContextRows = await getOutlineMentionContextRows(ctx, outlineMentions);
     const mentionContext = formatMentionContextRowsForPrompt(mentionContextRows);
     let targetScopeInstruction = buildTargetLockedProposalInstruction(trimmed, outlineMentions, mentionContextRows);
@@ -5718,17 +6407,108 @@ export async function sendMessageStream(
       });
 
     // ── Intent classification via deterministic scoring (zero Gemini calls) ──
-    const { intent: lessonAuthorIntent, signals: intentSignals, score: intentScore } = ctx.target === LESSON_AUTHOR_TARGET
-      ? classifyLessonAuthorIntentV2(trimmed, outlineMentions, (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto')
-      : { intent: 'chat' as LessonAuthorIntent, signals: [] as IntentSignal[], score: -100 };
+    const { intent: lessonAuthorIntent, operationPlan: classifiedOperationPlan, signals: intentSignals, score: intentScore, input_locale: inputLocale } = ctx.target === LESSON_AUTHOR_TARGET
+      ? classifyLessonAuthorIntentV2(
+        trimmed,
+        outlineMentions,
+        (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto',
+        outlineMentionSource === 'none' ? undefined : outlineMentionSource,
+      )
+      : {
+        intent: 'chat' as LessonAuthorIntent,
+        operationPlan: classifyLessonAuthorIntent({ message: trimmed, mode: 'chat' }),
+        signals: [] as IntentSignal[],
+        score: -100,
+        input_locale: detectLessonAuthorInputLocale(trimmed),
+      };
+    // A blueprint chapter is a pending, virtual target: it may not exist in
+    // the course outline until the proposal is approved. Resolve existing
+    // nodes only for ordinary @mention/explicit edit flows.
+    const resolvedOperationPlan = ctx.target === LESSON_AUTHOR_TARGET
+      ? blueprintDraftContext
+        ? classifiedOperationPlan
+        : await resolveLessonAuthorOperationPlan(ctx, classifiedOperationPlan, trimmed, outlineMentions.slice(0, 1))
+      : classifiedOperationPlan;
+    if (
+      ctx.target === LESSON_AUTHOR_TARGET
+      && (resolvedOperationPlan.operation === 'create' || resolvedOperationPlan.operation === 'update_content')
+    ) {
+      targetScopeInstruction = [
+        targetScopeInstruction,
+        buildLessonAuthorOperationInstruction(resolvedOperationPlan),
+      ].filter(Boolean).join('\n\n');
+    }
     logLessonAuthorFlow('intent_scored', {
       conversation_id: conversationId,
       target: ctx.target,
       intent: lessonAuthorIntent,
+      operation: resolvedOperationPlan.operation,
+      target_type: resolvedOperationPlan.target_type,
+      target_block_id: resolvedOperationPlan.target_block_id ?? null,
+      confidence: resolvedOperationPlan.confidence,
       score: intentScore,
+      input_locale: inputLocale,
+      mention_source: outlineMentionSource,
       matched: intentSignals.filter(s => s.matched).map(s => `${s.name}(${s.weight > 0 ? '+' : ''}${s.weight})`),
       requested_mode: options.mode ?? 'auto',
     });
+
+    if (ctx.target === LESSON_AUTHOR_TARGET && resolvedOperationPlan.operation === 'clarify') {
+      const assistantText = formatLessonAuthorIntentClarification(resolvedOperationPlan, options.locale ?? 'vi');
+      onChunk(assistantText);
+      await query(
+        `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+         VALUES ($1, 'assistant', $2, $3)`,
+        [conversationId, assistantText, {
+          kind: 'lesson_author_intent_clarification',
+          lesson_author_intent: resolvedOperationPlan,
+        }],
+      );
+      await finalizeAiReservation(
+        estimateAiTurnUsage([ctx.systemPrompt, currentTurnText], assistantText),
+        { service: aiSettings.activeEngine, operation: 'chat' },
+        { lesson_author_intent: resolvedOperationPlan.operation },
+      );
+      onDone();
+      return;
+    }
+
+    if (ctx.target === LESSON_AUTHOR_TARGET
+      && (resolvedOperationPlan.operation === 'rename' || resolvedOperationPlan.operation === 'delete' || resolvedOperationPlan.operation === 'move')) {
+      const actionPlan = resolvedOperationPlan as LessonAuthorOperationPlan;
+      const actionProposal: LessonAuthorProposal = {
+        summary: actionPlan.operation === 'rename'
+          ? `Đề xuất đổi tiêu đề "${actionPlan.target_display_name}" thành "${actionPlan.requested_title}".`
+          : actionPlan.operation === 'delete'
+            ? `Đề xuất xóa ${actionPlan.target_type} "${actionPlan.target_display_name}" và toàn bộ nội dung bên trong.`
+            : `Đề xuất thay đổi vị trí của ${actionPlan.target_type} "${actionPlan.target_display_name}".`,
+        chapters: [],
+        operation_plan: actionPlan,
+      };
+      const jobId = await createLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId, actionProposal, sourceDocuments);
+      const assistantText = formatLessonAuthorActionPreview(actionPlan, options.locale ?? 'vi');
+      onChunk(assistantText);
+      onSideEvent?.({ type: 'proposal', job_id: jobId, proposal: actionProposal });
+      await query(
+        `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+         VALUES ($1, 'assistant', $2, $3)`,
+        [conversationId, assistantText, {
+          kind: 'lesson_author_proposal',
+          lesson_author_job_id: jobId,
+          lesson_author_job_status: 'proposed',
+          locale: options.locale ?? 'vi',
+          lesson_author_proposal: actionProposal,
+          lesson_author_intent: actionPlan,
+        }],
+      );
+      await finalizeAiReservation(
+        estimateAiTurnUsage([ctx.systemPrompt, currentTurnText], assistantText),
+        { service: aiSettings.activeEngine, operation: 'lesson_author' },
+        { lesson_author_job_id: jobId, lesson_author_intent: actionPlan.operation },
+      );
+      onDone();
+      return;
+    }
 
     if (ctx.target === LESSON_AUTHOR_TARGET && lessonAuthorIntent === 'course_blueprint') {
       let blueprint: LessonAuthorBlueprint | null = null;
@@ -5799,6 +6579,7 @@ export async function sendMessageStream(
           );
         }
 
+        blueprint = withAuthoritativeCourseTitle(blueprint, course.courseName);
         onSideEvent?.({ type: 'progress', stage: 'validating' });
         qualityReport = buildLessonAuthorBlueprintQualityReport(blueprint, sourceDocuments.length, blueprintRetrieval);
         blueprintId = await createLessonAuthorBlueprint(
@@ -5813,7 +6594,7 @@ export async function sendMessageStream(
           aiSettings.activeEngine,
           aiSettings.lessonAuthorModel,
         );
-        assistantText = formatBlueprintPreview(blueprint, qualityReport);
+        assistantText = formatBlueprintPreview(blueprint, qualityReport, requestedLocale);
         logLessonAuthorFlow('blueprint_branch_ready', {
           conversation_id: conversationId,
           blueprint_id: blueprintId,
@@ -5858,6 +6639,7 @@ export async function sendMessageStream(
           {
             lesson_author_blueprint_id: blueprintId,
             kind: blueprint ? 'lesson_author_blueprint' : 'lesson_author_generation_failed',
+            locale: requestedLocale,
             ...(blueprint ? { lesson_author_blueprint: blueprint, lesson_author_blueprint_status: 'proposed' } : { lesson_author_blueprint_status: 'failed' }),
             ...(qualityReport ? { lesson_author_blueprint_quality_report: qualityReport } : {}),
             ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata) } : {}),
@@ -5959,6 +6741,16 @@ export async function sendMessageStream(
         if (proposal && blueprintDraftContext) {
           proposal = lockProposalToBlueprintChapter(proposal, blueprintDraftContext);
         }
+        if (
+          proposal
+          && !blueprintDraftContext
+          && (resolvedOperationPlan.operation === 'create' || resolvedOperationPlan.operation === 'update_content')
+        ) {
+          proposal = {
+            ...proposal,
+            operation_plan: resolvedOperationPlan as LessonAuthorOperationPlan,
+          };
+        }
         jobId = await createLessonAuthorJob(
           ctx,
           userId,
@@ -5968,7 +6760,11 @@ export async function sendMessageStream(
           sourceDocuments,
           blueprintDraftContext?.id ?? null,
         );
-        assistantText = formatProposalPreview(proposal, blueprintDraftContext?.chapterIndex ?? 0);
+        if (proposal) {
+          assistantText = formatProposalPreview(proposal, blueprintDraftContext?.chapterIndex ?? 0, requestedLocale);
+        } else if (!assistantText) {
+          assistantText = formatLessonAuthorFailurePreview(new Error('AI did not return a lesson-author proposal.'), requestedLocale);
+        }
         logLessonAuthorFlow('draft_branch_proposal_ready', {
           conversation_id: conversationId,
           job_id: jobId,
@@ -5978,7 +6774,7 @@ export async function sendMessageStream(
       } catch (err: any) {
         const errorReason = sanitizeInternalErrorReason(err);
         jobId = await createFailedLessonAuthorJob(ctx, userId, trimmed, ctx.botKbId ?? null, errorReason, sourceDocuments);
-        assistantText = formatLessonAuthorFailurePreview(err);
+        assistantText = formatLessonAuthorFailurePreview(err, requestedLocale);
         logLessonAuthorFlow('draft_branch_proposal_failed', {
           conversation_id: conversationId,
           job_id: jobId,
@@ -5988,7 +6784,7 @@ export async function sendMessageStream(
 
       onChunk(assistantText);
       if (proposal && jobId) {
-        onSideEvent?.({ type: 'proposal', job_id: jobId, proposal: toLessonAuthorDisplayProposal(proposal) });
+        onSideEvent?.({ type: 'proposal', job_id: jobId, proposal: toLessonAuthorDisplayProposal(proposal, requestedLocale) });
         logLessonAuthorFlow('draft_branch_side_event_sent', {
           conversation_id: conversationId,
           job_id: jobId,
@@ -6004,9 +6800,10 @@ export async function sendMessageStream(
           {
             lesson_author_job_id: jobId,
             kind: proposal ? 'lesson_author_proposal' : 'lesson_author_generation_failed',
+            locale: requestedLocale,
             ...(proposal ? {
               lesson_author_job_status: 'proposed',
-              lesson_author_proposal: toLessonAuthorDisplayProposal(proposal),
+              lesson_author_proposal: toLessonAuthorDisplayProposal(proposal, requestedLocale),
             } : {}),
             ...(blueprintDraftContext ? {
               lesson_author_blueprint_id: blueprintDraftContext.id,
@@ -6362,13 +7159,23 @@ export async function sendMessageStream(
       : stripLeadingInternalChatRoutingLabels(fullResponse);
     let assistantMetadata: Record<string, unknown> = {};
     if (shouldBufferLessonAuthorChat) {
-      const converted = await convertLessonAuthorChatJsonToProposalMessage(
-        ctx,
-        userId,
-        trimmed,
-        fullResponse,
-        sourceDocuments,
-      );
+      // The normal chat branch must never create a lesson-author job merely
+      // because the model happened to emit proposal-shaped JSON. All mutation
+      // intents are handled by the deterministic router above and return
+      // before this branch. Keep the legacy converter behind that same gate
+      // for compatibility with an explicit mutation operation only.
+      const canConvertLegacyProposal = ctx.target === LESSON_AUTHOR_TARGET
+        && ['course_blueprint', 'create', 'update_content'].includes(resolvedOperationPlan.operation);
+      const converted = canConvertLegacyProposal
+        ? await convertLessonAuthorChatJsonToProposalMessage(
+          ctx,
+          userId,
+          trimmed,
+          fullResponse,
+          sourceDocuments,
+          options.locale ?? 'vi',
+        )
+        : null;
       if (converted) {
         assistantContent = converted.content;
         assistantMetadata = converted.metadata;

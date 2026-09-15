@@ -5,9 +5,27 @@ import {
   appendAuditLogViewerScopeFilter,
   assertLegacyAuditOffset,
   canViewAuditLogSensitivePii,
+  DEFAULT_AUDIT_LOG_PAGE_SIZE,
   getAuditLogDetailPiiColumns,
   getAuditLogDetailPiiProjection,
+  parseAuditLogPageSize,
 } from './audit-logs.service.js';
+
+test('audit logs default to 10 rows and accept only the supported page sizes', () => {
+  assert.equal(parseAuditLogPageSize(undefined), DEFAULT_AUDIT_LOG_PAGE_SIZE);
+  for (const pageSize of ['5', '10', '15', '20']) {
+    assert.equal(parseAuditLogPageSize(pageSize), Number(pageSize));
+  }
+});
+
+test('audit logs reject an unsupported or malformed page size before querying', () => {
+  for (const pageSize of ['', '1', '20.0', '21', '50', '100', ['10', '20'], 10, null]) {
+    assert.throws(
+      () => parseAuditLogPageSize(pageSize),
+      (error: unknown) => error instanceof AppError && error.statusCode === 400,
+    );
+  }
+});
 
 test('tenant viewers receive only explicitly tenant-visible audit rows', () => {
   const params: unknown[] = ['tenant-id', 30];
