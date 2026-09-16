@@ -366,7 +366,7 @@ async function updateCourseFromDb(
     const current = await client.query<CourseAuditSnapshot>(
       `SELECT id, tenant_id, display_name, visible_to_staff_only, image_url
        FROM courses
-       WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL
+       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
        FOR UPDATE`,
       [courseId, tenantId],
     );
