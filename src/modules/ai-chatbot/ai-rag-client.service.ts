@@ -55,6 +55,23 @@ export interface RagRetrievalDiagnostics {
   known_source_ref_count?: number;
   covered_source_ref_count?: number;
   source_coverage_ratio?: number | null;
+  target_source_scope_count?: number;
+  target_source_scope_chunk_count?: number;
+  target_source_scope_candidate_count?: number;
+  target_source_scope_hard_locked?: boolean;
+  target_source_scope_pages?: number[];
+  target_source_scope_expected_pages?: number[];
+  target_source_scope_missing_pages?: number[];
+  target_source_scope_truncated?: boolean;
+  out_of_scope_retrieval_count?: number;
+  source_coverage_required_count?: number;
+  source_coverage_covered_count?: number;
+  source_coverage_missing_fact_ids?: string[];
+  source_coverage_status?: 'complete' | 'incomplete' | 'not_applicable';
+  retrieval_candidate_count?: number;
+  context_chars?: number;
+  context_truncated?: boolean;
+  omitted_retrieved_count?: number;
   reason: string | null;
 }
 
@@ -95,6 +112,7 @@ export interface RagLessonAuthorBlueprintResponse {
 export interface RagIndexResponse {
   status: 'learned' | 'error';
   chunk_count: number;
+  diagnostics?: Record<string, unknown>;
   usage?: Partial<AiUsage>;
   error_reason?: string;
 }

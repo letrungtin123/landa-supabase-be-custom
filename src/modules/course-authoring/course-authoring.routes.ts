@@ -90,6 +90,14 @@ router.post('/courses', checkPermission('courses', 'can_edit'), ctrl.createCours
 router.get('/outline/:courseId', checkPermission('courses', 'can_view'), ctrl.getOutline);
 router.get('/component-permissions', checkPermission('courses', 'can_view'), ctrl.getComponentPermissions);
 
+// Cross-course outline operations are intentionally separate from normal
+// component CRUD. The controller applies the superuser/superadmin-only gate.
+router.get('/transfer-targets', checkPermission('courses', 'can_edit'), ctrl.getTransferTargets);
+router.get('/transfer-destination-options', checkPermission('courses', 'can_edit'), ctrl.getTransferDestinationOptions);
+router.get('/transfer-destination-parents', checkPermission('courses', 'can_edit'), ctrl.getTransferDestinationParents);
+router.post('/transfers', checkPermission('courses', 'can_edit'), ctrl.createOutlineTransfer);
+router.get('/transfers/:jobId', checkPermission('courses', 'can_view'), ctrl.getOutlineTransfer);
+
 // Blocks CRUD
 router.get('/blocks/:blockId', checkPermission('courses', 'can_view'), ctrl.getBlock);
 router.post('/blocks', checkPermission('courses', 'can_edit'), ctrl.createBlock);

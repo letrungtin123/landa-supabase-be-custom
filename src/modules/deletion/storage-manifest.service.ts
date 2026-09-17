@@ -19,6 +19,16 @@ type StorageScanCursorRow = {
   completed_at: Date | null;
 };
 
+/**
+ * A course-outline move keeps the physical object key so it does not consume
+ * a second copy of the tenant's quota.  A later deletion of the former course
+ * must therefore skip objects whose authoritative course_assets row now
+ * belongs to another course in the same tenant.
+ */
+export interface StoragePrefixManifestOptions {
+  excludeCourseAssetReferencesForOtherCourses?: string;
+}
+
 function isSafeStoragePath(path: string): boolean {
   return path.length <= 1200
     && !path.includes('..')
@@ -157,6 +167,7 @@ async function discoverStoragePrefixManifestPaths(
   tenantId: string,
   scanPrefix: string,
   cursorPrefix = scanPrefix,
+  options: StoragePrefixManifestOptions = {},
 ): Promise<number> {
   const cursor = await getOrCreateStorageScanCursor(jobKind, jobId, tenantId, cursorPrefix);
   if (cursor.completed_at) return 0;
@@ -165,14 +176,31 @@ async function discoverStoragePrefixManifestPaths(
   let registered = 0;
   while (true) {
     const result = await query<{ storage_path: string }>(
-      `SELECT name AS storage_path
-       FROM storage.objects
-       WHERE bucket_id = $1
-         AND name LIKE $2 || '%'
-         AND ($3 = '' OR name > $3)
-       ORDER BY name ASC
-       LIMIT $4::int`,
-      [STORAGE_BUCKET, scanPrefix, after, STORAGE_DISCOVERY_BATCH_SIZE],
+      `SELECT storage_object.name AS storage_path
+       FROM storage.objects storage_object
+       WHERE storage_object.bucket_id = $1
+         AND storage_object.name LIKE $2 || '%'
+         AND ($3 = '' OR storage_object.name > $3)
+         AND (
+           $5::text IS NULL
+           OR NOT EXISTS (
+             SELECT 1
+             FROM course_assets asset
+             WHERE asset.tenant_id = $4::uuid
+               AND asset.course_id <> $5::text
+               AND asset.storage_path = storage_object.name
+           )
+         )
+       ORDER BY storage_object.name ASC
+       LIMIT $6::int`,
+      [
+        STORAGE_BUCKET,
+        scanPrefix,
+        after,
+        tenantId,
+        options.excludeCourseAssetReferencesForOtherCourses || null,
+        STORAGE_DISCOVERY_BATCH_SIZE,
+      ],
     );
     if (result.rowCount === 0) {
       await markStorageScanCursorCompleted(jobKind, jobId, cursorPrefix);
@@ -202,12 +230,13 @@ export async function registerStoragePrefixManifestPaths(
   jobId: string,
   tenantId: string,
   prefix: string,
+  options: StoragePrefixManifestOptions = {},
 ): Promise<number> {
   const normalizedPrefix = normalizeTenantStoragePath(prefix, tenantId);
   if (!normalizedPrefix || !normalizedPrefix.endsWith('/')) {
     throw new Error('Unsafe storage prefix blocked deletion discovery');
   }
-  return discoverStoragePrefixManifestPaths(jobKind, jobId, tenantId, normalizedPrefix);
+  return discoverStoragePrefixManifestPaths(jobKind, jobId, tenantId, normalizedPrefix, normalizedPrefix, options);
 }
 
 /**

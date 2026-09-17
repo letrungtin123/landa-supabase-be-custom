@@ -18,6 +18,7 @@ export interface AuditEventContext {
   affected_count?: number;
   file_name?: string;
   file_size_bytes?: number;
+  file_count?: number;
 }
 
 export interface StructuredAuditEvent {
@@ -53,6 +54,14 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   },
   'course.component.deleted': { context: ['course_id', 'course_name', 'component_type'], changes: [] },
   'course.component.reordered': { context: ['course_id', 'course_name', 'component_type', 'affected_count'], changes: ['sort_order'] },
+  'course.outline.duplicated': {
+    context: ['course_id', 'course_name', 'related_entity_name', 'related_entity_type', 'component_type', 'affected_count', 'file_count'],
+    changes: [],
+  },
+  'course.outline.moved': {
+    context: ['course_id', 'course_name', 'related_entity_name', 'related_entity_type', 'component_type', 'affected_count', 'file_count'],
+    changes: [],
+  },
   'course.asset.uploaded': { context: ['course_id', 'course_name', 'file_name', 'file_size_bytes'], changes: [] },
   'course.asset.deleted': { context: ['course_id', 'course_name', 'file_name', 'file_size_bytes', 'affected_count'], changes: [] },
   'course.asset.references.updated': { context: ['course_id', 'course_name', 'affected_count'], changes: [] },
@@ -244,6 +253,8 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'course.component.updated',
   'course.component.deleted',
   'course.component.reordered',
+  'course.outline.duplicated',
+  'course.outline.moved',
   'course.asset.uploaded',
   'course.asset.deleted',
   'course.asset.references.updated',

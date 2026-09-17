@@ -510,7 +510,9 @@ export async function updateCourseMentor(
        FROM courses c
        LEFT JOIN users u ON u.id = c.mentor_id
        WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL
-       FOR UPDATE`,
+       -- The mentor join is optional. Lock only the course row; PostgreSQL
+       -- rejects an unqualified FOR UPDATE on the nullable side of a LEFT JOIN.
+       FOR UPDATE OF c`,
       [courseId, tenantId],
     );
     if (courseResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);

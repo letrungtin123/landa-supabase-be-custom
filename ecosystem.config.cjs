@@ -47,6 +47,24 @@ module.exports = {
         NODE_ENV: "production",
         TENANT_DATA_QUOTA_WORKER_ENABLED: "true"
       }
+    },
+    {
+      name: "landa-course-outline-transfer-worker",
+      cwd: __dirname,
+      script: "./dist/workers/course-outline-transfer.worker.js",
+      interpreter: "node",
+      kill_timeout: 960000,
+      autorestart: true,
+      min_uptime: 60000,
+      exp_backoff_restart_delay: 5000,
+      env: {
+        NODE_ENV: "production",
+        COURSE_OUTLINE_TRANSFER_WORKER_ENABLED: "true"
+      },
+      env_production: {
+        NODE_ENV: "production",
+        COURSE_OUTLINE_TRANSFER_WORKER_ENABLED: "true"
+      }
     }
   ]
 }

@@ -94,6 +94,42 @@ async function getBlockSubtreeIds(blockId: string, courseId: string): Promise<st
 }
 
 function normalizeCourseStoragePath(value: unknown, tenantId: string, courseId: string): string | null {
+  const extracted = normalizeTenantCourseStoragePath(value, tenantId);
+  if (!extracted) return null;
+  if (!extracted.includes(`/courses/${courseId}/`)) return null;
+  return extracted;
+}
+
+async function assertNoActiveOutlineTransferForCourse(
+  client: Awaited<ReturnType<typeof getClient>>,
+  tenantId: string,
+  courseId: string,
+): Promise<void> {
+  // This is additive-schema aware so deployments remain safe until the user
+  // has manually applied the approved transfer-job SQL file.
+  const schema = await client.query<{ jobs: string | null }>(
+    `SELECT to_regclass('public.course_outline_transfer_jobs')::text AS jobs`,
+  );
+  if (!schema.rows[0]?.jobs) return;
+  const active = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1
+         FROM course_outline_transfer_jobs
+        WHERE tenant_id = $1::uuid
+          AND status IN ('queued', 'running')
+          AND (source_course_id = $2 OR destination_course_id = $2)
+     ) AS exists`,
+    [tenantId, courseId],
+  );
+  if (active.rows[0]?.exists) {
+    throw new AppError('Khóa học đang có yêu cầu chuyển nội dung. Vui lòng chờ xử lý hoàn tất trước khi xóa.', 409);
+  }
+}
+
+/** A row in course_assets is the authority for a moved asset. Its object key
+ * can intentionally retain the former course id, so never infer ownership
+ * only from that segment when an asset row has already been tenant-scoped. */
+function normalizeTenantCourseStoragePath(value: unknown, tenantId: string): string | null {
   if (typeof value !== 'string') return null;
   const raw = value.trim();
   if (!raw || raw.length > 1200) return null;
@@ -101,49 +137,88 @@ function normalizeCourseStoragePath(value: unknown, tenantId: string, courseId: 
   const extracted = extractStoragePath(raw);
   if (!extracted) return null;
   if (!extracted.startsWith(`${tenantId}/courses/`)) return null;
-  if (!extracted.includes(`/courses/${courseId}/`)) return null;
   if (/[<>"'`\\]/.test(extracted)) return null;
   return extracted;
 }
 
-function collectPathsFromString(value: string, tenantId: string, courseId: string, paths: Set<string>): void {
+function collectPathsFromString(
+  value: string,
+  tenantId: string,
+  courseId: string,
+  paths: Set<string>,
+  allowedAssetPaths?: ReadonlySet<string>,
+): void {
   const direct = normalizeCourseStoragePath(value, tenantId, courseId);
   if (direct) paths.add(direct);
+  else {
+    const movedAssetPath = normalizeTenantCourseStoragePath(value, tenantId);
+    if (movedAssetPath && allowedAssetPaths?.has(movedAssetPath)) paths.add(movedAssetPath);
+  }
 
   const imgSrcRegex = /<img[^>]+src=["']([^"']+)["']/gi;
   let match: RegExpExecArray | null;
   while ((match = imgSrcRegex.exec(value)) !== null) {
     const srcPath = normalizeCourseStoragePath(match[1], tenantId, courseId);
     if (srcPath) paths.add(srcPath);
-  }
-}
-
-function collectPathsFromValue(value: unknown, tenantId: string, courseId: string, paths: Set<string>): void {
-  if (value == null) return;
-  if (typeof value === 'string') {
-    collectPathsFromString(value, tenantId, courseId, paths);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectPathsFromValue(item, tenantId, courseId, paths);
-    return;
-  }
-  if (typeof value === 'object') {
-    for (const item of Object.values(value as Record<string, unknown>)) {
-      collectPathsFromValue(item, tenantId, courseId, paths);
+    else {
+      const movedAssetPath = normalizeTenantCourseStoragePath(match[1], tenantId);
+      if (movedAssetPath && allowedAssetPaths?.has(movedAssetPath)) paths.add(movedAssetPath);
     }
   }
 }
 
-function collectPathsFromBlocks(rows: BlockPayloadRow[], tenantId: string, courseId: string): string[] {
+function collectPathsFromValue(
+  value: unknown,
+  tenantId: string,
+  courseId: string,
+  paths: Set<string>,
+  allowedAssetPaths?: ReadonlySet<string>,
+): void {
+  if (value == null) return;
+  if (typeof value === 'string') {
+    collectPathsFromString(value, tenantId, courseId, paths, allowedAssetPaths);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectPathsFromValue(item, tenantId, courseId, paths, allowedAssetPaths);
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      collectPathsFromValue(item, tenantId, courseId, paths, allowedAssetPaths);
+    }
+  }
+}
+
+function collectPathsFromBlocks(
+  rows: BlockPayloadRow[],
+  tenantId: string,
+  courseId: string,
+  allowedAssetPaths?: ReadonlySet<string>,
+): string[] {
   const paths = new Set<string>();
   for (const row of rows) {
-    collectPathsFromValue(row.data, tenantId, courseId, paths);
-    collectPathsFromValue(row.metadata, tenantId, courseId, paths);
-    collectPathsFromValue(row.published_data, tenantId, courseId, paths);
-    collectPathsFromValue(row.published_metadata, tenantId, courseId, paths);
+    collectPathsFromValue(row.data, tenantId, courseId, paths, allowedAssetPaths);
+    collectPathsFromValue(row.metadata, tenantId, courseId, paths, allowedAssetPaths);
+    collectPathsFromValue(row.published_data, tenantId, courseId, paths, allowedAssetPaths);
+    collectPathsFromValue(row.published_metadata, tenantId, courseId, paths, allowedAssetPaths);
   }
   return [...paths];
+}
+
+async function getCourseAssetPathSet(tenantId: string, courseId: string): Promise<Set<string>> {
+  const result = await query<{ storage_path: string | null; url: string | null }>(
+    `SELECT storage_path, url FROM course_assets WHERE tenant_id = $1 AND course_id = $2`,
+    [tenantId, courseId],
+  );
+  const paths = new Set<string>();
+  for (const row of result.rows) {
+    const storagePath = normalizeTenantCourseStoragePath(row.storage_path, tenantId);
+    const urlPath = normalizeTenantCourseStoragePath(row.url, tenantId);
+    if (storagePath) paths.add(storagePath);
+    if (urlPath) paths.add(urlPath);
+  }
+  return paths;
 }
 
 function normalizeAssignmentStoragePath(value: unknown, tenantId: string, courseId: string): string | null {
@@ -169,6 +244,16 @@ function requireAssignmentStoragePath(value: unknown, tenantId: string, courseId
 function requireCourseOwnedStoragePath(value: unknown, tenantId: string, courseId: string, source: string): string | null {
   if (value == null || value === '') return null;
   const path = normalizeCourseStoragePath(value, tenantId, courseId);
+  const extracted = typeof value === 'string' ? extractStoragePath(value.trim()) : null;
+  if (extracted?.startsWith(`${tenantId}/`) && !path) {
+    throw new Error(`Unsafe or foreign ${source} storage reference blocked course deletion`);
+  }
+  return path;
+}
+
+function requireCourseAssetStoragePath(value: unknown, tenantId: string, source: string): string | null {
+  if (value == null || value === '') return null;
+  const path = normalizeTenantCourseStoragePath(value, tenantId);
   const extracted = typeof value === 'string' ? extractStoragePath(value.trim()) : null;
   if (extracted?.startsWith(`${tenantId}/`) && !path) {
     throw new Error(`Unsafe or foreign ${source} storage reference blocked course deletion`);
@@ -215,6 +300,10 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
   }
   await registerStorageManifestPaths('course', job.id, job.tenant_id, [...directPaths]);
 
+  // course_assets is the ownership authority for a transferred outline asset.
+  // Keep the set to validate payload references later without allowing a
+  // crafted block JSON to delete an object owned by another course.
+  const courseAssetPaths = new Set<string>();
   let lastAssetId = '';
   while (true) {
     const rows = await query<{ id: string; storage_path: string | null; url: string | null }>(
@@ -227,8 +316,9 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
     );
     if (rows.rowCount === 0) break;
     const paths = rows.rows.flatMap((row) => [row.storage_path, row.url])
-      .map((value) => requireCourseOwnedStoragePath(value, job.tenant_id, job.course_id, 'course asset'))
+      .map((value) => requireCourseAssetStoragePath(value, job.tenant_id, 'course asset'))
       .filter((value): value is string => value !== null);
+    for (const path of paths) courseAssetPaths.add(path);
     await registerStorageManifestPaths('course', job.id, job.tenant_id, paths);
     lastAssetId = rows.rows[rows.rows.length - 1].id;
   }
@@ -248,7 +338,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
       'course',
       job.id,
       job.tenant_id,
-      collectPathsFromBlocks(rows.rows, job.tenant_id, job.course_id),
+      collectPathsFromBlocks(rows.rows, job.tenant_id, job.course_id, courseAssetPaths),
     );
     // Invalidate before the destructive phase, in bounded batches. This
     // prevents a cached learner block from surviving a full-course purge and
@@ -295,7 +385,16 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
 
   // DB references miss failed/abandoned uploads. Discover both server-owned
   // prefixes directly from storage before the course rows are purged.
-  await registerStoragePrefixManifestPaths('course', job.id, job.tenant_id, `${job.tenant_id}/courses/${job.course_id}/`);
+  await registerStoragePrefixManifestPaths(
+    'course',
+    job.id,
+    job.tenant_id,
+    `${job.tenant_id}/courses/${job.course_id}/`,
+    // A moved outline asset intentionally keeps the source course segment in
+    // Storage. course_assets is the ownership authority, so the prefix sweep
+    // must not enqueue an object now owned by a different course.
+    { excludeCourseAssetReferencesForOtherCourses: job.course_id },
+  );
   await registerStoragePrefixManifestPaths('course', job.id, job.tenant_id, `${job.tenant_id}/assignments/${job.course_id}/`);
 
   await query(
@@ -336,6 +435,7 @@ export async function requestCourseDeletion(
     if (courseResult.rowCount === 0) {
       throw new AppError('Course not found', 404);
     }
+    await assertNoActiveOutlineTransferForCourse(client, tenantId, courseId);
 
     const jobResult = await client.query<{ id: string }>(
       `INSERT INTO course_deletion_jobs (tenant_id, course_id, target_type, requested_by)
@@ -406,6 +506,7 @@ export async function requestBlockDeletion(
     }
 
     courseId = blockResult.rows[0].course_id;
+    await assertNoActiveOutlineTransferForCourse(client, tenantId, courseId);
     const jobResult = await client.query<{ id: string }>(
       `INSERT INTO course_deletion_jobs (tenant_id, course_id, root_block_id, target_type, requested_by)
        VALUES ($1, $2, $3, 'block', $4)
@@ -577,9 +678,9 @@ async function deleteAssetsAndFilesByPaths(
 
     const deletePaths = new Set<string>(batch);
     for (const row of assetResult.rows) {
-      const storagePath = normalizeCourseStoragePath(row.storage_path, tenantId, courseId);
+      const storagePath = normalizeTenantCourseStoragePath(row.storage_path, tenantId);
       if (storagePath) deletePaths.add(storagePath);
-      const urlPath = normalizeCourseStoragePath(row.url, tenantId, courseId);
+      const urlPath = normalizeTenantCourseStoragePath(row.url, tenantId);
       if (urlPath) deletePaths.add(urlPath);
     }
 
@@ -649,6 +750,7 @@ async function deleteLeafBlocksByRoot(
   rootBlockId: string,
 ): Promise<Partial<PurgeStats>> {
   const stats = emptyStats();
+  const courseAssetPaths = await getCourseAssetPathSet(tenantId, courseId);
 
   while (true) {
     const result = await query<BlockPayloadRow>(
@@ -678,7 +780,7 @@ async function deleteLeafBlocksByRoot(
 
     stats.blocksDeleted += result.rowCount || 0;
     const blockIds = result.rows.map((row) => row.id);
-    const paths = collectPathsFromBlocks(result.rows, tenantId, courseId);
+    const paths = collectPathsFromBlocks(result.rows, tenantId, courseId, courseAssetPaths);
     addStats(stats, await deleteAssetsAndFilesByPaths(tenantId, courseId, paths));
 
     const sectionConfigDeleted = await query(

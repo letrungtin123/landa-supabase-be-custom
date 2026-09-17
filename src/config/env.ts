@@ -208,6 +208,11 @@ export const env = {
   KB_OPERATION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
   KB_RESTORE_RECOVERY_POLL_INTERVAL_MS: optionalBoundedInt('KB_RESTORE_RECOVERY_POLL_INTERVAL_MS', 30_000, 5_000, 300_000),
 
+  // Course outline transfer is a dedicated, resumable worker. It is separate
+  // from HTTP so a large media copy never monopolises API request capacity.
+  COURSE_OUTLINE_TRANSFER_WORKER_ENABLED: optionalBoolean('COURSE_OUTLINE_TRANSFER_WORKER_ENABLED', false),
+  COURSE_OUTLINE_TRANSFER_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('COURSE_OUTLINE_TRANSFER_WORKER_POLL_INTERVAL_MS', 10_000, 1_000, 300_000),
+
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',

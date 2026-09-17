@@ -156,7 +156,11 @@ async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
         totalTokens: result.usage?.totalTokens ?? result.usage?.embeddingTokens ?? 0,
       },
       source: { kb_id: job.kb_id, document_id: doc.id, operation_id: job.id },
-      metadata: { chunk_count: result.chunk_count, engine: 'self_built_rag' },
+      metadata: {
+        chunk_count: result.chunk_count,
+        engine: 'self_built_rag',
+        extraction_diagnostics: result.diagnostics ?? null,
+      },
     });
     const previous = previousFilePath(job);
     if (job.operation === 'document_reupload' && previous && previous !== doc.file_path) {

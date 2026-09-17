@@ -32,6 +32,8 @@ const MAX_DIAGRAMS = 32;
 const MAX_NODES_PER_DIAGRAM = 200;
 const MAX_EDGES_PER_DIAGRAM = 400;
 const VALID_POSITIONS = new Set(['top', 'left', 'bottom', 'right']);
+const DEFAULT_EDGE_COLOR = '#64748B';
+const DEFAULT_FEEDBACK_EDGE_COLOR = '#2563EB';
 
 export class DiagramDataValidationError extends Error {
   constructor(message: string) {
@@ -78,6 +80,52 @@ function normalizeHandle(value: unknown, nodeType: string, role: 'source' | 'tar
   if (nodeType !== 'junction') return base;
   const allowed = role === 'source' ? ['bottom', 'right'] : ['top', 'left'];
   return allowed.includes(base) ? `${base}-${role}` : undefined;
+}
+
+type DiagramEdgeAppearance = {
+  lineStyle: 'solid' | 'dashed';
+  arrow: 'none' | 'end';
+  color: string;
+};
+
+function normalizeEdgeColor(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const color = value.trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toUpperCase() : fallback;
+}
+
+function normalizeEdgeAppearance(
+  value: unknown,
+  routing: 'orthogonal' | 'feedback',
+  style: Record<string, any> | undefined,
+  markerEnd: unknown,
+): DiagramEdgeAppearance {
+  const edge = isRecord(value) ? value : {};
+  const data = isRecord(edge.data) ? edge.data : {};
+  const fallbackLineStyle: DiagramEdgeAppearance['lineStyle'] = typeof style?.strokeDasharray === 'string'
+    && style.strokeDasharray.trim().length > 0
+    ? 'dashed'
+    : routing === 'feedback' ? 'dashed' : 'solid';
+  const hasExplicitMarker = Object.prototype.hasOwnProperty.call(edge, 'markerEnd');
+  const fallbackArrow: DiagramEdgeAppearance['arrow'] = hasExplicitMarker
+    && (markerEnd === null || markerEnd === false)
+    ? 'none'
+    : 'end';
+  const markerColor = isRecord(markerEnd) ? markerEnd.color : undefined;
+  const persisted = isRecord(data.appearance) ? data.appearance : {};
+
+  return {
+    lineStyle: persisted.lineStyle === 'dashed' || persisted.lineStyle === 'solid'
+      ? persisted.lineStyle
+      : fallbackLineStyle,
+    arrow: persisted.arrow === 'none' || persisted.arrow === 'end'
+      ? persisted.arrow
+      : fallbackArrow,
+    color: normalizeEdgeColor(
+      persisted.color ?? style?.stroke ?? markerColor,
+      routing === 'feedback' ? DEFAULT_FEEDBACK_EDGE_COLOR : DEFAULT_EDGE_COLOR,
+    ),
+  };
 }
 
 function fallbackHandles(source: CanonicalDiagramNode, target: CanonicalDiagramNode): { sourceHandle: string; targetHandle: string } {
@@ -145,12 +193,23 @@ function normalizeEdge(
   if (!source || !target || source === target || !nodesById.has(source) || !nodesById.has(target)) return null;
   const sourceNode = nodesById.get(source)!;
   const targetNode = nodesById.get(target)!;
+  const explicitRouting = isRecord(value.data) ? value.data.routing : value.routing;
+  const routing = explicitRouting === 'feedback'
+    || targetNode.position.y < sourceNode.position.y - 1
+    ? 'feedback'
+    : 'orthogonal';
   const fallback = fallbackHandles(sourceNode, targetNode);
-  const sourceHandle = normalizeHandle(value.sourceHandle, sourceNode.type, 'source') ?? fallback.sourceHandle;
-  const targetHandle = normalizeHandle(value.targetHandle, targetNode.type, 'target') ?? fallback.targetHandle;
+  const sourceHandle = routing === 'feedback'
+    ? (sourceNode.type === 'junction' ? 'right-source' : 'right')
+    : normalizeHandle(value.sourceHandle, sourceNode.type, 'source') ?? fallback.sourceHandle;
+  const targetHandle = routing === 'feedback'
+    ? (targetNode.type === 'junction' ? 'left-target' : 'right')
+    : normalizeHandle(value.targetHandle, targetNode.type, 'target') ?? fallback.targetHandle;
   const type = typeof value.type === 'string' && ['deletable', 'orthogonal', 'default', 'smoothstep', 'step'].includes(value.type)
     ? value.type
     : 'deletable';
+  const style = isRecord(value.style) ? value.style : undefined;
+  const appearance = normalizeEdgeAppearance(value, routing, style, value.markerEnd);
   return {
     ...value,
     id: String(value.id ?? `edge-${index + 1}`).trim() || `edge-${index + 1}`,
@@ -158,8 +217,64 @@ function normalizeEdge(
     target,
     sourceHandle,
     targetHandle,
+    markerStart: undefined,
+    markerEnd: appearance.arrow === 'end'
+      ? {
+        ...(isRecord(value.markerEnd) ? value.markerEnd : {}),
+        type: 'arrowclosed',
+        color: appearance.color,
+        width: 12,
+        height: 12,
+      }
+      : undefined,
+    style: {
+      ...(style ?? {}),
+      stroke: appearance.color,
+      strokeDasharray: appearance.lineStyle === 'dashed' ? '6 4' : undefined,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+    },
+    data: {
+      ...(isRecord(value.data) ? value.data : {}),
+      appearance,
+      routing,
+      feedbackSide: 'right',
+    },
     type,
   };
+}
+
+function edgeLabel(value: CanonicalDiagramEdge): string {
+  const rawLabel = value.label ?? (isRecord(value.data) ? value.data.label : undefined);
+  return typeof rawLabel === 'string' ? rawLabel.trim().toLocaleLowerCase() : '';
+}
+
+/**
+ * Keep the graph readable without changing meaningful relationships.
+ * LLMs commonly emit the same relationship twice, or emit A -> B and B -> A
+ * as duplicates. A labelled pair with different labels is retained because it
+ * can represent a real bidirectional relationship.
+ */
+function removeRedundantRelationships(edges: CanonicalDiagramEdge[]): CanonicalDiagramEdge[] {
+  const acceptedByDirection = new Map<string, CanonicalDiagramEdge>();
+  const result: CanonicalDiagramEdge[] = [];
+
+  for (const edge of edges) {
+    const direction = `${edge.source}->${edge.target}`;
+    if (acceptedByDirection.has(direction)) continue;
+
+    const reverse = acceptedByDirection.get(`${edge.target}->${edge.source}`);
+    if (reverse) {
+      const currentLabel = edgeLabel(edge);
+      const reverseLabel = edgeLabel(reverse);
+      if (!currentLabel || !reverseLabel || currentLabel === reverseLabel) continue;
+    }
+
+    acceptedByDirection.set(direction, edge);
+    result.push(edge);
+  }
+
+  return result;
 }
 
 export function normalizeDiagramData(value: unknown): CanonicalDiagramData {
@@ -190,10 +305,10 @@ export function normalizeDiagramData(value: unknown): CanonicalDiagramData {
     });
     const nodesById = new Map(nodes.map(node => [node.id, node]));
     const edgeIds = new Set<string>();
-    const edges = rawEdges
+    const edges = removeRedundantRelationships(rawEdges
       .map((edge, edgeIndex) => normalizeEdge(edge, edgeIndex, nodesById))
       .filter((edge): edge is CanonicalDiagramEdge => Boolean(edge))
-      .map((edge, edgeIndex) => {
+    ).map((edge, edgeIndex) => {
         let id = edge.id;
         while (edgeIds.has(id)) id = `${edge.id}-${edgeIndex + 1}`;
         edgeIds.add(id);

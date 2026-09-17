@@ -88,7 +88,7 @@ const MAX_PROPOSAL_LESSONS = 30;
 const MAX_PROPOSAL_UNITS = 80;
 const MAX_PROPOSAL_COMPONENTS = 160;
 const MAX_COMPONENTS_PER_UNIT = 4;
-const MAX_UNIT_HTML_CHARS = 6000;
+const MAX_UNIT_HTML_CHARS = 20_000;
 const MIN_UNIT_HTML_TEXT_CHARS = 180;
 const MAX_SOURCE_DOCUMENTS = 5;
 const MAX_SOURCE_DOCUMENT_EXCERPT_CHARS = 2400;
@@ -98,7 +98,7 @@ const RAG_LESSON_AUTHOR_MIN_OUTPUT_TOKENS = 1024;
 const RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS = 8192;
 const RAG_LESSON_AUTHOR_BLUEPRINT_MIN_OUTPUT_TOKENS = 2048;
 const RAG_LESSON_AUTHOR_BLUEPRINT_MAX_OUTPUT_TOKENS = 8192;
-const RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET = 6000;
+const RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET = 8000;
 const BLUEPRINT_MAX_GENERATION_ATTEMPTS = 2;
 const BLUEPRINT_RETRY_PROMPT_TOKEN_BUDGET = 128;
 const MAX_STORED_LESSON_AUTHOR_PROMPT_CHARS = 12_000;
@@ -2740,7 +2740,9 @@ function buildAiTurnTokenBudget(input: {
       ? Math.max(10_000, baseInputTokens + 2_000)
       : baseInputTokens + Math.min(2_000, Math.max(500, Math.ceil(baseInputTokens / 2)));
   const embeddingTokens = input.engine === 'self_built_rag'
-    ? estimateTokensFromText(input.promptParts[1])
+    ? estimateTokensFromText(
+      ...(isLessonAuthor ? input.promptParts.slice(1, 4) : [input.promptParts[1]]),
+    )
     : 0;
   const maxGenerationAttempts = isCourseBlueprint ? BLUEPRINT_MAX_GENERATION_ATTEMPTS : 1;
   const retryPromptTokens = Math.max(0, maxGenerationAttempts - 1) * BLUEPRINT_RETRY_PROMPT_TOKEN_BUDGET;
@@ -2786,13 +2788,14 @@ function grantedOutputTokenLimit(
 
 function getLessonAuthorOutputSchemaHint(): string {
   return [
-    '{"summary":"string","chapters":[{"title":"string","source_refs":["src-001"],"lessons":[{"title":"string","source_refs":["src-001"],"units":[{"title":"string","source_refs":["src-001"],"components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select|dropdown|numerical|short_text","question":"string","choices":[{"text":"string","correct":true}],"options":["string"],"answer":"string|number","tolerance":"5%","explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
+    '{"summary":"string","chapters":[{"title":"string","source_refs":["src-001"],"lessons":[{"title":"string","source_refs":["src-001"],"units":[{"title":"string","source_refs":["src-001"],"source_fact_ids":["p3-f1"],"components":[{"type":"html","title":"string","html":"safe html string"},{"type":"problem","title":"string","problem_type":"multiple_choice|multiple_select|dropdown|numerical|short_text","question":"string","choices":[{"text":"string","correct":true}],"options":["string"],"answer":"string|number","tolerance":"5%","explanation":"string"},{"type":"la_faq","title":"string","items":[{"question":"string","answer":"string"}]},{"type":"la_sortable","title":"string","question_text":"string","items":["first","second","third"]},{"type":"la_crossword","title":"string","words":[{"answer":"TERM","clue":"string","hint":"string"}]},{"type":"la_diagram","title":"string","name":"string","nodes":[{"label":"string","shape":"rectangle|rounded|ellipse","tooltip":"string"}],"edges":[{"source":0,"target":1,"label":"string"}]}]}]}]}]}',
     `Limits: exactly 1 top-level section/chapter max, ${MAX_PROPOSAL_LESSONS} lessons total, ${MAX_PROPOSAL_UNITS} units total, ${MAX_COMPONENTS_PER_UNIT} components per unit.`,
     'Use Vietnamese content by default. Return JSON only.',
     'Structural integrity is mandatory: every lesson must contain at least one non-empty unit, and every unit must contain at least one valid learning component. If output space is limited, shorten the text or use one concise HTML component; never omit units or return an empty lesson.',
     'Title fields must be plain labels without chapter, lesson, or unit numbering. The system adds structural numbering from the selected course chapter.',
     'Structural title fields must contain semantic names only. Never include trailing source-range metadata such as "(từ slide 30 đến slide 32)", "(trang 30 đến trang 32)", or "(from slide 30 to slide 32)" in chapter, lesson, or unit titles. Keep source_refs and source evidence separately.',
     'When source outline references are supplied, use only those exact refs at chapter, lesson, or unit scope. Omit source_refs when none are supplied; never invent refs.',
+    'Every unit must include source_fact_ids for all items it covers from the server-provided mandatory source coverage checklist. Do not invent or omit checklist IDs.',
     'The server classifies the request before generation. Distinguish rename-title requests from content updates: a rename must not generate replacement content, and a content update must not rename structural nodes.',
     'Never turn an edit, rename, or delete request into a new course/chapter proposal. If the server does not provide an exact target scope, ask for clarification through the server flow and do not guess.',
   ].join('\n');
@@ -2978,7 +2981,10 @@ function sanitizeGeneratedHtml(value: unknown): string {
   if (plainText.length < MIN_UNIT_HTML_TEXT_CHARS) {
     throw new Error(`Unit content is too thin. Minimum ${MIN_UNIT_HTML_TEXT_CHARS} plain-text chars required.`);
   }
-  return html.slice(0, MAX_UNIT_HTML_CHARS);
+  if (html.length > MAX_UNIT_HTML_CHARS) {
+    throw new Error(`Unit content is too large. Maximum ${MAX_UNIT_HTML_CHARS} HTML chars allowed.`);
+  }
+  return html;
 }
 
 function escapeXml(value: unknown): string {
@@ -3442,7 +3448,11 @@ function formatDiagramNodeLabel(label: string, index: number): string {
 function getDiagramEdgeHandles(
   sourcePosition: { x: number; y: number },
   targetPosition: { x: number; y: number },
+  routing: 'orthogonal' | 'feedback' = 'orthogonal',
 ): { sourceHandle: 'top' | 'right' | 'bottom' | 'left'; targetHandle: 'top' | 'right' | 'bottom' | 'left' } {
+  if (routing === 'feedback') {
+    return { sourceHandle: 'right', targetHandle: 'right' };
+  }
   const dx = targetPosition.x - sourcePosition.x;
   const dy = targetPosition.y - sourcePosition.y;
   if (Math.abs(dx) >= Math.abs(dy)) {
@@ -3453,6 +3463,61 @@ function getDiagramEdgeHandles(
   return dy >= 0
     ? { sourceHandle: 'bottom', targetHandle: 'top' }
     : { sourceHandle: 'top', targetHandle: 'bottom' };
+}
+
+function generatedDiagramEdgeLabel(edge: Record<string, unknown>): string {
+  const value = edge.label ?? (asRecord(edge.data).label);
+  return typeof value === 'string' ? value.trim().toLocaleLowerCase() : '';
+}
+
+function removeRedundantGeneratedEdges<T extends { source: string; target: string }>(edges: T[]): T[] {
+  const acceptedByDirection = new Map<string, T>();
+  const result: T[] = [];
+
+  for (const edge of edges) {
+    const direction = `${edge.source}->${edge.target}`;
+    if (acceptedByDirection.has(direction)) continue;
+
+    const reverse = acceptedByDirection.get(`${edge.target}->${edge.source}`);
+    if (reverse) {
+      const currentLabel = generatedDiagramEdgeLabel(edge as Record<string, unknown>);
+      const reverseLabel = generatedDiagramEdgeLabel(reverse as Record<string, unknown>);
+      if (!currentLabel || !reverseLabel || currentLabel === reverseLabel) continue;
+    }
+
+    acceptedByDirection.set(direction, edge);
+    result.push(edge);
+  }
+
+  return result;
+}
+
+function limitGeneratedEdges<T extends { source: string; target: string }>(
+  edges: T[],
+  maxEdges: number,
+): T[] {
+  const selected: T[] = [];
+  const selectedDirections = new Set<string>();
+  const hasIncoming = new Set<string>();
+
+  // Preserve at least one incoming relationship for every reachable node so
+  // truncation never turns a connected authoring result into a random fragment.
+  for (const edge of edges) {
+    if (hasIncoming.has(edge.target) || selected.length >= maxEdges) continue;
+    selected.push(edge);
+    selectedDirections.add(`${edge.source}->${edge.target}`);
+    hasIncoming.add(edge.target);
+  }
+
+  for (const edge of edges) {
+    if (selected.length >= maxEdges) break;
+    const direction = `${edge.source}->${edge.target}`;
+    if (selectedDirections.has(direction)) continue;
+    selected.push(edge);
+    selectedDirections.add(direction);
+  }
+
+  return selected;
 }
 
 function layoutDiagramNodes<T extends { id: string; position: { x: number; y: number } }>(
@@ -3468,10 +3533,12 @@ function layoutDiagramNodes<T extends { id: string; position: { x: number; y: nu
 
   if (edges.length > 0) {
     const incoming = new Map(nodes.map(node => [node.id, 0]));
+    const incomingNodes = new Map<string, string[]>();
     const outgoing = new Map<string, string[]>();
     for (const edge of edges) {
       outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
       incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
+      incomingNodes.set(edge.target, [...(incomingNodes.get(edge.target) ?? []), edge.source]);
     }
 
     const roots = nodes.filter(node => (incoming.get(node.id) ?? 0) === 0);
@@ -3501,11 +3568,28 @@ function layoutDiagramNodes<T extends { id: string; position: { x: number; y: nu
     });
     const widestRow = Math.max(...Array.from(rows.values()).map(row => row.length));
     const canvasWidth = Math.max(1, widestRow - 1) * xSpacing;
+    const originalOrder = new Map(nodes.map((node, index) => [node.id, index]));
+    const rowOrder = new Map<string, number>();
 
-    for (const [level, row] of rows.entries()) {
+    for (const [level, row] of Array.from(rows.entries()).sort(([left], [right]) => left - right)) {
+      if (level > 0) {
+        row.sort((leftNode, rightNode) => {
+          const score = (node: T) => {
+            const parentOrders = (incomingNodes.get(node.id) ?? [])
+              .map(parentId => rowOrder.get(parentId))
+              .filter((order): order is number => typeof order === 'number');
+            return parentOrders.length > 0
+              ? parentOrders.reduce((total, order) => total + order, 0) / parentOrders.length
+              : Number.POSITIVE_INFINITY;
+          };
+          return score(leftNode) - score(rightNode)
+            || (originalOrder.get(leftNode.id) ?? 0) - (originalOrder.get(rightNode.id) ?? 0);
+        });
+      }
       const rowWidth = Math.max(1, row.length - 1) * xSpacing;
       const rowOffset = (canvasWidth - rowWidth) / 2;
       row.forEach((node, index) => {
+        rowOrder.set(node.id, index);
         node.position = {
           x: left + rowOffset + index * xSpacing,
           y: top + level * ySpacing,
@@ -3586,7 +3670,8 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
   const availableNodeRefs = nodeRefs.slice(0, nodes.length);
   const rawEdges = Array.isArray(component.edges) ? component.edges : [];
   const seenConnections = new Set<string>();
-  const explicitEdges = rawEdges
+  const maxReadableEdges = Math.max(1, Math.min(16, nodes.length + 2));
+  const explicitEdges = removeRedundantGeneratedEdges(rawEdges
     .map((edgeValue, index) => {
       const edge = asRecord(edgeValue);
       const source = resolveDiagramNodeRef(edge.source ?? edge.from, availableNodeRefs);
@@ -3608,10 +3693,14 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
       };
     })
     .filter((edge): edge is NonNullable<typeof edge> => Boolean(edge))
-    .slice(0, 16);
+  );
+  const readableEdges = limitGeneratedEdges(
+    explicitEdges,
+    maxReadableEdges,
+  );
 
-  const initialEdges = explicitEdges.length > 0
-    ? explicitEdges
+  const initialEdges = readableEdges.length > 0
+    ? readableEdges
     : nodes.slice(1).map((node, index) => ({
       id: `edge_${index + 1}`,
       source: nodes[index].id,
@@ -3627,10 +3716,21 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
   const edges = initialEdges.map(edge => {
     const source = nodeById.get(edge.source);
     const target = nodeById.get(edge.target);
+    const routing = source && target && target.position.y < source.position.y - 1
+      ? 'feedback'
+      : 'orthogonal';
     const handles = source && target
-      ? getDiagramEdgeHandles(source.position, target.position)
+      ? getDiagramEdgeHandles(source.position, target.position, routing)
       : { sourceHandle: edge.sourceHandle, targetHandle: edge.targetHandle };
-    return { ...edge, ...handles };
+    return {
+      ...edge,
+      ...handles,
+      data: {
+        ...asRecord((edge as { data?: unknown }).data),
+        routing,
+        feedbackSide: 'right',
+      },
+    };
   });
 
   const diagramId = 'root';
@@ -4980,7 +5080,7 @@ async function generateLessonAuthorProposal(
     'Each unit must contain 1-3 components. Usually start with one html component for explanation, then add one interactive component when it improves learning.',
     'Choose component types by pedagogy: html for explanation, problem for checks, la_sortable for ordered processes, la_faq for definitions/misconceptions, la_crossword only for vocabulary terms, la_diagram for concept maps, workflows, hierarchies, relationships, or cause-effect structures. Do not force every type.',
     'If a unit contains one or more la_faq components, every FAQ component must be the final component in that unit. Keep all non-FAQ learning content before FAQ. Never place FAQ between explanation, activity, or assessment components.',
-    'For la_diagram, output 4-8 meaningful nodes with short labels, useful tooltip/description text, and clear edges with relationship labels when helpful. Edge source/target may be zero-based node indexes or exact node labels. Do not include icons in labels; backend will add consistent label icons automatically.',
+    'For la_diagram, output 4-8 meaningful nodes with short labels, useful tooltip/description text, and a sparse, readable graph. Prefer a simple one-direction flow or hierarchy; do not emit self-loops, duplicate edges, reverse duplicates, or dense all-to-all connections. Keep edges to at most nodes.length + 2 and add relationship labels only when they clarify meaning. Edge source/target may be zero-based node indexes or exact node labels. Do not include icons in labels; backend will add consistent label icons automatically.',
     'Do not output video, pdf, image, or unsupported component types.',
     'Each html component must be real lesson content, not an empty shell: include a short objective, explanation, and key points. Prefer 500-1200 Vietnamese words when the KB supports it.',
     'Problem components may use exactly one of 5 problem_type values: multiple_choice, multiple_select, dropdown, numerical, short_text. For multiple_choice/multiple_select provide choices with correct flags. For dropdown provide options and answer, or choices with one correct flag. For numerical provide answer and optional tolerance such as "5%" or "0.01". For short_text provide answer and optional answers for accepted alternatives.',
@@ -5169,7 +5269,7 @@ async function generateUnitContentBatch(
     '- la_faq: provide items array with 2+ Q&A items.',
     '- la_sortable: provide question_text and items array with 3+ ordered items.',
     '- la_crossword: provide words array with 3+ terms, each having answer, clue, hint.',
-    '- la_diagram: provide 4-8 meaningful nodes with short labels, tooltip/description, and clear edges with relationship labels when useful. Do not include icons in labels; backend will add label icons.',
+    '- la_diagram: provide 4-8 meaningful nodes with short labels, tooltip/description, and a sparse readable graph. Prefer one-direction flows or hierarchies; avoid self-loops, duplicate/reverse edges, and dense all-to-all connections. Keep edges to at most nodes.length + 2. Do not include icons in labels; backend will add label icons.',
     'Return JSON array of units: [{"title":"exact unit title","components":[{"type":"html","title":"string","html":"full html content"}, ...]}]',
     'Use KB as source of truth. Do not invent facts not supported by KB.',
     'HTML must be clean. Use h3, p, ul, ol, strong, em only. No script/style/iframe.',
@@ -6728,6 +6828,12 @@ export async function sendMessageStream(
             top_score: draftRetrieval?.top_score ?? null,
             methods: draftRetrieval?.methods ?? [],
             reason: draftRetrieval?.reason ?? null,
+            target_source_scope_hard_locked: draftRetrieval?.target_source_scope_hard_locked ?? null,
+            target_source_scope_pages: draftRetrieval?.target_source_scope_pages ?? [],
+            target_source_scope_missing_pages: draftRetrieval?.target_source_scope_missing_pages ?? [],
+            source_coverage_status: draftRetrieval?.source_coverage_status ?? null,
+            source_coverage_required_count: draftRetrieval?.source_coverage_required_count ?? null,
+            source_coverage_covered_count: draftRetrieval?.source_coverage_covered_count ?? null,
           });
         } else {
           proposal = await generateLessonAuthorProposalV2(
