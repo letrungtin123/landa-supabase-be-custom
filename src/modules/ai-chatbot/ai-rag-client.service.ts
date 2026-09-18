@@ -86,6 +86,9 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   outline_context: string;
   target_scope_instruction: string;
   output_schema_hint: string;
+  operation?: 'answer' | 'course_blueprint' | 'create' | 'rename' | 'update_content' | 'delete' | 'move' | 'clarify';
+  target_type?: 'course' | 'chapter' | 'lesson' | 'unit' | 'component' | null;
+  generation_mode?: 'auto' | 'staged' | 'single';
   max_attempts?: number;
 }
 

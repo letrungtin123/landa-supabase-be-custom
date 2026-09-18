@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
+import {
+  getLessonAuthorSortableItems,
+  isLessonAuthorGeneratedContentOwned,
+  isLessonAuthorMediaProtectedBlock,
+  orderLessonAuthorComponents,
+} from './lesson-author-components.logic.js';
 import type { LessonAuthorComponentProposal } from './course-authoring.service.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
 
@@ -29,6 +34,35 @@ test('FAQ blocks are moved to the end while preserving stable order', () => {
 test('component order is unchanged when a unit has no FAQ', () => {
   const components = [component('html', 'A'), component('problem', 'B')];
   assert.deepEqual(orderLessonAuthorComponents(components), components);
+});
+
+test('lesson author ownership requires explicit generated metadata', () => {
+  assert.equal(isLessonAuthorGeneratedContentOwned({ generated_by: 'lesson_author_ai' }), true);
+  assert.equal(isLessonAuthorGeneratedContentOwned({ generated_by: 'manual' }), false);
+  assert.equal(isLessonAuthorGeneratedContentOwned(null), false);
+});
+
+test('media-bearing blocks are protected from lesson author replacement', () => {
+  assert.equal(isLessonAuthorMediaProtectedBlock('video', {}, {}), true);
+  assert.equal(isLessonAuthorMediaProtectedBlock('la_image_choice_quiz', {}, {}), true);
+  assert.equal(isLessonAuthorMediaProtectedBlock('html', '<p>Nội dung</p><img src="asset.png">', {}), true);
+  assert.equal(isLessonAuthorMediaProtectedBlock('html', '<p>Nội dung thuần văn bản</p>', {
+    html_media: { images: [{ storage_path: 'tenant/course/image.png' }] },
+  }), true);
+  assert.equal(isLessonAuthorMediaProtectedBlock('problem', {}, {
+    problem_media: { video_storage_path: 'tenant/course/video.mp4' },
+  }), true);
+  assert.equal(isLessonAuthorMediaProtectedBlock('html', '<p>Nội dung thuần văn bản</p>', {
+    generated_by: 'lesson_author_ai',
+    html_media: { images: [] },
+  }), false);
+});
+
+test('sortable contract accepts items, ordered_items, and steps aliases', () => {
+  assert.deepEqual(getLessonAuthorSortableItems({ items: ['A', 'B', 'C'] }), ['A', 'B', 'C']);
+  assert.deepEqual(getLessonAuthorSortableItems({ ordered_items: ['A', 'B', 'C'] }), ['A', 'B', 'C']);
+  assert.deepEqual(getLessonAuthorSortableItems({ steps: ['A', 'B', 'C'] }), ['A', 'B', 'C']);
+  assert.deepEqual(getLessonAuthorSortableItems({ ordered_items: 'A, B, C' }), []);
 });
 
 test('diagram data normalizes legacy JSON and repairs compatible edge handles', () => {

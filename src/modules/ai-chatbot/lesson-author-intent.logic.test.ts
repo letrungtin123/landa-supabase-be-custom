@@ -3,8 +3,11 @@ import test from 'node:test';
 import {
   classifyLessonAuthorIntent,
   detectLessonAuthorInputLocale,
+  extractLessonAuthorTargetNumberPath,
   extractRequestedTitle,
   formatChapterTitle,
+  isLessonAuthorNewChapterDraftRequest,
+  resolveLessonAuthorOutputLocale,
   stripLessonAuthorSourceRangeSuffix,
 } from './lesson-author-intent.logic.js';
 
@@ -129,6 +132,17 @@ test('routes a detailed whole-course request to the blueprint branch before cont
   assert.deepEqual(plan.signals, ['create_verb', 'course_scope']);
 });
 
+test('routes an English full-course authoring request to the blueprint branch', () => {
+  const plan = classifyLessonAuthorIntent({
+    message: 'Please create detailed and in-depth content for the entire course. The docx file I provided should be treated as the single source of truth.',
+    mode: 'auto',
+  });
+
+  assert.equal(plan.operation, 'course_blueprint');
+  assert.equal(plan.target_type, 'course');
+  assert.equal(plan.confidence, 0.96);
+});
+
 test('keeps a whole-course edit request out of the blueprint branch', () => {
   const plan = classifyLessonAuthorIntent({
     message: 'Chỉnh sửa nội dung toàn bộ khóa học',
@@ -243,4 +257,48 @@ test('detects Vietnamese, English and mixed authoring commands', () => {
   assert.equal(detectLessonAuthorInputLocale('Đổi tên Chương 6'), 'vi');
   assert.equal(detectLessonAuthorInputLocale('Rename Chapter 6'), 'en');
   assert.equal(detectLessonAuthorInputLocale('Đổi tên Chapter 6'), 'mixed');
+  assert.equal(
+    detectLessonAuthorInputLocale('Please create detailed and in-depth content for the entire course.'),
+    'en',
+  );
+});
+
+test('uses message language or an explicit instruction before dashboard locale', () => {
+  assert.equal(
+    resolveLessonAuthorOutputLocale('Please create detailed content for the entire course.', 'vi'),
+    'en',
+  );
+  assert.equal(
+    resolveLessonAuthorOutputLocale('Soạn chi tiết nội dung khóa học bằng tiếng Anh.', 'vi'),
+    'en',
+  );
+  assert.equal(
+    resolveLessonAuthorOutputLocale('Create a diagram', 'vi'),
+    'en',
+  );
+});
+
+test('recognizes guarded new-chapter drafting without treating edits as creation', () => {
+  assert.equal(isLessonAuthorNewChapterDraftRequest('Soạn chi tiết Chương 3'), true);
+  assert.equal(isLessonAuthorNewChapterDraftRequest('Draft Chapter 3'), true);
+  assert.equal(isLessonAuthorNewChapterDraftRequest('Sửa nội dung Chương 3'), false);
+  assert.equal(isLessonAuthorNewChapterDraftRequest('Đổi tên Chương 3 thành An toàn'), false);
+
+  const detailedDraft = classifyLessonAuthorIntent({
+    message: 'Soạn chi tiết Chương 3: Thực hành Nhận diện mối nguy, Đánh giá rủi ro, Lựa chọn và sử dụng PPE phù hợp',
+  });
+  assert.equal(detailedDraft.operation, 'update_content');
+  assert.equal(detailedDraft.target_type, 'chapter');
+
+  const twoChapterDraft = classifyLessonAuthorIntent({
+    message: 'Soạn Chương 3 và tạo Chương 4',
+  });
+  assert.equal(twoChapterDraft.operation, 'clarify');
+});
+
+test('extracts structural target number paths for Vietnamese and English labels', () => {
+  assert.equal(extractLessonAuthorTargetNumberPath('Soạn Chương 3', 'chapter'), '3');
+  assert.equal(extractLessonAuthorTargetNumberPath('Update Section 2.1', 'lesson'), '2.1');
+  assert.equal(extractLessonAuthorTargetNumberPath('Draft Lesson 2.1.1', 'unit'), '2.1.1');
+  assert.equal(extractLessonAuthorTargetNumberPath('Tạo nội dung', 'chapter'), null);
 });

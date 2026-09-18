@@ -278,7 +278,7 @@ async function applyMemberChanges(
          AND u.tenant_id = $2::uuid
          AND u.role IN ('staff', 'learner_plus')
        ORDER BY u.id ASC
-       FOR UPDATE`,
+       FOR UPDATE OF u`,
       [addIds, tenantId],
     );
     if (eligibleUsers.rowCount !== addIds.length) {

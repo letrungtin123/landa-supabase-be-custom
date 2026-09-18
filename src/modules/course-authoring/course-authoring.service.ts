@@ -19,14 +19,21 @@ import {
 } from '../tenants/tenant-course-components.service.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import { deleteFile, extractStoragePath } from '../../config/storage.js';
-import { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
+import {
+  isLessonAuthorGeneratedContentOwned,
+  isLessonAuthorMediaProtectedBlock,
+  orderLessonAuthorComponents,
+} from './lesson-author-components.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
 import {
   formatChapterTitle,
   stripLessonAuthorSourceRangeSuffix,
   type LessonAuthorIntentPlan,
 } from '../ai-chatbot/lesson-author-intent.logic.js';
-export { orderLessonAuthorComponents } from './lesson-author-components.logic.js';
+export {
+  getLessonAuthorSortableItems,
+  orderLessonAuthorComponents,
+} from './lesson-author-components.logic.js';
 
 type DbClient = Awaited<ReturnType<typeof getClient>>;
 
@@ -125,7 +132,13 @@ export interface DeleteAssetByStoragePathResult {
   storagePathsToDelete: string[];
 }
 
-export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram' | 'la_image_choice_quiz';
+export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram';
+
+export interface LessonAuthorComponentPlan {
+  type: LessonAuthorComponentType;
+  rationale?: string;
+  source_fact_ids?: string[];
+}
 
 export interface LessonAuthorComponentProposal {
   type: LessonAuthorComponentType;
@@ -139,6 +152,8 @@ export interface LessonAuthorUnitProposal {
   html?: string;
   components?: LessonAuthorComponentProposal[];
   source_refs?: string[];
+  source_fact_ids?: string[];
+  component_plan?: LessonAuthorComponentPlan[];
 }
 
 export interface LessonAuthorLessonProposal {
@@ -157,6 +172,7 @@ export interface LessonAuthorProposal {
   summary: string;
   chapters: LessonAuthorChapterProposal[];
   operation_plan?: LessonAuthorOperationPlan;
+  source_evidence?: Record<string, unknown>;
 }
 
 export interface LessonAuthorOperationPlan extends LessonAuthorIntentPlan {
@@ -1886,12 +1902,12 @@ async function findExistingChildBlock(
   parentId: string,
   blockType: string,
   displayName: string,
-): Promise<string | null> {
+): Promise<{ id: string; display_name: string; data: unknown; metadata: unknown } | null> {
   const normalized = normalizeGeneratedTitle(displayName);
   if (!normalized) return null;
 
-  const result = await client.query<{ id: string; display_name: string }>(
-    `SELECT id, display_name
+  const result = await client.query<{ id: string; display_name: string; data: unknown; metadata: unknown }>(
+    `SELECT id, display_name, data, metadata
      FROM course_blocks
      WHERE course_id = $1
        AND parent_id = $2
@@ -1902,7 +1918,7 @@ async function findExistingChildBlock(
   );
 
   const existing = result.rows.find(row => normalizeGeneratedTitle(row.display_name) === normalized);
-  return existing?.id ?? null;
+  return existing ?? null;
 }
 
 async function markAncestorsDirtyWithClient(client: DbClient, blockId: string): Promise<void> {
@@ -1961,13 +1977,18 @@ async function getOrCreateGeneratedBlock(
   metadata: Record<string, unknown>,
   options: { updateExisting?: boolean; requireExisting?: boolean } = {},
 ): Promise<{ id: string; created: boolean; updated: boolean }> {
-  const existingId = await findExistingChildBlock(client, courseId, parentId, blockType, displayName);
-  if (existingId) {
+  const existing = await findExistingChildBlock(client, courseId, parentId, blockType, displayName);
+  if (existing) {
     if (options.updateExisting) {
-      await updateGeneratedBlockContent(client, existingId, courseId, parentId, blockType, data, metadata);
-      return { id: existingId, created: false, updated: true };
+      const canUpdateGeneratedContent = isLessonAuthorGeneratedContentOwned(existing.metadata)
+        && !isLessonAuthorMediaProtectedBlock(blockType, existing.data, existing.metadata);
+      if (canUpdateGeneratedContent) {
+        await updateGeneratedBlockContent(client, existing.id, courseId, parentId, blockType, data, metadata);
+        return { id: existing.id, created: false, updated: true };
+      }
+    } else {
+      return { id: existing.id, created: false, updated: false };
     }
-    return { id: existingId, created: false, updated: false };
   }
 
   if (options.requireExisting) {
@@ -1997,31 +2018,38 @@ function clampStructuralTitle(value: string, fallback: string): string {
 }
 
 async function moveFaqComponentsToUnitEnd(client: DbClient, courseId: string, unitId: string): Promise<void> {
-  // Reorder active children atomically after an AI proposal is applied. The
-  // secondary keys preserve the existing order of every non-FAQ component and
-  // the relative order of multiple FAQ blocks.
+  // Move only FAQ rows. Non-FAQ blocks keep their sort_order and updated_at,
+  // which is important for manual media and image components.
   await client.query(
-    `WITH ordered_children AS (
-       SELECT id,
-              ROW_NUMBER() OVER (
-                ORDER BY CASE WHEN block_type = 'la_faq' THEN 1 ELSE 0 END,
-                         sort_order ASC NULLS LAST,
-                         created_at ASC,
-                         id ASC
-              ) - 1 AS new_sort_order
+    `WITH non_faq_max AS (
+       SELECT COALESCE(MAX(sort_order), -1) AS max_sort_order
        FROM course_blocks
        WHERE course_id = $1
          AND parent_id = $2
          AND deleted_at IS NULL
+         AND block_type <> 'la_faq'
+     ), ordered_faq AS (
+       SELECT cb.id,
+              non_faq_max.max_sort_order
+                + ROW_NUMBER() OVER (
+                    ORDER BY cb.sort_order ASC NULLS LAST, cb.created_at ASC, cb.id ASC
+                  ) AS new_sort_order
+       FROM course_blocks cb
+       CROSS JOIN non_faq_max
+       WHERE cb.course_id = $1
+         AND cb.parent_id = $2
+         AND cb.deleted_at IS NULL
+         AND cb.block_type = 'la_faq'
      )
      UPDATE course_blocks cb
-     SET sort_order = ordered_children.new_sort_order::integer,
+     SET sort_order = ordered_faq.new_sort_order::integer,
          updated_at = now()
-     FROM ordered_children
-     WHERE cb.id = ordered_children.id
+     FROM ordered_faq
+     WHERE cb.id = ordered_faq.id
        AND cb.course_id = $1
        AND cb.parent_id = $2
-       AND cb.deleted_at IS NULL`,
+       AND cb.deleted_at IS NULL
+       AND cb.sort_order IS DISTINCT FROM ordered_faq.new_sort_order::integer`,
     [courseId, unitId],
   );
 }
@@ -2292,6 +2320,12 @@ async function applyLessonAuthorComponentContentWithClient(
     throw new AppError('Component đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
   }
   if (!target.parent_id) throw new AppError('Component không có Mục cha hợp lệ.', 409);
+  if (isLessonAuthorMediaProtectedBlock(target.block_type, target.data, target.metadata)) {
+    throw new AppError(
+      'Lesson Author không sửa component chứa media, hình ảnh, video hoặc PDF. Hãy chỉnh component này trực tiếp trong trình soạn thảo.',
+      409,
+    );
+  }
 
   const generatedComponents = getLessonAuthorComponents(
     proposal.chapters[0]?.lessons[0]?.units[0] ?? { title: target.display_name },
@@ -2359,6 +2393,23 @@ async function assertLessonAuthorOperationTargetFreshWithClient(
   );
   const target = result.rows[0];
   if (!target) throw new AppError('Node trong cây outline không còn tồn tại.', 409);
+
+  // A guarded new-chapter plan points at the course root as its parent. It
+  // must never be accepted as an existing chapter update or as an arbitrary
+  // parent supplied by a model-generated proposal.
+  if (plan.target_resolution === 'new') {
+    if (plan.operation !== 'create'
+      || plan.target_type !== 'chapter'
+      || target.block_type !== 'course'
+      || target.parent_id !== null) {
+      throw new AppError('Parent tạo Chương mới không hợp lệ. Vui lòng tạo lại đề xuất.', 409);
+    }
+    if (plan.target_snapshot && operationTargetSnapshot(target) !== plan.target_snapshot) {
+      throw new AppError('Khóa học đã thay đổi sau khi tạo đề xuất. Vui lòng tạo lại đề xuất.', 409);
+    }
+    return;
+  }
+
   if (plan.target_type === 'course') {
     throw new AppError('Không thể áp dụng nội dung trực tiếp cho toàn khóa học. Hãy chọn một node cụ thể.', 409);
   }
@@ -2378,9 +2429,14 @@ function lockLessonAuthorProposalToTarget(
   if (plan.operation !== 'update_content' && plan.operation !== 'create') return proposal;
   if (!proposal.chapters.length) throw new AppError('Proposal không có nội dung để áp dụng.', 400);
 
+  const isNewChapter = plan.target_resolution === 'new'
+    && plan.operation === 'create'
+    && plan.target_type === 'chapter';
   const pathParts = plan.target_path.split(' / ').map(part => part.trim()).filter(Boolean);
   const chapters = proposal.chapters.slice(0, 1).map((chapter) => {
-    const chapterTitle = plan.target_type === 'chapter' || plan.target_type === 'course'
+    const chapterTitle = isNewChapter
+      ? chapter.title
+      : plan.target_type === 'chapter' || plan.target_type === 'course'
       ? plan.target_display_name
       : pathParts[0] || chapter.title;
     const lessons = chapter.lessons.slice(0, plan.target_type === 'chapter' || plan.target_type === 'course' ? chapter.lessons.length : 1).map((lesson) => {
@@ -2542,7 +2598,7 @@ export async function applyLessonAuthorProposalToCourse(
     const proposalForApply = operationPlan
       ? lockLessonAuthorProposalToTarget(input.proposal, operationPlan)
       : input.proposal;
-    const requireExistingChapter = Boolean(operationPlan);
+    const requireExistingChapter = Boolean(operationPlan) && operationPlan?.target_resolution !== 'new';
     const requireExistingLesson = operationPlan?.operation === 'update_content'
       || operationPlan?.target_type === 'lesson'
       || operationPlan?.target_type === 'unit'
@@ -2601,7 +2657,12 @@ export async function applyLessonAuthorProposalToCourse(
             'vertical',
             unitTitle,
             {},
-            { ...baseMetadata, ai_index: unitIndex },
+            {
+              ...baseMetadata,
+              ai_index: unitIndex,
+              ...(unit.source_fact_ids?.length ? { source_fact_ids: unit.source_fact_ids } : {}),
+              ...(unit.component_plan?.length ? { component_plan: unit.component_plan } : {}),
+            },
             { requireExisting: requireExistingUnit },
           );
           if (verticalBlock.created) createdBlockIds.push(verticalBlock.id);

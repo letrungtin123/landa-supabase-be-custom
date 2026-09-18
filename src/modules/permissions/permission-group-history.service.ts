@@ -103,6 +103,16 @@ function buildSearchText(groupName: string, actor: { username: string; displayNa
     .join(' ')).slice(0, 6000);
 }
 
+/**
+ * Optional state is represented by SQL NULL, not the JSON literal `null`.
+ * The history table deliberately accepts only an object when a snapshot exists.
+ */
+export function serializeOptionalHistoryState(
+  state: PermissionGroupStateSnapshot | null | undefined,
+): string | null {
+  return state == null ? null : JSON.stringify(state);
+}
+
 function historyTotalCacheKey(tenantId: string, search: string, from: Date | null, to: Date | null): string {
   return [tenantId, search, from?.toISOString() || '', to?.toISOString() || ''].join('\u0001');
 }
@@ -189,8 +199,8 @@ export async function appendPermissionGroupHistory(client: PoolClient, entry: Hi
       actor.displayName,
       actor.email,
       actor.role,
-      JSON.stringify(entry.beforeState || null),
-      JSON.stringify(entry.afterState || null),
+      serializeOptionalHistoryState(entry.beforeState),
+      serializeOptionalHistoryState(entry.afterState),
       JSON.stringify(participants),
       searchText,
     ],

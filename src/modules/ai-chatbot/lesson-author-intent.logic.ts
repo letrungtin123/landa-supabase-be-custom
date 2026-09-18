@@ -38,6 +38,8 @@ export interface LessonAuthorIntentPlan {
   version: 1;
   operation: LessonAuthorIntentOperation;
   target_type: LessonAuthorTargetType;
+  /** Whether the resolved target already exists or represents a guarded new node. */
+  target_resolution?: 'existing' | 'new' | null;
   target_block_id?: string | null;
   target_path?: string | null;
   target_number_path?: string | null;
@@ -62,13 +64,18 @@ const CREATE_WORDS = /(^|\b)(tao|them|bo sung|add|insert|create|generate|build|d
 const DELETE_WORDS = /(^|\b)(xoa|xóa|delete|remove|bo di|bỏ đi|go bo|loai bo|huy bo)(\b|$)/i;
 const MOVE_WORDS = /(^|\b)(di chuyen|chuyen sang|sap xep|doi thu tu|dat len truoc|dat xuong sau|move|reorder|sort)(\b|$)/i;
 const QUESTION_WORDS = /(^|\b)(la gi|giai thich|tom tat|cho biet|phan tich|tai sao|vi sao|nhu the nao|the nao|what is|explain|summarize|why|how)(\b|$)/i;
-const COURSE_BLUEPRINT_WORDS = /(^|\b)(toan bo khoa hoc|toan khoa|ca khoa hoc|course blueprint|curriculum|chuong trinh dao tao|ban thiet ke khoa hoc|khung khoa hoc|thiet ke mot khoa hoc|xay dung mot khoa hoc)(\b|$)/i;
+const COURSE_BLUEPRINT_WORDS = /(^|\b)(toan bo khoa hoc|toan khoa|ca khoa hoc|course blueprint|curriculum|chuong trinh dao tao|ban thiet ke khoa hoc|khung khoa hoc|thiet ke mot khoa hoc|xay dung mot khoa hoc|entire course|whole course|full course|complete course)(\b|$)/i;
 const COURSE_SCOPE_WORDS = /(^|\b)(khoa hoc|course|chuong trinh|curriculum)(\b|$)/i;
 const COMPOUND_CONNECTOR_WORDS = /(^|\b)(va|and|dong thoi|at the same time|sau do|then|also)(\b|$)/i;
 const NEGATED_DELETE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(xoa|delete|remove|bo di|go bo|loai bo)(\b|$)/i;
 const NEGATED_CREATE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(tao|them|add|insert|create|generate|build)(\b|$)/i;
 const VIETNAMESE_HINTS = /(^|\b)(chuong|muc|bai hoc|bai|noi dung|tieu de|doi ten|sua|chinh sua|tao|them|xoa|di chuyen|khoa hoc|hay|cho|va)(\b|$)/i;
 const ENGLISH_HINTS = /(^|\b)(chapter|section|lesson|unit|content|title|rename|edit|update|create|add|delete|remove|move|course|please|the|and)(\b|$)/i;
+// Do not use the `i` flag here. Unicode case folding makes an ASCII `e`
+// match Vietnamese `ê`, which would classify ordinary English as mixed.
+const VIETNAMESE_DIACRITIC_RE = /[ĂÂĐÊÔƠƯăâđêôơưÀ-Ỹà-ỹ]/u;
+const ENGLISH_OUTPUT_LANGUAGE_WORDS = /(^|\b)(in english|english only|english version|write in english|reply in english|respond in english|bang tieng anh|tieng anh)(\b|$)/i;
+const VIETNAMESE_OUTPUT_LANGUAGE_WORDS = /(^|\b)(in vietnamese|vietnamese only|vietnamese version|write in vietnamese|reply in vietnamese|respond in vietnamese|bang tieng viet|tieng viet)(\b|$)/i;
 
 function fold(value: string): string {
   return value
@@ -84,12 +91,30 @@ export function detectLessonAuthorInputLocale(value: string): LessonAuthorInputL
   const raw = String(value ?? '').trim();
   if (!raw) return 'unknown';
   const folded = fold(raw);
-  const hasVietnamese = /[ăâđêôơưà-ỹ]/iu.test(raw) || VIETNAMESE_HINTS.test(folded);
+  const hasVietnamese = VIETNAMESE_DIACRITIC_RE.test(raw) || VIETNAMESE_HINTS.test(folded);
   const hasEnglish = ENGLISH_HINTS.test(folded);
   if (hasVietnamese && hasEnglish) return 'mixed';
   if (hasVietnamese) return 'vi';
   if (hasEnglish) return 'en';
   return 'unknown';
+}
+
+/**
+ * Generated course content follows an explicit language instruction first,
+ * then the language of the current message. The dashboard locale only affects
+ * user-interface chrome and remains a fallback for genuinely mixed input.
+ */
+export function resolveLessonAuthorOutputLocale(
+  value: string,
+  fallback: 'vi' | 'en' = 'vi',
+): 'vi' | 'en' {
+  const folded = fold(String(value ?? ''));
+  const explicitlyEnglish = ENGLISH_OUTPUT_LANGUAGE_WORDS.test(folded);
+  const explicitlyVietnamese = VIETNAMESE_OUTPUT_LANGUAGE_WORDS.test(folded);
+  if (explicitlyEnglish !== explicitlyVietnamese) return explicitlyEnglish ? 'en' : 'vi';
+
+  const inputLocale = detectLessonAuthorInputLocale(value);
+  return inputLocale === 'en' || inputLocale === 'vi' ? inputLocale : fallback;
 }
 
 function hasTargetReference(text: string): boolean {
@@ -108,6 +133,41 @@ function targetTypeFromMention(mention?: LessonAuthorIntentMention | null): Less
 
 function hasActiveSignal(pattern: RegExp, text: string, negatedPattern?: RegExp): boolean {
   return pattern.test(text) && !(negatedPattern?.test(text) ?? false);
+}
+
+/**
+ * Returns true only for an explicit request to draft/create a new chapter.
+ * Existing-node edit language deliberately takes precedence so a missing
+ * target never turns a typo in an edit request into a new chapter.
+ */
+export function isLessonAuthorNewChapterDraftRequest(value: string): boolean {
+  const text = fold(String(value ?? ''));
+  const hasChapterReference = /(^|\b)(chuong|chapter)(\s*\d+)?(\b|$)/i.test(text);
+  if (!hasChapterReference) return false;
+
+  const hasDraftVerb = /(^|\b)(soan|draft|tao|create|generate|build|viet|xay dung|lap)(\b|$)/i.test(text);
+  if (!hasDraftVerb) return false;
+
+  const hasExistingNodeMutation = /(^|\b)(sua|chinh sua|cap nhat|edit|update|improve|rewrite|revise|refine|toi uu|cai thien|lam lai|viet lai|doi ten|rename|retitle|xoa|delete|remove|di chuyen|move|reorder)(\b|$)/i.test(text);
+  return !hasExistingNodeMutation;
+}
+
+export function extractLessonAuthorTargetNumberPath(
+  value: string,
+  targetType: LessonAuthorTargetType,
+): string | null {
+  const text = fold(String(value ?? ''));
+  const patterns: Array<{ type: NonNullable<LessonAuthorTargetType>; pattern: RegExp }> = [
+    { type: 'unit', pattern: /(?:bai hoc|lesson|unit|vertical)\s*(?:so\s*)?(\d+\.\d+\.\d+)/i },
+    { type: 'lesson', pattern: /(?:muc|bai|section|module|sequential|lesson)\s*(?:so\s*)?(\d+\.\d+)(?!\.)/i },
+    { type: 'chapter', pattern: /(?:chuong|chapter)\s*(?:so\s*)?(\d+)/i },
+  ];
+  for (const item of patterns) {
+    if (targetType && targetType !== item.type) continue;
+    const match = text.match(item.pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
 }
 
 function clampConfidence(value: number): number {
@@ -191,9 +251,33 @@ export function classifyLessonAuthorIntent(input: {
     && !hasSpecificOutlineTarget
     && !hasMention;
 
-  const mutationSignals = [isDelete, isMove, isTitleEdit, isEdit || isContentEdit, isCreate]
+  // A drafting command can contain an ordinary topic list joined by "và" /
+  // "and". Treat that as one operation, but do not bypass compound-mutation
+  // protection when the user names more than one chapter.
+  const chapterReferenceCount = [...text.matchAll(/(^|\b)(chuong|chapter)\s*(?:so\s*)?\d+/gi)].length;
+  const isSingleNewChapterDraftCommand = isLessonAuthorNewChapterDraftRequest(input.message)
+    && targetType === 'chapter'
+    && chapterReferenceCount === 1;
+
+  // "Create detailed and in-depth content" is one authoring request, not two
+  // mutations just because it contains both a creation and a content signal.
+  const isSingleCreateContentRequest = isCreate
+    && isContentEdit
+    && !isEdit
+    && !isTitleEdit
+    && !isDelete
+    && !isMove
+    && chapterReferenceCount <= 1;
+  const mutationSignals = [
+    isDelete,
+    isMove,
+    isTitleEdit,
+    (isEdit || isContentEdit) && !isSingleCreateContentRequest,
+    isCreate,
+  ]
     .filter(Boolean).length;
   const hasCompoundMutation = !isCourseWideBlueprintRequest
+    && !isSingleNewChapterDraftCommand
     && COMPOUND_CONNECTOR_WORDS.test(text)
     && mutationSignals > 1;
 
