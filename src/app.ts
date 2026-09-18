@@ -42,9 +42,16 @@ import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
-if (env.TRUST_PROXY_HOPS > 0) {
+if (env.TRUSTED_PROXY_CIDRS.length > 0) {
+  // A CIDR allowlist is safe even if the backend port is reachable directly:
+  // forwarded addresses are considered only when every proxy hop belongs to
+  // this explicitly trusted set. Do not replace this with `true` or a broad
+  // hop count in production.
+  app.set('trust proxy', env.TRUSTED_PROXY_CIDRS);
+  console.log(`[Server] Trust proxy enabled with ${env.TRUSTED_PROXY_CIDRS.length} exact trusted CIDR(s)`);
+} else if (env.TRUST_PROXY_HOPS > 0) {
   app.set('trust proxy', env.TRUST_PROXY_HOPS);
-  console.log(`[Server] Trust proxy enabled: ${env.TRUST_PROXY_HOPS} hop(s)`);
+  console.warn(`[Server] Trust proxy enabled by legacy hop count: ${env.TRUST_PROXY_HOPS}. Configure TRUSTED_PROXY_CIDRS for production.`);
 }
 
 if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {

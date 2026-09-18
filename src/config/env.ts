@@ -88,10 +88,19 @@ function optionalBoolean(key: string, fallback: boolean): boolean {
   throw new Error(`[ENV] ${key} must be a boolean, received: "${raw}"`);
 }
 
+function optionalCsv(key: string): string[] {
+  const raw = process.env[key]?.trim();
+  if (!raw) return [];
+  return raw.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
   TRUST_PROXY_HOPS: optionalNonNegativeInt('TRUST_PROXY_HOPS', 0),
+  // Exact proxy CIDR allowlist. When configured it takes precedence over the
+  // legacy hop count so a direct caller cannot spoof X-Forwarded-For.
+  TRUSTED_PROXY_CIDRS: optionalCsv('TRUSTED_PROXY_CIDRS'),
 
   // Database
   DATABASE_URL: required('DATABASE_URL'),
