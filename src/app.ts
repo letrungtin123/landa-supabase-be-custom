@@ -8,6 +8,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 
 // Routes
 import authRoutes from './modules/auth/auth.routes.js';
@@ -95,7 +96,8 @@ const authLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,  // 1 phút
-  max: 200,                  // 200 requests per IP
+  max: 200,                  // 200 requests per authenticated user or public client IP
+  keyGenerator: authenticatedUserOrIpRateLimitKey,
   message: { success: false, message: 'Quá nhiều request, vui lòng thử lại sau' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -149,6 +151,7 @@ app.use('/api', apiLimiter);                     // general rate limit
 const studySessionLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,  // 1 phút
   max: 30,                    // 30 requests/phút — FE gửi max 7 entries khi đóng tab
+  keyGenerator: authenticatedUserOrIpRateLimitKey,
   message: { success: false, message: 'Quá nhiều request study session' },
   standardHeaders: true,
   legacyHeaders: false,
