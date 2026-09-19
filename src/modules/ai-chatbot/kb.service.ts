@@ -1938,6 +1938,17 @@ export async function createQueuedDocumentFromStagedSource(
 
 const BLUEPRINT_SOURCE_CHANGED_REASON = 'Tài liệu nguồn trong Kho tri thức đã thay đổi hoặc bị xóa. Vui lòng tạo lại bản thiết kế khóa học.';
 
+export type QueuedDocumentDeletion = {
+  document: KbDocument;
+  detachedTranscriptJobIds: string[];
+};
+
+export type QueuedBulkDocumentDeletion = {
+  deleted: number;
+  documents: KbDocument[];
+  detachedTranscriptJobIds: string[];
+};
+
 function isLessonAuthorBlueprintSchemaUnavailable(error: unknown): boolean {
   const code = error && typeof error === 'object' && 'code' in error
     ? String((error as { code?: unknown }).code)
@@ -2003,7 +2014,33 @@ async function supersedeLessonAuthorBlueprintsForKnowledgebase(
   }
 }
 
-export async function queueDocumentDeletion(docId: string, kbId: string, tenantId: string): Promise<KbDocument | null> {
+async function detachTranscriptJobsForKnowledgebaseDocuments(
+  tenantId: string,
+  kbId: string,
+  documentIds: readonly string[],
+): Promise<string[]> {
+  if (documentIds.length === 0) return [];
+  try {
+    const detached = await query<{ id: string }>(
+      `UPDATE lesson_author_transcription_jobs
+       SET status = 'succeeded',
+           kb_document_id = NULL,
+           last_error = NULL,
+           updated_at = now()
+       WHERE tenant_id = $1
+         AND kb_id = $2
+         AND kb_document_id = ANY($3::uuid[])
+       RETURNING id::text`,
+      [tenantId, kbId, [...documentIds]],
+    );
+    return detached.rows.map(job => job.id);
+  } catch (error) {
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return [];
+    throw error;
+  }
+}
+
+export async function queueDocumentDeletion(docId: string, kbId: string, tenantId: string): Promise<QueuedDocumentDeletion | null> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   const current = await query<KbDocument>(
     `SELECT * FROM kb_documents
@@ -2013,11 +2050,14 @@ export async function queueDocumentDeletion(docId: string, kbId: string, tenantI
   );
   const document = current.rows[0] || null;
   if (!document) return null;
-  if (document.status === 'learning') throw new Error('Không thể xoá tài liệu đang được huấn luyện');
+  if (document.status === 'learning') {
+    throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409, 'KB_DOCUMENT_LEARNING');
+  }
   const mappings = await query<{ gemini_path: string }>(
     `SELECT gemini_path FROM kb_doc_gemini_mapping WHERE document_id = $1`,
     [docId],
   );
+  const detachedTranscriptJobIds = await detachTranscriptJobsForKnowledgebaseDocuments(tenantId, kbId, [docId]);
   await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
   // Delete the tenant row before adding the small outbox/audit rows. At a hard
   // quota boundary this preserves the customer's ability to free space while
@@ -2035,15 +2075,15 @@ export async function queueDocumentDeletion(docId: string, kbId: string, tenantI
     operation: 'document_delete',
     payload: { file_path: document.file_path, gemini_paths: mappings.rows.map(row => row.gemini_path) },
   });
-  return document;
+  return { document, detachedTranscriptJobIds };
 }
 
 export async function queueBulkDocumentDeletion(
   docIds: string[],
   kbId: string,
   tenantId: string,
-): Promise<{ deleted: number; documents: KbDocument[] }> {
-  if (docIds.length === 0) return { deleted: 0, documents: [] };
+): Promise<QueuedBulkDocumentDeletion> {
+  if (docIds.length === 0) return { deleted: 0, documents: [], detachedTranscriptJobIds: [] };
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   const documents = await query<KbDocument>(
     `SELECT * FROM kb_documents
@@ -2052,7 +2092,7 @@ export async function queueBulkDocumentDeletion(
      FOR UPDATE`,
     [docIds, kbId, tenantId],
   );
-  if (documents.rows.length === 0) return { deleted: 0, documents: [] };
+  if (documents.rows.length === 0) return { deleted: 0, documents: [], detachedTranscriptJobIds: [] };
   const mappings = await query<{ document_id: string; gemini_path: string }>(
     `SELECT document_id, gemini_path
      FROM kb_doc_gemini_mapping
@@ -2065,6 +2105,11 @@ export async function queueBulkDocumentDeletion(
     paths.push(mapping.gemini_path);
     pathsByDocument.set(mapping.document_id, paths);
   }
+  const detachedTranscriptJobIds = await detachTranscriptJobsForKnowledgebaseDocuments(
+    tenantId,
+    kbId,
+    documents.rows.map((document) => document.id),
+  );
   await supersedeLessonAuthorBlueprintsForDocuments(
     tenantId,
     kbId,
@@ -2085,7 +2130,7 @@ export async function queueBulkDocumentDeletion(
       payload: { file_path: document.file_path, gemini_paths: pathsByDocument.get(document.id) || [] },
     });
   }
-  return { deleted: documents.rows.length, documents: documents.rows };
+  return { deleted: documents.rows.length, documents: documents.rows, detachedTranscriptJobIds };
 }
 
 export async function queueDocumentRetry(docIds: string[], kbId: string, tenantId: string): Promise<{ retried: number }> {

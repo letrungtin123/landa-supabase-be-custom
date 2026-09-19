@@ -91,7 +91,11 @@ export function toPublicLessonAuthorTranscriptionJob(job: LessonAuthorTranscript
     kb_document_id: job.kb_document_id,
     can_add_to_kb: job.status === 'succeeded' && !job.kb_document_id,
     can_retry: job.status === 'failed',
-    error_reason: job.status === 'failed' ? job.last_error : null,
+    // A transcript can be created successfully while its automatic KB handoff
+    // fails. Preserve that recovery reason so the UI can offer a manual retry.
+    error_reason: job.status === 'failed' || (job.status === 'succeeded' && !job.kb_document_id)
+      ? job.last_error
+      : null,
     created_at: job.created_at,
     updated_at: job.updated_at,
   };
@@ -160,7 +164,9 @@ function transcriptChatMetadata(job: LessonAuthorTranscriptionJob, locale: Lesso
     lesson_author_transcript_file_name: job.transcript_file_name,
     lesson_author_transcript_language: job.transcript_language,
     lesson_author_transcript_char_count: job.transcript_char_count,
-    lesson_author_transcription_error: job.status === 'failed' ? job.last_error : null,
+    lesson_author_transcription_error: job.status === 'failed' || (job.status === 'succeeded' && !job.kb_document_id)
+      ? job.last_error
+      : null,
     lesson_author_kb_document_id: job.kb_document_id,
   };
 }
@@ -207,6 +213,26 @@ async function ensureLessonAuthorTranscriptMessage(job: LessonAuthorTranscriptio
 
 export async function syncLessonAuthorTranscriptMessage(job: LessonAuthorTranscriptionJob, locale: LessonAuthorTranscriptLocale): Promise<void> {
   await ensureLessonAuthorTranscriptMessage(job, locale);
+}
+
+/** Synchronizes cards after a transcript document is removed from the KB. */
+export async function syncLessonAuthorTranscriptMessagesById(jobIds: readonly string[]): Promise<void> {
+  const uniqueJobIds = [...new Set(jobIds)];
+  if (uniqueJobIds.length === 0) return;
+  const result = await query<LessonAuthorTranscriptionJob>(
+    `SELECT *
+     FROM lesson_author_transcription_jobs
+     WHERE id = ANY($1::uuid[])`,
+    [uniqueJobIds],
+  );
+  const updates = await Promise.allSettled(result.rows.map(job =>
+    syncLessonAuthorTranscriptMessage(job, job.requested_locale),
+  ));
+  for (const update of updates) {
+    if (update.status === 'rejected') {
+      console.error('[LessonAuthorTranscription] unable to synchronize detached transcript card', update.reason);
+    }
+  }
 }
 
 export async function prepareLessonAuthorTranscriptionUpload(input: {
@@ -333,6 +359,35 @@ export async function getLessonAuthorTranscriptionJob(input: {
   );
   if (!result.rows[0]) throw new AppError('Không tìm thấy bản chép lời.', 404, 'TRANSCRIPTION_NOT_FOUND');
   return toPublicLessonAuthorTranscriptionJob(result.rows[0]);
+}
+
+export async function downloadLessonAuthorTranscriptFile(input: {
+  jobId: string;
+  conversationId: string;
+  tenantId: string;
+  userId: string;
+}): Promise<{ fileName: string; content: string }> {
+  const result = await query<LessonAuthorTranscriptionJob>(
+    `SELECT job.*
+     FROM lesson_author_transcription_jobs job
+     JOIN chat_conversations conversation ON conversation.id = job.conversation_id
+     JOIN courses course ON course.id = job.course_id AND course.deleted_at IS NULL
+     WHERE job.id = $1::uuid
+       AND job.conversation_id = $2::uuid
+       AND job.tenant_id = $3::uuid
+       AND conversation.user_id = $4::uuid
+       AND conversation.target = 'lesson_author'`,
+    [input.jobId, input.conversationId, input.tenantId, input.userId],
+  );
+  const job = result.rows[0];
+  if (!job) throw new AppError('Không tìm thấy bản chép lời.', 404, 'TRANSCRIPTION_NOT_FOUND');
+  if ((job.status !== 'succeeded' && job.status !== 'committed') || !job.transcript_storage_path) {
+    throw new AppError('Bản chép lời chưa sẵn sàng để tải xuống.', 409, 'TRANSCRIPTION_NOT_READY');
+  }
+  return {
+    fileName: job.transcript_file_name,
+    content: await downloadLessonAuthorPrivateText(job.transcript_storage_path),
+  };
 }
 
 export async function updateLessonAuthorTranscriptionJob(

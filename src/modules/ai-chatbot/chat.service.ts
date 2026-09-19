@@ -882,7 +882,7 @@ export async function listLessonAuthorSourceDocuments(
      WHERE d.tenant_id = $1
        AND d.kb_id = $2
        AND d.type = 'file'
-       AND d.status = 'learned'
+       AND d.status IN ('learning', 'learned')
        AND ($3 = '' OR d.name ILIKE '%' || $3 || '%')
      ORDER BY d.updated_at DESC, d.created_at DESC
      LIMIT $4`,

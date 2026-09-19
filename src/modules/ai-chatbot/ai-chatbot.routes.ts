@@ -193,6 +193,7 @@ router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getL
 router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
 router.post('/chat/lesson-author/conversations/:conversationId/transcriptions', observeLessonAuthorTranscriptionRequest, checkPermission('courses', 'can_edit'), parseLessonAuthorVideoUpload, transcriptCtrl.createLessonAuthorTranscription);
 router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId', checkPermission('courses', 'can_edit'), transcriptCtrl.getLessonAuthorTranscription);
+router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/download', checkPermission('courses', 'can_edit'), transcriptCtrl.downloadLessonAuthorTranscript);
 router.post('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit', checkPermission('courses', 'can_edit'), transcriptCtrl.commitLessonAuthorTranscript);
 router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversations);
 router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);

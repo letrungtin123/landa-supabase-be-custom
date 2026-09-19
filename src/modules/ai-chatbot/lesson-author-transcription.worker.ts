@@ -13,11 +13,13 @@ import {
 import { getGeminiClient, transcribeAudioFile } from './gemini.service.js';
 import {
   claimDueLessonAuthorTranscriptionJobs,
+  commitLessonAuthorTranscriptToKnowledgebase,
   completeLessonAuthorTranscriptionJob,
   failLessonAuthorTranscriptionJob,
   expireLessonAuthorTranscriptionJobs,
   renewLessonAuthorTranscriptionLease,
   syncLessonAuthorTranscriptMessage,
+  updateLessonAuthorTranscriptionJob,
   type LessonAuthorTranscriptionJob,
 } from './lesson-author-transcription.service.js';
 import {
@@ -137,7 +139,39 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
     }
     transcriptStoragePath = null;
     await deleteLessonAuthorPrivateFiles([job.source_storage_path]).catch(() => undefined);
-    await syncLessonAuthorTranscriptMessage(completed, workerLocale(completed));
+    try {
+      if (!completed.conversation_id || !completed.requested_by) {
+        throw new Error('Transcript job không còn thông tin cuộc hội thoại hoặc người yêu cầu.');
+      }
+      const committed = await commitLessonAuthorTranscriptToKnowledgebase({
+        jobId: completed.id,
+        conversationId: completed.conversation_id,
+        tenantId: completed.tenant_id,
+        userId: completed.requested_by,
+        locale: workerLocale(completed),
+      });
+      console.info('[LessonAuthorTranscription] transcript committed to knowledge base', {
+        job_id: completed.id,
+        created: committed.created,
+      });
+    } catch (error) {
+      // Keep a completed transcript downloadable when the KB handoff is
+      // temporarily unavailable. The client can then expose a manual retry.
+      const reason = safeWorkerError(error);
+      console.error('[LessonAuthorTranscription] automatic knowledge base commit failed', {
+        job_id: completed.id,
+        error: reason,
+      });
+      await updateLessonAuthorTranscriptionJob(completed.id, {
+        status: 'succeeded',
+        last_error: reason,
+      }, workerLocale(completed)).catch(syncError => {
+        console.error('[LessonAuthorTranscription] could not sync completed transcript state', {
+          job_id: completed.id,
+          error: safeWorkerError(syncError),
+        });
+      });
+    }
   } catch (error) {
     if (transcriptStoragePath) await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(() => undefined);
     if (job.lease_token) {

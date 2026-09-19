@@ -14,6 +14,30 @@ import { getGeminiApiKey } from './gemini.service.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { fixMulterFilename } from '../../config/storage.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+import { describeKbDocumentDeletionFailure } from './kb-document-deletion.logic.js';
+import { syncLessonAuthorTranscriptMessagesById } from './lesson-author-transcription.service.js';
+
+function logKbDocumentDeletionFailure(
+  error: unknown,
+  context: { tenantId: string; kbId: string; docId?: string; documentCount?: number },
+): void {
+  const dbError = error as { code?: unknown; constraint?: unknown; detail?: unknown };
+  console.error('[KbDocumentDeletion] failed', {
+    ...context,
+    error_code: typeof dbError?.code === 'string' ? dbError.code : null,
+    constraint: typeof dbError?.constraint === 'string' ? dbError.constraint : null,
+    detail: typeof dbError?.detail === 'string' ? dbError.detail : null,
+    message: error instanceof Error ? error.message : 'Unknown error',
+  });
+}
+
+async function synchronizeDetachedTranscriptCards(jobIds: readonly string[]): Promise<void> {
+  try {
+    await syncLessonAuthorTranscriptMessagesById(jobIds);
+  } catch (error) {
+    console.error('[KbDocumentDeletion] transcript card synchronization failed', error);
+  }
+}
 
 // ── KB CRUD ──
 
@@ -182,15 +206,22 @@ export async function deleteDocument(req: Request, res: Response): Promise<void>
     const doc = await kbService.getDocument(docId, tenantId);
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
     if (!doc) { sendError(res, 'Document không tồn tại', 404); return; }
-    if (doc.status === 'learning') { sendError(res, 'Không thể xoá tài liệu đang được huấn luyện', 400); return; }
+    if (!kb || doc.kb_id !== kbId) { sendError(res, 'Document không tồn tại', 404); return; }
+    if (doc.status === 'learning') {
+      res.status(409).json({ success: false, code: 'KB_DOCUMENT_LEARNING', message: 'Không thể xoá tài liệu đang được huấn luyện' });
+      return;
+    }
     const queued = await runAuditedTransaction(
       () => kbService.queueDocumentDeletion(docId, kbId, tenantId),
-      (queuedDocument) => queuedDocument ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.deleted', context: { parent_name: kb?.name } }, docId, queuedDocument.name) : null,
+      (result) => result ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.deleted', context: { parent_name: kb.name } }, docId, result.document.name) : null,
     );
-    if (!queued) { sendError(res, 'Không thể đưa tài liệu vào hàng đợi xoá', 400); return; }
+    if (!queued) { sendError(res, 'Document không tồn tại', 404); return; }
+    await synchronizeDetachedTranscriptCards(queued.detachedTranscriptJobIds);
     sendSuccess(res, { queued: true }, 'Đã đưa tài liệu vào hàng đợi xoá an toàn', 202);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (error) {
+    logKbDocumentDeletionFailure(error, { tenantId, kbId, docId });
+    const failure = describeKbDocumentDeletionFailure(error);
+    res.status(failure.statusCode).json({ success: false, code: failure.code, message: failure.message });
   }
 }
 
@@ -204,12 +235,18 @@ export async function bulkDeleteDocuments(req: Request, res: Response): Promise<
 
   try {
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
     const result = await runAuditedTransaction(
       () => kbService.queueBulkDocumentDeletion(docIds, kbId, tenantId),
-      (deleted) => deleted.deleted > 0 ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.bulk_deleted', context: { parent_name: kb?.name, affected_count: deleted.deleted } }, kbId, kb?.name) : null,
+      (deleted) => deleted.deleted > 0 ? createTransactionalAuditEntry(req, 'DELETE', 'kb_document', { code: 'knowledgebase.document.bulk_deleted', context: { parent_name: kb.name, affected_count: deleted.deleted } }, kbId, kb.name) : null,
     );
+    await synchronizeDetachedTranscriptCards(result.detachedTranscriptJobIds);
     sendSuccess(res, { deleted: result.deleted, queued: result.deleted }, undefined, 202);
-  } catch (err: any) { sendError(res, err.message, 500); }
+  } catch (error) {
+    logKbDocumentDeletionFailure(error, { tenantId, kbId, documentCount: docIds.length });
+    const failure = describeKbDocumentDeletionFailure(error);
+    res.status(failure.statusCode).json({ success: false, code: failure.code, message: failure.message });
+  }
 }
 
 export async function retryDocuments(req: Request, res: Response): Promise<void> {

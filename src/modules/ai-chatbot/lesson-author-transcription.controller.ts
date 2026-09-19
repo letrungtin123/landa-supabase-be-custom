@@ -4,6 +4,7 @@ import { fixMulterFilename } from '../../config/storage.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import {
   commitLessonAuthorTranscriptToKnowledgebase,
+  downloadLessonAuthorTranscriptFile,
   getLessonAuthorTranscriptionJob,
   prepareLessonAuthorTranscriptionUpload,
   toPublicLessonAuthorTranscriptionJob,
@@ -106,6 +107,27 @@ export async function getLessonAuthorTranscription(req: Request, res: Response):
     sendSuccess(res, job);
   } catch (error: unknown) {
     sendError(res, error instanceof Error ? error.message : 'Không thể tải trạng thái transcript.', errorStatus(error), errorCode(error));
+  }
+}
+
+export async function downloadLessonAuthorTranscript(req: Request, res: Response): Promise<void> {
+  const { conversationId, jobId } = req.params;
+  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId)) {
+    sendError(res, 'ID không hợp lệ', 400);
+    return;
+  }
+  try {
+    const transcript = await downloadLessonAuthorTranscriptFile({
+      jobId,
+      conversationId,
+      tenantId: req.user!.tenantId!,
+      userId: req.user!.id,
+    });
+    res.attachment(transcript.fileName);
+    res.type('text/plain; charset=utf-8');
+    res.send(transcript.content);
+  } catch (error: unknown) {
+    sendError(res, error instanceof Error ? error.message : 'Không thể tải bản chép lời.', errorStatus(error), errorCode(error));
   }
 }
 

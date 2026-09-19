@@ -40,8 +40,8 @@ export function formatLessonAuthorTranscriptMessage(
     case 'queued':
     case 'running':
       return english
-        ? `Preparing a transcript for ${fileName}.`
-        : `Đang tạo bản chép lời cho ${fileName}.`;
+        ? `Preparing a transcript for ${fileName} and adding it to the knowledge base.`
+        : `Đang tạo bản chép lời cho ${fileName} và đưa vào Kho tri thức.`;
     case 'succeeded':
       return english
         ? `The transcript for ${fileName} is ready.`

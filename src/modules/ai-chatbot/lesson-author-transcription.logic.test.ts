@@ -29,6 +29,7 @@ test('normalizes transcript whitespace and rejects unusable output', () => {
 });
 
 test('formats assistant transcript state in the requested locale', () => {
+  assert.match(formatLessonAuthorTranscriptMessage('running', 'video.mp4', 'en'), /knowledge base/i);
   assert.match(formatLessonAuthorTranscriptMessage('succeeded', 'video.mp4', 'en'), /ready/i);
   assert.match(formatLessonAuthorTranscriptMessage('committed', 'video.mp4', 'vi'), /Kho tri thức/);
 });
