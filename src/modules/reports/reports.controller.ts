@@ -8,26 +8,13 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
 import { streamReportExcel } from './reports-export.service.js';
+import { enforceReportScope as enforceSharedReportScope, readReportScopeId, type ReportScope } from './report-access.service.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
 const VALID_COURSE_COMPLETION_STATUSES = new Set(['all', 'not_started', 'learning', 'completed']);
 const VALID_CHART_WINDOW_DIRECTIONS = new Set(['initial', 'before', 'after']);
 const YMD_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-type ReportScope = {
-  groupId: string | undefined;
-  subgroupId: string | undefined;
-  teamId: string | undefined;
-  allowedGroupIds: string[] | null;  // null = no restriction (staff/superadmin), [] = no groups
-};
-
-function getQueryId(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === 'all') return undefined;
-  return trimmed;
-}
 
 function getQueryString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -89,127 +76,24 @@ function parseChartWindowOptions(req: Request): svc.ReportChartWindowOptions {
   };
 }
 
-async function resolveReportHierarchy(
-  tenantId: string,
-  requested: { groupId?: string; subgroupId?: string; teamId?: string },
-): Promise<{ groupId?: string; subgroupId?: string; teamId?: string }> {
-  if (requested.teamId) {
-    const result = await query<{ group_id: string; subgroup_id: string; team_id: string }>(
-      `SELECT og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE t.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [requested.teamId, tenantId],
-    );
-    const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Team không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
-    if (requested.subgroupId && requested.subgroupId !== row.subgroup_id) {
-      throw { status: 400, message: 'Team không thuộc nhóm con đã chọn' };
-    }
-    if (requested.groupId && requested.groupId !== row.group_id) {
-      throw { status: 400, message: 'Team không thuộc nhóm đã chọn' };
-    }
-    return { groupId: row.group_id, subgroupId: row.subgroup_id, teamId: row.team_id };
-  }
-
-  if (requested.subgroupId) {
-    const result = await query<{ group_id: string; subgroup_id: string }>(
-      `SELECT og.id AS group_id, sg.id AS subgroup_id
-       FROM sub_groups sg
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE sg.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [requested.subgroupId, tenantId],
-    );
-    const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Nhóm con không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
-    if (requested.groupId && requested.groupId !== row.group_id) {
-      throw { status: 400, message: 'Nhóm con không thuộc nhóm đã chọn' };
-    }
-    return { groupId: row.group_id, subgroupId: row.subgroup_id };
-  }
-
-  if (requested.groupId) {
-    const result = await query<{ group_id: string }>(
-      `SELECT id AS group_id
-       FROM org_groups
-       WHERE id = $1 AND tenant_id = $2
-       LIMIT 1`,
-      [requested.groupId, tenantId],
-    );
-    const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
-    return { groupId: row.group_id };
-  }
-
-  return {};
-}
-
 /**
  * Cho learner_plus: lấy danh sách org_group_ids mà user thuộc về.
  * Nếu user không thuộc group nào → trả mảng rỗng → FE hiển thị "Không có dữ liệu".
  * Nếu user request group_id không thuộc về họ → reject 403.
  */
 async function enforceReportScope(req: Request): Promise<ReportScope> {
-  const tenantId = req.user!.tenantId!;
-  const role = req.user!.role;
-  const requestedGroupId = getQueryId(req.query.group_id);
-  const requestedSubgroupId = getQueryId(req.query.subgroup_id);
-  const requestedTeamId = getQueryId(req.query.team_id);
-
-  // Staff/superuser/superadmin: không giới hạn
-  if (role !== 'learner_plus') {
-    const hierarchy = await resolveReportHierarchy(tenantId, {
-      groupId: requestedGroupId,
-      subgroupId: requestedSubgroupId,
-      teamId: requestedTeamId,
-    });
-    return {
-      groupId: hierarchy.groupId,
-      subgroupId: hierarchy.subgroupId,
-      teamId: hierarchy.teamId,
-      allowedGroupIds: null,
-    };
-  }
-
-  // learner_plus: query allowed groups
-  const result = await query<{ group_id: string }>(
-    `SELECT DISTINCT og.id AS group_id
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1`,
-    [req.user!.id],
+  return enforceSharedReportScope(
+    {
+      userId: req.user!.id,
+      tenantId: req.user!.tenantId!,
+      role: req.user!.role,
+    },
+    {
+      groupId: readReportScopeId(req.query.group_id),
+      subgroupId: readReportScopeId(req.query.subgroup_id),
+      teamId: readReportScopeId(req.query.team_id),
+    },
   );
-
-  const allowedGroupIds = result.rows.map(r => r.group_id);
-
-  // Không thuộc group nào → trả mảng rỗng, handler sẽ trả empty data
-  if (allowedGroupIds.length === 0) {
-    return { groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: [] };
-  }
-
-  const hierarchy = await resolveReportHierarchy(tenantId, {
-    groupId: requestedGroupId,
-    subgroupId: requestedSubgroupId,
-    teamId: requestedTeamId,
-  });
-  const effectiveGroupId = hierarchy.groupId || requestedGroupId || allowedGroupIds[0];
-
-  // Nếu user request cụ thể 1 group/team/subgroup ngoài scope → validate
-  if (!allowedGroupIds.includes(effectiveGroupId)) {
-    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này' };
-  }
-
-  return {
-    groupId: effectiveGroupId,
-    subgroupId: hierarchy.subgroupId,
-    teamId: hierarchy.teamId,
-    allowedGroupIds,
-  };
 }
 
 /** GET /api/reports/summary */

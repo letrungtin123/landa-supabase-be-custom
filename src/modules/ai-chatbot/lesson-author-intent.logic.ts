@@ -171,6 +171,24 @@ export function extractLessonAuthorTargetNumberPath(
   return null;
 }
 
+/**
+ * Allows a deliberate manual draft command to reuse the current Blueprint
+ * without treating a vague chapter request as an approved-source draft.
+ */
+export function matchesLessonAuthorBlueprintChapterDraft(
+  value: string,
+  chapterIndex: number,
+  chapterTitle: string,
+): boolean {
+  if (!isLessonAuthorNewChapterDraftRequest(value)) return false;
+  const requestedChapter = extractLessonAuthorTargetNumberPath(value, 'chapter');
+  if (!requestedChapter || Number(requestedChapter) !== chapterIndex + 1) return false;
+
+  const titleKey = fold(chapterTitle).replace(/[^a-z0-9]+/g, ' ').trim();
+  const requestKey = fold(value).replace(/[^a-z0-9]+/g, ' ').trim();
+  return Boolean(titleKey && requestKey.includes(titleKey));
+}
+
 function clampConfidence(value: number): number {
   return Math.max(0, Math.min(1, Number(value.toFixed(2))));
 }

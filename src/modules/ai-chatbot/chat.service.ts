@@ -13,6 +13,7 @@ import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js'
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { getRedisClient } from '../../config/redis.js';
 import { AppError } from '../../middleware/error-handler.js';
+import type { UserRole } from '../../types/index.js';
 import {
   applyLessonAuthorProposalToCourse,
   getLessonAuthorSortableItems,
@@ -59,6 +60,7 @@ import {
   extractRequestedTitle,
   formatChapterTitle,
   isLessonAuthorNewChapterDraftRequest,
+  matchesLessonAuthorBlueprintChapterDraft,
   resolveLessonAuthorOutputLocale,
   stripLessonAuthorStructuralPrefix,
   stripLessonAuthorSourceRangeSuffix,
@@ -76,6 +78,17 @@ import { runStoredInputFilter } from './input-filter/input-filter.service.js';
 import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
 import type { FilterResult } from './input-filter/core/index.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
+import {
+  buildReportChatSnapshot,
+  formatReportFilterRequest,
+  getReportSnapshotHash,
+  isPotentialReportYearCorrection,
+  resolveReportYearCorrection,
+  routeAdminReportQuestion,
+  streamGroundedReportAnalysis,
+  type ReportChatFilterInput,
+  type NormalizedReportChatFilter,
+} from './report-chat.service.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -114,10 +127,10 @@ const MAX_SOURCE_DOCUMENT_EXCERPT_CHARS = 2400;
 const RAG_CHAT_MIN_OUTPUT_TOKENS = 256;
 const RAG_CHAT_MAX_OUTPUT_TOKENS = 2048;
 const RAG_LESSON_AUTHOR_MIN_OUTPUT_TOKENS = 1024;
-// Proposal generation is now skeleton + bounded unit calls. Keeping the
-// provider output cap bounded prevents a single fallback response from
-// consuming the entire reservation when a chapter is large.
-const RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS = 4096;
+// Staged proposal generation emits one bounded request per unit. Preserve
+// the provider window for source-complete units; tenant token reservation is
+// the capacity control and may still grant a smaller budget when necessary.
+const RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS = 65_536;
 const RAG_LESSON_AUTHOR_BLUEPRINT_MIN_OUTPUT_TOKENS = 2048;
 // Course blueprints are the authoritative design artifact used to generate
 // the full course. Allow the provider's complete output budget instead of
@@ -1581,6 +1594,41 @@ async function loadHistory(conversationId: string): Promise<{ role: string; part
   }));
 }
 
+function readStoredReportFilter(value: unknown): NormalizedReportChatFilter | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const filter = value as Record<string, unknown>;
+  if (typeof filter.date_from !== 'string' || typeof filter.date_to !== 'string') return null;
+  return {
+    date_from: filter.date_from,
+    date_to: filter.date_to,
+    ...(typeof filter.group_id === 'string' ? { group_id: filter.group_id } : {}),
+    ...(typeof filter.subgroup_id === 'string' ? { subgroup_id: filter.subgroup_id } : {}),
+    ...(typeof filter.team_id === 'string' ? { team_id: filter.team_id } : {}),
+  };
+}
+
+async function loadLatestReportAnalysisContext(conversationId: string): Promise<{
+  question: string;
+  filter: NormalizedReportChatFilter;
+} | null> {
+  const result = await query<{ metadata: unknown }>(
+    `SELECT metadata
+     FROM chat_messages
+     WHERE conversation_id = $1
+       AND role = 'assistant'
+       AND metadata ->> 'kind' = 'report_analysis'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [conversationId],
+  );
+  const metadata = result.rows[0]?.metadata;
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+  const record = metadata as Record<string, unknown>;
+  const question = typeof record.report_question === 'string' ? record.report_question : '';
+  const filter = readStoredReportFilter(record.report_filter);
+  return question && filter ? { question, filter } : null;
+}
+
 /** Helper: parse retry delay from Gemini 429 error message */
 function parseRetryDelay(err: any): number | null {
   try {
@@ -1660,6 +1708,9 @@ export interface ChatStreamOptions {
   blueprintChapterIndex?: number;
   inputMode?: 'text' | 'voice';
   locale?: 'vi' | 'en';
+  canAccessReports?: boolean;
+  reportActorRole?: UserRole;
+  reportFilters?: ReportChatFilterInput;
 }
 
 export interface LessonAuthorOutlineMention {
@@ -1745,7 +1796,19 @@ export type ChatStreamSideEvent =
     quality_report: LessonAuthorBlueprintQualityReport;
     locale: 'vi' | 'en';
   }
-  | { type: 'progress'; stage: string; detail?: string };
+  | { type: 'progress'; stage: string; detail?: string }
+  | {
+    type: 'report_filter';
+    message_id: string;
+    question: string;
+    locale: 'vi' | 'en';
+    suggested_filter?: Pick<ReportChatFilterInput, 'date_from' | 'date_to'>;
+  }
+  | {
+    type: 'report_result';
+    message_id: string;
+    metadata: Record<string, unknown>;
+  };
 
 interface DraftCourseOutline {
   courseName: string;
@@ -6314,6 +6377,47 @@ async function loadLessonAuthorBlueprintForDraft(
   return { id: stored.id, chapterIndex: requestedChapterIndex, blueprint, sourceDocuments };
 }
 
+async function tryLoadMatchingLessonAuthorBlueprintDraft(
+  ctx: ConversationContext,
+  prompt: string,
+  requireGeminiMapping: boolean,
+  locale: 'vi' | 'en',
+): Promise<BlueprintDraftContext | null> {
+  if (!ctx.courseId || !ctx.botKbId || !isLessonAuthorNewChapterDraftRequest(prompt)) return null;
+  const chapterPath = extractLessonAuthorTargetNumberPath(prompt, 'chapter');
+  const chapterIndex = chapterPath ? Number(chapterPath) - 1 : Number.NaN;
+  if (!Number.isInteger(chapterIndex) || chapterIndex < 0) return null;
+
+  const candidates = await query<{ id: string; blueprint: LessonAuthorBlueprint }>(
+    `SELECT id, blueprint
+     FROM lesson_author_blueprints
+     WHERE tenant_id = $1
+       AND course_id = $2
+       AND conversation_id = $3
+       AND kb_id = $4
+       AND status = 'proposed'
+     ORDER BY updated_at DESC, created_at DESC
+     LIMIT 5`,
+    [ctx.tenantId, ctx.courseId, ctx.conversationId, ctx.botKbId],
+  );
+
+  for (const candidate of candidates.rows) {
+    let blueprint: LessonAuthorBlueprint;
+    try {
+      blueprint = normalizeLessonAuthorBlueprint(candidate.blueprint);
+    } catch {
+      continue;
+    }
+    const chapter = blueprint.chapters[chapterIndex];
+    if (!chapter || !matchesLessonAuthorBlueprintChapterDraft(prompt, chapterIndex, chapter.title)) continue;
+
+    // The canonical loader revalidates source revisions and the next-chapter
+    // sequence before this manually-entered command can reach generation.
+    return loadLessonAuthorBlueprintForDraft(ctx, candidate.id, chapterIndex, requireGeminiMapping, locale);
+  }
+  return null;
+}
+
 function formatBlueprintDraftContext(context: BlueprintDraftContext): string {
   const chapter = context.blueprint.chapters[context.chapterIndex];
   const architecture = {
@@ -6980,7 +7084,10 @@ export async function sendMessageStream(
       lesson_author_model: aiSettings.lessonAuthorModel,
       embedding_model: aiSettings.embeddingModel,
     });
-    if (aiSettings.activeEngine === 'self_built_rag' && ctx.target !== LESSON_AUTHOR_TARGET && !ctx.botKbId) {
+    if (aiSettings.activeEngine === 'self_built_rag'
+      && ctx.target !== LESSON_AUTHOR_TARGET
+      && !ctx.botKbId
+      && !options.canAccessReports) {
       throw new AppError(
         'Bot này chưa được gắn Kho tri thức. Vui lòng gắn Kho tri thức cho bot trước khi chat bằng AI RAG.',
         400,
@@ -7024,6 +7131,7 @@ export async function sendMessageStream(
     const mentionContext = formatMentionContextRowsForPrompt(mentionContextRows);
     let targetScopeInstruction = buildTargetLockedProposalInstruction(trimmed, outlineMentions, mentionContextRows);
     let blueprintDraftContext: BlueprintDraftContext | null = null;
+    let blueprintDraftSource: 'explicit' | 'auto_matched' | 'none' = 'none';
     if (ctx.target === LESSON_AUTHOR_TARGET && options.blueprintId) {
       if (preClassify?.intent !== 'draft_lesson') {
         throw new Error('Blueprint chỉ được dùng khi soạn chi tiết một chương.');
@@ -7035,6 +7143,17 @@ export async function sendMessageStream(
         aiSettings.activeEngine === 'gemini_file_search',
         resolveLessonAuthorOutputLocale(trimmed, options.locale ?? 'vi'),
       );
+      blueprintDraftSource = 'explicit';
+    } else if (ctx.target === LESSON_AUTHOR_TARGET && preClassify?.intent === 'draft_lesson') {
+      blueprintDraftContext = await tryLoadMatchingLessonAuthorBlueprintDraft(
+        ctx,
+        trimmed,
+        aiSettings.activeEngine === 'gemini_file_search',
+        resolveLessonAuthorOutputLocale(trimmed, options.locale ?? 'vi'),
+      );
+      blueprintDraftSource = blueprintDraftContext ? 'auto_matched' : 'none';
+    }
+    if (blueprintDraftContext) {
       targetScopeInstruction = [targetScopeInstruction, formatBlueprintDraftContext(blueprintDraftContext)]
         .filter(Boolean)
         .join('\n\n');
@@ -7071,6 +7190,7 @@ export async function sendMessageStream(
       mention_source: outlineMentionSource,
       mention_context_chars: mentionContext.length,
       target_scope_chars: targetScopeInstruction.length,
+      blueprint_draft_source: blueprintDraftSource,
     });
     logLessonAuthorFlow('stream_source_documents_validated', {
       conversation_id: conversationId,
@@ -7189,6 +7309,7 @@ export async function sendMessageStream(
             lesson_author_blueprint_id: blueprintDraftContext.id,
             lesson_author_blueprint_chapter_index: blueprintDraftContext.chapterIndex,
           } : {}),
+          ...(options.reportFilters ? { report_filters: options.reportFilters } : {}),
         },
       ],
     );
@@ -7202,6 +7323,137 @@ export async function sendMessageStream(
         course_id: courseId ?? null,
         source_documents: sourceDocuments.length,
       });
+
+    // Report routing is limited to the normal admin deployment. The model can
+    // request a fixed server-owned snapshot, but it never receives database
+    // credentials, arbitrary query parameters, or organization IDs to invent.
+    if (ctx.target === 'admin' && options.canAccessReports && options.reportActorRole) {
+      const requestedLocale = options.locale ?? 'vi';
+      const previousReport = !options.reportFilters && isPotentialReportYearCorrection(trimmed)
+        ? await loadLatestReportAnalysisContext(conversationId)
+        : null;
+      const reportCorrection = previousReport
+        ? resolveReportYearCorrection({
+          question: trimmed,
+          previousFilter: previousReport.filter,
+          previousQuestion: previousReport.question,
+        })
+        : null;
+      const route = options.reportFilters || reportCorrection
+        ? { kind: 'snapshot' as const }
+        : await routeAdminReportQuestion({
+          tenantId: ctx.tenantId,
+          model: aiSettings.chatModel,
+          question: trimmed,
+          locale: requestedLocale,
+        });
+      const reportQuestion = reportCorrection?.reportQuestion ?? trimmed;
+      const reportFilter = options.reportFilters ?? reportCorrection?.filter ?? route.suggested_filter;
+
+      if (route.kind === 'filters') {
+        const assistantText = formatReportFilterRequest(requestedLocale);
+        const saved = await query<{ id: string }>(
+          `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+           VALUES ($1, 'assistant', $2, $3)
+           RETURNING id::text AS id`,
+          [conversationId, assistantText, {
+            kind: 'report_filter_request',
+            locale: requestedLocale,
+            report_question: trimmed,
+            report_suggested_filter: route.suggested_filter ?? {},
+          }],
+        );
+        await query(
+          `UPDATE chat_conversations
+           SET updated_at = now(), title = CASE WHEN $3::boolean THEN $2 ELSE title END
+           WHERE id = $1 AND tenant_id = $4`,
+          [conversationId, trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : ''), ctx.messageCount === 0, tenantId],
+        );
+        onChunk(assistantText);
+        onSideEvent?.({
+          type: 'report_filter',
+          message_id: saved.rows[0].id,
+          question: trimmed,
+          locale: requestedLocale,
+          suggested_filter: route.suggested_filter,
+        });
+        await finalizeAiReservation(
+          estimateAiTurnUsage([ctx.systemPrompt, trimmed], assistantText),
+          { service: aiSettings.activeEngine, operation: 'chat' },
+          { report_chat: true, report_stage: 'filter_request' },
+        );
+        onDone();
+        return;
+      }
+
+      if (route.kind === 'snapshot') {
+        const snapshot = await buildReportChatSnapshot({
+          tenantId: ctx.tenantId,
+          actor: { userId, tenantId: ctx.tenantId, role: options.reportActorRole },
+          filter: reportFilter,
+        });
+        let assistantText = '';
+        try {
+          assistantText = await streamGroundedReportAnalysis({
+            tenantId: ctx.tenantId,
+            model: aiSettings.chatModel,
+            question: reportQuestion,
+            locale: requestedLocale,
+            snapshot,
+            onChunk,
+          });
+        } catch (error) {
+          console.error('[ReportChat] grounded analysis failed:', error instanceof Error ? error.message : String(error));
+          assistantText = requestedLocale === 'en'
+            ? `The verified report snapshot is ready. ${snapshot.summary.overview.total_enrollments} enrollments and a ${snapshot.summary.overview.completion_rate}% completion rate were recorded for the selected period.`
+            : `Bản chụp báo cáo đã được xác thực. Khoảng thời gian đã chọn ghi nhận ${snapshot.summary.overview.total_enrollments} lượt ghi danh và tỷ lệ hoàn thành ${snapshot.summary.overview.completion_rate}%.`;
+          onChunk(assistantText);
+        }
+        if (!assistantText) {
+          assistantText = requestedLocale === 'en'
+            ? 'The verified report snapshot is ready. Use the report controls to refine the scope or export it.'
+            : 'Bản chụp báo cáo đã được xác thực. Dùng các điều khiển báo cáo để thay đổi phạm vi hoặc xuất file.';
+          onChunk(assistantText);
+        }
+        const metadata: Record<string, unknown> = {
+          kind: 'report_analysis',
+          locale: requestedLocale,
+          report_contract_version: snapshot.version,
+          report_filter: snapshot.filter,
+          report_scope: snapshot.scope,
+          report_question: reportQuestion,
+          ...(reportCorrection ? {
+            report_follow_up_correction: {
+              user_message: trimmed,
+              corrected_year: reportCorrection.year,
+            },
+          } : {}),
+          report_generated_at: snapshot.generated_at,
+          report_snapshot_hash: getReportSnapshotHash(snapshot),
+          report_snapshot: snapshot,
+        };
+        const saved = await query<{ id: string }>(
+          `INSERT INTO chat_messages (conversation_id, role, content, metadata)
+           VALUES ($1, 'assistant', $2, $3)
+           RETURNING id::text AS id`,
+          [conversationId, assistantText, metadata],
+        );
+        await query(
+          `UPDATE chat_conversations
+           SET updated_at = now(), title = CASE WHEN $3::boolean THEN $2 ELSE title END
+           WHERE id = $1 AND tenant_id = $4`,
+          [conversationId, trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : ''), ctx.messageCount === 0, tenantId],
+        );
+        onSideEvent?.({ type: 'report_result', message_id: saved.rows[0].id, metadata });
+        await finalizeAiReservation(
+          estimateAiTurnUsage([ctx.systemPrompt, trimmed, JSON.stringify(snapshot)], assistantText),
+          { service: aiSettings.activeEngine, operation: 'chat' },
+          { report_chat: true, report_stage: 'analysis', report_snapshot_hash: metadata.report_snapshot_hash },
+        );
+        onDone();
+        return;
+      }
+    }
 
     // ── Intent classification via deterministic scoring (zero Gemini calls) ──
     const { intent: lessonAuthorIntent, operationPlan: classifiedOperationPlan, signals: intentSignals, score: intentScore, input_locale: inputLocale } = ctx.target === LESSON_AUTHOR_TARGET

@@ -7,6 +7,7 @@ import {
   extractRequestedTitle,
   formatChapterTitle,
   isLessonAuthorNewChapterDraftRequest,
+  matchesLessonAuthorBlueprintChapterDraft,
   resolveLessonAuthorOutputLocale,
   stripLessonAuthorSourceRangeSuffix,
 } from './lesson-author-intent.logic.js';
@@ -317,4 +318,33 @@ test('extracts structural target number paths for Vietnamese and English labels'
   assert.equal(extractLessonAuthorTargetNumberPath('Update Section 2.1', 'lesson'), '2.1');
   assert.equal(extractLessonAuthorTargetNumberPath('Draft Lesson 2.1.1', 'unit'), '2.1.1');
   assert.equal(extractLessonAuthorTargetNumberPath('Tạo nội dung', 'chapter'), null);
+});
+
+test('matches only an explicit manual draft for the approved Blueprint chapter', () => {
+  const chapterTitle = 'Nhận diện mối nguy và đánh giá rủi ro';
+  assert.equal(
+    matchesLessonAuthorBlueprintChapterDraft(
+      'Soạn chi tiết Chương 2: Nhận diện mối nguy và đánh giá rủi ro đi',
+      1,
+      chapterTitle,
+    ),
+    true,
+  );
+  assert.equal(matchesLessonAuthorBlueprintChapterDraft('Soạn Chương 2', 1, chapterTitle), false);
+  assert.equal(
+    matchesLessonAuthorBlueprintChapterDraft(
+      'Sửa nội dung Chương 2: Nhận diện mối nguy và đánh giá rủi ro',
+      1,
+      chapterTitle,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesLessonAuthorBlueprintChapterDraft(
+      'Soạn chi tiết Chương 3: Nhận diện mối nguy và đánh giá rủi ro',
+      1,
+      chapterTitle,
+    ),
+    false,
+  );
 });

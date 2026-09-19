@@ -8,14 +8,77 @@ import { createTransactionalAuditEntry, runAuditedTransaction } from '../../midd
 import { query } from '../../config/database.js';
 import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { hasPermission } from '../../middleware/authorize.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+import {
+  buildReportPdfArtifact,
+  downloadReportPdfExportJob,
+  getReportPdfExportError,
+  getReportPdfExportJob,
+  startReportPdfExportJob,
+} from './report-pdf-export.service.js';
 import * as chatService from './chat.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
 
 // ── UUID validation ──
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const reportPdfLocks = new Set<string>();
+const reportPdfLastExportAt = new Map<string, number>();
+const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
+
+function parseReportFilters(value: unknown): {
+  date_from?: string;
+  date_to?: string;
+  group_id?: string;
+  subgroup_id?: string;
+  team_id?: string;
+} | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError('report_filters không hợp lệ', 400);
+  }
+  const input = value as Record<string, unknown>;
+  const readDate = (key: 'date_from' | 'date_to') => {
+    const raw = input[key];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      throw new AppError(`${key} không hợp lệ`, 400);
+    }
+    return raw;
+  };
+  const readId = (key: 'group_id' | 'subgroup_id' | 'team_id') => {
+    const raw = input[key];
+    if (raw === undefined || raw === 'all' || raw === '') return undefined;
+    if (typeof raw !== 'string' || !UUID_REGEX.test(raw)) {
+      throw new AppError(`${key} không hợp lệ`, 400);
+    }
+    return raw;
+  };
+  const dateFrom = readDate('date_from');
+  const dateTo = readDate('date_to');
+  const groupId = readId('group_id');
+  const subgroupId = readId('subgroup_id');
+  const teamId = readId('team_id');
+  return {
+    ...(dateFrom ? { date_from: dateFrom } : {}),
+    ...(dateTo ? { date_to: dateTo } : {}),
+    ...(groupId ? { group_id: groupId } : {}),
+    ...(subgroupId ? { subgroup_id: subgroupId } : {}),
+    ...(teamId ? { team_id: teamId } : {}),
+  };
+}
+
+function sendReportPdfError(res: Response, error: unknown): void {
+  const normalized = getReportPdfExportError(error);
+  if (normalized.statusCode >= 500) console.error('[ReportPdf] export failed:', normalized);
+  res.status(normalized.statusCode).json({
+    success: false,
+    message: normalized.message,
+    code: normalized.code,
+  });
+}
 
 function sendLessonAuthorApplyError(res: Response, error: unknown): void {
   if (error instanceof AppError) {
@@ -386,6 +449,107 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
   } catch (err: any) { sendError(res, err.message, 400); }
 }
 
+export async function exportReportPdf(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id: conversationId } = req.params;
+  const assistantMessageId = req.body?.assistant_message_id;
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể xuất báo cáo', 403);
+    return;
+  }
+  if (!UUID_REGEX.test(conversationId) || typeof assistantMessageId !== 'string' || !UUID_REGEX.test(assistantMessageId)) {
+    sendError(res, 'ID báo cáo không hợp lệ', 400);
+    return;
+  }
+  const exportKey = `${userId}:${assistantMessageId}`;
+  const lastExportAt = reportPdfLastExportAt.get(exportKey) ?? 0;
+  if (reportPdfLocks.has(exportKey)) {
+    sendError(res, 'Báo cáo đang được xuất. Vui lòng đợi.', 409);
+    return;
+  }
+  if (Date.now() - lastExportAt < REPORT_PDF_MIN_INTERVAL_MS) {
+    sendError(res, 'Vui lòng chờ vài giây trước khi xuất lại báo cáo.', 429);
+    return;
+  }
+
+  reportPdfLocks.add(exportKey);
+  try {
+    const artifact = await buildReportPdfArtifact({
+      actor: { userId, tenantId, role: req.user!.role },
+      conversationId,
+      assistantMessageId,
+    });
+    reportPdfLastExportAt.set(exportKey, Date.now());
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${artifact.fileName}"; filename*=UTF-8''${encodeURIComponent(artifact.fileName)}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(artifact.pdf);
+  } catch (error) {
+    sendReportPdfError(res, error);
+  } finally {
+    reportPdfLocks.delete(exportKey);
+  }
+}
+
+export async function startReportPdfJob(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id: conversationId } = req.params;
+  const assistantMessageId = req.body?.assistant_message_id;
+  if (isDemoIframeSession(req.user)) {
+    sendReportPdfError(res, new AppError('Phiên demo iframe không thể xuất báo cáo', 403, 'REPORT_PDF_DEMO_SESSION'));
+    return;
+  }
+  if (!UUID_REGEX.test(conversationId) || typeof assistantMessageId !== 'string' || !UUID_REGEX.test(assistantMessageId)) {
+    sendReportPdfError(res, new AppError('ID báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
+    return;
+  }
+  try {
+    const job = startReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId });
+    sendSuccess(res, job, undefined, 202);
+  } catch (error) {
+    sendReportPdfError(res, error);
+  }
+}
+
+export async function getReportPdfJob(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id: conversationId, jobId } = req.params;
+  const assistantMessageId = typeof req.query.assistant_message_id === 'string' ? req.query.assistant_message_id : '';
+  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId) || !UUID_REGEX.test(assistantMessageId)) {
+    sendReportPdfError(res, new AppError('ID tiến trình xuất báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
+    return;
+  }
+  try {
+    const job = getReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
+    sendSuccess(res, job);
+  } catch (error) {
+    sendReportPdfError(res, error);
+  }
+}
+
+export async function downloadReportPdfJob(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id: conversationId, jobId } = req.params;
+  const assistantMessageId = typeof req.query.assistant_message_id === 'string' ? req.query.assistant_message_id : '';
+  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId) || !UUID_REGEX.test(assistantMessageId)) {
+    sendReportPdfError(res, new AppError('ID tiến trình xuất báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
+    return;
+  }
+  try {
+    const artifact = await downloadReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${artifact.fileName}"; filename*=UTF-8''${encodeURIComponent(artifact.fileName)}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(artifact.pdf);
+  } catch (error) {
+    sendReportPdfError(res, error);
+  }
+}
+
 /**
  * POST /conversations/:id/messages — SSE streaming
  * Sends user message, streams Gemini response as Server-Sent Events.
@@ -408,6 +572,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     blueprint_chapter_index,
     input_mode,
     locale,
+    report_filters,
   } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
@@ -436,6 +601,23 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     sendError(res, 'blueprint_chapter_index không hợp lệ', 400); return;
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
+  let parsedReportFilters: ReturnType<typeof parseReportFilters>;
+  try {
+    parsedReportFilters = parseReportFilters(report_filters);
+  } catch (error) {
+    sendError(res, error instanceof Error ? error.message : 'report_filters không hợp lệ', 400);
+    return;
+  }
+  let canAccessReports = false;
+  if (target === 'admin') {
+    try {
+      canAccessReports = await hasPermission(req.user!, 'report_summary', 'can_view');
+    } catch (error) {
+      console.error('[ReportChat] permission check failed:', error);
+      sendError(res, 'Lỗi kiểm tra quyền báo cáo', 500);
+      return;
+    }
+  }
 
   // Set SSE headers
   res.writeHead(200, {
@@ -497,6 +679,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       blueprintChapterIndex: blueprint_chapter_index,
       inputMode,
       locale: locale === 'en' ? 'en' : 'vi',
+      canAccessReports,
+      reportActorRole: req.user!.role,
+      reportFilters: parsedReportFilters,
     },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });

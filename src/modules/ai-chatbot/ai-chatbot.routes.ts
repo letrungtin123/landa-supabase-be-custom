@@ -199,6 +199,10 @@ router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversat
 router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);
 router.delete('/chat/conversations/:id', allowRuntimeChatTarget, chatCtrl.deleteConversation);
 router.get('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.getMessages);
+router.post('/chat/conversations/:id/report-pdf', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.exportReportPdf);
+router.post('/chat/conversations/:id/report-pdf/jobs', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.startReportPdfJob);
+router.get('/chat/conversations/:id/report-pdf/jobs/:jobId', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.getReportPdfJob);
+router.get('/chat/conversations/:id/report-pdf/jobs/:jobId/download', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.downloadReportPdfJob);
 router.post('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.sendMessage);
 
 export default router;
