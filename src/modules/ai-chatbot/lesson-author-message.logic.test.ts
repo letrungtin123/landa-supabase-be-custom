@@ -43,6 +43,10 @@ test('keeps blueprint and proposal messages concise because the structured cards
   );
   assert.equal(
     formatLessonAuthorProposalReadyMessage(3, 'vi'),
-    'Đề xuất nội dung chi tiết cho Chương 3 đã sẵn sàng để duyệt. Mở phần thay đổi outline trước khi áp dụng.',
+    'Đề xuất nội dung chi tiết cho Chương 3 đã sẵn sàng để duyệt. Vui lòng chọn Áp dụng để đưa nội dung đã soạn vào khóa học.',
+  );
+  assert.equal(
+    formatLessonAuthorProposalReadyMessage(3, 'en'),
+    'The detailed proposal for Chapter 3 is ready for review. Select Apply to add the drafted content to the course.',
   );
 });

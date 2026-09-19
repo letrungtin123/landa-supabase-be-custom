@@ -18,8 +18,8 @@ export function formatLessonAuthorProposalReadyMessage(
   locale: LessonAuthorMessageLocale,
 ): string {
   return locale === 'en'
-    ? `The detailed proposal for Chapter ${chapterNumber} is ready for review. Open the outline changes before applying it.`
-    : `Đề xuất nội dung chi tiết cho Chương ${chapterNumber} đã sẵn sàng để duyệt. Mở phần thay đổi outline trước khi áp dụng.`;
+    ? `The detailed proposal for Chapter ${chapterNumber} is ready for review. Select Apply to add the drafted content to the course.`
+    : `Đề xuất nội dung chi tiết cho Chương ${chapterNumber} đã sẵn sàng để duyệt. Vui lòng chọn Áp dụng để đưa nội dung đã soạn vào khóa học.`;
 }
 
 export function formatLessonAuthorApprovalMessage(
