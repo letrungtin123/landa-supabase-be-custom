@@ -5,6 +5,23 @@
 export type LessonAuthorApprovalOperation = string | null | undefined;
 export type LessonAuthorMessageLocale = 'vi' | 'en';
 
+export function formatLessonAuthorBlueprintReadyMessage(
+  locale: LessonAuthorMessageLocale,
+): string {
+  return locale === 'en'
+    ? 'The course blueprint is ready. Open Course blueprint to review the structure, learner outcomes, quality checks, and course mind map.'
+    : 'Bản thiết kế khóa học đã sẵn sàng. Mở Bản thiết kế khóa học để rà soát cấu trúc, kết quả đầu ra, chất lượng và mind map toàn khóa.';
+}
+
+export function formatLessonAuthorProposalReadyMessage(
+  chapterNumber: number,
+  locale: LessonAuthorMessageLocale,
+): string {
+  return locale === 'en'
+    ? `The detailed proposal for Chapter ${chapterNumber} is ready for review. Open the outline changes before applying it.`
+    : `Đề xuất nội dung chi tiết cho Chương ${chapterNumber} đã sẵn sàng để duyệt. Mở phần thay đổi outline trước khi áp dụng.`;
+}
+
 export function formatLessonAuthorApprovalMessage(
   operation: LessonAuthorApprovalOperation,
   createdCount: number,

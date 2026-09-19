@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   formatLessonAuthorApprovalMessage,
+  formatLessonAuthorBlueprintReadyMessage,
+  formatLessonAuthorProposalReadyMessage,
   LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY,
 } from './lesson-author-message.logic.js';
 
@@ -31,5 +33,16 @@ test('formats English approval confirmations from the proposal locale', () => {
   assert.equal(
     formatLessonAuthorApprovalMessage('delete', 0, 1, 'en'),
     'The selected outline item has been queued for deletion.',
+  );
+});
+
+test('keeps blueprint and proposal messages concise because the structured cards hold the detail', () => {
+  assert.equal(
+    formatLessonAuthorBlueprintReadyMessage('en'),
+    'The course blueprint is ready. Open Course blueprint to review the structure, learner outcomes, quality checks, and course mind map.',
+  );
+  assert.equal(
+    formatLessonAuthorProposalReadyMessage(3, 'vi'),
+    'Đề xuất nội dung chi tiết cho Chương 3 đã sẵn sàng để duyệt. Mở phần thay đổi outline trước khi áp dụng.',
   );
 });

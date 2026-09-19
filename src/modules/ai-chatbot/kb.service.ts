@@ -1777,7 +1777,8 @@ export async function updateArticle(
 // staged object if that transaction rolls back.
 
 export interface StagedKbSource {
-  storagePath: string;
+  /** Text-backed sources intentionally have no public Storage object. */
+  storagePath: string | null;
   sourceInfo: Record<string, unknown>;
   content: string | null;
   name: string;
@@ -1805,6 +1806,27 @@ async function stageKbSource(
 export async function discardStagedKbSource(staged: Pick<StagedKbSource, 'storagePath'> | null | undefined): Promise<void> {
   if (!staged?.storagePath) return;
   try { await deleteFile(staged.storagePath); } catch { /* reconciliation is the fail-safe */ }
+}
+
+/**
+ * Create a KB file source from server-generated text. This is used for
+ * reviewed artifacts such as a lesson-author video transcript. Keeping the
+ * content in the tenant-scoped document row avoids copying the artifact to
+ * the public asset bucket before it has been indexed.
+ */
+export async function stageTextBackedDocumentSource(
+  kbId: string,
+  tenantId: string,
+  input: { name: string; content: string; sourceInfo: Record<string, unknown> },
+): Promise<StagedKbSource> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'luu ban chep loi');
+  return {
+    storagePath: null,
+    sourceInfo: input.sourceInfo,
+    content: input.content,
+    name: input.name,
+    type: 'file',
+  };
 }
 
 export async function stageDocumentSource(

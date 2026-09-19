@@ -12,6 +12,10 @@ import {
   getGoogleAiStudioApiKey,
   getOptionalGoogleAiStudioApiKeyFingerprint,
 } from './ai-settings.service.js';
+import {
+  extractGeminiAudioTranscriptionText,
+  summarizeGeminiTranscriptionResponse,
+} from './gemini-transcription.logic.js';
 
 // ── Constants ──
 const LRO_POLL_INTERVAL = 5_000;   // 5 seconds
@@ -118,6 +122,69 @@ export async function markKbGeminiStoreRemoteProblem(
 export async function getGeminiClient(tenantId: string): Promise<GoogleGenAI> {
   const apiKey = await getGeminiApiKey(tenantId);
   return new GoogleGenAI({ apiKey });
+}
+
+/**
+ * Upload an extracted audio stream to Gemini's Files API and request a plain
+ * transcript. The SDK response surface differs between provider revisions, so
+ * this boundary intentionally normalizes it before the durable worker writes
+ * anything to the database.
+ */
+export async function transcribeAudioFile(
+  localFilePath: string,
+  aiClient: GoogleGenAI,
+): Promise<string> {
+  const filesApi = (aiClient as any).files;
+  const modelsApi = (aiClient as any).models;
+  if (!filesApi?.upload || !filesApi?.delete || !modelsApi?.generateContent) {
+    throw new Error('Gemini SDK không hỗ trợ Files API cho transcription.');
+  }
+
+  let uploaded: any = null;
+  try {
+    uploaded = await filesApi.upload({
+      file: localFilePath,
+      config: { mimeType: 'audio/mpeg' },
+    });
+    const startedAt = Date.now();
+    while (uploaded?.state && String(uploaded.state).toUpperCase() !== 'ACTIVE') {
+      if (String(uploaded.state).toUpperCase() === 'FAILED') {
+        throw new Error('Gemini không thể xử lý audio của video.');
+      }
+      if (Date.now() - startedAt > LRO_TIMEOUT) throw new Error('Gemini xử lý audio quá thời gian cho phép.');
+      await sleep(LRO_POLL_INTERVAL);
+      uploaded = await filesApi.get({ name: uploaded.name });
+    }
+    if (!uploaded?.uri) throw new Error('Gemini không trả về URI audio hợp lệ.');
+
+    const response = await modelsApi.generateContent({
+      model: env.GEMINI_TRANSCRIPTION_MODEL,
+      contents: [
+        {
+          fileData: {
+            fileUri: uploaded.uri,
+            mimeType: uploaded.mimeType || 'audio/mpeg',
+          },
+        },
+      ],
+      // Deliberately leave languageCodes empty: Gemini detects Vietnamese,
+      // English, and code switching from the actual audio rather than the UI
+      // locale used for status messages.
+      config: {
+        audioTranscriptionConfig: {
+          languageCodes: [],
+        },
+      },
+    });
+    const text = extractGeminiAudioTranscriptionText(response);
+    if (!text) {
+      console.warn('[Gemini] Transcription response did not contain usable text', summarizeGeminiTranscriptionResponse(response));
+      throw new Error('Gemini không trả về transcript hợp lệ.');
+    }
+    return text;
+  } finally {
+    if (uploaded?.name) await filesApi.delete({ name: uploaded.name }).catch(() => undefined);
+  }
 }
 
 /**

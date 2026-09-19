@@ -66,6 +66,7 @@ const MOVE_WORDS = /(^|\b)(di chuyen|chuyen sang|sap xep|doi thu tu|dat len truo
 const QUESTION_WORDS = /(^|\b)(la gi|giai thich|tom tat|cho biet|phan tich|tai sao|vi sao|nhu the nao|the nao|what is|explain|summarize|why|how)(\b|$)/i;
 const COURSE_BLUEPRINT_WORDS = /(^|\b)(toan bo khoa hoc|toan khoa|ca khoa hoc|course blueprint|curriculum|chuong trinh dao tao|ban thiet ke khoa hoc|khung khoa hoc|thiet ke mot khoa hoc|xay dung mot khoa hoc|entire course|whole course|full course|complete course)(\b|$)/i;
 const COURSE_SCOPE_WORDS = /(^|\b)(khoa hoc|course|chuong trinh|curriculum)(\b|$)/i;
+const DETAILED_COURSE_AUTHORING_WORDS = /(^|\b)(chi tiet|chuyen sau|day du|hoan chinh|detailed|in[-\s]?depth|comprehensive)(\b|$)/i;
 const COMPOUND_CONNECTOR_WORDS = /(^|\b)(va|and|dong thoi|at the same time|sau do|then|also)(\b|$)/i;
 const NEGATED_DELETE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(xoa|delete|remove|bo di|go bo|loai bo)(\b|$)/i;
 const NEGATED_CREATE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(tao|them|add|insert|create|generate|build)(\b|$)/i;
@@ -238,11 +239,19 @@ export function classifyLessonAuthorIntent(input: {
   const isEdit = EDIT_WORDS.test(text);
   const isCreate = hasActiveSignal(CREATE_WORDS, text, NEGATED_CREATE_WORDS);
   const isQuestion = text.endsWith('?') || QUESTION_WORDS.test(text);
-  // Mentioning a course is not enough to request a blueprint. A broad
-  // "create content for the course" request must stay clarify-only unless it
-  // contains an explicit blueprint/full-course signal.
+  // A whole-course authoring request remains review-only: it produces a
+  // Blueprint and never mutates the outline before the admin applies it.
+  // Requiring the literal phrase "entire course" made the natural request
+  // "create detailed content for this course" fail when the outline was empty.
   const isBlueprint = COURSE_BLUEPRINT_WORDS.test(text);
-  const isCourseWideBlueprintRequest = isBlueprint
+  const isDetailedCourseAuthoringRequest = isCreate
+    && isContentEdit
+    && targetType === 'course'
+    && COURSE_SCOPE_WORDS.test(text)
+    && DETAILED_COURSE_AUTHORING_WORDS.test(text)
+    && !hasSpecificOutlineTarget
+    && !hasMention;
+  const isCourseWideBlueprintRequest = (isBlueprint || isDetailedCourseAuthoringRequest)
     && isCreate
     && !isEdit
     && !isTitleEdit

@@ -143,6 +143,22 @@ test('routes an English full-course authoring request to the blueprint branch', 
   assert.equal(plan.confidence, 0.96);
 });
 
+test('routes a detailed course request to a blueprint without requiring whole-course wording', () => {
+  const vietnamese = classifyLessonAuthorIntent({
+    message: 'Hãy tạo nội dung chi tiết cho khóa học này',
+    mode: 'auto',
+  });
+  const english = classifyLessonAuthorIntent({
+    message: 'Please create detailed content for this course.',
+    mode: 'auto',
+  });
+
+  assert.equal(vietnamese.operation, 'course_blueprint');
+  assert.equal(english.operation, 'course_blueprint');
+  assert.equal(vietnamese.target_type, 'course');
+  assert.equal(english.target_type, 'course');
+});
+
 test('keeps a whole-course edit request out of the blueprint branch', () => {
   const plan = classifyLessonAuthorIntent({
     message: 'Chỉnh sửa nội dung toàn bộ khóa học',

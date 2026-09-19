@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { pool, query } from '../config/database.js';
+import { TENANT_STORAGE_BUCKETS } from '../config/storage.js';
 
 type Mode = 'fast' | 'full-parity';
 type HealthStatus = 'ready' | 'degraded' | 'blocked';
@@ -217,7 +218,7 @@ async function loadFullParity(): Promise<{ mismatchedTenants: FullParityRow[]; c
                 COUNT(*) FILTER (WHERE object.name IS NOT NULL AND (object.metadata ->> 'size' !~ '^[0-9]+$' OR object.metadata ->> 'size' IS NULL))::bigint AS invalid_size_objects
          FROM public.tenants tenant
          LEFT JOIN storage.objects object
-           ON object.bucket_id = 'landa-storage'
+           ON object.bucket_id = ANY($1::text[])
           AND object.name LIKE tenant.id::text || '/%'
          GROUP BY tenant.id
        ), ledger AS (
@@ -240,6 +241,7 @@ async function loadFullParity(): Promise<{ mismatchedTenants: FullParityRow[]; c
           OR actual.actual_bytes <> COALESCE(ledger.ledger_bytes, 0)
           OR actual.invalid_size_objects <> 0
        ORDER BY tenant.name`,
+      [TENANT_STORAGE_BUCKETS],
     ),
     query<StorageClassificationRow>(
       `SELECT COUNT(*) FILTER (WHERE object.name LIKE 'system/prompt-mascots/%')::text AS platform_objects,
@@ -249,12 +251,13 @@ async function loadFullParity(): Promise<{ mismatchedTenants: FullParityRow[]; c
               COALESCE(SUM(CASE WHEN object.name NOT LIKE 'system/prompt-mascots/%' AND object.metadata ->> 'size' ~ '^[0-9]+$'
                 THEN (object.metadata ->> 'size')::numeric ELSE 0 END), 0)::bigint::text AS unclassified_bytes
        FROM storage.objects object
-       WHERE object.bucket_id = 'landa-storage'
+       WHERE object.bucket_id = ANY($1::text[])
          AND NOT EXISTS (
            SELECT 1
            FROM public.tenants tenant
            WHERE object.name LIKE tenant.id::text || '/%'
          )`,
+      [TENANT_STORAGE_BUCKETS],
     ),
   ]);
 

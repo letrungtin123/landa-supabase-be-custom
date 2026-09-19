@@ -9,6 +9,7 @@ import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
+import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesson-author-transcription.worker.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
@@ -121,6 +122,7 @@ async function initRabbitMQ(): Promise<void> {
     await startDeleteWorker();
     await startRestoreWorker();
     await startKbOperationWorker();
+    await startLessonAuthorTranscriptionWorker();
     await startAiEngineTransitionWorker();
     await startCourseDeletionWorker();
     await startUserDeletionWorker();

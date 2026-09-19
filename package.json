@@ -23,7 +23,7 @@
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",
     "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts",
     "test:permission-groups": "tsx --test src/modules/permissions/permissions.validator.test.ts src/modules/permissions/permission-group-history.search.test.ts src/modules/permissions/permission-group-history.serialization.test.ts",
-    "test:lesson-author": "tsx --test src/modules/course-authoring/lesson-author-components.logic.test.ts src/modules/ai-chatbot/lesson-author-intent.logic.test.ts src/modules/ai-chatbot/lesson-author-message.logic.test.ts src/modules/ai-chatbot/lesson-author-blueprint-quality.logic.test.ts",
+    "test:lesson-author": "tsx --test src/modules/course-authoring/lesson-author-components.logic.test.ts src/modules/ai-chatbot/lesson-author-intent.logic.test.ts src/modules/ai-chatbot/lesson-author-message.logic.test.ts src/modules/ai-chatbot/lesson-author-blueprint-quality.logic.test.ts src/modules/ai-chatbot/lesson-author-blueprint-sequencing.logic.test.ts",
     "test:deletion": "tsx --test src/modules/deletion/storage-manifest.logic.test.ts",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
     "verify:audit-event-usage": "tsx src/scripts/verify-audit-event-usage.ts",

@@ -90,6 +90,24 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   target_type?: 'course' | 'chapter' | 'lesson' | 'unit' | 'component' | null;
   generation_mode?: 'auto' | 'staged' | 'single';
   max_attempts?: number;
+  blueprint_architecture?: {
+    chapter_title: string;
+    source_refs?: string[];
+    lessons: Array<{
+      title: string;
+      source_refs?: string[];
+      units: Array<{
+        title: string;
+        source_refs?: string[];
+        source_fact_ids?: string[];
+        component_plan: Array<{
+          type: string;
+          title: string;
+          rationale: string;
+        }>;
+      }>;
+    }>;
+  };
 }
 
 export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {

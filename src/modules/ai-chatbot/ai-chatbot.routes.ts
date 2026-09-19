@@ -11,7 +11,12 @@ import { sendError } from '../../utils/response.js';
 import * as kbCtrl from './kb.controller.js';
 import * as botCtrl from './bot.controller.js';
 import * as chatCtrl from './chat.controller.js';
+import * as transcriptCtrl from './lesson-author-transcription.controller.js';
 import { getAiOverviewController } from './ai-report.controller.js';
+import { env } from '../../config/env.js';
+import fs from 'fs';
+import path from 'path';
+import { randomUUID } from 'crypto';
 
 const router = Router();
 
@@ -45,6 +50,82 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
 });
+
+const lessonAuthorVideoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      const destination = path.resolve(env.LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR, 'uploads');
+      try {
+        fs.mkdirSync(destination, { recursive: true });
+        callback(null, destination);
+      } catch (error) {
+        callback(error as Error, destination);
+      }
+    },
+    filename: (_req, file, callback) => callback(null, `${randomUUID()}${path.extname(file.originalname || '').toLowerCase()}`),
+  }),
+  limits: { files: 1, fileSize: env.LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB * 1024 * 1024 },
+});
+
+function clearTemporaryLessonAuthorVideo(req: Request): void {
+  const filePath = req.file?.path;
+  if (filePath) fs.unlink(filePath, () => undefined);
+}
+
+/**
+ * Multer errors bypass the controller. Keep this boundary explicit so the
+ * client receives a JSON API error and operators can distinguish transport,
+ * authorization, multipart, and transcription-service failures.
+ */
+function parseLessonAuthorVideoUpload(req: Request, res: Response, next: NextFunction): void {
+  lessonAuthorVideoUpload.single('video')(req, res, (error?: unknown) => {
+    if (!error) {
+      console.info('[LessonAuthorTranscription] multipart parsed', {
+        conversation_id: req.params.conversationId,
+        source_size_bytes: req.file?.size ?? null,
+        has_video: Boolean(req.file),
+      });
+      next();
+      return;
+    }
+
+    clearTemporaryLessonAuthorVideo(req);
+    const isSizeLimit = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE';
+    const isMultipartError = error instanceof multer.MulterError;
+    const code = isSizeLimit
+      ? 'VIDEO_FILE_TOO_LARGE'
+      : isMultipartError
+        ? 'VIDEO_MULTIPART_INVALID'
+        : 'VIDEO_UPLOAD_PARSE_FAILED';
+    const message = isSizeLimit
+      ? `Video vượt quá giới hạn ${env.LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB}MB.`
+      : 'Không thể đọc video tải lên.';
+    console.warn('[LessonAuthorTranscription] multipart rejected', {
+      conversation_id: req.params.conversationId,
+      error_code: code,
+      multer_code: error instanceof multer.MulterError ? error.code : null,
+      source_size_bytes: req.file?.size ?? null,
+    });
+    sendError(res, message, isSizeLimit ? 413 : 400, code);
+  });
+}
+
+function observeLessonAuthorTranscriptionRequest(req: Request, res: Response, next: NextFunction): void {
+  const startedAt = Date.now();
+  console.info('[LessonAuthorTranscription] request received', {
+    conversation_id: req.params.conversationId,
+    content_length: req.headers['content-length'] ?? null,
+    content_type: req.headers['content-type']?.split(';', 1)[0] ?? null,
+  });
+  res.once('finish', () => {
+    console.info('[LessonAuthorTranscription] request completed', {
+      conversation_id: req.params.conversationId,
+      status_code: res.statusCode,
+      duration_ms: Date.now() - startedAt,
+    });
+  });
+  next();
+}
 
 // All routes require auth + tenant context
 router.use(authenticate);
@@ -110,6 +191,9 @@ router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
 router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
 router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
 router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+router.post('/chat/lesson-author/conversations/:conversationId/transcriptions', observeLessonAuthorTranscriptionRequest, checkPermission('courses', 'can_edit'), parseLessonAuthorVideoUpload, transcriptCtrl.createLessonAuthorTranscription);
+router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId', checkPermission('courses', 'can_edit'), transcriptCtrl.getLessonAuthorTranscription);
+router.post('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit', checkPermission('courses', 'can_edit'), transcriptCtrl.commitLessonAuthorTranscript);
 router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversations);
 router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);
 router.delete('/chat/conversations/:id', allowRuntimeChatTarget, chatCtrl.deleteConversation);

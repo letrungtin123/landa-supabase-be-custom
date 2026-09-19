@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
-import { STORAGE_BUCKET } from '../../config/storage.js';
+import { TENANT_STORAGE_BUCKETS } from '../../config/storage.js';
 
 const MAX_BIGINT = 9223372036854775807n;
 const CANONICAL_TENANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -62,6 +62,7 @@ type ClaimRow = {
 };
 
 type StorageObject = {
+  bucket_id: string;
   name: string;
   size_bytes: string | null;
 };
@@ -86,6 +87,23 @@ function parseStorageSize(value: string | null, storagePath: string): string {
 
 function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 4_000);
+}
+
+function decodeStorageCursor(value: string | null): { bucketId: string; name: string } | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[0] === 'string' && typeof parsed[1] === 'string') {
+      return { bucketId: parsed[0], name: parsed[1] };
+    }
+  } catch {
+    // A legacy single-bucket cursor can be safely replayed.
+  }
+  return null;
+}
+
+function encodeStorageCursor(bucketId: string, name: string): string {
+  return JSON.stringify([bucketId, name]);
 }
 
 export function tenantStorageKeysetBounds(tenantId: string): { lowerBound: string; upperBound: string } {
@@ -229,7 +247,8 @@ async function writeStoragePage(
 ): Promise<void> {
   const storagePaths = objects.map((object) => object.name);
   const sizes = objects.map((object) => parseStorageSize(object.size_bytes, object.name));
-  const cursor = storagePaths[storagePaths.length - 1];
+  const lastObject = objects[objects.length - 1];
+  const cursor = encodeStorageCursor(lastObject.bucket_id, lastObject.name);
   const client = await getClient();
   try {
     await client.query('BEGIN');
@@ -344,7 +363,7 @@ export async function reconcileTenantDataQuota(
 
   let ownsClaim = true;
   try {
-    let cursor = claim.storage_scan_cursor || '';
+    let cursor = decodeStorageCursor(claim.storage_scan_cursor);
     let pages = 0;
     const scanStartedAtMs = Date.now();
     const { lowerBound, upperBound } = tenantStorageKeysetBounds(tenantId);
@@ -353,15 +372,17 @@ export async function reconcileTenantDataQuota(
       && pages < options.maxPagesPerClaim
       && !isTenantDataQuotaSliceExpired(scanStartedAtMs, options.maxSliceMs)) {
       const objects = await query<StorageObject>(
-        `SELECT name, metadata ->> 'size' AS size_bytes
+        `SELECT bucket_id, name, metadata ->> 'size' AS size_bytes
          FROM storage.objects
-         WHERE bucket_id = $1
+         WHERE bucket_id = ANY($1::text[])
            AND name COLLATE "C" >= $2::text COLLATE "C"
            AND name COLLATE "C" < $3::text COLLATE "C"
-           AND ($4::text = '' OR name COLLATE "C" > $4::text COLLATE "C")
-         ORDER BY name COLLATE "C" ASC
-         LIMIT $5::integer`,
-        [STORAGE_BUCKET, lowerBound, upperBound, cursor, options.pageSize],
+           AND ($4::text = ''
+             OR bucket_id > $4::text
+             OR (bucket_id = $4::text AND name COLLATE "C" > $5::text COLLATE "C"))
+         ORDER BY bucket_id ASC, name COLLATE "C" ASC
+         LIMIT $6::integer`,
+        [TENANT_STORAGE_BUCKETS, lowerBound, upperBound, cursor?.bucketId || '', cursor?.name || '', options.pageSize],
       );
 
       if (objects.rowCount === 0) {
@@ -371,7 +392,8 @@ export async function reconcileTenantDataQuota(
       }
 
       await writeStoragePage(tenantId, claimToken, options.leaseSeconds, objects.rows);
-      cursor = objects.rows[objects.rows.length - 1].name;
+      const lastObject = objects.rows[objects.rows.length - 1];
+      cursor = { bucketId: lastObject.bucket_id, name: lastObject.name };
       pages += 1;
     }
 

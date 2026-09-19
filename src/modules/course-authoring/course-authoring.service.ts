@@ -136,6 +136,7 @@ export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sort
 
 export interface LessonAuthorComponentPlan {
   type: LessonAuthorComponentType;
+  title?: string;
   rationale?: string;
   source_fact_ids?: string[];
 }

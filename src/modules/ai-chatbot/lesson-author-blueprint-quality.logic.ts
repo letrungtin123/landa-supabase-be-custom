@@ -30,11 +30,6 @@ export function getLessonAuthorBlueprintReviewNotes(
       ? 'Cần mô tả rõ cách đánh giá kết quả học tập.'
       : 'Clarify how learning outcomes will be assessed.');
   }
-  if (isFailed('duration_balance')) {
-    notes.push(isVietnamese
-      ? 'Cần rà lại thời lượng giữa chương và bài học.'
-      : 'Review the time allocation across chapters and lessons.');
-  }
   if (isFailed('source_grounding')) {
     notes.push(isVietnamese
       ? 'Chưa có nguồn tài liệu được chọn hoặc truy xuất rõ ràng để đối chiếu.'

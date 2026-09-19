@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import fs from 'fs/promises';
+import path from 'path';
 import { env } from '../../config/env.js';
 import { getClient, query } from '../../config/database.js';
 import { deleteFile, downloadToTempFile } from '../../config/storage.js';
@@ -66,7 +67,7 @@ async function uploadDocumentToGemini(job: KbOperationJob): Promise<void> {
   if (!job.document_id) throw new Error('KB document operation is missing document_id');
   const doc = await getDocument(job.document_id, job.tenant_id);
   if (!doc) return;
-  if (!doc.file_path) throw new Error('Document has no file_path');
+  if (!doc.file_path && !doc.content) throw new Error('Document has no source file or text content');
 
   if (job.operation === 'document_reupload') {
     // Remote cleanup happens only after the re-train request and Audit Log are
@@ -90,7 +91,13 @@ async function uploadDocumentToGemini(job: KbOperationJob): Promise<void> {
 
   let tempPath: string | null = null;
   try {
-    tempPath = await downloadToTempFile(doc.file_path, env.GEMINI_TEMP_DIR);
+    if (doc.file_path) {
+      tempPath = await downloadToTempFile(doc.file_path, env.GEMINI_TEMP_DIR);
+    } else {
+      tempPath = path.resolve(env.GEMINI_TEMP_DIR, `kb-text-${doc.id}-${Date.now()}.txt`);
+      await fs.mkdir(env.GEMINI_TEMP_DIR, { recursive: true });
+      await fs.writeFile(tempPath, doc.content || '', 'utf8');
+    }
     const [aiClient, apiKeyFingerprint] = await Promise.all([
       getGeminiClient(job.tenant_id),
       getGeminiApiKeyFingerprint(job.tenant_id),
@@ -116,7 +123,7 @@ async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
   if (!job.document_id) throw new Error('KB document operation is missing document_id');
   const doc = await getDocument(job.document_id, job.tenant_id);
   if (!doc) return;
-  if (!doc.file_path) throw new Error('Document has no file_path');
+  if (!doc.file_path && !doc.content) throw new Error('Document has no source file or text content');
 
   const settings = await getTenantAiRuntimeSettings(job.tenant_id);
   let reservationId: string | null = null;

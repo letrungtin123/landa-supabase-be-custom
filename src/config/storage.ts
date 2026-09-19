@@ -9,7 +9,10 @@
 import { createClient } from '@supabase/supabase-js';
 import { env } from './env.js';
 import fs from 'fs/promises';
+import { createReadStream, createWriteStream } from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES } from './upload-limits.js';
 import {
   commitStorageUpload,
@@ -28,6 +31,14 @@ const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
 });
 
 export const STORAGE_BUCKET = 'landa-storage';
+/**
+ * Raw lesson-author videos and their uncommitted transcripts must never enter
+ * the application's public asset bucket. This bucket is created manually by
+ * the matching Supabase migration and is accessed by the backend only.
+ */
+export const LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET = 'lesson-author-private';
+/** Every tenant-owned object bucket included in quota reconciliation/parity. */
+export const TENANT_STORAGE_BUCKETS = [STORAGE_BUCKET, LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET] as const;
 
 /** A received Storage API error is a definitive provider rejection, unlike a timeout. */
 class StorageProviderRejectedError extends Error {
@@ -124,6 +135,146 @@ export async function uploadFileFromPath(
 ): Promise<string> {
   const buffer = await fs.readFile(filePath);
   return uploadFile(storagePath, buffer, contentType, upsert);
+}
+
+function storageObjectUrl(bucket: string, storagePath: string): string {
+  const encodedPath = storagePath.split('/').map(segment => encodeURIComponent(segment)).join('/');
+  return `${env.SUPABASE_URL.replace(/\/+$/, '')}/storage/v1/object/${encodeURIComponent(bucket)}/${encodedPath}`;
+}
+
+function privateStorageHeaders(contentType?: string, contentLength?: number): Record<string, string> {
+  return {
+    apikey: env.SUPABASE_SERVICE_KEY,
+    Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+    ...(contentType ? { 'Content-Type': contentType } : {}),
+    ...(contentLength !== undefined ? { 'Content-Length': String(contentLength) } : {}),
+  };
+}
+
+/** Build an opaque, tenant-scoped key for server-only lesson-author artifacts. */
+export function buildLessonAuthorPrivateStoragePath(
+  tenantId: string,
+  kind: 'videos' | 'transcripts',
+  fileName: string,
+): string {
+  const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  return `${tenantId}/lesson-author/${kind}/${dateFolder}/${fileName}`;
+}
+
+/**
+ * Stream a local file directly to the private bucket. The existing SDK helper
+ * accepts Buffers and is intentionally not used here: a video upload must not
+ * allocate its full size in the Node.js heap.
+ */
+export async function uploadLessonAuthorPrivateFileFromPath(
+  storagePath: string,
+  filePath: string,
+  contentType: string,
+): Promise<string> {
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile() || stat.size <= 0) throw new Error('Tệp video tạm không hợp lệ.');
+
+  const reservation = await reserveStorageUpload(storagePath, stat.size);
+  try {
+    const body = Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit;
+    const response = await fetch(storageObjectUrl(LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET, storagePath), {
+      method: 'POST',
+      headers: { ...privateStorageHeaders(contentType, stat.size), 'x-upsert': 'false' },
+      body,
+      // Required by Node's fetch implementation for streamed request bodies.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      throw new StorageProviderRejectedError(`[Storage] Private upload failed (${response.status}): ${detail || response.statusText}`);
+    }
+    await commitStorageUpload(reservation, stat.size);
+    return storagePath;
+  } catch (error) {
+    if (error instanceof StorageProviderRejectedError) {
+      await releaseStorageUploadReservation(reservation)
+        .catch(() => flagStorageUploadForReconciliation(reservation));
+    } else {
+      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+/** Download a private object to disk without buffering a video in memory. */
+export async function downloadLessonAuthorPrivateFileToTemp(
+  storagePath: string,
+  tempDir: string,
+): Promise<string> {
+  await fs.mkdir(tempDir, { recursive: true });
+  const response = await fetch(storageObjectUrl(LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET, storagePath), {
+    headers: privateStorageHeaders(),
+  });
+  if (!response.ok || !response.body) {
+    const detail = (await response.text().catch(() => '')).slice(0, 300);
+    throw new Error(`[Storage] Private download failed (${response.status}): ${detail || response.statusText}`);
+  }
+
+  const fileName = storagePath.split('/').pop() || `lesson-author-${Date.now()}`;
+  const tempPath = path.resolve(tempDir, `${Date.now()}_${fileName}`);
+  try {
+    await pipeline(
+      Readable.fromWeb(response.body as unknown as import('stream/web').ReadableStream),
+      createWriteStream(tempPath, { flags: 'wx' }),
+    );
+    return tempPath;
+  } catch (error) {
+    await fs.unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Transcript text is bounded before buffering, even if a private object is corrupted. */
+export async function downloadLessonAuthorPrivateText(
+  storagePath: string,
+  maximumBytes = env.LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS * 4 + 1024,
+): Promise<string> {
+  const response = await fetch(storageObjectUrl(LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET, storagePath), {
+    headers: privateStorageHeaders(),
+  });
+  if (!response.ok || !response.body) {
+    const detail = (await response.text().catch(() => '')).slice(0, 300);
+    throw new Error(`[Storage] Private transcript download failed (${response.status}): ${detail || response.statusText}`);
+  }
+  const contentLength = Number(response.headers.get('content-length') || '0');
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
+    throw new Error('[Storage] Private transcript exceeds the permitted size.');
+  }
+  const chunks: Buffer[] = [];
+  let receivedBytes = 0;
+  for await (const chunk of Readable.fromWeb(response.body as unknown as import('stream/web').ReadableStream)) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    receivedBytes += buffer.length;
+    if (receivedBytes > maximumBytes) {
+      throw new Error('[Storage] Private transcript exceeds the permitted size.');
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+export async function deleteLessonAuthorPrivateFiles(storagePaths: readonly string[]): Promise<void> {
+  const paths = [...new Set(storagePaths.map(value => value.trim()).filter(Boolean))];
+  if (paths.length === 0) return;
+  const reservations = await reserveStorageDeletes(paths);
+  try {
+    const { error } = await supabase.storage.from(LESSON_AUTHOR_PRIVATE_STORAGE_BUCKET).remove(paths);
+    if (error) throw new StorageProviderRejectedError(`[Storage] Private delete failed: ${error.message}`);
+    await recordStorageDelete(paths, reservations);
+  } catch (error) {
+    if (error instanceof StorageProviderRejectedError) {
+      await releaseStorageDeleteReservations(reservations)
+        .catch(() => flagStorageDeletesForReconciliation(reservations));
+    } else {
+      await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 /**

@@ -7,7 +7,7 @@ import {
   invalidateTenantBadgeCaches,
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
-import { deleteFiles, extractStoragePath } from '../../config/storage.js';
+import { deleteFiles, deleteLessonAuthorPrivateFiles, extractStoragePath } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
@@ -403,6 +403,27 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
      WHERE id = $1::uuid AND status = 'running'`,
     [job.id],
   );
+}
+
+/** Private transcription artifacts are fenced before the course rows vanish. */
+async function deleteLessonAuthorPrivateArtifactsForCourse(job: DeleteJobRow): Promise<number> {
+  const table = await query<{ exists: boolean }>(
+    `SELECT to_regclass('public.lesson_author_transcription_jobs') IS NOT NULL AS exists`,
+  );
+  if (!table.rows[0]?.exists) return 0;
+
+  const rows = await query<{ source_storage_path: string | null; transcript_storage_path: string | null }>(
+    `SELECT source_storage_path, transcript_storage_path
+     FROM lesson_author_transcription_jobs
+     WHERE tenant_id = $1::uuid
+       AND course_id = $2
+       AND status IN ('queued', 'running', 'succeeded', 'failed', 'committed')`,
+    [job.tenant_id, job.course_id],
+  );
+  const paths = rows.rows.flatMap(row => [row.source_storage_path, row.transcript_storage_path])
+    .filter((value): value is string => typeof value === 'string' && value.startsWith(`${job.tenant_id}/lesson-author/`));
+  if (paths.length > 0) await deleteLessonAuthorPrivateFiles(paths);
+  return paths.length;
 }
 
 async function publishDeleteJob(jobId: string): Promise<void> {
@@ -831,6 +852,7 @@ type CourseReferenceTable =
   | 'notification_email_jobs'
   | 'lesson_author_blueprints'
   | 'lesson_author_jobs'
+  | 'lesson_author_transcription_jobs'
   | 'course_mentor_assignment_history'
   | 'course_mentor_sections'
   | 'team_courses'
@@ -842,9 +864,10 @@ type CourseReferenceTable =
   | 'tenant_badge_rule_courses';
 
 async function isOptionalCourseReferenceTableAvailable(tableName: CourseReferenceTable): Promise<boolean> {
-  if (tableName !== 'lesson_author_blueprints') return true;
+  if (tableName !== 'lesson_author_blueprints' && tableName !== 'lesson_author_transcription_jobs') return true;
   const result = await query<{ exists: boolean }>(
-    `SELECT to_regclass('public.lesson_author_blueprints') IS NOT NULL AS exists`,
+    `SELECT to_regclass($1) IS NOT NULL AS exists`,
+    [tableName === 'lesson_author_blueprints' ? 'public.lesson_author_blueprints' : 'public.lesson_author_transcription_jobs'],
   );
   return Boolean(result.rows[0]?.exists);
 }
@@ -917,6 +940,7 @@ async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeSt
     'notification_email_jobs',
     'lesson_author_blueprints',
     'lesson_author_jobs',
+    'lesson_author_transcription_jobs',
     'course_mentor_assignment_history',
     'course_mentor_sections',
     'team_courses',
@@ -1025,11 +1049,12 @@ export async function runDeletionJob(jobId: string): Promise<void> {
   try {
     let stats: PurgeStats;
     if (job.target_type === 'course') {
+      const privateStorageDeleteRequested = await deleteLessonAuthorPrivateArtifactsForCourse(job);
       await ensureCourseStorageManifest(job);
       const storageDeleteRequested = await deleteStorageManifest('course', job.id);
       await touchJobLease(job.id);
       stats = await purgeCourse(job);
-      stats.storageDeleteRequested += storageDeleteRequested;
+      stats.storageDeleteRequested += storageDeleteRequested + privateStorageDeleteRequested;
     } else {
       stats = await purgeBlock(job);
     }
