@@ -139,6 +139,12 @@ export interface LessonAuthorComponentPlan {
   title?: string;
   rationale?: string;
   source_fact_ids?: string[];
+  purpose?: 'explain' | 'assess' | 'clarify' | 'sequence' | 'relationship' | 'terminology';
+  content_requirements?: string[];
+  required_artifacts?: Array<{
+    type: 'ordered_list' | 'checklist' | 'table' | 'warning' | 'requirement' | 'exception' | 'comparison';
+    minimum_items?: number;
+  }>;
 }
 
 export interface LessonAuthorComponentProposal {

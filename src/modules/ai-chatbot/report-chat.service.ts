@@ -107,6 +107,18 @@ export interface ReportTrendContext {
   granularity?: 'day' | 'week' | 'month';
 }
 
+export type ReportCourseDetail = Pick<
+  reportsService.ReportCoursePerformance,
+  'course_id'
+  | 'name'
+  | 'total_enrollments'
+  | 'completed_enrollments'
+  | 'incomplete_enrollments'
+  | 'not_started_enrollments'
+  | 'in_progress_enrollments'
+  | 'completion_rate'
+>;
+
 export interface ReportComparisonPeriod {
   date_from: string;
   date_to: string;
@@ -130,6 +142,7 @@ export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'vers
   previous_summary: reportsService.ReportSummary;
   active_learner_trend: Array<{ bucket: string; label: string; value: number }>;
   course_portfolio: reportsService.ReportCoursePerformance[];
+  course_detail?: ReportCourseDetail;
   completion_status_distribution: reportsService.ReportCompletionStatusDistribution;
   factual_metrics: ReportMetricFact[];
   signals: ReportAnalyticsSignal[];
@@ -410,6 +423,62 @@ function normalizeReportQuestion(question: string): string {
     .trim();
 }
 
+const COURSE_REFERENCE_PATTERN = /\b(?:kh(?:óa|oá|oa)(?:\s+học)?|course)\s+(?:(?:là|la|về|ve|about)\s+)?(.+?)(?=\s+(?:có|co|bao\s+nhiêu|bao\s+nhieu|số\s+lượng|so\s+luong|số|so|người\s+học|nguoi\s+hoc|học\s+viên|hoc\s+vien|lượt\s+ghi\s+danh|luot\s+ghi\s+danh|enrollments?|learners?|trong|từ|tu|tháng|thang|năm|nam|from|during|in)(?=\s|[?.!,;]|$)|[?.!,;]|$)/iu;
+const ENGLISH_TRAILING_COURSE_REFERENCE_PATTERNS = [
+  /\b(?:taking|attending|enrolled\s+(?:in|on)|for|about|on)\s+(?:the\s+)?(.+?)\s+course\b/iu,
+  /(?:^|[?.!,;]\s*)(?:the\s+)?(.+?)\s+course\b(?=\s+(?:has|have|with|in|from|during|for|enrollments?|learners?|students?)\b|[?.!,;]|$)/iu,
+] as const;
+
+function normalizeCourseReference(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLocaleLowerCase('vi-VN')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function extractReportCourseReference(question: string): string | null {
+  const quoted = /["“]([^"”]{2,160})["”]/u.exec(question)?.[1]?.trim();
+  if (quoted) return quoted;
+  const normalizedQuestion = question.replace(/\s+/g, ' ');
+  for (const pattern of ENGLISH_TRAILING_COURSE_REFERENCE_PATTERNS) {
+    const trailingCourseReference = pattern.exec(normalizedQuestion)?.[1]?.trim();
+    if (trailingCourseReference) return trailingCourseReference;
+  }
+  const leadingCourseReference = COURSE_REFERENCE_PATTERN.exec(normalizedQuestion)?.[1]?.trim();
+  if (leadingCourseReference) return leadingCourseReference;
+  return null;
+}
+
+export function isCourseLearnerDetailRequest(question: string): boolean {
+  const normalized = normalizeReportQuestion(question);
+  return /\b(bao nhieu|how many|so luong|nguoi hoc|hoc vien|learners?|students?|danh sach|list|who)\b/.test(normalized);
+}
+
+export function resolveReportCourseDetail(
+  question: string,
+  candidates: reportsService.ReportCoursePerformance[],
+): ReportCourseDetail | null {
+  const requestedCourse = extractReportCourseReference(question);
+  if (!requestedCourse || !isCourseLearnerDetailRequest(question)) return null;
+  const normalizedRequest = normalizeCourseReference(requestedCourse);
+  if (!normalizedRequest) return null;
+  const exactMatches = candidates.filter((candidate) => normalizeCourseReference(candidate.name) === normalizedRequest);
+  if (exactMatches.length !== 1) return null;
+  const course = exactMatches[0];
+  return {
+    course_id: course.course_id,
+    name: course.name,
+    total_enrollments: course.total_enrollments,
+    completed_enrollments: course.completed_enrollments,
+    incomplete_enrollments: course.incomplete_enrollments,
+    not_started_enrollments: course.not_started_enrollments,
+    in_progress_enrollments: course.in_progress_enrollments,
+    completion_rate: course.completion_rate,
+  };
+}
+
 function containsExplicitYear(question: string): boolean {
   return /\b(?:19|20)\d{2}\b/.test(question);
 }
@@ -573,6 +642,7 @@ export async function buildReportChatSnapshot(input: {
   tenantId: string;
   actor: ReportScopeActor;
   filter?: ReportChatFilterInput;
+  question?: string;
 }): Promise<ReportChatSnapshot> {
   const normalized = normalizeReportChatFilter(input.filter);
   const scope = await enforceReportScope(input.actor, {
@@ -605,7 +675,9 @@ export async function buildReportChatSnapshot(input: {
     return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope');
   }
 
-  const [summary, previousSummary, enrollmentChart, activeLearnerChart, coursePortfolio, completionStatus, scopeDisplay] = await Promise.all([
+  const requestedCourse = input.question ? extractReportCourseReference(input.question) : null;
+  const shouldResolveCourseDetail = Boolean(requestedCourse && isCourseLearnerDetailRequest(input.question ?? ''));
+  const [summary, previousSummary, enrollmentChart, activeLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseCandidates] = await Promise.all([
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
     reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
@@ -613,7 +685,13 @@ export async function buildReportChatSnapshot(input: {
     reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     resolveReportScopeDisplay(input.tenantId, scope),
+    shouldResolveCourseDetail
+      ? reportsService.findReportCoursePerformanceByName(input.tenantId, requestedCourse!, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange)
+      : Promise.resolve([]),
   ]);
+  const courseDetail = shouldResolveCourseDetail
+    ? resolveReportCourseDetail(input.question ?? '', courseCandidates)
+    : null;
   return createReportSnapshot(
     base,
     summary,
@@ -625,6 +703,7 @@ export async function buildReportChatSnapshot(input: {
     scopeDisplay,
     hasReportData(summary) ? 'available' : 'empty',
     enrollmentChart.granularity ? { granularity: enrollmentChart.granularity } : {},
+    courseDetail ?? undefined,
   );
 }
 
@@ -808,6 +887,7 @@ export function createReportSnapshot(
   scopeDisplay: ReportScopeDisplay,
   availabilityState: ReportChatSnapshot['availability']['state'],
   enrollmentTrendContext: ReportTrendContext = {},
+  courseDetail?: ReportCourseDetail,
 ): ReportChatSnapshot {
   const factualMetrics = buildReportMetricFacts(summary, previousSummary);
   const signalLimitations = getReportSignalLimitations(factualMetrics);
@@ -826,6 +906,7 @@ export function createReportSnapshot(
       .slice(0, 5)
       .map(({ course_id, name, total_enrollments, completed_enrollments, incomplete_enrollments, completion_rate }) => ({ course_id, name, total_enrollments, completed_enrollments, incomplete_enrollments, completion_rate })),
     course_portfolio: coursePortfolio,
+    ...(courseDetail ? { course_detail: courseDetail } : {}),
     completion_status_distribution: completionStatus,
     factual_metrics: factualMetrics,
     signals: buildReportSignals({ metrics: factualMetrics, activeTrend: activeLearnerTrend, coursePortfolio }),
@@ -949,6 +1030,18 @@ export function hasDeterministicReportIntent(question: string): boolean {
     || explicitMetricCue;
 }
 
+export function resolveDeterministicReportRoute(input: {
+  question: string;
+  locale: 'vi' | 'en';
+  referenceDate?: Date;
+}): ReportRouterResult | null {
+  if (!hasDeterministicReportIntent(input.question)) return null;
+  const suggestedFilter = resolveReportDateFilter(input);
+  return suggestedFilter.date_from && suggestedFilter.date_to
+    ? { kind: 'snapshot', suggested_filter: suggestedFilter }
+    : null;
+}
+
 export async function routeAdminReportQuestion(input: {
   tenantId: string;
   model: string;
@@ -956,6 +1049,12 @@ export async function routeAdminReportQuestion(input: {
   locale: 'vi' | 'en';
   referenceDate?: Date;
 }): Promise<ReportRouterResult> {
+  // Concrete time expressions are resolved by the backend before any model
+  // routing, so an explicit report question does not make the user reapply an
+  // already unambiguous date range in the widget.
+  const deterministicRoute = resolveDeterministicReportRoute(input);
+  if (deterministicRoute) return deterministicRoute;
+
   const referenceDate = localYmd(input.referenceDate ?? new Date());
   const aiClient = await getGeminiClient(input.tenantId);
   const response = await aiClient.models.generateContent({

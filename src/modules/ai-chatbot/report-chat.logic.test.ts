@@ -6,6 +6,7 @@ import {
   buildReportMetricFacts,
   buildReportSignals,
   createReportSnapshot,
+  extractReportCourseReference,
   getReportSignalLimitations,
   getReportComparisonDisplay,
   hasNumericReportNarrativeClaim,
@@ -17,8 +18,10 @@ import {
   resolveReportDateFilter,
   resolveReportYearCorrection,
   resolveComparableReportPeriod,
+  resolveReportCourseDetail,
+  resolveDeterministicReportRoute,
 } from './report-chat.service.js';
-import type { ReportSummary } from '../reports/reports.service.js';
+import type { ReportCoursePerformance, ReportSummary } from '../reports/reports.service.js';
 import { resolveLearnerPlusReportScope } from '../reports/report-access.service.js';
 
 test.after(async () => {
@@ -65,6 +68,103 @@ test('recognizes explicit learning-report requests when the model router does no
   assert.equal(hasDeterministicReportIntent('Show course completion metrics by team'), true);
   assert.equal(hasDeterministicReportIntent('Thời tiết hôm nay thế nào?'), false);
   assert.equal(hasDeterministicReportIntent('Giải thích khóa học là gì'), false);
+});
+
+test('routes an explicit dated report request directly to its backend snapshot', () => {
+  assert.deepEqual(
+    resolveDeterministicReportRoute({
+      question: 'Báo cáo cho tôi Khóa Customer Experience có bao nhiêu người học trong tháng 7',
+      locale: 'vi',
+      referenceDate: new Date('2026-09-19T05:00:00.000Z'),
+    }),
+    {
+      kind: 'snapshot',
+      suggested_filter: { date_from: '2026-07-01', date_to: '2026-07-31' },
+    },
+  );
+});
+
+test('resolves a uniquely named course detail request without trusting an AI-generated course id', () => {
+  const candidates: ReportCoursePerformance[] = [
+    {
+      course_id: 'course-customer-experience',
+      name: 'Customer Experience',
+      total_enrollments: 24,
+      completed_enrollments: 18,
+      incomplete_enrollments: 6,
+      not_started_enrollments: 2,
+      in_progress_enrollments: 4,
+      completion_rate: 75,
+    },
+    {
+      course_id: 'course-customer-experience-v2',
+      name: 'Customer Experience V2',
+      total_enrollments: 8,
+      completed_enrollments: 7,
+      incomplete_enrollments: 1,
+      not_started_enrollments: 0,
+      in_progress_enrollments: 1,
+      completion_rate: 87.5,
+    },
+  ];
+  const question = 'Báo cáo cho tôi Khóa Customer Experience có bao nhiêu người học trong tháng 7';
+
+  assert.equal(extractReportCourseReference(question), 'Customer Experience');
+  assert.deepEqual(resolveReportCourseDetail(question, candidates), {
+    course_id: 'course-customer-experience',
+    name: 'Customer Experience',
+    total_enrollments: 24,
+    completed_enrollments: 18,
+    incomplete_enrollments: 6,
+    not_started_enrollments: 2,
+    in_progress_enrollments: 4,
+    completion_rate: 75,
+  });
+});
+
+test('resolves a trailing English course name without trusting an AI-generated course id', () => {
+  const course: ReportCoursePerformance = {
+    course_id: 'course-customer-experience',
+    name: 'Customer Experience',
+    total_enrollments: 24,
+    completed_enrollments: 18,
+    incomplete_enrollments: 6,
+    not_started_enrollments: 2,
+    in_progress_enrollments: 4,
+    completion_rate: 75,
+  };
+  const question = 'How many learners are taking the Customer Experience course in July?';
+
+  assert.equal(extractReportCourseReference(question), 'Customer Experience');
+  assert.deepEqual(resolveReportCourseDetail(question, [course]), {
+    course_id: 'course-customer-experience',
+    name: 'Customer Experience',
+    total_enrollments: 24,
+    completed_enrollments: 18,
+    incomplete_enrollments: 6,
+    not_started_enrollments: 2,
+    in_progress_enrollments: 4,
+    completion_rate: 75,
+  });
+});
+
+test('suppresses course detail selection when the candidate name is ambiguous or the request is not for learners', () => {
+  const candidate: ReportCoursePerformance = {
+    course_id: 'course-customer-experience',
+    name: 'Customer Experience',
+    total_enrollments: 24,
+    completed_enrollments: 18,
+    incomplete_enrollments: 6,
+    not_started_enrollments: 2,
+    in_progress_enrollments: 4,
+    completion_rate: 75,
+  };
+
+  assert.equal(
+    resolveReportCourseDetail('Khóa Customer Experience có bao nhiêu người học?', [candidate, { ...candidate, course_id: 'duplicate-course' }]),
+    null,
+  );
+  assert.equal(resolveReportCourseDetail('Báo cáo tiến độ Khóa Customer Experience trong tháng 7', [candidate]), null);
 });
 
 test('uses the exact Vietnamese KPI titles shown in the learning report dashboard', () => {
@@ -307,6 +407,41 @@ test('persists KPI and previous-period values exactly as supplied by ReportsServ
   assert.deepEqual(snapshot.previous_summary, previous);
   assert.deepEqual(snapshot.factual_metrics, buildReportMetricFacts(current, previous));
   assert.deepEqual(snapshot.enrollment_trend_context, { granularity: 'day' });
+});
+
+test('persists the backend-resolved course detail in the immutable report snapshot', () => {
+  const courseDetail = {
+    course_id: 'course-customer-experience',
+    name: 'Customer Experience',
+    total_enrollments: 24,
+    completed_enrollments: 18,
+    incomplete_enrollments: 6,
+    not_started_enrollments: 2,
+    in_progress_enrollments: 4,
+    completion_rate: 75,
+  };
+  const snapshot = createReportSnapshot(
+    {
+      version: 2,
+      generated_at: '2026-09-19T00:00:00.000Z',
+      timezone: 'Asia/Ho_Chi_Minh',
+      filter: { date_from: '2026-07-01', date_to: '2026-07-31' },
+      scope: { groupId: 'group-1', subgroupId: undefined, teamId: undefined },
+      comparison: { date_from: '2026-06-01', date_to: '2026-06-30', basis: 'calendar_month' },
+    },
+    reportSummary(),
+    reportSummary(),
+    [],
+    [],
+    [],
+    { not_started: 0, in_progress: 0, completed: 0 },
+    { group_name: 'Group 1' },
+    'available',
+    {},
+    courseDetail,
+  );
+
+  assert.deepEqual(snapshot.course_detail, courseDetail);
 });
 
 test('calculates deterministic deltas without dividing by a zero prior denominator', () => {

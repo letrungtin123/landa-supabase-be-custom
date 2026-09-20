@@ -1680,6 +1680,78 @@ export async function getReportCoursePerformance(
   });
 }
 
+/**
+ * Returns only report-course candidates from the same authorized enrollment
+ * cohort used by the dashboard rankings. The caller must still resolve an
+ * exact normalized title before selecting a course for a chat response.
+ */
+export async function findReportCoursePerformanceByName(
+  tenantId: string,
+  courseName: string,
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+  dateRange?: ReportDateRange,
+): Promise<ReportCoursePerformance[]> {
+  const normalizedName = courseName.trim();
+  if (!normalizedName) return [];
+
+  const range = getReportRange(undefined, undefined, dateRange);
+  const matchingCacheKey = cacheKey('reports', 'course-performance-match', 'v1', tenantId, stableHash({
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    courseName: normalizedName.toLocaleLowerCase('vi-VN'),
+  }));
+
+  return cacheJson(matchingCacheKey, getSummaryCacheTtl(range), async () => {
+    const cohort = buildReportEnrollmentCte({
+      tenantParam: '$1',
+      rangeStartParam: '$2',
+      rangeEndParam: '$3',
+      groupId,
+      subgroupId,
+      teamId,
+      scopeParamStart: 4,
+    });
+    const courseNameParam = 4 + cohort.params.length;
+    const result = await query<ReportCoursePerformance>(
+      `WITH ${cohort.sql},
+        aggregated AS (
+          SELECT
+            re.course_id,
+            MAX(re.course_name) AS name,
+            COUNT(*)::bigint AS total_enrollments,
+            COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+            COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
+            COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
+            COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
+            COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
+          FROM report_enrollments re
+          GROUP BY re.course_id
+        )
+       SELECT *
+       FROM aggregated
+       WHERE name ILIKE '%' || $${courseNameParam} || '%'
+       ORDER BY total_enrollments DESC, completion_rate ASC, name ASC
+       LIMIT 25`,
+      [tenantId, range.startDate, range.endDate, ...cohort.params, normalizedName],
+    );
+    return result.rows.map((row) => ({
+      course_id: row.course_id,
+      name: row.name,
+      total_enrollments: Number(row.total_enrollments) || 0,
+      completed_enrollments: Number(row.completed_enrollments) || 0,
+      incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
+      not_started_enrollments: Number(row.not_started_enrollments) || 0,
+      in_progress_enrollments: Number(row.in_progress_enrollments) || 0,
+      completion_rate: Number(row.completion_rate) || 0,
+    }));
+  });
+}
+
 export async function getReportCompletionStatusDistribution(
   tenantId: string,
   month?: number,

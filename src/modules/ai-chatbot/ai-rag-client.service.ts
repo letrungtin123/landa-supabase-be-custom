@@ -104,6 +104,13 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
           type: string;
           title: string;
           rationale: string;
+          purpose?: 'explain' | 'assess' | 'clarify' | 'sequence' | 'relationship' | 'terminology';
+          source_fact_ids?: string[];
+          content_requirements?: string[];
+          required_artifacts?: Array<{
+            type: 'ordered_list' | 'checklist' | 'table' | 'warning' | 'requirement' | 'exception' | 'comparison';
+            minimum_items?: number;
+          }>;
         }>;
       }>;
     }>;
