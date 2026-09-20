@@ -7,7 +7,7 @@ import { createTransactionalAuditEntry, runAuditedTransaction } from '../../midd
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
-import { streamReportExcel } from './reports-export.service.js';
+import { buildReportExcelFileName, normalizeReportExcelLocale, streamReportExcel } from './reports-export.service.js';
 import { enforceReportScope as enforceSharedReportScope, readReportScopeId, type ReportScope } from './report-access.service.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
 
@@ -226,15 +226,14 @@ export async function exportExcel(req: Request, res: Response) {
   const year = Math.max(parseInt(req.query.year as string) || dateRange?.startDate.getFullYear() || now.getFullYear(), 2000);
   const rawMonth = req.query.month ? parseInt(req.query.month as string) : undefined;
   const month = dateRange ? undefined : rawMonth && rawMonth >= 1 && rawMonth <= 12 ? rawMonth : undefined;
+  const locale = normalizeReportExcelLocale(req.query.locale);
   const scope = await enforceReportScope(req);
 
   if (scope.allowedGroupIds?.length === 0) {
     return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
   }
 
-  const fileName = dateRange
-    ? `bao-cao-tong-hop-${dateRange.dateFrom}-den-${dateRange.dateTo}.xlsx`
-    : `bao-cao-tong-hop-${month ? `${month}-` : ''}${year}.xlsx`;
+  const fileName = buildReportExcelFileName(locale, dateRange, month, year);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
   res.setHeader('Cache-Control', 'no-store');
@@ -252,11 +251,12 @@ export async function exportExcel(req: Request, res: Response) {
         teamId: scope.teamId,
       },
       labels: {
-        group: (req.query.group_label as string) || 'Khối/Khu vực',
-        subgroup: (req.query.subgroup_label as string) || 'Nhóm con',
-        team: (req.query.team_label as string) || 'Đội nhóm',
+        group: (req.query.group_label as string) || (locale === 'en' ? 'Company' : 'Công ty'),
+        subgroup: (req.query.subgroup_label as string) || (locale === 'en' ? 'Branch' : 'Chi nhánh'),
+        team: (req.query.team_label as string) || (locale === 'en' ? 'Department' : 'Phòng ban'),
       },
       exporterName: req.user!.username || 'Admin',
+      locale,
     });
   } catch (err) {
     console.error('[ReportsExport] Error:', err);

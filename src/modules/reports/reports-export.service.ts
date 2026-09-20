@@ -24,7 +24,10 @@ export type ReportExcelExportOptions = {
   scope: ExportScope;
   labels: ExportLabels;
   exporterName: string;
+  locale: ReportExcelLocale;
 };
+
+export type ReportExcelLocale = 'vi' | 'en';
 
 type ColumnDef = {
   header: string;
@@ -59,7 +62,8 @@ type TeamBreakdownRow = {
 };
 
 type HierarchyTrendRow = {
-  period_label: string;
+  period_month: string;
+  period_year: string;
   group_name: string;
   subgroup_name: string;
   team_name: string;
@@ -104,10 +108,92 @@ type CourseLearnerRow = {
   status: 'not_started' | 'learning' | 'completed';
 };
 
-const MONTH_LABELS = [
-  '', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
-  'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12',
-];
+type ReportExcelCopy = {
+  all: string;
+  dateRangeSeparator: string;
+  year: string;
+  dataPeriod: string;
+  aggregationPeriod: string;
+  aggregationYear: string;
+  exportedBy: string;
+  exportedAt: string;
+  notes: string;
+  notesValue: string;
+  item: string;
+  value: string;
+  information: string;
+  reportFileInformation: string;
+  dateRange: string;
+  month: string;
+  totalLearners: string;
+  activeLearners: string;
+  periodEnrollments: string;
+  enrollments: string;
+  completed: string;
+  incomplete: string;
+  averageCompletionRate: string;
+  overviewForPeriod: string;
+  overviewByDateRange: string;
+  monthlyOverview: string;
+  monthlyOverviewTitle: string;
+  totalPeriodEnrollments: string;
+  totalYearEnrollments: string;
+  completedInYear: string;
+  incompleteInYear: string;
+  averageCompletionRateInYear: string;
+  trendBy: string;
+  teamBreakdown: string;
+  currentTeamMembers: string;
+  averageProgress: string;
+  rank: string;
+  course: string;
+  courseRanking: string;
+  courseCompletionRanking: string;
+  username: string;
+  fullName: string;
+  learnerList: string;
+  learnerListInScope: string;
+  latestCompletion: string;
+  courseLearnerDetail: string;
+  courseEnrollmentDetail: string;
+  status: string;
+  progress: string;
+  completedInPeriod: string;
+  enrolledAt: string;
+  completedAt: string;
+  yes: string;
+  no: string;
+  statuses: Record<'completed' | 'learning' | 'not_started', string>;
+  months: string[];
+};
+
+const REPORT_EXCEL_COPY: Record<ReportExcelLocale, ReportExcelCopy> = {
+  vi: {
+    all: 'Tất cả', dateRangeSeparator: 'đến', year: 'Năm', dataPeriod: 'Kỳ dữ liệu', aggregationPeriod: 'Khoảng tổng hợp', aggregationYear: 'Năm tổng hợp', exportedBy: 'Người xuất', exportedAt: 'Thời gian xuất', notes: 'Ghi chú', notesValue: 'Dữ liệu được tính theo tenant và bộ lọc phân quyền hiện tại.', item: 'Mục', value: 'Giá trị', information: 'Thông tin', reportFileInformation: 'Thông tin file báo cáo', dateRange: 'Khoảng ngày', month: 'Tháng', totalLearners: 'Tổng học viên đã tạo', activeLearners: 'Học viên có hoạt động học', periodEnrollments: 'Lượt ghi danh trong kỳ', enrollments: 'Lượt ghi danh', completed: 'Đã hoàn thành', incomplete: 'Chưa hoàn thành', averageCompletionRate: 'Tỷ lệ hoàn thành trung bình của học viên', overviewForPeriod: 'Tổng quan kỳ', overviewByDateRange: 'Tổng quan theo khoảng ngày', monthlyOverview: 'Tổng quan tháng', monthlyOverviewTitle: 'Tổng quan theo tháng - năm', totalPeriodEnrollments: 'Tổng lượt ghi danh trong khoảng', totalYearEnrollments: 'Tổng lượt ghi danh trong năm', completedInYear: 'Đã hoàn thành trong năm', incompleteInYear: 'Chưa hoàn thành trong năm', averageCompletionRateInYear: 'Tỷ lệ hoàn thành trung bình của học viên trong năm', trendBy: 'Xu hướng theo', teamBreakdown: 'Chi tiết', currentTeamMembers: 'Học viên hiện thuộc đội', averageProgress: 'Tiến độ trung bình', rank: 'Hạng', course: 'Khóa học', courseRanking: 'Xếp hạng khóa học', courseCompletionRanking: 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', username: 'Username', fullName: 'Họ tên', learnerList: 'Danh sách học viên', learnerListInScope: 'Danh sách học viên trong phạm vi đang lọc', latestCompletion: 'Hoàn thành gần nhất', courseLearnerDetail: 'Chi tiết khóa-học viên', courseEnrollmentDetail: 'Chi tiết lượt ghi danh theo từng khóa học', status: 'Trạng thái', progress: 'Tiến độ', completedInPeriod: 'Hoàn thành trong kỳ', enrolledAt: 'Ngày ghi danh', completedAt: 'Ngày hoàn thành', yes: 'Có', no: 'Chưa', statuses: { completed: 'Đã học', learning: 'Đang học', not_started: 'Chưa học' }, months: ['', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6', 'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'],
+  },
+  en: {
+    all: 'All', dateRangeSeparator: 'to', year: 'Year', dataPeriod: 'Data period', aggregationPeriod: 'Aggregation period', aggregationYear: 'Aggregation year', exportedBy: 'Exported by', exportedAt: 'Exported at', notes: 'Notes', notesValue: 'Data is calculated using the current tenant and authorized report filters.', item: 'Item', value: 'Value', information: 'Information', reportFileInformation: 'Report file information', dateRange: 'Date range', month: 'Month', totalLearners: 'Total learners created', activeLearners: 'Learners with learning activity', periodEnrollments: 'Period enrollments', enrollments: 'Enrollments', completed: 'Completed', incomplete: 'Incomplete', averageCompletionRate: 'Average learner completion rate', overviewForPeriod: 'Period overview', overviewByDateRange: 'Overview by date range', monthlyOverview: 'Monthly overview', monthlyOverviewTitle: 'Monthly overview - year', totalPeriodEnrollments: 'Total enrollments in range', totalYearEnrollments: 'Total enrollments in year', completedInYear: 'Completed in year', incompleteInYear: 'Incomplete in year', averageCompletionRateInYear: 'Average learner completion rate in year', trendBy: 'Trend by', teamBreakdown: 'Breakdown', currentTeamMembers: 'Current team members', averageProgress: 'Average progress', rank: 'Rank', course: 'Course', courseRanking: 'Course ranking', courseCompletionRanking: 'Course completion ranking', username: 'Username', fullName: 'Full name', learnerList: 'Learner list', learnerListInScope: 'Learners in the selected scope', latestCompletion: 'Latest completion', courseLearnerDetail: 'Course-learner detail', courseEnrollmentDetail: 'Course enrollment detail', status: 'Status', progress: 'Progress', completedInPeriod: 'Completed in period', enrolledAt: 'Enrolled at', completedAt: 'Completed at', yes: 'Yes', no: 'No', statuses: { completed: 'Completed', learning: 'In progress', not_started: 'Not started' }, months: ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+  },
+};
+
+export function normalizeReportExcelLocale(value: unknown): ReportExcelLocale {
+  return value === 'en' ? 'en' : 'vi';
+}
+
+export function getReportExcelCopy(locale: ReportExcelLocale): ReportExcelCopy {
+  return REPORT_EXCEL_COPY[locale];
+}
+
+export function buildReportExcelFileName(
+  locale: ReportExcelLocale,
+  dateRange: ReportDateRange | undefined,
+  month: number | undefined,
+  year: number,
+): string {
+  const prefix = locale === 'en' ? 'learning-report' : 'bao-cao-tong-hop';
+  if (dateRange) return `${prefix}-${dateRange.dateFrom}-${locale === 'en' ? 'to' : 'den'}-${dateRange.dateTo}.xlsx`;
+  return `${prefix}-${month ? `${month}-` : ''}${year}.xlsx`;
+}
 
 const EXCEL_MAX_ROWS = 1_048_576;
 const STREAM_BATCH_SIZE = 5_000;
@@ -161,8 +247,34 @@ function getExportPeriodRange(options: ReportExcelExportOptions): { startDate: D
 
 
 function getExportPeriodLabel(options: ReportExcelExportOptions): string {
-  if (options.dateRange) return `${options.dateRange.dateFrom} đến ${options.dateRange.dateTo}`;
-  return options.month ? `${MONTH_LABELS[options.month]}/${options.year}` : `Năm ${options.year}`;
+  const copy = getReportExcelCopy(options.locale);
+  if (options.dateRange) {
+    return `${formatExportDate(options.dateRange.dateFrom, options.locale)} ${copy.dateRangeSeparator} ${formatExportDate(options.dateRange.dateTo, options.locale)}`;
+  }
+  return options.month ? `${copy.months[options.month]}/${options.year}` : `${copy.year} ${options.year}`;
+}
+
+function formatExportDate(value: string, locale: ReportExcelLocale): string {
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', {
+    day: '2-digit',
+    month: locale === 'en' ? 'short' : '2-digit',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(date);
+}
+
+function dateTimeNumberFormat(locale: ReportExcelLocale): string {
+  return locale === 'en' ? 'dd mmm yyyy hh:mm' : 'dd/mm/yyyy hh:mm';
+}
+
+function formatHierarchyPeriodLabel(item: HierarchyTrendRow, locale: ReportExcelLocale): string {
+  const copy = getReportExcelCopy(locale);
+  const month = Number(item.period_month);
+  const year = Number(item.period_year);
+  if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year)) return '';
+  return locale === 'en' ? `${copy.months[month]} ${year}` : `${copy.months[month]}/${year}`;
 }
 
 function toNumber(value: unknown): number {
@@ -174,10 +286,11 @@ function roundPercent(value: unknown): number {
   return Math.round(Math.min(Math.max(toNumber(value), 0), 100) * 100) / 100;
 }
 
-function statusText(status: string): string {
-  if (status === 'completed') return 'Đã học';
-  if (status === 'learning') return 'Đang học';
-  return 'Chưa học';
+function statusText(status: string, locale: ReportExcelLocale): string {
+  const statuses = getReportExcelCopy(locale).statuses;
+  if (status === 'completed') return statuses.completed;
+  if (status === 'learning') return statuses.learning;
+  return statuses.not_started;
 }
 
 function statusColor(status: string): string {
@@ -210,8 +323,8 @@ function safeSheetName(baseName: string, index?: number): string {
   return `${baseName}${suffix}`.replace(/[\\/*?:[\]]/g, ' ').slice(0, 31);
 }
 
-function lowerLabel(label: string): string {
-  return label.trim().toLocaleLowerCase('vi-VN');
+function lowerLabel(label: string, locale: ReportExcelLocale): string {
+  return label.trim().toLocaleLowerCase(locale === 'en' ? 'en-US' : 'vi-VN');
 }
 
 function addStyledRow(
@@ -349,7 +462,8 @@ class SplitWorksheetWriter {
   }
 }
 
-async function resolveScopeNames(tenantId: string, scope: ExportScope): Promise<ScopeNames> {
+async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: ReportExcelLocale): Promise<ScopeNames> {
+  const all = getReportExcelCopy(locale).all;
   if (scope.teamId) {
     const result = await query<ScopeNames>(
       `SELECT og.name AS "groupName", sg.name AS "subgroupName", t.name AS "teamName"
@@ -360,7 +474,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope): Promise<
        LIMIT 1`,
       [scope.teamId, tenantId],
     );
-    return result.rows[0] || { groupName: 'Tất cả', subgroupName: 'Tất cả', teamName: 'Tất cả' };
+    return result.rows[0] || { groupName: all, subgroupName: all, teamName: all };
   }
 
   if (scope.subgroupId) {
@@ -373,7 +487,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope): Promise<
       [scope.subgroupId, tenantId],
     );
     const row = result.rows[0];
-    return { groupName: row?.groupName || 'Tất cả', subgroupName: row?.subgroupName || 'Tất cả', teamName: 'Tất cả' };
+    return { groupName: row?.groupName || all, subgroupName: row?.subgroupName || all, teamName: all };
   }
 
   if (scope.groupId) {
@@ -384,10 +498,10 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope): Promise<
        LIMIT 1`,
       [scope.groupId, tenantId],
     );
-    return { groupName: result.rows[0]?.groupName || 'Tất cả', subgroupName: 'Tất cả', teamName: 'Tất cả' };
+    return { groupName: result.rows[0]?.groupName || all, subgroupName: all, teamName: all };
   }
 
-  return { groupName: 'Tất cả', subgroupName: 'Tất cả', teamName: 'Tất cả' };
+  return { groupName: all, subgroupName: all, teamName: all };
 }
 
 async function writeInfoSheet(
@@ -396,22 +510,23 @@ async function writeInfoSheet(
   scopeNames: ScopeNames,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: 'Mục', key: 'label', width: 30 },
-    { header: 'Giá trị', key: 'value', width: 78 },
+    { header: copy.item, key: 'label', width: 30 },
+    { header: copy.value, key: 'value', width: 78 },
   ];
-  const worksheet = addWorksheetChrome(workbook, 'Thông tin', 'Thông tin file báo cáo', subtitle, columns);
+  const worksheet = addWorksheetChrome(workbook, copy.information, copy.reportFileInformation, subtitle, columns);
   const periodLabel = getExportPeriodLabel(options);
 
   const rows: Array<[string, unknown]> = [
-    ['Kỳ dữ liệu', periodLabel],
-    [options.dateRange ? 'Khoảng tổng hợp' : 'Năm tổng hợp', options.dateRange ? periodLabel : options.year],
+    [copy.dataPeriod, periodLabel],
+    [options.dateRange ? copy.aggregationPeriod : copy.aggregationYear, options.dateRange ? periodLabel : options.year],
     [options.labels.group, scopeNames.groupName],
     [options.labels.subgroup, scopeNames.subgroupName],
     [options.labels.team, scopeNames.teamName],
-    ['Người xuất', options.exporterName],
-    ['Thời gian xuất', new Date()],
-    ['Ghi chú', 'Dữ liệu được tính theo tenant và bộ lọc phân quyền hiện tại.'],
+    [copy.exportedBy, options.exporterName],
+    [copy.exportedAt, new Date()],
+    [copy.notes, copy.notesValue],
   ];
 
   rows.forEach((item, index) => {
@@ -427,7 +542,7 @@ async function writeInfoSheet(
         fgColor: { argb: index % 2 === 0 ? COLORS.white : COLORS.slateSoft },
       };
       cell.font = { name: 'Arial', size: 10, bold: i === 1, color: { argb: i === 1 ? COLORS.navy : COLORS.slate } };
-      if (item[0] === 'Thời gian xuất' && i === 2) cell.numFmt = 'dd/mm/yyyy hh:mm';
+      if (item[0] === copy.exportedAt && i === 2) cell.numFmt = dateTimeNumberFormat(options.locale);
     }
     row.commit();
   });
@@ -440,19 +555,20 @@ async function writeMonthlyOverviewSheet(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
-    { header: 'Tổng học viên đã tạo', key: 'totalLearners', width: 22 },
-    { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 24 },
-    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
-    { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 18 },
-    { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 18 },
-    { header: 'Tỷ lệ hoàn thành trung bình của học viên', key: 'completionRate', width: 36 },
+    { header: options.dateRange ? copy.dateRange : copy.month, key: 'month', width: 22 },
+    { header: copy.totalLearners, key: 'totalLearners', width: 22 },
+    { header: copy.activeLearners, key: 'activeLearners', width: 24 },
+    { header: copy.periodEnrollments, key: 'enrollments', width: 20 },
+    { header: copy.completed, key: 'completedEnrollments', width: 18 },
+    { header: copy.incomplete, key: 'incompleteEnrollments', width: 18 },
+    { header: copy.averageCompletionRate, key: 'completionRate', width: 36 },
   ];
   const worksheet = addWorksheetChrome(
     workbook,
-    options.dateRange ? 'Tổng quan kỳ' : 'Tổng quan tháng',
-    options.dateRange ? 'Tổng quan theo khoảng ngày' : `Tổng quan theo tháng - năm ${options.year}`,
+    options.dateRange ? copy.overviewForPeriod : copy.monthlyOverview,
+    options.dateRange ? copy.overviewByDateRange : `${copy.monthlyOverviewTitle} ${options.year}`,
     subtitle,
     columns,
   );
@@ -489,10 +605,10 @@ async function writeMonthlyOverviewSheet(
     );
     addOverviewRow(getExportPeriodLabel(options), summary, 0);
     addStyledRow(worksheet, [], columns.length, 'spacer');
-    addStyledRow(worksheet, ['Tổng lượt ghi danh trong khoảng', summary.overview.total_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, ['Đã hoàn thành', summary.overview.completed_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, ['Chưa hoàn thành', summary.overview.incomplete_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, ['Tỷ lệ hoàn thành trung bình của học viên', `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.totalPeriodEnrollments, summary.overview.total_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.completed, summary.overview.completed_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.incomplete, summary.overview.incomplete_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.averageCompletionRate, `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
     worksheet.commit();
     return;
   }
@@ -512,7 +628,7 @@ async function writeMonthlyOverviewSheet(
       completedEnrollments += summary.overview.completed_enrollments;
       incompleteEnrollments += summary.overview.incomplete_enrollments;
     }
-    addOverviewRow(MONTH_LABELS[month], summary, month - 1);
+    addOverviewRow(copy.months[month], summary, month - 1);
   }
 
   const annualRange = maxMonth === 0 ? null : (() => {
@@ -537,10 +653,10 @@ async function writeMonthlyOverviewSheet(
     )
     : null;
   const yearlyRate = annualSummary?.overview.completion_rate ?? 0;  addStyledRow(worksheet, [], columns.length, 'spacer');
-  addStyledRow(worksheet, ['Tổng lượt ghi danh trong năm', totalEnrollments], columns.length, 'summary');
-  addStyledRow(worksheet, ['Đã hoàn thành trong năm', completedEnrollments], columns.length, 'summary');
-  addStyledRow(worksheet, ['Chưa hoàn thành trong năm', incompleteEnrollments], columns.length, 'summary');
-  addStyledRow(worksheet, ['Tỷ lệ hoàn thành trung bình của học viên trong năm', `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
+  addStyledRow(worksheet, [copy.totalYearEnrollments, totalEnrollments], columns.length, 'summary');
+  addStyledRow(worksheet, [copy.completedInYear, completedEnrollments], columns.length, 'summary');
+  addStyledRow(worksheet, [copy.incompleteInYear, incompleteEnrollments], columns.length, 'summary');
+  addStyledRow(worksheet, [copy.averageCompletionRateInYear, `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
   worksheet.commit();
 }
 async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promise<HierarchyTrendRow[]> {
@@ -589,7 +705,8 @@ async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promi
         GROUP BY period_start, og.id, sg.id, t.id, og.name, sg.name, t.name
       )
       SELECT
-        'Tháng ' || EXTRACT(MONTH FROM COALESCE(em.period_start, am.period_start))::int || '/' || EXTRACT(YEAR FROM COALESCE(em.period_start, am.period_start))::int AS period_label,
+        EXTRACT(MONTH FROM COALESCE(em.period_start, am.period_start))::int AS period_month,
+        EXTRACT(YEAR FROM COALESCE(em.period_start, am.period_start))::int AS period_year,
         COALESCE(em.group_name, am.group_name) AS group_name,
         COALESCE(em.subgroup_name, am.subgroup_name) AS subgroup_name,
         COALESCE(em.team_name, am.team_name) AS team_name,
@@ -611,22 +728,23 @@ async function writeHierarchyTrendSheet(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: options.dateRange ? 'Khoảng ngày' : 'Tháng', key: 'month', width: 22 },
+    { header: options.dateRange ? copy.dateRange : copy.month, key: 'month', width: 22 },
     { header: options.labels.group, key: 'groupName', width: 24 },
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
-    { header: 'Lượt ghi danh', key: 'enrollments', width: 16 },
-    { header: 'Đã hoàn thành', key: 'completedEnrollments', width: 16 },
-    { header: 'Chưa hoàn thành', key: 'incompleteEnrollments', width: 16 },
-    { header: 'Học viên có hoạt động học', key: 'activeLearners', width: 22 },
-    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
+    { header: copy.enrollments, key: 'enrollments', width: 16 },
+    { header: copy.completed, key: 'completedEnrollments', width: 16 },
+    { header: copy.incomplete, key: 'incompleteEnrollments', width: 16 },
+    { header: copy.activeLearners, key: 'activeLearners', width: 22 },
+    { header: copy.averageProgress, key: 'completionRate', width: 18 },
   ];
-  const worksheet = addWorksheetChrome(workbook, `Xu hướng theo ${options.labels.team}`, `Xu hướng theo ${lowerLabel(options.labels.team)} - ${getExportPeriodLabel(options)}`, subtitle, columns);
+  const worksheet = addWorksheetChrome(workbook, `${copy.trendBy} ${options.labels.team}`, `${copy.trendBy} ${lowerLabel(options.labels.team, options.locale)} - ${getExportPeriodLabel(options)}`, subtitle, columns);
   const rows = await fetchHierarchyTrendRows(options);
   rows.forEach((item, index) => {
     const row = worksheet.addRow([
-      item.period_label, item.group_name, item.subgroup_name, item.team_name,
+      formatHierarchyPeriodLabel(item, options.locale), item.group_name, item.subgroup_name, item.team_name,
       toNumber(item.total_enrollments), toNumber(item.completed_enrollments), toNumber(item.incomplete_enrollments), toNumber(item.active_learners), roundPercent(item.completion_rate) / 100,
     ]);
     row.height = 22;
@@ -695,17 +813,18 @@ async function writeTeamBreakdownSheet(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
     { header: options.labels.group, key: 'groupName', width: 24 },
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
-    { header: 'Học viên hiện thuộc đội', key: 'memberCount', width: 22 },
-    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
-    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
-    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
+    { header: copy.currentTeamMembers, key: 'memberCount', width: 22 },
+    { header: copy.periodEnrollments, key: 'enrollments', width: 20 },
+    { header: copy.completed, key: 'completed', width: 18 },
+    { header: copy.incomplete, key: 'incomplete', width: 18 },
+    { header: copy.averageProgress, key: 'completionRate', width: 18 },
   ];
-  const worksheet = addWorksheetChrome(workbook, `Chi tiết ${options.labels.team}`, `Chi tiết ${lowerLabel(options.labels.team)}`, subtitle, columns);
+  const worksheet = addWorksheetChrome(workbook, `${copy.teamBreakdown} ${options.labels.team}`, `${copy.teamBreakdown} ${lowerLabel(options.labels.team, options.locale)}`, subtitle, columns);
   const rows = await fetchTeamBreakdownRows(options);
   rows.forEach((item, index) => {
     const rate = roundPercent(item.completion_rate);
@@ -754,17 +873,18 @@ async function writeCourseRankingSheet(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<CourseRankingExportRow[]> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: 'Hạng', key: 'rank', width: 10 },
-    { header: 'Khóa học', key: 'courseName', width: 46 },
+    { header: copy.rank, key: 'rank', width: 10 },
+    { header: copy.course, key: 'courseName', width: 46 },
     { header: 'Course ID', key: 'courseId', width: 38 },
-    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
-    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
-    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
+    { header: copy.periodEnrollments, key: 'enrollments', width: 20 },
+    { header: copy.completed, key: 'completed', width: 18 },
+    { header: copy.incomplete, key: 'incomplete', width: 18 },
+    { header: copy.averageProgress, key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(
-    workbook, 'Xếp hạng khóa học', 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', subtitle, columns,
+    workbook, copy.courseRanking, copy.courseCompletionRanking, subtitle, columns,
   );
   const rows = await fetchCourseRankingRows(options);
   rows.forEach((item, index) => {
@@ -870,20 +990,21 @@ async function writeLearnerSummarySheet(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: 'Username', key: 'username', width: 26 },
-    { header: 'Họ tên', key: 'fullName', width: 26 },
+    { header: copy.username, key: 'username', width: 26 },
+    { header: copy.fullName, key: 'fullName', width: 26 },
     { header: 'Email', key: 'email', width: 34 },
     { header: options.labels.group, key: 'groups', width: 24 },
     { header: options.labels.subgroup, key: 'subgroups', width: 28 },
     { header: options.labels.team, key: 'teams', width: 30 },
-    { header: 'Lượt ghi danh trong kỳ', key: 'enrollments', width: 20 },
-    { header: 'Đã hoàn thành', key: 'completed', width: 18 },
-    { header: 'Chưa hoàn thành', key: 'incomplete', width: 18 },
-    { header: 'Tiến độ trung bình', key: 'completionRate', width: 18 },
-    { header: 'Hoàn thành gần nhất', key: 'lastCompletion', width: 20 },
+    { header: copy.periodEnrollments, key: 'enrollments', width: 20 },
+    { header: copy.completed, key: 'completed', width: 18 },
+    { header: copy.incomplete, key: 'incomplete', width: 18 },
+    { header: copy.averageProgress, key: 'completionRate', width: 18 },
+    { header: copy.latestCompletion, key: 'lastCompletion', width: 20 },
   ];
-  const writer = new SplitWorksheetWriter(workbook, 'Danh sách học viên', 'Danh sách học viên trong phạm vi đang lọc', subtitle, columns);
+  const writer = new SplitWorksheetWriter(workbook, copy.learnerList, copy.learnerListInScope, subtitle, columns);
   let lastUserId: string | null = null;
   for (;;) {
     const rows = await fetchLearnerSummaryBatch(options, lastUserId);
@@ -896,7 +1017,7 @@ async function writeLearnerSummarySheet(
       ], (row) => {
         row.getCell(10).numFmt = '0.00%';
         row.getCell(10).font = { name: 'Arial', size: 10, bold: true, color: { argb: rate >= 80 ? COLORS.emerald : rate >= 50 ? COLORS.amber : COLORS.red } };
-        row.getCell(11).numFmt = 'dd/mm/yyyy hh:mm';
+        row.getCell(11).numFmt = dateTimeNumberFormat(options.locale);
       });
     }
     lastUserId = rows[rows.length - 1].user_id;
@@ -980,22 +1101,23 @@ async function writeCourseLearnerDetailSheets(
   options: ReportExcelExportOptions,
   subtitle: string,
 ): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
-    { header: 'Khóa học', key: 'courseName', width: 42 },
+    { header: copy.course, key: 'courseName', width: 42 },
     { header: 'Course ID', key: 'courseId', width: 38 },
-    { header: 'Username', key: 'username', width: 24 },
-    { header: 'Họ tên', key: 'fullName', width: 24 },
+    { header: copy.username, key: 'username', width: 24 },
+    { header: copy.fullName, key: 'fullName', width: 24 },
     { header: 'Email', key: 'email', width: 34 },
     { header: options.labels.group, key: 'groups', width: 24 },
     { header: options.labels.subgroup, key: 'subgroups', width: 28 },
     { header: options.labels.team, key: 'teams', width: 30 },
-    { header: 'Trạng thái', key: 'status', width: 16 },
-    { header: 'Tiến độ', key: 'progress', width: 14 },
-    { header: 'Hoàn thành trong kỳ', key: 'completed', width: 20 },
-    { header: 'Ngày ghi danh', key: 'enrolledAt', width: 18 },
-    { header: 'Ngày hoàn thành', key: 'completedAt', width: 18 },
+    { header: copy.status, key: 'status', width: 16 },
+    { header: copy.progress, key: 'progress', width: 14 },
+    { header: copy.completedInPeriod, key: 'completed', width: 20 },
+    { header: copy.enrolledAt, key: 'enrolledAt', width: 18 },
+    { header: copy.completedAt, key: 'completedAt', width: 18 },
   ];
-  const writer = new SplitWorksheetWriter(workbook, 'Chi tiết khóa-học viên', 'Chi tiết lượt ghi danh theo từng khóa học', subtitle, columns);
+  const writer = new SplitWorksheetWriter(workbook, copy.courseLearnerDetail, copy.courseEnrollmentDetail, subtitle, columns);
   let lastEnrolledAt: Date | null = null;
   let lastEnrollmentId: string | null = null;
   for (;;) {
@@ -1004,12 +1126,12 @@ async function writeCourseLearnerDetailSheets(
     for (const item of rows) {
       writer.addRow([
         item.course_name, item.course_id, item.username, item.full_name || '', item.email,
-        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status), roundPercent(item.progress) / 100, item.is_completed ? 'Có' : 'Chưa', item.enrolled_at, item.completed_at,
+        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status, options.locale), roundPercent(item.progress) / 100, item.is_completed ? copy.yes : copy.no, item.enrolled_at, item.completed_at,
       ], (row) => {
         row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
         row.getCell(10).numFmt = '0.00%';
-        row.getCell(12).numFmt = 'dd/mm/yyyy hh:mm';
-        row.getCell(13).numFmt = 'dd/mm/yyyy hh:mm';
+        row.getCell(12).numFmt = dateTimeNumberFormat(options.locale);
+        row.getCell(13).numFmt = dateTimeNumberFormat(options.locale);
       });
     }
     const lastRow = rows[rows.length - 1];
@@ -1020,15 +1142,16 @@ async function writeCourseLearnerDetailSheets(
   writer.finish();
 }
 export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
-  const scopeNames = await resolveScopeNames(options.tenantId, options.scope);
+  const copy = getReportExcelCopy(options.locale);
+  const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
   const selectedPeriodText = getExportPeriodLabel(options);
   const yearlyPeriodText = getExportPeriodLabel(options);
   const buildSubtitle = (periodText: string): string => [
-    `Kỳ dữ liệu: ${periodText}`,
+    `${copy.dataPeriod}: ${periodText}`,
     `${options.labels.group}: ${scopeNames.groupName}`,
     `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
     `${options.labels.team}: ${scopeNames.teamName}`,
-    `Người xuất: ${options.exporterName}`,
+    `${copy.exportedBy}: ${options.exporterName}`,
   ].join(' | ');
   const selectedPeriodSubtitle = buildSubtitle(selectedPeriodText);
   const yearlySubtitle = buildSubtitle(yearlyPeriodText);

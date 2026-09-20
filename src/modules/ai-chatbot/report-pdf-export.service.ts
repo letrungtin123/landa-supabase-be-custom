@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { getTenantAiRuntimeSettings } from './ai-settings.service.js';
-import { estimateTokensFromText, finalizeTenantAiTokens, releaseTenantAiTokenReservation, reserveTenantAiTokens } from './ai-token-quota.service.js';
-import { getReportSnapshotHash, loadStoredReportSnapshot } from './report-chat.service.js';
+import { loadStoredReportSnapshot } from './report-chat.service.js';
 import { generateReportPdfNarrative, renderReportPdf } from './report-pdf.service.js';
 import { enforceReportScope } from '../reports/report-access.service.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { hasPermission } from '../../middleware/authorize.js';
 import type { UserRole } from '../../types/index.js';
 import { isReportPdfExportTerminal, type ReportPdfExportPhase } from './report-pdf-export.logic.js';
 
@@ -18,6 +17,8 @@ export type ReportPdfExportActor = {
   tenantId: string;
   role: UserRole;
 };
+
+export type ReportPdfPermissionChecker = (actor: ReportPdfExportActor) => Promise<boolean>;
 
 export type ReportPdfExportStatus = {
   id: string;
@@ -54,6 +55,24 @@ export class ReportPdfExportError extends Error {
 
 const jobsById = new Map<string, ReportPdfExportJob>();
 const jobIdByKey = new Map<string, string>();
+
+const defaultReportPdfPermissionChecker: ReportPdfPermissionChecker = (actor) => hasPermission(
+  { id: actor.userId, tenantId: actor.tenantId, role: actor.role },
+  'report_summary',
+  'can_view',
+);
+
+export async function assertReportPdfPermission(
+  actor: ReportPdfExportActor,
+  permissionChecker: ReportPdfPermissionChecker = defaultReportPdfPermissionChecker,
+): Promise<void> {
+  if (await permissionChecker(actor)) return;
+  throw new ReportPdfExportError(
+    'Bạn không còn quyền xem Báo cáo tổng quan.',
+    403,
+    'REPORT_PDF_PERMISSION_DENIED',
+  );
+}
 
 function exportKey(input: Pick<ReportPdfExportActor, 'userId' | 'tenantId'> & { conversationId: string; assistantMessageId: string }): string {
   return `${input.tenantId}:${input.userId}:${input.conversationId}:${input.assistantMessageId}`;
@@ -153,16 +172,17 @@ export async function buildReportPdfArtifact(input: {
   conversationId: string;
   assistantMessageId: string;
   onPhase?: (phase: Extract<ReportPdfExportPhase, 'validating' | 'narrative' | 'rendering'>) => void;
+  permissionChecker?: ReportPdfPermissionChecker;
 }): Promise<{ pdf: Buffer; locale: 'vi' | 'en'; fileName: string }> {
-  input.onPhase?.('validating');
   const { actor, conversationId, assistantMessageId } = input;
+  await assertReportPdfPermission(actor, input.permissionChecker);
+  input.onPhase?.('validating');
   const stored = await loadStoredReportSnapshot({
     assistantMessageId,
     conversationId,
     userId: actor.userId,
     tenantId: actor.tenantId,
   });
-  const reportSnapshotHash = getReportSnapshotHash(stored.snapshot);
   const currentScope = await enforceReportScope(
     { userId: actor.userId, tenantId: actor.tenantId, role: actor.role },
     {
@@ -177,37 +197,11 @@ export async function buildReportPdfArtifact(input: {
     throw new ReportPdfExportError('Bạn không còn quyền xuất phạm vi báo cáo này', 403, 'REPORT_PDF_SCOPE_DENIED');
   }
 
-  const settings = await getTenantAiRuntimeSettings(actor.tenantId);
-  if (!settings.hasGoogleAiStudioKey) {
-    throw new ReportPdfExportError('Chưa cấu hình API key Google AI Studio cho doanh nghiệp này.', 400, 'AI_PROVIDER_KEY_MISSING');
-  }
-
-  const inputTokens = estimateTokensFromText(JSON.stringify(stored.snapshot), stored.question);
-  let reservationId: string | null = null;
   try {
-    const reservation = await reserveTenantAiTokens({
-      tenantId: actor.tenantId,
-      userId: actor.userId,
-      conversationId,
-      target: 'admin',
-      engine: settings.activeEngine,
-      provider: settings.provider,
-      model: settings.chatModel,
-      operation: 'chat',
-      minimumTokens: Math.max(1_000, inputTokens + 500),
-      maximumTokens: Math.min(30_000, Math.max(4_500, inputTokens + 3_000)),
-      budget: {
-        inputTokens,
-        outputTokens: 2_000,
-        maxOutputTokens: 2_000,
-        metadata: { report_chat: true, report_stage: 'pdf' },
-      },
-    });
-    reservationId = reservation.id;
     input.onPhase?.('narrative');
     const narrative = await generateReportPdfNarrative({
       tenantId: actor.tenantId,
-      model: settings.chatModel,
+      model: 'deterministic',
       locale: stored.locale,
       question: stored.question,
       snapshot: stored.snapshot,
@@ -217,26 +211,12 @@ export async function buildReportPdfArtifact(input: {
     if (pdf.byteLength > MAX_ARTIFACT_BYTES) {
       throw new ReportPdfExportError('PDF báo cáo vượt quá dung lượng tạm thời cho phép.', 413, 'REPORT_PDF_ARTIFACT_TOO_LARGE');
     }
-    await finalizeTenantAiTokens({
-      reservationId,
-      tenantId: actor.tenantId,
-      usage: {
-        inputTokens,
-        outputTokens: estimateTokensFromText(JSON.stringify(narrative)),
-        embeddingTokens: 0,
-        totalTokens: inputTokens + estimateTokensFromText(JSON.stringify(narrative)),
-      },
-      source: { service: 'report_pdf', assistant_message_id: assistantMessageId },
-      metadata: { report_chat: true, report_stage: 'pdf', report_snapshot_hash: reportSnapshotHash },
-    });
-    reservationId = null;
     return {
       pdf,
       locale: stored.locale,
       fileName: buildReportPdfFileName(stored.locale, stored.snapshot.filter.date_from, stored.snapshot.filter.date_to),
     };
   } catch (error) {
-    if (reservationId) await releaseTenantAiTokenReservation(reservationId, actor.tenantId).catch(() => undefined);
     throw normalizeExportError(error);
   }
 }
@@ -254,13 +234,18 @@ function findJob(input: ReportPdfExportActor & { conversationId: string; assista
   return job;
 }
 
-async function runJob(job: ReportPdfExportJob, actor: ReportPdfExportActor): Promise<void> {
+async function runJob(
+  job: ReportPdfExportJob,
+  actor: ReportPdfExportActor,
+  permissionChecker?: ReportPdfPermissionChecker,
+): Promise<void> {
   try {
     const artifact = await buildReportPdfArtifact({
       actor,
       conversationId: job.conversationId,
       assistantMessageId: job.assistantMessageId,
       onPhase: (phase) => setPhase(job, phase),
+      permissionChecker,
     });
     if (!jobsById.has(job.id)) return;
     job.phase = 'ready';
@@ -286,10 +271,12 @@ async function runJob(job: ReportPdfExportJob, actor: ReportPdfExportActor): Pro
   }
 }
 
-export function startReportPdfExportJob(input: ReportPdfExportActor & {
+export async function startReportPdfExportJob(input: ReportPdfExportActor & {
   conversationId: string;
   assistantMessageId: string;
-}): ReportPdfExportStatus {
+  permissionChecker?: ReportPdfPermissionChecker;
+}): Promise<ReportPdfExportStatus> {
+  await assertReportPdfPermission(input, input.permissionChecker);
   purgeStaleJobs();
   const key = exportKey(input);
   const existingId = jobIdByKey.get(key);
@@ -321,15 +308,17 @@ export function startReportPdfExportJob(input: ReportPdfExportActor & {
   };
   jobsById.set(job.id, job);
   jobIdByKey.set(key, job.id);
-  void runJob(job, input);
+  void runJob(job, input, input.permissionChecker);
   return toPublicStatus(job);
 }
 
-export function getReportPdfExportJob(input: ReportPdfExportActor & {
+export async function getReportPdfExportJob(input: ReportPdfExportActor & {
   conversationId: string;
   assistantMessageId: string;
   jobId: string;
-}): ReportPdfExportStatus {
+  permissionChecker?: ReportPdfPermissionChecker;
+}): Promise<ReportPdfExportStatus> {
+  await assertReportPdfPermission(input, input.permissionChecker);
   return toPublicStatus(findJob(input));
 }
 
@@ -337,7 +326,9 @@ export async function downloadReportPdfExportJob(input: ReportPdfExportActor & {
   conversationId: string;
   assistantMessageId: string;
   jobId: string;
+  permissionChecker?: ReportPdfPermissionChecker;
 }): Promise<{ pdf: Buffer; fileName: string }> {
+  await assertReportPdfPermission(input, input.permissionChecker);
   const job = findJob(input);
   if (job.phase !== 'ready' || !job.artifact || !job.fileName) {
     throw new ReportPdfExportError('PDF báo cáo chưa sẵn sàng để tải.', 409, 'REPORT_PDF_NOT_READY');

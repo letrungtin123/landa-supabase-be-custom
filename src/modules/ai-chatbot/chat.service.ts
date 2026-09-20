@@ -82,10 +82,10 @@ import {
   buildReportChatSnapshot,
   formatReportFilterRequest,
   getReportSnapshotHash,
+  generateReportNarrative,
   isPotentialReportYearCorrection,
   resolveReportYearCorrection,
   routeAdminReportQuestion,
-  streamGroundedReportAnalysis,
   type ReportChatFilterInput,
   type NormalizedReportChatFilter,
 } from './report-chat.service.js';
@@ -1808,7 +1808,8 @@ export type ChatStreamSideEvent =
     type: 'report_result';
     message_id: string;
     metadata: Record<string, unknown>;
-  };
+  }
+  | { type: 'report_status'; stage: 'collecting' | 'analyzing' };
 
 interface DraftCourseOutline {
   courseName: string;
@@ -7387,36 +7388,29 @@ export async function sendMessageStream(
       }
 
       if (route.kind === 'snapshot') {
+        onSideEvent?.({ type: 'report_status', stage: 'collecting' });
         const snapshot = await buildReportChatSnapshot({
           tenantId: ctx.tenantId,
           actor: { userId, tenantId: ctx.tenantId, role: options.reportActorRole },
           filter: reportFilter,
         });
-        let assistantText = '';
-        try {
-          assistantText = await streamGroundedReportAnalysis({
-            tenantId: ctx.tenantId,
-            model: aiSettings.chatModel,
-            question: reportQuestion,
-            locale: requestedLocale,
-            snapshot,
-            onChunk,
-          });
-        } catch (error) {
-          console.error('[ReportChat] grounded analysis failed:', error instanceof Error ? error.message : String(error));
-          assistantText = requestedLocale === 'en'
-            ? `The verified report snapshot is ready. ${snapshot.summary.overview.total_enrollments} enrollments and a ${snapshot.summary.overview.completion_rate}% completion rate were recorded for the selected period.`
-            : `Bản chụp báo cáo đã được xác thực. Khoảng thời gian đã chọn ghi nhận ${snapshot.summary.overview.total_enrollments} lượt ghi danh và tỷ lệ hoàn thành ${snapshot.summary.overview.completion_rate}%.`;
-          onChunk(assistantText);
-        }
-        if (!assistantText) {
-          assistantText = requestedLocale === 'en'
-            ? 'The verified report snapshot is ready. Use the report controls to refine the scope or export it.'
-            : 'Bản chụp báo cáo đã được xác thực. Dùng các điều khiển báo cáo để thay đổi phạm vi hoặc xuất file.';
-          onChunk(assistantText);
-        }
+        onSideEvent?.({ type: 'report_status', stage: 'analyzing' });
+        const narrative = await generateReportNarrative({
+          tenantId: ctx.tenantId,
+          model: aiSettings.chatModel,
+          locale: requestedLocale,
+          snapshot,
+        });
+        // Facts live exclusively in report_snapshot. This short text is only a
+        // fallback for legacy/accessibility rendering and must not contain data.
+        const assistantText = requestedLocale === 'en'
+          ? 'Your report analysis is ready.'
+          : 'Phân tích báo cáo đã sẵn sàng.';
+        onChunk(assistantText);
         const metadata: Record<string, unknown> = {
           kind: 'report_analysis',
+          report_chat: true,
+          report_ui_version: 2,
           locale: requestedLocale,
           report_contract_version: snapshot.version,
           report_filter: snapshot.filter,
@@ -7431,6 +7425,7 @@ export async function sendMessageStream(
           report_generated_at: snapshot.generated_at,
           report_snapshot_hash: getReportSnapshotHash(snapshot),
           report_snapshot: snapshot,
+          report_narrative: narrative,
         };
         const saved = await query<{ id: string }>(
           `INSERT INTO chat_messages (conversation_id, role, content, metadata)
@@ -7446,7 +7441,14 @@ export async function sendMessageStream(
         );
         onSideEvent?.({ type: 'report_result', message_id: saved.rows[0].id, metadata });
         await finalizeAiReservation(
-          estimateAiTurnUsage([ctx.systemPrompt, trimmed, JSON.stringify(snapshot)], assistantText),
+          // Gemini only receives signal IDs/categories, never the factual
+          // snapshot. Account for that actual bounded narrative request rather
+          // than treating the complete backend snapshot as model input.
+          estimateAiTurnUsage([
+            ctx.systemPrompt,
+            trimmed,
+            JSON.stringify(snapshot.signals.map((signal) => ({ id: signal.id, category: signal.category, severity: signal.severity }))),
+          ], JSON.stringify(narrative)),
           { service: aiSettings.activeEngine, operation: 'chat' },
           { report_chat: true, report_stage: 'analysis', report_snapshot_hash: metadata.report_snapshot_hash },
         );

@@ -21,6 +21,26 @@ export interface ReportScope {
   allowedGroupIds: string[] | null;
 }
 
+export function resolveLearnerPlusReportScope(
+  allowedGroupIds: string[],
+  requested: RequestedReportScope,
+  hierarchy: { groupId?: string; subgroupId?: string; teamId?: string },
+): ReportScope {
+  if (allowedGroupIds.length === 0) {
+    return { groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: [] };
+  }
+  const effectiveGroupId = hierarchy.groupId || requested.groupId || allowedGroupIds[0];
+  if (!allowedGroupIds.includes(effectiveGroupId)) {
+    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này' };
+  }
+  return {
+    groupId: effectiveGroupId,
+    subgroupId: hierarchy.subgroupId,
+    teamId: hierarchy.teamId,
+    allowedGroupIds,
+  };
+}
+
 export function readReportScopeId(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
@@ -112,18 +132,8 @@ export async function enforceReportScope(
   );
   const allowedGroupIds = result.rows.map((row) => row.group_id);
   if (allowedGroupIds.length === 0) {
-    return { groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: [] };
+    return resolveLearnerPlusReportScope(allowedGroupIds, requested, {});
   }
-
   const hierarchy = await resolveReportHierarchy(actor.tenantId, requested);
-  const effectiveGroupId = hierarchy.groupId || requested.groupId || allowedGroupIds[0];
-  if (!allowedGroupIds.includes(effectiveGroupId)) {
-    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này' };
-  }
-  return {
-    groupId: effectiveGroupId,
-    subgroupId: hierarchy.subgroupId,
-    teamId: hierarchy.teamId,
-    allowedGroupIds,
-  };
+  return resolveLearnerPlusReportScope(allowedGroupIds, requested, hierarchy);
 }

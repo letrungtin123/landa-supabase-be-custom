@@ -506,7 +506,7 @@ export async function startReportPdfJob(req: Request, res: Response): Promise<vo
     return;
   }
   try {
-    const job = startReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId });
+    const job = await startReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId });
     sendSuccess(res, job, undefined, 202);
   } catch (error) {
     sendReportPdfError(res, error);
@@ -523,7 +523,7 @@ export async function getReportPdfJob(req: Request, res: Response): Promise<void
     return;
   }
   try {
-    const job = getReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
+    const job = await getReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
     sendSuccess(res, job);
   } catch (error) {
     sendReportPdfError(res, error);

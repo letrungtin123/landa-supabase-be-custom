@@ -1,3 +1,5 @@
+import { Type } from '@google/genai';
+import { z } from 'zod';
 import { stableHash } from '../../config/cache.js';
 import { query } from '../../config/database.js';
 import { getGeminiClient } from './gemini.service.js';
@@ -10,7 +12,25 @@ import * as reportsService from '../reports/reports.service.js';
 
 const REPORT_TIME_ZONE = 'Asia/Ho_Chi_Minh';
 const MAX_REPORT_RANGE_DAYS = 366;
-const SNAPSHOT_VERSION = 1 as const;
+const LEGACY_SNAPSHOT_VERSION = 1 as const;
+const SNAPSHOT_VERSION = 2 as const;
+export const REPORT_SIGNAL_THRESHOLD_VERSION = 'v1' as const;
+export const REPORT_SIGNAL_THRESHOLDS = {
+  completion_decline: {
+    minimum_current_enrollments: 10,
+    minimum_previous_enrollments: 10,
+    decline_percentage_points: -3,
+  },
+  high_enrollment_low_completion: {
+    minimum_enrollments: 5,
+    maximum_completion_rate: 50,
+  },
+  end_period_activity_drop: {
+    minimum_buckets: 8,
+    minimum_preceding_activity: 3,
+    maximum_recent_to_preceding_ratio: 0.5,
+  },
+} as const;
 
 export interface ReportChatFilterInput {
   date_from?: string;
@@ -28,8 +48,8 @@ export interface NormalizedReportChatFilter {
   team_id?: string;
 }
 
-export interface ReportChatSnapshot {
-  version: typeof SNAPSHOT_VERSION;
+export interface LegacyReportChatSnapshot {
+  version: typeof LEGACY_SNAPSHOT_VERSION;
   generated_at: string;
   timezone: typeof REPORT_TIME_ZONE;
   filter: NormalizedReportChatFilter;
@@ -38,6 +58,99 @@ export interface ReportChatSnapshot {
   enrollment_trend: Array<{ bucket: string; label: string; value: number }>;
   top_courses: reportsService.ReportTopCourse[];
   completion_ranking: reportsService.ReportCourseCompletionRanking[];
+}
+
+export type ReportMetricId = 'total_learners' | 'active_learners' | 'completion_rate' | 'total_enrollments' | 'incomplete_enrollments';
+export type ReportMetricUnit = 'count' | 'percentage';
+export type ReportSignalSeverity = 'attention' | 'warning' | 'neutral';
+
+export interface ReportMetricFact {
+  id: ReportMetricId;
+  unit: ReportMetricUnit;
+  current: number;
+  previous: number | null;
+  delta_absolute: number | null;
+  delta_percent: number | null;
+  delta_percentage_points: number | null;
+}
+
+export interface ReportSignalEvidence {
+  metric_id?: ReportMetricId;
+  course_id?: string;
+  course_name?: string;
+  current?: number;
+  previous?: number;
+  delta_absolute?: number;
+  delta_percentage_points?: number;
+  affected_course_count?: number;
+  enrollment_count?: number;
+  completion_rate?: number;
+  current_sample_size?: number;
+  previous_sample_size?: number;
+}
+
+export interface ReportAnalyticsSignal {
+  id: string;
+  category: 'enrollment' | 'completion' | 'activity' | 'course';
+  severity: ReportSignalSeverity;
+  threshold_version: typeof REPORT_SIGNAL_THRESHOLD_VERSION;
+  evidence: ReportSignalEvidence;
+}
+
+export interface ReportScopeDisplay {
+  group_name?: string;
+  subgroup_name?: string;
+  team_name?: string;
+}
+
+export interface ReportTrendContext {
+  granularity?: 'day' | 'week' | 'month';
+}
+
+export interface ReportComparisonPeriod {
+  date_from: string;
+  date_to: string;
+  basis: 'calendar_month' | 'month_to_date' | 'calendar_week' | 'year_to_date' | 'calendar_year' | 'equal_length';
+}
+
+export interface ReportComparisonDisplay {
+  title: string;
+  date_label: string;
+  delta_suffix: string;
+}
+
+export type ReportComparisonDisplays = Record<'vi' | 'en', ReportComparisonDisplay>;
+
+export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'version'> {
+  version: typeof SNAPSHOT_VERSION;
+  comparison: ReportComparisonPeriod;
+  comparison_display: ReportComparisonDisplays;
+  scope_display: ReportScopeDisplay;
+  enrollment_trend_context?: ReportTrendContext;
+  previous_summary: reportsService.ReportSummary;
+  active_learner_trend: Array<{ bucket: string; label: string; value: number }>;
+  course_portfolio: reportsService.ReportCoursePerformance[];
+  completion_status_distribution: reportsService.ReportCompletionStatusDistribution;
+  factual_metrics: ReportMetricFact[];
+  signals: ReportAnalyticsSignal[];
+  signal_threshold_version: typeof REPORT_SIGNAL_THRESHOLD_VERSION;
+  availability: {
+    state: 'available' | 'empty' | 'no_accessible_scope';
+    limitations: string[];
+  };
+}
+
+export type StoredReportChatSnapshot = LegacyReportChatSnapshot | ReportChatSnapshot;
+
+export interface ReportNarrative {
+  selected_signal_ids: string[];
+  interpretation: string[];
+  recommended_actions: Array<{
+    signal_id: string | null;
+    priority: 'high' | 'medium' | 'low';
+    action: string;
+  }>;
+  limitations: string[];
 }
 
 export interface ReportRouterResult {
@@ -62,7 +175,7 @@ export interface ReportKpiVocabularyItem {
 const VIETNAMESE_REPORT_KPI_VOCABULARY: readonly ReportKpiVocabularyItem[] = [
   {
     key: 'total_learners',
-    title: 'Tổng học viên đã đào tạo',
+    title: 'Tổng học viên đã tạo',
     definition: 'Tổng số tài khoản học viên được tạo trong khoảng thời gian đã chọn và thuộc phạm vi tổ chức đang lọc; mỗi học viên chỉ được tính một lần.',
   },
   {
@@ -135,6 +248,158 @@ function startOfWeek(value: string): string {
 
 function endOfMonth(year: number, month: number): string {
   return formatYmd(year, month, new Date(Date.UTC(year, month, 0)).getUTCDate());
+}
+
+function dayCountBetween(dateFrom: string, dateTo: string): number {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  if (!from || !to) return 0;
+  const fromMs = Date.UTC(from.year, from.month - 1, from.day);
+  const toMs = Date.UTC(to.year, to.month - 1, to.day);
+  return Math.floor((toMs - fromMs) / 86_400_000) + 1;
+}
+
+function isCalendarMonth(dateFrom: string, dateTo: string): boolean {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  return Boolean(from
+    && to
+    && from.year === to.year
+    && from.month === to.month
+    && from.day === 1
+    && dateTo === endOfMonth(to.year, to.month));
+}
+
+function isCalendarWeek(dateFrom: string, dateTo: string): boolean {
+  return startOfWeek(dateFrom) === dateFrom && dayCountBetween(dateFrom, dateTo) === 7;
+}
+
+function isCalendarYear(dateFrom: string, dateTo: string): boolean {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  return Boolean(from && to && from.month === 1 && from.day === 1 && to.month === 12 && to.day === 31);
+}
+
+function isMonthToDate(dateFrom: string, dateTo: string): boolean {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  return Boolean(from
+    && to
+    && from.year === to.year
+    && from.month === to.month
+    && from.day === 1
+    && to.day < new Date(Date.UTC(to.year, to.month, 0)).getUTCDate());
+}
+
+function isYearToDate(dateFrom: string, dateTo: string): boolean {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  return Boolean(from
+    && to
+    && from.year === to.year
+    && from.month === 1
+    && from.day === 1
+    && !(to.month === 12 && to.day === 31));
+}
+
+function sameCalendarDateInYear(dateFrom: string, dateTo: string, targetYear: number): { date_from: string; date_to: string } {
+  const from = parseYmd(dateFrom)!;
+  const to = parseYmd(dateTo)!;
+  return {
+    date_from: clampYmd(targetYear, from.month, from.day)!,
+    date_to: clampYmd(targetYear, to.month, to.day)!,
+  };
+}
+
+export function resolveComparableReportPeriod(dateFrom: string, dateTo: string): ReportComparisonPeriod {
+  const from = parseYmd(dateFrom);
+  const to = parseYmd(dateTo);
+  if (!from || !to) throw { status: 400, message: 'Khoảng ngày báo cáo không hợp lệ' };
+
+  if (isCalendarYear(dateFrom, dateTo)) {
+    return {
+      date_from: formatYmd(from.year - 1, 1, 1),
+      date_to: formatYmd(from.year - 1, 12, 31),
+      basis: 'calendar_year',
+    };
+  }
+  if (isYearToDate(dateFrom, dateTo)) {
+    return { ...sameCalendarDateInYear(dateFrom, dateTo, from.year - 1), basis: 'year_to_date' };
+  }
+  if (isCalendarMonth(dateFrom, dateTo)) {
+    const previousMonth = from.month === 1 ? 12 : from.month - 1;
+    const previousYear = from.month === 1 ? from.year - 1 : from.year;
+    return {
+      date_from: formatYmd(previousYear, previousMonth, 1),
+      date_to: endOfMonth(previousYear, previousMonth),
+      basis: 'calendar_month',
+    };
+  }
+  if (isCalendarWeek(dateFrom, dateTo)) {
+    return { date_from: addDays(dateFrom, -7), date_to: addDays(dateTo, -7), basis: 'calendar_week' };
+  }
+  if (isMonthToDate(dateFrom, dateTo)) {
+    const previousMonth = from.month === 1 ? 12 : from.month - 1;
+    const previousYear = from.month === 1 ? from.year - 1 : from.year;
+    return {
+      date_from: formatYmd(previousYear, previousMonth, 1),
+      date_to: clampYmd(previousYear, previousMonth, to.day)!,
+      basis: 'month_to_date',
+    };
+  }
+  const days = dayCountBetween(dateFrom, dateTo);
+  return {
+    date_from: addDays(dateFrom, -days),
+    date_to: addDays(dateFrom, -1),
+    basis: 'equal_length',
+  };
+}
+
+function formatComparisonDate(value: string, locale: 'vi' | 'en'): string {
+  const parts = parseYmd(value);
+  if (!parts) return value;
+  return new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', {
+    day: '2-digit',
+    month: locale === 'en' ? 'short' : '2-digit',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(Date.UTC(parts.year, parts.month - 1, parts.day)));
+}
+
+export function getReportComparisonDisplay(
+  comparison: ReportComparisonPeriod,
+  locale: 'vi' | 'en',
+): ReportComparisonDisplay {
+  const copy = locale === 'en'
+    ? {
+      calendar_month: ['Compared with previous month', 'vs previous month'],
+      month_to_date: ['Compared with same elapsed period last month', 'vs same elapsed period last month'],
+      calendar_week: ['Compared with previous week', 'vs previous week'],
+      year_to_date: ['Compared with same period last year', 'vs same period last year'],
+      calendar_year: ['Compared with previous year', 'vs previous year'],
+      equal_length: ['Compared with immediately preceding period', 'vs immediately preceding period'],
+    }
+    : {
+      calendar_month: ['So sánh với tháng trước', 'so với tháng trước'],
+      month_to_date: ['So sánh với cùng giai đoạn tháng trước', 'so với cùng giai đoạn tháng trước'],
+      calendar_week: ['So sánh với tuần trước', 'so với tuần trước'],
+      year_to_date: ['So sánh cùng kỳ năm trước', 'so với cùng kỳ năm trước'],
+      calendar_year: ['So sánh với năm trước', 'so với năm trước'],
+      equal_length: ['So sánh với giai đoạn liền trước', 'so với giai đoạn liền trước'],
+    };
+  const [title, deltaSuffix] = copy[comparison.basis];
+  return {
+    title,
+    date_label: `${formatComparisonDate(comparison.date_from, locale)} - ${formatComparisonDate(comparison.date_to, locale)}`,
+    delta_suffix: deltaSuffix,
+  };
+}
+
+export function getReportComparisonDisplays(comparison: ReportComparisonPeriod): ReportComparisonDisplays {
+  return {
+    vi: getReportComparisonDisplay(comparison, 'vi'),
+    en: getReportComparisonDisplay(comparison, 'en'),
+  };
 }
 
 function normalizeReportQuestion(question: string): string {
@@ -323,48 +588,263 @@ export async function buildReportChatSnapshot(input: {
     ...(scope.teamId ? { team_id: scope.teamId } : {}),
   };
 
-  if (scope.allowedGroupIds?.length === 0) {
-    return {
-      version: SNAPSHOT_VERSION,
-      generated_at: new Date().toISOString(),
-      timezone: REPORT_TIME_ZONE,
-      filter: effectiveFilter,
-      scope: { groupId: scope.groupId, subgroupId: scope.subgroupId, teamId: scope.teamId },
-      summary: {
-        meta: { month: normalized.dateRange.startDate.getMonth() + 1, year: normalized.dateRange.startDate.getFullYear(), month_label: '', is_current_month: false, date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo },
-        overview: { total_learners: 0, active_learners: 0, completion_rate: 0, total_enrollments: 0, completed_enrollments: 0, incomplete_enrollments: 0 },
-      },
-      enrollment_trend: [],
-      top_courses: [],
-      completion_ranking: [],
-    };
-  }
-
-  const [summary, chart, topCourses, completionRanking] = await Promise.all([
-    reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
-    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
-    reportsService.getReportTopCourses(input.tenantId, 1, 5, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
-    reportsService.getReportCourseCompletionRanking(input.tenantId, 1, 5, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
-  ]);
-  const chartData = Array.isArray((chart as { data?: unknown }).data) ? (chart as { data: reportsService.ReportChartPoint[] }).data : [];
-  return {
+  const comparison = resolveComparableReportPeriod(normalized.dateRange.dateFrom, normalized.dateRange.dateTo);
+  const previousRange = dateRangeFromYmd(comparison.date_from, comparison.date_to);
+  const base = {
     version: SNAPSHOT_VERSION,
     generated_at: new Date().toISOString(),
     timezone: REPORT_TIME_ZONE,
     filter: effectiveFilter,
     scope: { groupId: scope.groupId, subgroupId: scope.subgroupId, teamId: scope.teamId },
+    comparison,
+  } as const;
+
+  if (scope.allowedGroupIds?.length === 0) {
+    const summary = emptyReportSummary(normalized.dateRange);
+    const previousSummary = emptyReportSummary(previousRange);
+    return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope');
+  }
+
+  const [summary, previousSummary, enrollmentChart, activeLearnerChart, coursePortfolio, completionStatus, scopeDisplay] = await Promise.all([
+    reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
+    reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
+    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
+    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'active_learners', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
+    reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
+    reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
+    resolveReportScopeDisplay(input.tenantId, scope),
+  ]);
+  return createReportSnapshot(
+    base,
     summary,
-    enrollment_trend: chartData.slice(0, 62).map((point) => ({
-      bucket: String(point.bucket ?? point.month ?? ''),
-      label: String(point.bucket_label ?? point.month_label ?? point.bucket ?? point.month ?? ''),
-      value: Number(point.value ?? 0) || 0,
-    })),
-    top_courses: topCourses.results.slice(0, 5),
-    completion_ranking: completionRanking.results.slice(0, 5),
+    previousSummary,
+    chartToSnapshotPoints(enrollmentChart),
+    chartToSnapshotPoints(activeLearnerChart),
+    coursePortfolio,
+    completionStatus,
+    scopeDisplay,
+    hasReportData(summary) ? 'available' : 'empty',
+    enrollmentChart.granularity ? { granularity: enrollmentChart.granularity } : {},
+  );
+}
+
+function emptyReportSummary(range: reportsService.ReportDateRange): reportsService.ReportSummary {
+  return {
+    meta: {
+      month: range.startDate.getMonth() + 1,
+      year: range.startDate.getFullYear(),
+      month_label: '',
+      is_current_month: false,
+      date_from: range.dateFrom,
+      date_to: range.dateTo,
+    },
+    overview: {
+      total_learners: 0,
+      active_learners: 0,
+      completion_rate: 0,
+      total_enrollments: 0,
+      completed_enrollments: 0,
+      incomplete_enrollments: 0,
+    },
   };
 }
 
-export function getReportSnapshotHash(snapshot: ReportChatSnapshot): string {
+function chartToSnapshotPoints(chart: { data?: reportsService.ReportChartPoint[] }): Array<{ bucket: string; label: string; value: number }> {
+  return (Array.isArray(chart.data) ? chart.data : []).slice(0, 62).map((point) => ({
+    bucket: String(point.bucket ?? point.month ?? ''),
+    label: String(point.bucket_label ?? point.month_label ?? point.bucket ?? point.month ?? ''),
+    value: Number(point.value ?? 0) || 0,
+  }));
+}
+
+function roundReportValue(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function metricFact(id: ReportMetricId, unit: ReportMetricUnit, current: number, previous: number): ReportMetricFact {
+  const delta = roundReportValue(current - previous);
+  return {
+    id,
+    unit,
+    current,
+    previous,
+    delta_absolute: delta,
+    delta_percent: unit === 'count' && previous > 0 ? roundReportValue((delta / previous) * 100) : null,
+    delta_percentage_points: unit === 'percentage' ? delta : null,
+  };
+}
+
+export function buildReportMetricFacts(summary: reportsService.ReportSummary, previousSummary: reportsService.ReportSummary): ReportMetricFact[] {
+  const current = summary.overview;
+  const previous = previousSummary.overview;
+  return [
+    metricFact('total_learners', 'count', current.total_learners, previous.total_learners),
+    metricFact('active_learners', 'count', current.active_learners, previous.active_learners),
+    metricFact('completion_rate', 'percentage', current.completion_rate, previous.completion_rate),
+    metricFact('total_enrollments', 'count', current.total_enrollments, previous.total_enrollments),
+    metricFact('incomplete_enrollments', 'count', current.incomplete_enrollments, previous.incomplete_enrollments),
+  ];
+}
+
+export function buildReportSignals(input: {
+  metrics: ReportMetricFact[];
+  activeTrend: Array<{ value: number }>;
+  coursePortfolio: reportsService.ReportCoursePerformance[];
+}): ReportAnalyticsSignal[] {
+  const metric = (id: ReportMetricId) => input.metrics.find((item) => item.id === id)!;
+  const signals: ReportAnalyticsSignal[] = [];
+  const enrollments = metric('total_enrollments');
+  const completion = metric('completion_rate');
+  if (enrollments.delta_absolute !== null && enrollments.delta_absolute !== 0) {
+    signals.push({
+      id: 'enrollment_period_change',
+      category: 'enrollment',
+      severity: 'neutral',
+      threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
+      evidence: {
+        metric_id: 'total_enrollments',
+        current: enrollments.current,
+        previous: enrollments.previous ?? undefined,
+        delta_absolute: enrollments.delta_absolute,
+      },
+    });
+  }
+  const enrollmentCount = metric('total_enrollments');
+  const completionSampleIsSufficient = enrollmentCount.current >= REPORT_SIGNAL_THRESHOLDS.completion_decline.minimum_current_enrollments
+    && (enrollmentCount.previous ?? 0) >= REPORT_SIGNAL_THRESHOLDS.completion_decline.minimum_previous_enrollments;
+  if (completionSampleIsSufficient
+    && (completion.delta_percentage_points ?? 0) <= REPORT_SIGNAL_THRESHOLDS.completion_decline.decline_percentage_points) {
+    signals.push({
+      id: 'completion_decline',
+      category: 'completion',
+      severity: 'warning',
+      threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
+      evidence: {
+        metric_id: 'completion_rate',
+        current: completion.current,
+        previous: completion.previous ?? undefined,
+        delta_percentage_points: completion.delta_percentage_points ?? undefined,
+        current_sample_size: enrollmentCount.current,
+        previous_sample_size: enrollmentCount.previous ?? undefined,
+      },
+    });
+  }
+  const watchlist = input.coursePortfolio.filter((course) => (
+    course.total_enrollments >= REPORT_SIGNAL_THRESHOLDS.high_enrollment_low_completion.minimum_enrollments
+    && course.completion_rate <= REPORT_SIGNAL_THRESHOLDS.high_enrollment_low_completion.maximum_completion_rate
+  ));
+  if (watchlist.length > 0) {
+    const representative = watchlist[0];
+    signals.push({
+      id: 'high_enrollment_low_completion',
+      category: 'course',
+      severity: 'warning',
+      threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
+      evidence: {
+        course_id: representative.course_id,
+        course_name: representative.name,
+        affected_course_count: watchlist.length,
+        enrollment_count: representative.total_enrollments,
+        completion_rate: representative.completion_rate,
+      },
+    });
+  }
+  if (input.activeTrend.length >= REPORT_SIGNAL_THRESHOLDS.end_period_activity_drop.minimum_buckets) {
+    const recent = input.activeTrend.slice(-Math.min(7, Math.floor(input.activeTrend.length / 2))).reduce((sum, point) => sum + point.value, 0);
+    const preceding = input.activeTrend.slice(-Math.min(14, input.activeTrend.length), -Math.min(7, Math.floor(input.activeTrend.length / 2))).reduce((sum, point) => sum + point.value, 0);
+    if (preceding >= REPORT_SIGNAL_THRESHOLDS.end_period_activity_drop.minimum_preceding_activity
+      && recent <= preceding * REPORT_SIGNAL_THRESHOLDS.end_period_activity_drop.maximum_recent_to_preceding_ratio) {
+      signals.push({
+        id: 'end_period_activity_drop',
+        category: 'activity',
+        severity: 'attention',
+        threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
+        evidence: { current: recent, previous: preceding, delta_absolute: recent - preceding },
+      });
+    }
+  }
+  return signals.slice(0, 5);
+}
+
+export function getReportSignalLimitations(metrics: ReportMetricFact[]): string[] {
+  const enrollments = metrics.find((metric) => metric.id === 'total_enrollments');
+  if (!enrollments) return [];
+  const currentIsSufficient = enrollments.current >= REPORT_SIGNAL_THRESHOLDS.completion_decline.minimum_current_enrollments;
+  const previousIsSufficient = (enrollments.previous ?? 0) >= REPORT_SIGNAL_THRESHOLDS.completion_decline.minimum_previous_enrollments;
+  return currentIsSufficient && previousIsSufficient
+    ? []
+    : [`completion_decline_insufficient_sample:${REPORT_SIGNAL_THRESHOLD_VERSION}`];
+}
+
+function hasReportData(summary: reportsService.ReportSummary): boolean {
+  return Object.values(summary.overview).some((value) => Number(value) > 0);
+}
+
+async function resolveReportScopeDisplay(tenantId: string, scope: Pick<ReportScope, 'groupId' | 'subgroupId' | 'teamId'>): Promise<ReportScopeDisplay> {
+  if (!scope.groupId && !scope.subgroupId && !scope.teamId) return {};
+  const result = await query<{ group_name: string | null; subgroup_name: string | null; team_name: string | null }>(
+    `SELECT
+       (SELECT name FROM org_groups WHERE id = $2 AND tenant_id = $1) AS group_name,
+       (SELECT sg.name FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id WHERE sg.id = $3 AND og.tenant_id = $1) AS subgroup_name,
+       (SELECT t.name FROM teams t JOIN sub_groups sg ON sg.id = t.sub_group_id JOIN org_groups og ON og.id = sg.org_group_id WHERE t.id = $4 AND og.tenant_id = $1) AS team_name`,
+    [tenantId, scope.groupId ?? null, scope.subgroupId ?? null, scope.teamId ?? null],
+  );
+  const row = result.rows[0];
+  return {
+    ...(row?.group_name ? { group_name: row.group_name } : {}),
+    ...(row?.subgroup_name ? { subgroup_name: row.subgroup_name } : {}),
+    ...(row?.team_name ? { team_name: row.team_name } : {}),
+  };
+}
+
+export function createReportSnapshot(
+  base: Pick<ReportChatSnapshot, 'version' | 'generated_at' | 'timezone' | 'filter' | 'scope' | 'comparison'>,
+  summary: reportsService.ReportSummary,
+  previousSummary: reportsService.ReportSummary,
+  enrollmentTrend: Array<{ bucket: string; label: string; value: number }>,
+  activeLearnerTrend: Array<{ bucket: string; label: string; value: number }>,
+  coursePortfolio: reportsService.ReportCoursePerformance[],
+  completionStatus: reportsService.ReportCompletionStatusDistribution,
+  scopeDisplay: ReportScopeDisplay,
+  availabilityState: ReportChatSnapshot['availability']['state'],
+  enrollmentTrendContext: ReportTrendContext = {},
+): ReportChatSnapshot {
+  const factualMetrics = buildReportMetricFacts(summary, previousSummary);
+  const signalLimitations = getReportSignalLimitations(factualMetrics);
+  return {
+    ...base,
+    comparison_display: getReportComparisonDisplays(base.comparison),
+    scope_display: scopeDisplay,
+    summary,
+    previous_summary: previousSummary,
+    enrollment_trend: enrollmentTrend,
+    ...(enrollmentTrendContext.granularity ? { enrollment_trend_context: enrollmentTrendContext } : {}),
+    active_learner_trend: activeLearnerTrend,
+    top_courses: coursePortfolio.slice(0, 5).map(({ course_id, name, total_enrollments }) => ({ course_id, name, enrollments: total_enrollments })),
+    completion_ranking: [...coursePortfolio]
+      .sort((left, right) => right.completion_rate - left.completion_rate || right.completed_enrollments - left.completed_enrollments || right.total_enrollments - left.total_enrollments || left.name.localeCompare(right.name))
+      .slice(0, 5)
+      .map(({ course_id, name, total_enrollments, completed_enrollments, incomplete_enrollments, completion_rate }) => ({ course_id, name, total_enrollments, completed_enrollments, incomplete_enrollments, completion_rate })),
+    course_portfolio: coursePortfolio,
+    completion_status_distribution: completionStatus,
+    factual_metrics: factualMetrics,
+    signals: buildReportSignals({ metrics: factualMetrics, activeTrend: activeLearnerTrend, coursePortfolio }),
+    signal_threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
+    availability: {
+      state: availabilityState,
+      limitations: [
+        ...(availabilityState === 'no_accessible_scope'
+        ? ['no_accessible_scope']
+        : availabilityState === 'empty'
+          ? ['no_data_in_selected_period']
+          : []),
+        ...signalLimitations,
+      ],
+    },
+  };
+}
+
+export function getReportSnapshotHash(snapshot: StoredReportChatSnapshot): string {
   return stableHash(snapshot);
 }
 
@@ -372,14 +852,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isReportChatSnapshot(value: unknown): value is ReportChatSnapshot {
-  if (!isRecord(value) || value.version !== SNAPSHOT_VERSION || !isRecord(value.filter) || !isRecord(value.scope)) return false;
+export function isStoredReportChatSnapshot(value: unknown): value is StoredReportChatSnapshot {
+  if (!isRecord(value) || (value.version !== LEGACY_SNAPSHOT_VERSION && value.version !== SNAPSHOT_VERSION) || !isRecord(value.filter) || !isRecord(value.scope)) return false;
   if (!isRecord(value.summary) || !isRecord(value.summary.overview)) return false;
-  return typeof value.filter.date_from === 'string'
+  const validBase = typeof value.filter.date_from === 'string'
     && typeof value.filter.date_to === 'string'
     && Array.isArray(value.enrollment_trend)
     && Array.isArray(value.top_courses)
     && Array.isArray(value.completion_ranking);
+  if (!validBase) return false;
+  return value.version === LEGACY_SNAPSHOT_VERSION
+    || (isRecord(value.comparison)
+      && (value.comparison_display === undefined || isRecord(value.comparison_display))
+      && isRecord(value.previous_summary)
+      && Array.isArray(value.active_learner_trend)
+      && Array.isArray(value.course_portfolio)
+      && isRecord(value.completion_status_distribution)
+      && Array.isArray(value.factual_metrics)
+      && Array.isArray(value.signals)
+      // Existing V2 snapshots predate versioned signal thresholds. Preserve their
+      // integrity contract while new snapshots always carry the threshold version.
+      && (value.signal_threshold_version === undefined || typeof value.signal_threshold_version === 'string')
+      && isRecord(value.availability));
 }
 
 export async function loadStoredReportSnapshot(input: {
@@ -387,7 +881,7 @@ export async function loadStoredReportSnapshot(input: {
   conversationId: string;
   userId: string;
   tenantId: string;
-}): Promise<{ snapshot: ReportChatSnapshot; question: string; locale: 'vi' | 'en' }> {
+}): Promise<{ snapshot: StoredReportChatSnapshot; question: string; locale: 'vi' | 'en' }> {
   const result = await query<{ metadata: unknown }>(
     `SELECT message.metadata
      FROM chat_messages message
@@ -402,7 +896,7 @@ export async function loadStoredReportSnapshot(input: {
     [input.assistantMessageId, input.conversationId, input.userId, input.tenantId],
   );
   const metadata = result.rows[0]?.metadata;
-  if (!isRecord(metadata) || metadata.kind !== 'report_analysis' || !isReportChatSnapshot(metadata.report_snapshot)) {
+  if (!isRecord(metadata) || metadata.kind !== 'report_analysis' || !isStoredReportChatSnapshot(metadata.report_snapshot)) {
     throw { status: 404, message: 'Không tìm thấy bản chụp báo cáo hợp lệ' };
   }
   const snapshot = metadata.report_snapshot;
@@ -498,62 +992,101 @@ export async function routeAdminReportQuestion(input: {
     : { kind: 'snapshot', suggested_filter: suggestedFilter };
 }
 
-function formatReaderDate(value: string, locale: 'vi' | 'en'): string {
-  const [year, month, day] = value.split('-').map(Number);
-  if (!year || !month || !day) return value;
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', {
-    day: '2-digit',
-    month: locale === 'en' ? 'short' : '2-digit',
-    year: 'numeric',
-    timeZone: 'UTC',
-  }).format(date);
+const ReportNarrativeSchema = z.object({
+  selected_signal_ids: z.array(z.string().trim().min(1).max(80)).max(3),
+  interpretation: z.array(z.string().trim().min(1).max(220)).max(3),
+  recommended_actions: z.array(z.object({
+    signal_id: z.string().trim().min(1).max(80).nullable(),
+    priority: z.enum(['high', 'medium', 'low']),
+    action: z.string().trim().min(1).max(220),
+  })).max(3),
+  limitations: z.array(z.string().trim().min(1).max(180)).max(3),
+});
+
+export function hasNumericReportNarrativeClaim(narrative: ReportNarrative): boolean {
+  return [
+    ...narrative.interpretation,
+    ...narrative.recommended_actions.map((item) => item.action),
+    ...narrative.limitations,
+  ].some((value) => /\d/.test(value));
 }
 
-function snapshotPrompt(snapshot: ReportChatSnapshot, locale: 'vi' | 'en'): string {
-  const overview = snapshot.summary.overview;
-  return JSON.stringify({
-    reporting_period: locale === 'en'
-      ? `${formatReaderDate(snapshot.filter.date_from, locale)} to ${formatReaderDate(snapshot.filter.date_to, locale)}`
-      : `${formatReaderDate(snapshot.filter.date_from, locale)} đến ${formatReaderDate(snapshot.filter.date_to, locale)}`,
-    kpis: locale === 'vi'
-      ? getVietnameseReportKpiVocabulary().map((metric) => ({
-        title: metric.title,
-        value: overview[metric.key],
-        definition: metric.definition,
-      }))
-      : overview,
-    trend: snapshot.enrollment_trend,
-    top_courses: snapshot.top_courses,
-    completion_ranking: snapshot.completion_ranking,
-  });
+export function isReportNarrativeAllowed(narrative: ReportNarrative, snapshot: Pick<ReportChatSnapshot, 'signals'>): boolean {
+  const allowed = new Set(snapshot.signals.map((signal) => signal.id));
+  return !hasNumericReportNarrativeClaim(narrative)
+    && narrative.selected_signal_ids.every((id) => allowed.has(id))
+    && narrative.recommended_actions.every((action) => action.signal_id === null || allowed.has(action.signal_id));
 }
 
-export async function streamGroundedReportAnalysis(input: {
+function fallbackReportNarrative(snapshot: ReportChatSnapshot, locale: 'vi' | 'en'): ReportNarrative {
+  const selected = snapshot.signals.slice(0, 3).map((signal) => signal.id);
+  const actions = snapshot.signals
+    .filter((signal) => signal.severity !== 'neutral')
+    .slice(0, 2)
+    .map((signal) => ({
+      signal_id: signal.id,
+      priority: signal.severity === 'warning' ? 'high' as const : 'medium' as const,
+      action: locale === 'en'
+        ? 'Review the related learning journey and confirm the next operational action.'
+        : 'Rà soát hành trình học liên quan và xác nhận hành động vận hành tiếp theo.',
+    }));
+  return {
+    selected_signal_ids: selected,
+    interpretation: [],
+    recommended_actions: actions,
+    limitations: snapshot.availability.limitations,
+  };
+}
+
+/**
+ * Gemini receives only the identifiers and categories of deterministic facts.
+ * It may suggest an action, but cannot become the source of any metric.
+ */
+export async function generateReportNarrative(input: {
   tenantId: string;
   model: string;
-  question: string;
   locale: 'vi' | 'en';
   snapshot: ReportChatSnapshot;
-  onChunk: (text: string) => void;
-}): Promise<string> {
+}): Promise<ReportNarrative> {
   const aiClient = await getGeminiClient(input.tenantId);
   const systemInstruction = input.locale === 'en'
-    ? 'Answer as a concise, professional reporting analyst. Use only facts and values in REPORT_SNAPSHOT. Do not claim a causal reason unless the data proves it. State when the data does not provide enough evidence. Use reader-friendly dates such as 19 Sep 2026, never ISO dates. Do not mention REPORT_SNAPSHOT, snapshots, scopes, databases, backends, tools, prompts, or other implementation details. Use short Markdown headings and bullets; do not use tables or HTML.'
-    : 'Trả lời như chuyên viên phân tích báo cáo, ngắn gọn và chuyên nghiệp. Chỉ dùng số liệu và sự kiện trong REPORT_SNAPSHOT. Không khẳng định nguyên nhân nếu dữ liệu không chứng minh. Nêu rõ khi dữ liệu chưa đủ bằng chứng. Dùng ngày dễ đọc theo dạng 19/09/2026, không dùng dạng YYYY-MM-DD. Khi nêu bất kỳ KPI nào, phải dùng nguyên văn tiêu đề KPI được cung cấp trong REPORT_SNAPSHOT; tuyệt đối không thay bằng các biến thể như "Tổng học viên đã tạo", "Người học", "Người học hoạt động", "Tỷ lệ hoàn thành" hoặc "Lượt ghi danh". Không nhắc REPORT_SNAPSHOT, snapshot, phạm vi kỹ thuật, cơ sở dữ liệu, backend, công cụ, prompt hoặc chi tiết triển khai. Dùng heading Markdown ngắn và bullet; không dùng bảng hoặc HTML.';
-  const response = await aiClient.models.generateContentStream({
-    model: input.model,
-    contents: [{ role: 'user', parts: [{ text: `USER_QUESTION:\n${input.question}\n\nREPORT_SNAPSHOT:\n${snapshotPrompt(input.snapshot, input.locale)}` }] }],
-    config: { systemInstruction, maxOutputTokens: 3_500 },
-  });
-  let fullText = '';
-  for await (const chunk of response) {
-    const text = chunk.text ?? '';
-    if (!text) continue;
-    fullText += text;
-    input.onChunk(text);
+    ? 'You are an executive-learning advisor. Return JSON only. You may select allowed signal IDs and recommend operational actions. Never state or spell out numbers, dates, percentages, rankings, causes, database facts, or metric claims. Do not introduce a signal ID not supplied. Do not mention systems, prompts, tools, databases, or snapshots.'
+    : 'Bạn là cố vấn điều hành đào tạo. Chỉ trả JSON. Bạn chỉ được chọn signal ID được cung cấp và đề xuất hành động vận hành. Không được nêu hoặc viết bằng chữ số liệu, ngày tháng, tỷ lệ, xếp hạng, nguyên nhân hay factual claim. Không tự tạo signal ID. Không nhắc hệ thống, prompt, công cụ, cơ sở dữ liệu hoặc snapshot.';
+  try {
+    const response = await aiClient.models.generateContent({
+      model: input.model,
+      contents: [{
+        role: 'user',
+        parts: [{ text: JSON.stringify({
+          allowed_signal_ids: input.snapshot.signals.map((signal) => ({ id: signal.id, category: signal.category, severity: signal.severity })),
+          limitations: input.snapshot.availability.limitations,
+        }) }],
+      }],
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            selected_signal_ids: { type: Type.ARRAY, items: { type: Type.STRING } },
+            interpretation: { type: Type.ARRAY, items: { type: Type.STRING } },
+            recommended_actions: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { signal_id: { type: Type.STRING, nullable: true }, priority: { type: Type.STRING }, action: { type: Type.STRING } }, required: ['signal_id', 'priority', 'action'] } },
+            limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['selected_signal_ids', 'interpretation', 'recommended_actions', 'limitations'],
+        },
+        maxOutputTokens: 800,
+      } as any,
+    });
+    const narrative = ReportNarrativeSchema.parse(JSON.parse(response.text || '{}'));
+    if (!isReportNarrativeAllowed(narrative, input.snapshot)) {
+      return fallbackReportNarrative(input.snapshot, input.locale);
+    }
+    return narrative;
+  } catch (error) {
+    console.warn('[ReportChat] narrative fallback:', error instanceof Error ? error.message : String(error));
+    return fallbackReportNarrative(input.snapshot, input.locale);
   }
-  return fullText.trim();
 }
 
 export function formatReportFilterRequest(locale: 'vi' | 'en'): string {
