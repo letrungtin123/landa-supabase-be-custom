@@ -151,6 +151,57 @@ function privateStorageHeaders(contentType?: string, contentLength?: number): Re
   };
 }
 
+/**
+ * Stream a public course asset from Multer's temp file to Storage. Unlike the
+ * SDK's Buffer upload, this does not duplicate large videos in the Node heap.
+ * This is deliberately separate from uploadFileFromPath() so document and AI
+ * flows retain their established behaviour.
+ */
+export async function uploadCourseAssetFileFromPath(
+  storagePath: string,
+  filePath: string,
+  contentType: string,
+  upsert = false,
+): Promise<string> {
+  await ensureBucket();
+
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile() || stat.size <= 0) throw new Error('Tệp tải lên tạm không hợp lệ.');
+  if (stat.size > COURSE_ASSET_MAX_UPLOAD_BYTES) throw new Error('Tệp tải lên vượt quá giới hạn cho phép.');
+
+  const reservation = await reserveStorageUpload(storagePath, stat.size);
+  try {
+    const body = Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit;
+    const response = await fetch(storageObjectUrl(STORAGE_BUCKET, storagePath), {
+      method: 'POST',
+      headers: {
+        ...privateStorageHeaders(contentType, stat.size),
+        'x-upsert': String(upsert),
+        'cache-control': '3600',
+      },
+      body,
+      // Node requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      throw new StorageProviderRejectedError(`[Storage] Course asset upload failed (${response.status}): ${detail || response.statusText}`);
+    }
+
+    await commitStorageUpload(reservation, stat.size);
+    return storagePath;
+  } catch (error) {
+    if (error instanceof StorageProviderRejectedError) {
+      await releaseStorageUploadReservation(reservation)
+        .catch(() => flagStorageUploadForReconciliation(reservation));
+    } else {
+      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
 /** Build an opaque, tenant-scoped key for server-only lesson-author artifacts. */
 export function buildLessonAuthorPrivateStoragePath(
   tenantId: string,

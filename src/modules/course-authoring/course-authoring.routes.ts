@@ -63,19 +63,58 @@ function isClientUploadAbort(req: Request, err: unknown): boolean {
 }
 
 function uploadSingleCourseAsset(req: Request, res: Response, next: NextFunction): void {
+  const startedAt = Date.now();
+  const declaredBytes = Number(req.headers['content-length'] || 0);
+  console.info('[CourseAssets] upload request received', {
+    course_id: req.params.courseId,
+    declared_bytes: Number.isFinite(declaredBytes) && declaredBytes > 0 ? declaredBytes : null,
+  });
+
+  req.once('aborted', () => {
+    console.warn('[CourseAssets] upload request aborted by client', {
+      course_id: req.params.courseId,
+      duration_ms: Date.now() - startedAt,
+    });
+  });
+
   upload.single('file')(req, res, (err: unknown) => {
     if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      console.warn('[CourseAssets] multipart upload exceeded size limit', {
+        course_id: req.params.courseId,
+        duration_ms: Date.now() - startedAt,
+      });
       sendError(res, `File quá lớn. Giới hạn tối đa ${COURSE_ASSET_MAX_UPLOAD_LABEL}.`, 413);
       return;
     }
 
     if (err && isClientUploadAbort(req, err)) {
+      console.warn('[CourseAssets] multipart upload aborted by client', {
+        course_id: req.params.courseId,
+        duration_ms: Date.now() - startedAt,
+      });
       if (!res.headersSent && !res.writableEnded && !req.destroyed) {
         sendError(res, 'Upload đã bị hủy bởi client.', 400);
       }
       return;
     }
 
+    if (err) {
+      console.error('[CourseAssets] multipart upload failed', {
+        course_id: req.params.courseId,
+        duration_ms: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      });
+      next(err);
+      return;
+    }
+
+    if (req.file) {
+      console.info('[CourseAssets] multipart upload received', {
+        course_id: req.params.courseId,
+        bytes: req.file.size,
+        duration_ms: Date.now() - startedAt,
+      });
+    }
     next(err);
   });
 }

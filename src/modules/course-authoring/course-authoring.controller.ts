@@ -11,7 +11,14 @@ import { getTenantCourseComponentPermissions } from '../tenants/tenant-course-co
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
 import { initializeCourseMentorSectionDefaults, recordCourseMentorAssignmentHistory } from '../courses/courses.service.js';
 import { reorderSchema } from './course-authoring.validator.js';
-import { uploadFile, uploadFileFromPath, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
+import {
+  uploadFile,
+  uploadCourseAssetFileFromPath,
+  deleteFile,
+  buildFileName,
+  buildStoragePath,
+  fixMulterFilename,
+} from '../../config/storage.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
@@ -443,7 +450,8 @@ export async function getBlock(req: Request, res: Response) {
     const block = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
     sendSuccess(res, block);
   } catch (err: any) {
-    sendError(res, err.message, 404);
+    const statusCode = err instanceof AppError ? err.statusCode : 500;
+    sendError(res, err?.message || 'Không thể tải nội dung khóa học.', statusCode);
   }
 }
 
@@ -776,7 +784,8 @@ export async function updateBlock(req: Request, res: Response) {
     );
     sendSuccess(res, result);
   } catch (err: any) {
-    sendError(res, err.message, 404);
+    const statusCode = err instanceof AppError ? err.statusCode : 500;
+    sendError(res, err?.message || 'Không thể cập nhật nội dung khóa học.', statusCode);
   }
 }
 
@@ -907,6 +916,7 @@ export async function uploadAsset(req: Request, res: Response) {
   const file = req.file;
   let storagePath = '';
   let storageUploaded = false;
+  const startedAt = Date.now();
 
   try {
     if (file.size > COURSE_ASSET_MAX_UPLOAD_BYTES) {
@@ -917,9 +927,16 @@ export async function uploadAsset(req: Request, res: Response) {
     const fileName = buildFileName(originalName);
     storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);
 
-    // Upload to Supabase Storage — trả về path, KHÔNG phải full URL
+    console.info('[CourseAssets] storage upload started', {
+      course_id: courseId,
+      bytes: file.size,
+      content_type: file.mimetype,
+    });
+
+    // Stream from Multer's temp file so a large course video is never copied
+    // wholesale into the API process heap.
     if (file.path) {
-      await uploadFileFromPath(storagePath, file.path, file.mimetype);
+      await uploadCourseAssetFileFromPath(storagePath, file.path, file.mimetype);
     } else if (file.buffer) {
       await uploadFile(storagePath, file.buffer, file.mimetype);
     } else {
@@ -953,11 +970,22 @@ export async function uploadAsset(req: Request, res: Response) {
         asset.display_name,
       ),
     );
+    console.info('[CourseAssets] storage upload completed', {
+      course_id: courseId,
+      bytes: file.size,
+      duration_ms: Date.now() - startedAt,
+    });
     sendSuccess(res, asset, undefined, 201);
   } catch (err) {
     if (storageUploaded && storagePath) {
       await deleteFile(storagePath).catch(() => undefined);
     }
+    console.error('[CourseAssets] storage upload failed', {
+      course_id: courseId,
+      bytes: file.size,
+      duration_ms: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : 'Unknown error',
+    });
     if (isStorageObjectSizeLimitError(err)) {
       throw new AppError(
         `Tệp vượt dung lượng lưu trữ cho phép. Vui lòng chọn tệp không quá ${COURSE_ASSET_MAX_UPLOAD_LABEL}.`,

@@ -22,6 +22,12 @@ const AUDIT_LOG_RETENTION_DAYS = 30;
 const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
 const AUDIT_LOG_RETENTION_MAX_BATCHES = 5;
 const DELETION_JOB_RETENTION_BATCH_SIZE = 1000;
+// The API streams course assets from a temporary file to Storage after the
+// multipart body has arrived. Keep the HTTP ceiling long enough for the
+// documented large-upload gateway, while the gateway still enforces short
+// header/body-idle timeouts and the API enforces auth, RBAC, and rate limits.
+const LARGE_ASSET_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
+const REQUEST_HEADERS_TIMEOUT_MS = 60 * 1000;
 
 /** Remove only completed deletion metadata; failed jobs remain actionable for retry. */
 async function cleanupCompletedDeletionJobs(): Promise<number> {
@@ -156,8 +162,8 @@ async function bootstrap() {
   } catch { /* ignore */ }
 
   // 3. Start Express server
-  app.listen(env.PORT, async function onListen() {
-    console.log(`[Server] LANDA Backend running on port ${env.PORT}`);
+  const server = app.listen(env.PORT, env.BIND_HOST, async function onListen() {
+    console.log(`[Server] LANDA Backend listening on ${env.BIND_HOST}:${env.PORT}`);
     console.log(`[Server] Environment: ${env.NODE_ENV}`);
     console.log(`[Server] CORS origin: ${env.CORS_ORIGIN}`);
 
@@ -188,6 +194,13 @@ async function bootstrap() {
     // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
     await runAuditLogRetentionCleanup('startup');
   });
+
+  // Node defaults to a five-minute request budget. That can cut off a valid
+  // 300MB course asset on slower enterprise connections before Multer finishes
+  // receiving it. The public upload gateway is required to apply matching body
+  // limits and idle-time protections; do not expose this process directly.
+  server.requestTimeout = LARGE_ASSET_REQUEST_TIMEOUT_MS;
+  server.headersTimeout = REQUEST_HEADERS_TIMEOUT_MS;
 }
 
 bootstrap().catch(err => {

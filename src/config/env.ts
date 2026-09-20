@@ -101,6 +101,9 @@ function optionalString(key: string, fallback: string): string {
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
+  // Existing direct deployments retain the default. Behind Nginx, bind to
+  // 127.0.0.1 so the API cannot bypass the gateway on a LAN/public interface.
+  BIND_HOST: optionalString('BIND_HOST', '0.0.0.0'),
   TRUST_PROXY_HOPS: optionalNonNegativeInt('TRUST_PROXY_HOPS', 0),
   // Exact proxy CIDR allowlist. When configured it takes precedence over the
   // legacy hop count so a direct caller cannot spoof X-Forwarded-For.

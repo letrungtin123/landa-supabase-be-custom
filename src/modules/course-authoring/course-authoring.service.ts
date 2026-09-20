@@ -25,6 +25,7 @@ import {
   orderLessonAuthorComponents,
 } from './lesson-author-components.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
+import { getDefaultProblemXml } from './course-authoring-problem-defaults.logic.js';
 import {
   formatChapterTitle,
   stripLessonAuthorSourceRangeSuffix,
@@ -395,6 +396,13 @@ function makeDefaultImageChoiceQuizChoice(index: number, correct = false) {
 }
 
 function getDefaultData(blockType: string, boilerplate?: string): any {
+  // Manual Course Studio passes a boilerplate for its five explicit Problem
+  // choices. Keeping the legacy empty-data path when no boilerplate is sent
+  // prevents this UI correction from changing AI-generated block behaviour.
+  if (blockType === 'problem' && boilerplate) {
+    return getDefaultProblemXml(boilerplate);
+  }
+
   if (blockType === 'la_image_choice_quiz') {
     return {
       version: 1,
@@ -657,7 +665,7 @@ export async function getBlockInfo(blockId: string, tenantId?: string | null): P
        AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
     [blockId, tenantId ?? null],
   );
-  if (result.rowCount === 0) throw new Error('Block not found');
+  if (result.rowCount === 0) throw new AppError('Block not found', 404);
   return result.rows[0];
 }
 
