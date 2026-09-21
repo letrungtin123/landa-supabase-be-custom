@@ -333,13 +333,13 @@ export async function hardDeleteController(req: Request, res: Response, next: Ne
       req.params.id,
       tenantId,
       req.user!.id,
-      (jobId) => createTransactionalAuditEntry(
+      (jobId, courseName) => createTransactionalAuditEntry(
         req,
         'DELETE',
         'course_deletion_job',
         { code: 'course.deleted' },
         jobId,
-        'Khóa học đã xóa',
+        courseName,
       ),
     );
     sendSuccess(res, { job_id: result.jobId, status: 'queued' }, 'Đã đưa khóa học vào hàng đợi xóa vĩnh viễn', 202);

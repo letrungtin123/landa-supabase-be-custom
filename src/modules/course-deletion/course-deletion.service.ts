@@ -438,7 +438,7 @@ export async function requestCourseDeletion(
   courseId: string,
   tenantId: string,
   requestedBy: string,
-  auditEntry?: (jobId: string) => TransactionalAuditEntry,
+  auditEntry?: (jobId: string, courseName: string) => TransactionalAuditEntry,
 ): Promise<{ jobId: string }> {
   const client = await getClient();
   let jobId = '';
@@ -446,8 +446,8 @@ export async function requestCourseDeletion(
   try {
     await client.query('BEGIN');
 
-    const courseResult = await client.query<{ id: string }>(
-      `SELECT id
+    const courseResult = await client.query<{ id: string; display_name: string | null }>(
+      `SELECT id, display_name
        FROM courses
        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
        FOR UPDATE`,
@@ -477,7 +477,10 @@ export async function requestCourseDeletion(
       [courseId, tenantId, jobId, requestedBy],
     );
 
-    if (auditEntry) await appendAuditLog(client, auditEntry(jobId));
+    // The course is permanently purged by the asynchronous worker. Preserve
+    // its name in the audit row while the locked course record still exists.
+    const courseName = courseResult.rows[0].display_name?.trim() || courseId;
+    if (auditEntry) await appendAuditLog(client, auditEntry(jobId, courseName));
 
     await client.query('COMMIT');
   } catch (err) {

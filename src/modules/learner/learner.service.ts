@@ -646,11 +646,37 @@ export async function submitBlockAnswer(
       return gradeSortable(block, body.answer || []);
 
     default:
-      return { status: 'ok', message: 'Block type không hỗ trợ submit', score: 0 };
+      return {
+        status: 'ok',
+        message: 'Block type không hỗ trợ submit',
+        feedback: submitFeedback('unsupported_block_type'),
+        score: 0,
+      };
   }
 }
 
 /** Grade problem block — parse OLX XML, support all 5 problem types */
+type SubmitFeedbackCode =
+  | 'correct'
+  | 'incorrect'
+  | 'partial_answers'
+  | 'partial_words'
+  | 'partial_positions'
+  | 'content_unavailable'
+  | 'question_not_found'
+  | 'round_not_found'
+  | 'answer_not_found'
+  | 'missing_correct_answer'
+  | 'unsupported_problem_type'
+  | 'unsupported_block_type';
+
+function submitFeedback(
+  code: SubmitFeedbackCode,
+  params?: Record<string, number>,
+) {
+  return params && Object.keys(params).length > 0 ? { code, params } : { code };
+}
+
 function normalizeMediaQuizAnswer(raw: unknown): string[] {
   const values = Array.isArray(raw) ? raw : [raw];
   return Array.from(new Set(
@@ -663,13 +689,13 @@ function normalizeMediaQuizAnswer(raw: unknown): string[] {
 function gradeMediaQuiz(block: any, body: any) {
   const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
   if (!data || typeof data !== 'object' || !Array.isArray(data.questions)) {
-    return { status: 'error', message: 'Câu hỏi kèm media chưa có dữ liệu câu hỏi', score: 0 };
+    return { status: 'error', message: 'Câu hỏi kèm media chưa có dữ liệu câu hỏi', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
   const questionId = typeof body?.question_id === 'string' ? body.question_id : '';
   const questionIndex = data.questions.findIndex((question: any) => question?.id === questionId);
   if (questionIndex < 0) {
-    return { status: 'error', message: 'Không tìm thấy câu hỏi', score: 0 };
+    return { status: 'error', message: 'Không tìm thấy câu hỏi', feedback: submitFeedback('question_not_found'), score: 0 };
   }
 
   const question = data.questions[questionIndex];
@@ -681,7 +707,7 @@ function gradeMediaQuiz(block: any, body: any) {
       .map((choice: any) => String(choice.id)),
   );
   if (correctSet.size === 0) {
-    return { status: 'error', message: 'Câu hỏi chưa có đáp án đúng', score: 0, question_id: questionId };
+    return { status: 'error', message: 'Câu hỏi chưa có đáp án đúng', feedback: submitFeedback('missing_correct_answer'), score: 0, question_id: questionId };
   }
 
   const answerSource = body?.answer ?? body?.answers?.[questionId] ?? body?.answers;
@@ -695,6 +721,7 @@ function gradeMediaQuiz(block: any, body: any) {
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác! Media tiếp theo đã được mở.' : 'Chưa đúng, hãy thử lại.',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     question_id: questionId,
     completed: isCorrect && isLastQuestion,
@@ -707,7 +734,7 @@ function gradeMediaQuiz(block: any, body: any) {
 function gradeImageChoiceQuiz(block: any, body: any) {
   const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
   if (!data || typeof data !== 'object' || !Array.isArray(data.choices)) {
-    return { status: 'error', message: 'Câu hỏi đáp án hình ảnh chưa có dữ liệu', score: 0 };
+    return { status: 'error', message: 'Câu hỏi đáp án hình ảnh chưa có dữ liệu', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
   const answerFromMap = body?.answers && typeof body.answers === 'object'
@@ -724,13 +751,14 @@ function gradeImageChoiceQuiz(block: any, body: any) {
   const choices = data.choices.slice(0, 4);
   const choice = choices.find((item: any) => item?.id === choiceId);
   if (!choice) {
-    return { status: 'error', message: 'Không tìm thấy đáp án', score: 0 };
+    return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), score: 0 };
   }
 
   const isCorrect = choice.correct === true;
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     choice_id: choiceId,
     completed: isCorrect,
@@ -742,21 +770,21 @@ function gradeImageChoiceQuiz(block: any, body: any) {
 function gradeScenarioChat(block: any, body: any) {
   const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
   if (!data || typeof data !== 'object' || !Array.isArray(data.rounds)) {
-    return { status: 'error', message: 'Giao tiếp tình huống chưa có dữ liệu', score: 0 };
+    return { status: 'error', message: 'Giao tiếp tình huống chưa có dữ liệu', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
   const roundId = typeof body?.round_id === 'string' ? body.round_id : '';
   const choiceId = typeof body?.choice_id === 'string' ? body.choice_id : '';
   const roundIndex = data.rounds.findIndex((round: any) => round?.id === roundId);
   if (roundIndex < 0) {
-    return { status: 'error', message: 'Không tìm thấy lượt hội thoại', score: 0 };
+    return { status: 'error', message: 'Không tìm thấy lượt hội thoại', feedback: submitFeedback('round_not_found'), score: 0 };
   }
 
   const round = data.rounds[roundIndex];
   const choices = Array.isArray(round?.choices) ? round.choices : [];
   const choice = choices.find((item: any) => item?.id === choiceId);
   if (!choice) {
-    return { status: 'error', message: 'Không tìm thấy câu trả lời', score: 0, round_id: roundId };
+    return { status: 'error', message: 'Không tìm thấy câu trả lời', feedback: submitFeedback('answer_not_found'), score: 0, round_id: roundId };
   }
 
   const isCorrect = choice.correct === true;
@@ -766,6 +794,7 @@ function gradeScenarioChat(block: any, body: any) {
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     round_id: roundId,
     choice_id: choiceId,
@@ -781,7 +810,7 @@ function gradeScenarioChat(block: any, body: any) {
 
 function gradeProblem(block: any, userAnswers: Record<string, string | string[]>) {
   const data = typeof block.data === 'string' ? block.data : '';
-  if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', correctness: {} };
+  if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', feedback: submitFeedback('content_unavailable'), correctness: {} };
 
 
 
@@ -810,13 +839,13 @@ function gradeProblem(block: any, userAnswers: Record<string, string | string[]>
     return gradeNumericalInput(data, userAnswers);
   }
 
-  return { status: 'error', message: 'Loại câu hỏi chưa được hỗ trợ', correctness: {} };
+  return { status: 'error', message: 'Loại câu hỏi chưa được hỗ trợ', feedback: submitFeedback('unsupported_problem_type'), correctness: {} };
 }
 
 /** 1. Single-select (radio) */
 function gradeMultipleChoice(data: string, userAnswers: Record<string, string | string[]>) {
   const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
-  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', correctness: {} };
+  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), correctness: {} };
 
   const correctIndices: string[] = [];
   const choiceTexts: Record<string, string> = {};
@@ -835,6 +864,7 @@ function gradeMultipleChoice(data: string, userAnswers: Record<string, string | 
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
     correct_answers: correctIndices.map(id => choiceTexts[id]),
@@ -844,7 +874,7 @@ function gradeMultipleChoice(data: string, userAnswers: Record<string, string | 
 /** 2. Multi-select (checkbox) */
 function gradeCheckbox(data: string, userAnswers: Record<string, string | string[]>) {
   const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
-  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', correctness: {} };
+  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), correctness: {} };
 
   const correctSet = new Set<string>();
   const choiceTexts: Record<string, string> = {};
@@ -867,6 +897,7 @@ function gradeCheckbox(data: string, userAnswers: Record<string, string | string
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : `Đúng ${correctCount}/${correctSet.size} đáp án. Thử lại nhé!`,
+    feedback: submitFeedback(isCorrect ? 'correct' : 'partial_answers', isCorrect ? undefined : { correct: correctCount, total: correctSet.size }),
     score: Math.round((correctCount / correctSet.size) * 100),
     correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
     correct_answers: [...correctSet].map(id => choiceTexts[id]),
@@ -884,7 +915,7 @@ function gradeDropdown(data: string, userAnswers: Record<string, string | string
     correctAnswer = correctOption ? correctOption[2].replace(/<[^>]+>/g, '').trim() : '';
   }
 
-  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
 
   const userVal = Object.values(userAnswers)[0];
   const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
@@ -895,6 +926,7 @@ function gradeDropdown(data: string, userAnswers: Record<string, string | string
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
     correct_answers: [correctAnswer],
@@ -908,7 +940,7 @@ function gradeStringInput(data: string, userAnswers: Record<string, string | str
   const correctAnswer = answerMatch ? answerMatch[1] : '';
   const isCaseInsensitive = data.includes('type="ci"');
 
-  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
 
   const userVal = Object.values(userAnswers)[0];
   const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
@@ -920,6 +952,7 @@ function gradeStringInput(data: string, userAnswers: Record<string, string | str
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
     correct_answers: [correctAnswer],
@@ -936,7 +969,7 @@ function gradeNumericalInput(data: string, userAnswers: Record<string, string | 
   const tolMatch = data.match(/<responseparam\s+type="tolerance"\s+default="([^"]+)"/i);
   const tolerance = tolMatch ? parseFloat(tolMatch[1]) : 0;
 
-  if (isNaN(correctAnswer)) return { status: 'error', message: 'Không tìm thấy đáp án đúng', correctness: {} };
+  if (isNaN(correctAnswer)) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
 
   const userVal = Object.values(userAnswers)[0];
   const userNum = parseFloat(Array.isArray(userVal) ? userVal[0] : String(userVal || ''));
@@ -946,6 +979,7 @@ function gradeNumericalInput(data: string, userAnswers: Record<string, string | 
   return {
     status: isCorrect ? 'correct' : 'incorrect',
     message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
+    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
     score: isCorrect ? 100 : 0,
     correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
     correct_answers: [String(correctAnswer)],
@@ -959,7 +993,7 @@ function gradeCrossword(block: any, userAnswers: Record<string, string>) {
   const words: any[] = cd.words || [];
 
   if (words.length === 0) {
-    return { status: 'error', message: 'Không có dữ liệu ô chữ', score: 0 };
+    return { status: 'error', message: 'Không có dữ liệu ô chữ', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
   let correct = 0;
@@ -980,6 +1014,7 @@ function gradeCrossword(block: any, userAnswers: Record<string, string>) {
     message: correct === words.length
       ? 'Hoàn thành ô chữ!'
       : `Đúng ${correct}/${words.length} từ`,
+    feedback: submitFeedback(correct === words.length ? 'correct' : 'partial_words', correct === words.length ? undefined : { correct, total: words.length }),
     score,
     results,
   };
@@ -992,7 +1027,7 @@ function gradeSortable(block: any, userOrder: number[]) {
   const items: any[] = sd.items || [];
 
   if (items.length === 0) {
-    return { status: 'error', message: 'Không có dữ liệu sắp xếp', score: 0 };
+    return { status: 'error', message: 'Không có dữ liệu sắp xếp', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
   // Correct order = thứ tự id trong items array (1,2,3,4,5)
@@ -1012,6 +1047,7 @@ function gradeSortable(block: any, userOrder: number[]) {
     message: isCorrect
       ? 'Sắp xếp đúng thứ tự!'
       : `Đúng ${correctPositions}/${correctOrder.length} vị trí`,
+    feedback: submitFeedback(isCorrect ? 'correct' : 'partial_positions', isCorrect ? undefined : { correct: correctPositions, total: correctOrder.length }),
     score,
     correct_order: correctOrder,
   };
