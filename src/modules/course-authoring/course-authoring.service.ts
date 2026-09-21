@@ -1173,7 +1173,6 @@ export async function studioSubmit(
 ): Promise<any> {
   // Get current block
   const block = await getBlockInfo(blockId, tenantId);
-  const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   // Extract display_name (FE gửi kèm trong submitData)
   const displayName = submitData.display_name;
@@ -1247,29 +1246,6 @@ export async function studioSubmit(
   }
 
   const updated = await updateBlock(blockId, updatePayload);
-
-  // Auto-sync published_metadata/published_data so learner sees changes immediately
-  // (learner API uses COALESCE(published_metadata, metadata) — if published_metadata exists
-  // but is stale, learner won't see the new data)
-  if (updatePayload.metadata || updatePayload.data) {
-    const syncClauses: string[] = ['updated_at = now()'];
-    const syncParams: any[] = [blockId];
-    let syncIdx = 2;
-    if (updatePayload.metadata) {
-      syncClauses.push(`published_metadata = $${syncIdx++}`);
-      syncParams.push(updatePayload.metadata);
-    }
-    if (updatePayload.data) {
-      syncClauses.push(`published_data = $${syncIdx++}`);
-      syncParams.push(JSON.stringify(updatePayload.data));
-    }
-    syncClauses.push('has_draft_changes = false');
-    await query(
-      `UPDATE course_blocks SET ${syncClauses.join(', ')} WHERE id = $1 AND deleted_at IS NULL`,
-      syncParams,
-    );
-    await cleanupStoragePathsNoLongerReferenced(block.course_id, previousPublishedPaths);
-  }
 
   await Promise.all([
     invalidateCourseReadCaches(block.course_id),

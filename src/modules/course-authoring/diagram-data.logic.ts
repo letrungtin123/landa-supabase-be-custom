@@ -193,18 +193,11 @@ function normalizeEdge(
   if (!source || !target || source === target || !nodesById.has(source) || !nodesById.has(target)) return null;
   const sourceNode = nodesById.get(source)!;
   const targetNode = nodesById.get(target)!;
-  const explicitRouting = isRecord(value.data) ? value.data.routing : value.routing;
-  const routing = explicitRouting === 'feedback'
-    || targetNode.position.y < sourceNode.position.y - 1
-    ? 'feedback'
-    : 'orthogonal';
+  const explicitRouting = value.routing ?? (isRecord(value.data) ? value.data.routing : undefined);
+  const routing = explicitRouting === 'feedback' ? 'feedback' : 'orthogonal';
   const fallback = fallbackHandles(sourceNode, targetNode);
-  const sourceHandle = routing === 'feedback'
-    ? (sourceNode.type === 'junction' ? 'right-source' : 'right')
-    : normalizeHandle(value.sourceHandle, sourceNode.type, 'source') ?? fallback.sourceHandle;
-  const targetHandle = routing === 'feedback'
-    ? (targetNode.type === 'junction' ? 'left-target' : 'right')
-    : normalizeHandle(value.targetHandle, targetNode.type, 'target') ?? fallback.targetHandle;
+  const sourceHandle = normalizeHandle(value.sourceHandle, sourceNode.type, 'source') ?? fallback.sourceHandle;
+  const targetHandle = normalizeHandle(value.targetHandle, targetNode.type, 'target') ?? fallback.targetHandle;
   const type = typeof value.type === 'string' && ['deletable', 'orthogonal', 'default', 'smoothstep', 'step'].includes(value.type)
     ? value.type
     : 'deletable';
@@ -244,39 +237,6 @@ function normalizeEdge(
   };
 }
 
-function edgeLabel(value: CanonicalDiagramEdge): string {
-  const rawLabel = value.label ?? (isRecord(value.data) ? value.data.label : undefined);
-  return typeof rawLabel === 'string' ? rawLabel.trim().toLocaleLowerCase() : '';
-}
-
-/**
- * Keep the graph readable without changing meaningful relationships.
- * LLMs commonly emit the same relationship twice, or emit A -> B and B -> A
- * as duplicates. A labelled pair with different labels is retained because it
- * can represent a real bidirectional relationship.
- */
-function removeRedundantRelationships(edges: CanonicalDiagramEdge[]): CanonicalDiagramEdge[] {
-  const acceptedByDirection = new Map<string, CanonicalDiagramEdge>();
-  const result: CanonicalDiagramEdge[] = [];
-
-  for (const edge of edges) {
-    const direction = `${edge.source}->${edge.target}`;
-    if (acceptedByDirection.has(direction)) continue;
-
-    const reverse = acceptedByDirection.get(`${edge.target}->${edge.source}`);
-    if (reverse) {
-      const currentLabel = edgeLabel(edge);
-      const reverseLabel = edgeLabel(reverse);
-      if (!currentLabel || !reverseLabel || currentLabel === reverseLabel) continue;
-    }
-
-    acceptedByDirection.set(direction, edge);
-    result.push(edge);
-  }
-
-  return result;
-}
-
 export function normalizeDiagramData(value: unknown): CanonicalDiagramData {
   const raw = unwrap(value);
   if (!isRecord(raw) || !Array.isArray(raw.diagrams)) {
@@ -305,10 +265,10 @@ export function normalizeDiagramData(value: unknown): CanonicalDiagramData {
     });
     const nodesById = new Map(nodes.map(node => [node.id, node]));
     const edgeIds = new Set<string>();
-    const edges = removeRedundantRelationships(rawEdges
+    const edges = rawEdges
       .map((edge, edgeIndex) => normalizeEdge(edge, edgeIndex, nodesById))
       .filter((edge): edge is CanonicalDiagramEdge => Boolean(edge))
-    ).map((edge, edgeIndex) => {
+      .map((edge, edgeIndex) => {
         let id = edge.id;
         while (edgeIds.has(id)) id = `${edge.id}-${edgeIndex + 1}`;
         edgeIds.add(id);

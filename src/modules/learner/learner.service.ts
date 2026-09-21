@@ -313,9 +313,10 @@ async function getCourseBlocksFromDb(
   const isLearner = true;
   const publishFilter = 'AND b.is_published = true';
 
-  // Learner route: luôn đọc published_data/published_metadata
+  // Learner route must read the immutable published snapshot only.  Falling
+  // back to metadata would leak a saved-but-unpublished diagram draft.
   const dataCol = 'b.published_data';
-  const metaCol = 'COALESCE(b.published_metadata, b.metadata)';
+  const metaCol = 'b.published_metadata';
 
   let sql: string;
   let params: unknown[];
@@ -408,11 +409,9 @@ async function getBlockDetailFromDb(
   role = 'learner',
   tenantId?: string | null,
 ) {
-  // Learner route: luôn chỉ trả published data
-  const isLearner = true;
-  // Learner: chỉ đọc published data (KHÔNG fallback draft)
+  // Learner route must never fall back to a block's draft columns.
   const dataCol = 'b.published_data';
-  const metaCol = 'COALESCE(b.published_metadata, b.metadata)';
+  const metaCol = 'b.published_metadata';
 
   const result = await query<any>(
     `WITH RECURSIVE ancestors AS (
@@ -597,7 +596,8 @@ export async function submitBlockAnswer(
   tenantId: string | null | undefined,
   body: any,
 ) {
-  // Lấy block data — luôn dùng published data để grading (tránh learner exploit draft)
+  // Lấy block data — luôn dùng snapshot published, kể cả khi snapshot null.
+  // Không fallback sang draft vì learner không được thấy hay dùng nội dung chưa publish.
   const blockResult = await query<any>(
     `WITH RECURSIVE ancestors AS (
        SELECT id, parent_id, deleted_at
@@ -609,8 +609,8 @@ export async function submitBlockAnswer(
        JOIN ancestors a ON parent.id = a.parent_id
      )
      SELECT b.id, b.block_type,
-            COALESCE(b.published_data, b.data) AS data,
-            COALESCE(b.published_metadata, b.metadata) AS metadata,
+            b.published_data AS data,
+            b.published_metadata AS metadata,
             b.course_id
      FROM course_blocks b
      JOIN courses c ON c.id = b.course_id
@@ -1762,4 +1762,3 @@ export async function markSectionModalShown(userId: string, courseId: string, se
   );
   return { success: true };
 }
-

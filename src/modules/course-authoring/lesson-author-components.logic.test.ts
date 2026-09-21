@@ -116,7 +116,25 @@ test('diagram data respects junction input and output ports', () => {
   assert.equal(normalized.diagrams[0].edges[0].targetHandle, 'right');
 });
 
-test('diagram data removes duplicate, reverse-duplicate, and self-loop relationships', () => {
+test('diagram data preserves selected ports for an upward connection', () => {
+  const normalized = normalizeDiagramData({
+    diagrams: [{
+      id: 'main',
+      nodes: [
+        { id: 'lower', position: { x: 0, y: 200 }, data: { label: 'Lower' } },
+        { id: 'upper', position: { x: 240, y: 0 }, data: { label: 'Upper' } },
+      ],
+      edges: [{ source: 'lower', target: 'upper', sourceHandle: 'left', targetHandle: 'bottom' }],
+    }],
+  });
+
+  const edge = normalized.diagrams[0].edges[0];
+  assert.equal(edge.sourceHandle, 'left');
+  assert.equal(edge.targetHandle, 'bottom');
+  assert.equal((edge.data as Record<string, unknown>).routing, 'orthogonal');
+});
+
+test('diagram data preserves parallel and reverse relationships while dropping self-loops', () => {
   const normalized = normalizeDiagramData({
     diagrams: [{
       id: 'main',
@@ -137,7 +155,7 @@ test('diagram data removes duplicate, reverse-duplicate, and self-loop relations
 
   assert.deepEqual(
     normalized.diagrams[0].edges.map(edge => `${edge.source}->${edge.target}`),
-    ['a->b', 'b->c'],
+    ['a->b', 'a->b', 'b->a', 'b->c'],
   );
 });
 
@@ -227,7 +245,7 @@ test('legacy feedback edges remain dashed and preserve their visible arrow', () 
         { id: 'a', position: { x: 0, y: 100 }, data: { label: 'A' } },
         { id: 'b', position: { x: 240, y: 0 }, data: { label: 'B' } },
       ],
-      edges: [{ id: 'feedback', source: 'a', target: 'b', label: 'Phản hồi' }],
+      edges: [{ id: 'feedback', source: 'a', target: 'b', label: 'Phản hồi', data: { routing: 'feedback' } }],
     }],
   });
 
