@@ -33,6 +33,8 @@ export interface RagChatRequest {
   source_documents?: RagSourceDocument[];
   course_context?: string | null;
   locale?: 'vi' | 'en';
+  /** Node-generated request correlation; Python must echo it in diagnostics. */
+  correlation_id?: string;
 }
 
 export interface RagRetrievalDiagnostics {
@@ -72,6 +74,13 @@ export interface RagRetrievalDiagnostics {
   context_chars?: number;
   context_truncated?: boolean;
   omitted_retrieved_count?: number;
+  source_total_facts?: number;
+  source_total_sections?: number;
+  source_total_concepts?: number;
+  source_map_complete?: boolean;
+  architect_context_mode?: 'detailed' | 'hierarchical';
+  architect_context_size?: number;
+  architect_detail_fact_count?: number;
   reason: string | null;
 }
 
@@ -80,6 +89,36 @@ export interface RagChatResponse {
   usage?: Partial<AiUsage>;
   sources?: Array<Record<string, unknown>>;
   retrieval?: RagRetrievalDiagnostics;
+}
+
+/** Safe request-scoped orchestration diagnostics from the Python RAG service. */
+export interface RagWorkflowProgressEvent {
+  code: string;
+  message: string;
+  phase: 'course_architecture' | 'lesson_generation';
+  current?: number;
+  total?: number;
+}
+
+export interface RagWorkflowDiagnostics {
+  workflow: 'course_architecture' | 'lesson_generation';
+  workflow_version: string;
+  status: 'ready' | 'failed' | string;
+  duration_ms: number;
+  node_durations_ms: Record<string, number>;
+  repair_count: number;
+  validation_codes: string[];
+  source_coverage?: number | null;
+  source_fact_coverage?: number | null;
+  concept_coverage?: number | null;
+  objective_coverage?: number | null;
+  assessment_alignment?: number | null;
+  instructional_depth?: number | null;
+  component_purpose?: number | null;
+  duplicate_count?: number;
+  pedagogical_warning_count?: number;
+  component_counts?: Record<string, number>;
+  progress?: RagWorkflowProgressEvent[];
 }
 
 export interface RagLessonAuthorRequest extends RagChatRequest {
@@ -91,15 +130,36 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   generation_mode?: 'auto' | 'staged' | 'single';
   max_attempts?: number;
   blueprint_architecture?: {
+    architecture_contract_version?: 4 | 5;
     chapter_title: string;
     source_refs?: string[];
     lessons: Array<{
       title: string;
       source_refs?: string[];
+      learning_objectives?: string[];
+      primary_concept_ids?: string[];
+      supporting_concept_ids?: string[];
+      assessment_required?: boolean;
+      assessment_objective_refs?: string[];
       units: Array<{
         title: string;
+        purpose?: string;
+        concept_ids?: string[];
+        primary_concept_ids?: string[];
+        primary_evidence_scope_ids?: string[];
+        supporting_evidence_scope_ids?: string[];
+        learning_objective_refs?: string[];
         source_refs?: string[];
         source_fact_ids?: string[];
+        learning_blocks?: Array<{
+          id: string;
+          intent: string;
+          source_fact_ids?: string[];
+          primary_concept_ids?: string[];
+          primary_evidence_scope_ids?: string[];
+          supporting_evidence_scope_ids?: string[];
+          learning_objective_refs?: string[];
+        }>;
         component_plan: Array<{
           type: string;
           title: string;
@@ -107,6 +167,8 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
           purpose?: 'explain' | 'assess' | 'clarify' | 'sequence' | 'relationship' | 'terminology';
           source_fact_ids?: string[];
           content_requirements?: string[];
+          reason_code?: string;
+          learning_block_ids?: string[];
           required_artifacts?: Array<{
             type: 'ordered_list' | 'checklist' | 'table' | 'warning' | 'requirement' | 'exception' | 'comparison';
             minimum_items?: number;
@@ -121,6 +183,8 @@ export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {
   outline_context: string;
   blueprint_schema_hint: string;
   max_attempts?: number;
+  /** Node-resolved CMS identifier, diagnostic only; Python never authorises with it. */
+  course_id?: string;
 }
 
 export interface RagLessonAuthorResponse {
@@ -128,13 +192,17 @@ export interface RagLessonAuthorResponse {
   usage?: Partial<AiUsage>;
   sources?: Array<Record<string, unknown>>;
   retrieval?: RagRetrievalDiagnostics;
+  workflow?: RagWorkflowDiagnostics;
 }
 
 export interface RagLessonAuthorBlueprintResponse {
   blueprint: unknown;
+  /** Self-built-RAG Phase-3 global provenance map; File Search does not provide it. */
+  source_map?: unknown;
   usage?: Partial<AiUsage>;
   sources?: Array<Record<string, unknown>>;
   retrieval?: RagRetrievalDiagnostics;
+  workflow?: RagWorkflowDiagnostics;
 }
 
 export interface RagIndexResponse {

@@ -29,6 +29,8 @@ export interface LessonAuthorContentContractPlan {
   purpose?: LessonAuthorInstructionalPurpose;
   source_fact_ids?: string[];
   content_requirements?: string[];
+  reason_code?: string;
+  learning_block_ids?: string[];
   required_artifacts?: LessonAuthorStructuredArtifactRequirement[];
 }
 

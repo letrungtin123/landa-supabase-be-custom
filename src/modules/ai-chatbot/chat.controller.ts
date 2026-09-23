@@ -567,6 +567,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     content,
     mode,
     outline_mentions,
+    editor_context,
     source_documents,
     blueprint_id,
     blueprint_chapter_index,
@@ -656,6 +657,18 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     if (!res.writableEnded) clientDisconnected = true;
   });
 
+  // Commit the streaming response before the Lesson Author performs source,
+  // course, and intent lookups. This prevents same-origin proxies from seeing
+  // an idle request while that preparation is still in progress.
+  res.flushHeaders();
+  if (target === 'lesson_author') {
+    writeSSE({
+      type: 'progress',
+      stage: 'REQUEST_ACCEPTED',
+      detail: 'Yêu cầu đã được máy chủ tiếp nhận',
+    });
+  }
+
   await chatService.sendMessageStream(
     conversationId,
     userId,
@@ -674,6 +687,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
             ? 'auto'
             : 'chat',
       outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
+      editorContext: editor_context,
       sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
       blueprintId: blueprint_id,
       blueprintChapterIndex: blueprint_chapter_index,

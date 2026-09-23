@@ -1,4 +1,4 @@
-import { query, getClient } from '../../config/database.js';
+import { query, getClient, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import {
@@ -7,7 +7,7 @@ import {
   invalidateTenantBadgeCaches,
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
-import { deleteFiles, deleteLessonAuthorPrivateFiles, extractStoragePath } from '../../config/storage.js';
+import { extractStoragePath } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
@@ -15,6 +15,7 @@ import {
   registerStorageManifestPaths,
   registerStoragePrefixManifestPaths,
 } from '../deletion/storage-manifest.service.js';
+import { classifyCourseMentorLogoOwnership } from '../courses/course-mentor-logo-ownership.logic.js';
 
 const DELETE_BATCH_SIZE = 500;
 const ASSET_BATCH_SIZE = 100;
@@ -50,6 +51,14 @@ interface PurgeStats {
   enrollmentsDeleted: number;
   linkedRowsDeleted: number;
   rowsUpdated: number;
+  warnings: RetainedStorageReferenceWarning[];
+}
+
+interface RetainedStorageReferenceWarning {
+  code: 'course_deletion.storage_reference_retained';
+  source: string;
+  reason: string;
+  storage_path?: string;
 }
 
 function emptyStats(): PurgeStats {
@@ -60,12 +69,15 @@ function emptyStats(): PurgeStats {
     enrollmentsDeleted: 0,
     linkedRowsDeleted: 0,
     rowsUpdated: 0,
+    warnings: [],
   };
 }
 
 function addStats(total: PurgeStats, next: Partial<PurgeStats>): void {
-  for (const key of Object.keys(next) as (keyof PurgeStats)[]) {
-    total[key] += next[key] ?? 0;
+  for (const [key, value] of Object.entries(next)) {
+    if (key === 'warnings' || typeof value !== 'number') continue;
+    const statKey = key as Exclude<keyof PurgeStats, 'warnings'>;
+    total[statKey] += value;
   }
 }
 
@@ -96,7 +108,7 @@ async function getBlockSubtreeIds(blockId: string, courseId: string): Promise<st
 function normalizeCourseStoragePath(value: unknown, tenantId: string, courseId: string): string | null {
   const extracted = normalizeTenantCourseStoragePath(value, tenantId);
   if (!extracted) return null;
-  if (!extracted.includes(`/courses/${courseId}/`)) return null;
+  if (!extracted.startsWith(`${tenantId}/courses/${courseId}/`)) return null;
   return extracted;
 }
 
@@ -231,49 +243,160 @@ function normalizeAssignmentStoragePath(value: unknown, tenantId: string, course
   return extracted;
 }
 
-function requireAssignmentStoragePath(value: unknown, tenantId: string, courseId: string, source: string): string | null {
-  if (value == null || value === '') return null;
-  const path = normalizeAssignmentStoragePath(value, tenantId, courseId);
-  const extracted = typeof value === 'string' ? extractStoragePath(value.trim()) : null;
-  if (extracted?.startsWith(`${tenantId}/`) && !path) {
-    throw new Error(`Unsafe or foreign ${source} storage reference blocked course deletion`);
-  }
-  return path;
-}
-
-function requireCourseOwnedStoragePath(value: unknown, tenantId: string, courseId: string, source: string): string | null {
-  if (value == null || value === '') return null;
-  const path = normalizeCourseStoragePath(value, tenantId, courseId);
-  const extracted = typeof value === 'string' ? extractStoragePath(value.trim()) : null;
-  if (extracted?.startsWith(`${tenantId}/`) && !path) {
-    throw new Error(`Unsafe or foreign ${source} storage reference blocked course deletion`);
-  }
-  return path;
-}
-
-function requireCourseAssetStoragePath(value: unknown, tenantId: string, source: string): string | null {
-  if (value == null || value === '') return null;
-  const path = normalizeTenantCourseStoragePath(value, tenantId);
-  const extracted = typeof value === 'string' ? extractStoragePath(value.trim()) : null;
-  if (extracted?.startsWith(`${tenantId}/`) && !path) {
-    throw new Error(`Unsafe or foreign ${source} storage reference blocked course deletion`);
-  }
-  return path;
-}
-
 /**
  * Build the durable object-key manifest before any course rows are purged.
  * Every high-cardinality query is keyset-paginated to stay bounded at scale.
  */
-async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
-  if (job.target_type !== 'course') return;
+function toRetainedStorageReferenceWarning(
+  source: string,
+  reason: string,
+  storagePath?: string,
+): RetainedStorageReferenceWarning {
+  return {
+    code: 'course_deletion.storage_reference_retained',
+    source,
+    reason,
+    ...(storagePath ? { storage_path: storagePath } : {}),
+  };
+}
+
+function retainedStorageReferenceWarningForValue(
+  value: unknown,
+  tenantId: string,
+  source: string,
+): RetainedStorageReferenceWarning | null {
+  if (value == null || value === '') return null;
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const extracted = raw ? extractStoragePath(raw) : null;
+  const safeTenantPath = extracted
+    && extracted.startsWith(`${tenantId}/`)
+    && !extracted.includes('..')
+    && !/[<>"'`\\]/.test(extracted)
+    ? extracted
+    : undefined;
+  return toRetainedStorageReferenceWarning(
+    source,
+    safeTenantPath ? 'unrecognized-tenant-path' : 'foreign-or-untrusted-tenant-path',
+    safeTenantPath,
+  );
+}
+
+function warnRetainedStorageReference(job: DeleteJobRow, warning: RetainedStorageReferenceWarning): void {
+  console.warn('[CourseDelete] storage_reference_retained', {
+    event: warning.code,
+    deletion_job_id: job.id,
+    tenant_id: job.tenant_id,
+    course_id: job.course_id,
+    ...warning,
+  });
+}
+
+function warningKey(warning: RetainedStorageReferenceWarning): string {
+  return `${warning.code}|${warning.source}|${warning.reason}|${warning.storage_path || ''}`;
+}
+
+function mergeRetainedStorageReferenceWarnings(
+  ...warningSets: ReadonlyArray<ReadonlyArray<RetainedStorageReferenceWarning>>
+): RetainedStorageReferenceWarning[] {
+  const warnings = new Map<string, RetainedStorageReferenceWarning>();
+  for (const warning of warningSets.flat()) warnings.set(warningKey(warning), warning);
+  return [...warnings.values()];
+}
+
+function parseRetainedStorageReferenceWarnings(value: unknown): RetainedStorageReferenceWarning[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): RetainedStorageReferenceWarning[] => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as Record<string, unknown>;
+    if (row.code !== 'course_deletion.storage_reference_retained'
+      || typeof row.source !== 'string'
+      || typeof row.reason !== 'string'
+      || (row.storage_path !== undefined && typeof row.storage_path !== 'string')) return [];
+    return [{
+      code: row.code,
+      source: row.source,
+      reason: row.reason,
+      ...(typeof row.storage_path === 'string' ? { storage_path: row.storage_path } : {}),
+    }];
+  });
+}
+
+async function getRetainedStorageReferenceWarnings(jobId: string): Promise<RetainedStorageReferenceWarning[]> {
+  const result = await query<{ warnings: unknown }>(
+    `SELECT stats -> 'warnings' AS warnings
+     FROM course_deletion_jobs
+     WHERE id = $1::uuid`,
+    [jobId],
+  );
+  return parseRetainedStorageReferenceWarnings(result.rows[0]?.warnings);
+}
+
+async function persistRetainedStorageReferenceWarnings(
+  job: DeleteJobRow,
+  warnings: readonly RetainedStorageReferenceWarning[],
+): Promise<void> {
+  if (warnings.length === 0) return;
+  await query(
+    `UPDATE course_deletion_jobs
+     SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb), '{warnings}', $2::jsonb, true),
+         updated_at = now()
+     WHERE id = $1::uuid AND status = 'running'`,
+    [job.id, JSON.stringify(warnings)],
+  );
+}
+
+function normalizeLessonAuthorStoragePath(value: unknown, tenantId: string): string | null {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (!raw || raw.length > 1200) return null;
+  const path = extractStoragePath(raw);
+  if (!path || !path.startsWith(`${tenantId}/lesson-author/`)) return null;
+  if (path.includes('..') || /[<>"'`\\]/.test(path)) return null;
+  return path;
+}
+
+async function registerLessonAuthorPrivateArtifactsForCourse(
+  job: DeleteJobRow,
+): Promise<RetainedStorageReferenceWarning[]> {
+  const table = await query<{ exists: boolean }>(
+    `SELECT to_regclass('public.lesson_author_transcription_jobs') IS NOT NULL AS exists`,
+  );
+  if (!table.rows[0]?.exists) return [];
+
+  const rows = await query<{ source_storage_path: string | null; transcript_storage_path: string | null }>(
+    `SELECT source_storage_path, transcript_storage_path
+     FROM lesson_author_transcription_jobs
+     WHERE tenant_id = $1::uuid
+       AND course_id = $2
+       AND status IN ('queued', 'running', 'succeeded', 'failed', 'committed')`,
+    [job.tenant_id, job.course_id],
+  );
+  const warnings: RetainedStorageReferenceWarning[] = [];
+  const paths: string[] = [];
+  for (const row of rows.rows) {
+    for (const [source, value] of [
+      ['lesson_author_transcription_jobs.source_storage_path', row.source_storage_path],
+      ['lesson_author_transcription_jobs.transcript_storage_path', row.transcript_storage_path],
+    ] as const) {
+      if (value == null || value === '') continue;
+      const path = normalizeLessonAuthorStoragePath(value, job.tenant_id);
+      if (path) paths.push(path);
+      else warnings.push(toRetainedStorageReferenceWarning(source, 'foreign-or-untrusted-tenant-path'));
+    }
+  }
+  await registerStorageManifestPaths('course', job.id, job.tenant_id, paths);
+  return warnings;
+}
+
+async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedStorageReferenceWarning[]> {
+  if (job.target_type !== 'course') return [];
   const alreadyComplete = await query<{ manifest_completed_at: Date | null }>(
     `SELECT manifest_completed_at
      FROM course_deletion_jobs
      WHERE id = $1::uuid`,
     [job.id],
   );
-  if (alreadyComplete.rows[0]?.manifest_completed_at) return;
+  if (alreadyComplete.rows[0]?.manifest_completed_at) return [];
 
   const directPaths = new Set<string>();
 
@@ -289,16 +412,29 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
       [job.course_id, job.tenant_id],
     ),
   ]);
-  if (course.rowCount === 0) return;
-  for (const value of [
-    course.rows[0].image_url,
-    mentor.rows[0]?.logo_light_path,
-    mentor.rows[0]?.logo_dark_path,
-  ]) {
-    const path = requireCourseOwnedStoragePath(value, job.tenant_id, job.course_id, 'course metadata');
-    if (path) directPaths.add(path);
+  if (course.rowCount === 0) return [];
+  const warnings: RetainedStorageReferenceWarning[] = [];
+  const imagePath = normalizeCourseStoragePath(course.rows[0].image_url, job.tenant_id, job.course_id);
+  if (imagePath) directPaths.add(imagePath);
+  else {
+    const warning = retainedStorageReferenceWarningForValue(course.rows[0].image_url, job.tenant_id, 'courses.image_url');
+    if (warning) warnings.push(warning);
+  }
+
+  for (const [source, value] of [
+    ['course_mentor_sections.logo_light_path', mentor.rows[0]?.logo_light_path],
+    ['course_mentor_sections.logo_dark_path', mentor.rows[0]?.logo_dark_path],
+  ] as const) {
+    const ownership = classifyCourseMentorLogoOwnership(value, job.tenant_id, job.course_id);
+    if (ownership.kind === 'course-owned') {
+      directPaths.add(ownership.storagePath);
+    } else if (ownership.kind === 'unknown') {
+      const warning = toRetainedStorageReferenceWarning(source, ownership.reason, ownership.storagePath);
+      warnings.push(warning);
+    }
   }
   await registerStorageManifestPaths('course', job.id, job.tenant_id, [...directPaths]);
+  warnings.push(...await registerLessonAuthorPrivateArtifactsForCourse(job));
 
   // course_assets is the ownership authority for a transferred outline asset.
   // Keep the set to validate payload references later without allowing a
@@ -315,9 +451,20 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
       [job.tenant_id, job.course_id, lastAssetId || '00000000-0000-0000-0000-000000000000', ASSET_BATCH_SIZE],
     );
     if (rows.rowCount === 0) break;
-    const paths = rows.rows.flatMap((row) => [row.storage_path, row.url])
-      .map((value) => requireCourseAssetStoragePath(value, job.tenant_id, 'course asset'))
-      .filter((value): value is string => value !== null);
+    const paths: string[] = [];
+    for (const row of rows.rows) {
+      for (const [source, value] of [
+        ['course_assets.storage_path', row.storage_path],
+        ['course_assets.url', row.url],
+      ] as const) {
+        const path = normalizeTenantCourseStoragePath(value, job.tenant_id);
+        if (path) paths.push(path);
+        else {
+          const warning = retainedStorageReferenceWarningForValue(value, job.tenant_id, source);
+          if (warning) warnings.push(warning);
+        }
+      }
+    }
     for (const path of paths) courseAssetPaths.add(path);
     await registerStorageManifestPaths('course', job.id, job.tenant_id, paths);
     lastAssetId = rows.rows[rows.rows.length - 1].id;
@@ -358,9 +505,19 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
       [job.course_id, lastAssignmentId || '00000000-0000-0000-0000-000000000000', DELETE_BATCH_SIZE],
     );
     if (rows.rowCount === 0) break;
-    const paths = rows.rows
-      .map((row) => requireAssignmentStoragePath(row.storage_path, job.tenant_id, job.course_id, 'assignment attachment'))
-      .filter((value): value is string => value !== null);
+    const paths: string[] = [];
+    for (const row of rows.rows) {
+      const path = normalizeAssignmentStoragePath(row.storage_path, job.tenant_id, job.course_id);
+      if (path) paths.push(path);
+      else {
+        const warning = retainedStorageReferenceWarningForValue(
+          row.storage_path,
+          job.tenant_id,
+          'course_assignments.attachment_file.storage_path',
+        );
+        if (warning) warnings.push(warning);
+      }
+    }
     await registerStorageManifestPaths('course', job.id, job.tenant_id, paths);
     lastAssignmentId = rows.rows[rows.rows.length - 1].id;
   }
@@ -376,9 +533,15 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
       [job.course_id, lastFileId || '00000000-0000-0000-0000-000000000000', DELETE_BATCH_SIZE],
     );
     if (rows.rowCount === 0) break;
-    const paths = rows.rows
-      .map((row) => requireAssignmentStoragePath(row.storage_path, job.tenant_id, job.course_id, 'assignment file'))
-      .filter((value): value is string => value !== null);
+    const paths: string[] = [];
+    for (const row of rows.rows) {
+      const path = normalizeAssignmentStoragePath(row.storage_path, job.tenant_id, job.course_id);
+      if (path) paths.push(path);
+      else {
+        const warning = retainedStorageReferenceWarningForValue(row.storage_path, job.tenant_id, 'assignment_files.storage_path');
+        if (warning) warnings.push(warning);
+      }
+    }
     await registerStorageManifestPaths('course', job.id, job.tenant_id, paths);
     lastFileId = rows.rows[rows.rows.length - 1].id;
   }
@@ -403,27 +566,8 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<void> {
      WHERE id = $1::uuid AND status = 'running'`,
     [job.id],
   );
-}
-
-/** Private transcription artifacts are fenced before the course rows vanish. */
-async function deleteLessonAuthorPrivateArtifactsForCourse(job: DeleteJobRow): Promise<number> {
-  const table = await query<{ exists: boolean }>(
-    `SELECT to_regclass('public.lesson_author_transcription_jobs') IS NOT NULL AS exists`,
-  );
-  if (!table.rows[0]?.exists) return 0;
-
-  const rows = await query<{ source_storage_path: string | null; transcript_storage_path: string | null }>(
-    `SELECT source_storage_path, transcript_storage_path
-     FROM lesson_author_transcription_jobs
-     WHERE tenant_id = $1::uuid
-       AND course_id = $2
-       AND status IN ('queued', 'running', 'succeeded', 'failed', 'committed')`,
-    [job.tenant_id, job.course_id],
-  );
-  const paths = rows.rows.flatMap(row => [row.source_storage_path, row.transcript_storage_path])
-    .filter((value): value is string => typeof value === 'string' && value.startsWith(`${job.tenant_id}/lesson-author/`));
-  if (paths.length > 0) await deleteLessonAuthorPrivateFiles(paths);
-  return paths.length;
+  for (const warning of warnings) warnRetainedStorageReference(job, warning);
+  return warnings;
 }
 
 async function publishDeleteJob(jobId: string): Promise<void> {
@@ -679,15 +823,12 @@ export async function markJobRetryable(jobId: string, error: unknown): Promise<v
   console.error(`[CourseDelete] Job ${jobId} reached terminal failure after retry budget was exhausted`);
 }
 
-async function deleteAssetsAndFilesByPaths(
-  tenantId: string,
-  courseId: string,
+async function registerDeletedBlockAssetManifest(
+  job: DeleteJobRow,
   rawPaths: string[],
-  deleteStorage = true,
 ): Promise<Partial<PurgeStats>> {
   const paths = [...new Set(rawPaths)];
   let assetsDeleted = 0;
-  let storageDeleteRequested = 0;
 
   for (let i = 0; i < paths.length; i += ASSET_BATCH_SIZE) {
     const batch = paths.slice(i, i + ASSET_BATCH_SIZE);
@@ -697,35 +838,33 @@ async function deleteAssetsAndFilesByPaths(
        WHERE tenant_id = $1
          AND course_id = $2
          AND (storage_path = ANY($3::text[]) OR url = ANY($3::text[]))`,
-      [tenantId, courseId, batch],
+      [job.tenant_id, job.course_id, batch],
     );
 
-    const deletePaths = new Set<string>(batch);
+    const manifestPaths = new Set<string>(batch);
     for (const row of assetResult.rows) {
-      const storagePath = normalizeTenantCourseStoragePath(row.storage_path, tenantId);
-      if (storagePath) deletePaths.add(storagePath);
-      const urlPath = normalizeTenantCourseStoragePath(row.url, tenantId);
-      if (urlPath) deletePaths.add(urlPath);
+      const storagePath = normalizeTenantCourseStoragePath(row.storage_path, job.tenant_id);
+      if (storagePath) manifestPaths.add(storagePath);
+      const urlPath = normalizeTenantCourseStoragePath(row.url, job.tenant_id);
+      if (urlPath) manifestPaths.add(urlPath);
     }
 
-    if (deleteStorage && deletePaths.size > 0) {
-      await deleteFiles([...deletePaths]);
-      storageDeleteRequested += deletePaths.size;
-    }
+    // The manifest write and DB reference deletion are in the same transaction
+    // as the block deletion. Storage is drained only after that transaction
+    // commits, so no committed row can point at an already-deleted object.
+    await registerStorageManifestPaths('course', job.id, job.tenant_id, [...manifestPaths]);
 
-    // External storage is deleted first. If the process dies here, a retry
-    // repeats a safe remove; deleting this row first would orphan the object.
     const deleted = await query(
       `DELETE FROM course_assets
        WHERE tenant_id = $1
          AND course_id = $2
          AND (storage_path = ANY($3::text[]) OR url = ANY($3::text[]))`,
-      [tenantId, courseId, batch],
+      [job.tenant_id, job.course_id, batch],
     );
     assetsDeleted += deleted.rowCount || 0;
   }
 
-  return { assetsDeleted, storageDeleteRequested };
+  return { assetsDeleted };
 }
 
 async function deleteAllCourseAssets(tenantId: string, courseId: string): Promise<Partial<PurgeStats>> {
@@ -769,55 +908,61 @@ async function deleteAllCourseBlocks(courseId: string): Promise<Partial<PurgeSta
 }
 
 async function deleteLeafBlocksByRoot(
-  tenantId: string,
-  courseId: string,
-  rootBlockId: string,
+  job: DeleteJobRow,
 ): Promise<Partial<PurgeStats>> {
   const stats = emptyStats();
-  const courseAssetPaths = await getCourseAssetPathSet(tenantId, courseId);
+  if (!job.root_block_id) return stats;
+  const courseAssetPaths = await getCourseAssetPathSet(job.tenant_id, job.course_id);
 
   while (true) {
-    const result = await query<BlockPayloadRow>(
-      `WITH RECURSIVE subtree AS (
-         SELECT id FROM course_blocks WHERE id = $1
-         UNION ALL
-         SELECT child.id
-         FROM course_blocks child
-         JOIN subtree s ON child.parent_id = s.id
-       ),
-       doomed AS (
-         SELECT b.id
-         FROM course_blocks b
-         JOIN subtree s ON s.id = b.id
-         WHERE NOT EXISTS (
-           SELECT 1 FROM course_blocks child WHERE child.parent_id = b.id
+    const batch = await withDatabaseTransaction(async () => {
+      const result = await query<BlockPayloadRow>(
+        `WITH RECURSIVE subtree AS (
+           SELECT id FROM course_blocks WHERE id = $1 AND course_id = $2
+           UNION ALL
+           SELECT child.id
+           FROM course_blocks child
+           JOIN subtree s ON child.parent_id = s.id
+           WHERE child.course_id = $2
+         ),
+         doomed AS (
+           SELECT b.id
+           FROM course_blocks b
+           JOIN subtree s ON s.id = b.id
+           WHERE NOT EXISTS (
+             SELECT 1 FROM course_blocks child WHERE child.parent_id = b.id
+           )
+           LIMIT $3
          )
-         LIMIT $2
-       )
-       DELETE FROM course_blocks b
-       USING doomed
-       WHERE b.id = doomed.id
-       RETURNING b.id, b.data, b.metadata, b.published_data, b.published_metadata`,
-      [rootBlockId, DELETE_BATCH_SIZE],
-    );
-    if (result.rowCount === 0) break;
+         DELETE FROM course_blocks b
+         USING doomed
+         WHERE b.id = doomed.id
+         RETURNING b.id, b.data, b.metadata, b.published_data, b.published_metadata`,
+        [job.root_block_id, job.course_id, DELETE_BATCH_SIZE],
+      );
+      if (result.rowCount === 0) return null;
 
-    stats.blocksDeleted += result.rowCount || 0;
-    const blockIds = result.rows.map((row) => row.id);
-    const paths = collectPathsFromBlocks(result.rows, tenantId, courseId, courseAssetPaths);
-    addStats(stats, await deleteAssetsAndFilesByPaths(tenantId, courseId, paths));
-
-    const sectionConfigDeleted = await query(
-      `DELETE FROM section_modal_configs
-       WHERE course_id = $1 AND section_id = ANY($2::text[])`,
-      [courseId, blockIds],
-    );
-    const sectionShownDeleted = await query(
-      `DELETE FROM section_modal_shown
-       WHERE course_id = $1 AND section_id = ANY($2::text[])`,
-      [courseId, blockIds],
-    );
-    stats.linkedRowsDeleted += (sectionConfigDeleted.rowCount || 0) + (sectionShownDeleted.rowCount || 0);
+      const blockIds = result.rows.map((row) => row.id);
+      const paths = collectPathsFromBlocks(result.rows, job.tenant_id, job.course_id, courseAssetPaths);
+      const assetStats = await registerDeletedBlockAssetManifest(job, paths);
+      const sectionConfigDeleted = await query(
+        `DELETE FROM section_modal_configs
+         WHERE course_id = $1 AND section_id = ANY($2::text[])`,
+        [job.course_id, blockIds],
+      );
+      const sectionShownDeleted = await query(
+        `DELETE FROM section_modal_shown
+         WHERE course_id = $1 AND section_id = ANY($2::text[])`,
+        [job.course_id, blockIds],
+      );
+      return {
+        blocksDeleted: result.rowCount || 0,
+        linkedRowsDeleted: (sectionConfigDeleted.rowCount || 0) + (sectionShownDeleted.rowCount || 0),
+        ...assetStats,
+      };
+    });
+    if (!batch) break;
+    addStats(stats, batch);
   }
 
   return stats;
@@ -1031,7 +1176,7 @@ async function purgeBlock(job: DeleteJobRow): Promise<PurgeStats> {
     [job.root_block_id],
   );
 
-  addStats(stats, await deleteLeafBlocksByRoot(job.tenant_id, job.course_id, job.root_block_id));
+  addStats(stats, await deleteLeafBlocksByRoot(job));
   return stats;
 }
 
@@ -1052,14 +1197,22 @@ export async function runDeletionJob(jobId: string): Promise<void> {
   try {
     let stats: PurgeStats;
     if (job.target_type === 'course') {
-      const privateStorageDeleteRequested = await deleteLessonAuthorPrivateArtifactsForCourse(job);
-      await ensureCourseStorageManifest(job);
-      const storageDeleteRequested = await deleteStorageManifest('course', job.id);
-      await touchJobLease(job.id);
+      const existingWarnings = await getRetainedStorageReferenceWarnings(job.id);
+      const discoveredWarnings = await ensureCourseStorageManifest(job);
+      const warnings = mergeRetainedStorageReferenceWarnings(existingWarnings, discoveredWarnings);
+      await persistRetainedStorageReferenceWarnings(job, warnings);
+
+      // All database references are removed first. The durable manifest stays
+      // intact across a storage failure, so a retry can safely re-run the
+      // idempotent object removal after the database transaction has committed.
       stats = await purgeCourse(job);
-      stats.storageDeleteRequested += storageDeleteRequested + privateStorageDeleteRequested;
+      stats.warnings = warnings;
+      await touchJobLease(job.id);
+      stats.storageDeleteRequested += await deleteStorageManifest('course', job.id);
     } else {
       stats = await purgeBlock(job);
+      await touchJobLease(job.id);
+      stats.storageDeleteRequested += await deleteStorageManifest('course', job.id);
     }
 
     await markJobSucceeded(job.id, stats);

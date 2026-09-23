@@ -9,6 +9,7 @@ import {
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { classifyCourseMentorLogoOwnership } from './course-mentor-logo-ownership.logic.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 import { getTenantRoleLabels, type RoleLabelMap } from '../tenants/tenant-role-labels.service.js';
@@ -764,7 +765,19 @@ export async function uploadCourseMentorSectionLogo(
   }
 
   if (oldPath && oldPath !== storagePath) {
-    await deleteFile(oldPath).catch(() => {});
+    const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
+    if (ownership.kind === 'course-owned') {
+      await deleteFile(ownership.storagePath).catch(() => {});
+    } else if (ownership.kind === 'unknown') {
+      console.warn('[CourseMentorLogo] storage_reference_retained', {
+        event: 'course_mentor_logo.storage_reference_retained',
+        operation: 'replace',
+        tenant_id: tenantId,
+        course_id: courseId,
+        reason: ownership.reason,
+        storage_path: ownership.storagePath,
+      });
+    }
   }
 
   await invalidateCourseReadCaches(courseId, tenantId);
@@ -813,7 +826,19 @@ export async function deleteCourseMentorSectionLogo(
   }
 
   if (oldPath) {
-    await deleteFile(oldPath).catch(() => {});
+    const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
+    if (ownership.kind === 'course-owned') {
+      await deleteFile(ownership.storagePath).catch(() => {});
+    } else if (ownership.kind === 'unknown') {
+      console.warn('[CourseMentorLogo] storage_reference_retained', {
+        event: 'course_mentor_logo.storage_reference_retained',
+        operation: 'clear',
+        tenant_id: tenantId,
+        course_id: courseId,
+        reason: ownership.reason,
+        storage_path: ownership.storagePath,
+      });
+    }
   }
 
   await invalidateCourseReadCaches(courseId, tenantId);

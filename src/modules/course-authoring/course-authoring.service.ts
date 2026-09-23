@@ -24,6 +24,7 @@ import {
   isLessonAuthorMediaProtectedBlock,
   orderLessonAuthorComponents,
 } from './lesson-author-components.logic.js';
+import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/lesson-author-component-registry.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
 import { getDefaultProblemXml, type CourseComponentLocale } from './course-authoring-problem-defaults.logic.js';
 import {
@@ -142,6 +143,10 @@ export interface LessonAuthorComponentPlan {
   source_fact_ids?: string[];
   purpose?: 'explain' | 'assess' | 'clarify' | 'sequence' | 'relationship' | 'terminology';
   content_requirements?: string[];
+  /** Phase 2 stable planner diagnostic; never model chain-of-thought. */
+  reason_code?: string;
+  /** Semantic learning-block IDs that the deterministic planner mapped here. */
+  learning_block_ids?: string[];
   required_artifacts?: Array<{
     type: 'ordered_list' | 'checklist' | 'table' | 'warning' | 'requirement' | 'exception' | 'comparison';
     minimum_items?: number;
@@ -1251,6 +1256,25 @@ export async function getUnitChildren(unitId: string, tenantId?: string | null):
 
 // ── Studio Submit (custom XBlock data) ──
 
+function normalizeCrosswordData(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+
+  const crossword = raw as Record<string, unknown>;
+  if (!Array.isArray(crossword.words)) return crossword;
+
+  return {
+    ...crossword,
+    words: crossword.words.map((rawWord) => {
+      if (!rawWord || typeof rawWord !== 'object' || Array.isArray(rawWord)) return rawWord;
+
+      const word = rawWord as Record<string, unknown>;
+      const answer = typeof word.answer === 'string' ? word.answer : '';
+      // `length` is redundant display data; never let it diverge from answer.
+      return answer.length > 0 ? { ...word, length: answer.length } : word;
+    }),
+  };
+}
+
 export async function studioSubmit(
   blockId: string,
   submitData: any,
@@ -1271,12 +1295,16 @@ export async function studioSubmit(
       // FE gửi crossword_data dạng JSON string
       const crosswordRaw = restData.crossword_data;
       const crosswordParsed = typeof crosswordRaw === 'string' ? safeJsonParse(crosswordRaw) : crosswordRaw;
+      const crosswordData = normalizeCrosswordData(crosswordParsed ?? crosswordRaw);
+      const normalizedCrosswordRaw = typeof crosswordRaw === 'string' && crosswordParsed
+        ? JSON.stringify(crosswordData)
+        : crosswordData;
       const cwMediaPayload: any = {};
       if (restData.problem_media) cwMediaPayload.problem_media = restData.problem_media;
       else if ('problem_media' in restData) delete block.metadata?.problem_media;
       updatePayload = {
-        metadata: { ...block.metadata, crossword_data: crosswordParsed || crosswordRaw, ...cwMediaPayload },
-        data: restData,
+        metadata: { ...block.metadata, crossword_data: crosswordData, ...cwMediaPayload },
+        data: { ...restData, crossword_data: normalizedCrosswordRaw },
       };
       break;
     }
@@ -2587,6 +2615,10 @@ export async function applyLessonAuthorProposalToCourse(
       job_id: input.jobId ?? null,
       allowed_component_types: allowedComponentTypes.size,
     });
+    // Revalidate the persisted proposal inside the same transaction that will
+    // mutate course_blocks. This preserves the proposal/Apply boundary even if
+    // tenant component settings changed after review.
+    assertLessonAuthorProposalComponentsValid(input.proposal, allowedComponentTypes);
     const baseMetadata = {
       generated_by: 'lesson_author_ai',
       job_id: input.jobId ?? null,

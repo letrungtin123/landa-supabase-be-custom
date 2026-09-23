@@ -51,7 +51,7 @@ export interface LessonAuthorIntentPlan {
   fields: Array<'title' | 'content' | 'components' | 'sort_order'>;
   confidence: number;
   requires_confirmation: boolean;
-  target_source: 'mention' | 'explicit_reference' | 'conversation_context' | 'none';
+  target_source: 'mention' | 'editor_context' | 'explicit_reference' | 'conversation_context' | 'none';
   signals: string[];
   ambiguity_reasons: string[];
 }
@@ -198,7 +198,7 @@ export function classifyLessonAuthorIntent(input: {
   mode?: 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto';
   mention?: LessonAuthorIntentMention | null;
   carriedTarget?: boolean;
-  mentionSource?: 'current' | 'carried_forward';
+  mentionSource?: 'current' | 'editor_context' | 'carried_forward';
 }): LessonAuthorIntentPlan {
   const text = fold(input.message);
   const mentionTarget = targetTypeFromMention(input.mention);
@@ -207,7 +207,11 @@ export function classifyLessonAuthorIntent(input: {
   const targetType = mentionTarget ?? (hasExplicitTarget ? inferTargetType(text) : null);
   const hasSpecificOutlineTarget = Boolean(targetType && targetType !== 'course');
   const targetSource = hasMention
-    ? input.mentionSource === 'carried_forward' ? 'conversation_context' : 'mention'
+    ? input.mentionSource === 'carried_forward'
+      ? 'conversation_context'
+      : input.mentionSource === 'editor_context'
+        ? 'editor_context'
+        : 'mention'
     : hasExplicitTarget
       ? 'explicit_reference'
       : input.carriedTarget
