@@ -10,6 +10,7 @@ import {
   normalizeSemanticLearningBlocks,
   planSemanticLearningBlocks,
   renderSemanticLearningHtml,
+  validateSemanticLearningHtmlPayload,
   type SemanticLearningBlock,
 } from './lesson-author-component-registry.logic.js';
 
@@ -141,6 +142,29 @@ test('semantic explanatory content is deterministically rendered and safely esca
   assert.match(html ?? '', /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(html ?? '', /<script/i);
   assert.doesNotThrow(() => assertAiGeneratedComponentValid(htmlComponent(html ?? ''), allAllowed));
+});
+
+test('semantic explanatory content rejects oversize payloads before render can lose evidence', () => {
+  const oversizedSteps = Array.from({ length: 21 }, (_value, index) => `Bước ${index + 1}`);
+  assert.match(
+    validateSemanticLearningHtmlPayload({ ordered_steps: oversizedSteps }) ?? '',
+    /exceeds the 20-item render limit/,
+  );
+  assert.throws(
+    () => renderSemanticLearningHtml({ comparison_rows: [{ label: 'L'.repeat(501), value: 'Giá trị' }] }),
+    /not lossless/,
+  );
+});
+
+test('semantic explanatory content rejects unknown or empty fields with no renderable text', () => {
+  assert.match(
+    validateSemanticLearningHtmlPayload({ source_fact_ids: ['fact-1'] }) ?? '',
+    /no renderer-visible text/,
+  );
+  assert.throws(
+    () => renderSemanticLearningHtml({ paragraphs: [], comparison_rows: [] }),
+    /not lossless/,
+  );
 });
 
 function htmlComponent(data = '<p>Nội dung hợp lệ.</p>'): LessonAuthorComponentProposal {

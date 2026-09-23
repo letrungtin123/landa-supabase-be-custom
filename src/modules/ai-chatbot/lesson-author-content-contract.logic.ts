@@ -28,6 +28,8 @@ export interface LessonAuthorContentContractPlan {
   rationale?: string;
   purpose?: LessonAuthorInstructionalPurpose;
   source_fact_ids?: string[];
+  /** Read-only grounding for V5 reinforcement; never canonical ownership. */
+  supporting_evidence_fact_ids?: string[];
   content_requirements?: string[];
   reason_code?: string;
   learning_block_ids?: string[];
@@ -36,6 +38,8 @@ export interface LessonAuthorContentContractPlan {
 
 export interface LessonAuthorContentContractUnit {
   source_fact_ids?: string[];
+  /** Facts resolved from approved supporting evidence scopes, never owned here. */
+  supporting_evidence_fact_ids?: string[];
   component_plan?: LessonAuthorContentContractPlan[];
 }
 
@@ -43,6 +47,7 @@ export interface LessonAuthorGeneratedComponentContract {
   type: LessonAuthorComponentType;
   source_fact_ids?: string[];
   covered_source_fact_ids?: string[];
+  supporting_evidence_fact_ids?: string[];
   html?: string;
   data?: unknown;
 }
@@ -165,9 +170,26 @@ export function validateLessonAuthorContentContractUnit(
   unit: LessonAuthorContentContractUnit,
 ): string | null {
   const unitFactIds = uniqueFactIds(unit.source_fact_ids);
+  const supportingEvidenceFactIds = uniqueFactIds(unit.supporting_evidence_fact_ids);
   const plan = Array.isArray(unit.component_plan) ? unit.component_plan : [];
-  if (unitFactIds.length === 0) return 'Unit must declare at least one source_fact_id for the Phase-1 content contract.';
+  if (unitFactIds.length === 0 && supportingEvidenceFactIds.length === 0) {
+    return 'Unit must declare canonical source facts or resolved read-only supporting evidence.';
+  }
   if (plan.length === 0) return 'Unit must contain a component plan for the Phase-1 content contract.';
+
+  if (unitFactIds.length === 0) {
+    const knownSupportingFacts = new Set(supportingEvidenceFactIds);
+    for (const component of plan) {
+      if (uniqueFactIds(component.source_fact_ids).length > 0) {
+        return `Supporting-only component ${component.type} must not claim canonical source fact ownership.`;
+      }
+      const evidenceIds = uniqueFactIds(component.supporting_evidence_fact_ids);
+      if (evidenceIds.length === 0) return `Supporting-only component ${component.type} needs resolved supporting evidence.`;
+      const invalid = evidenceIds.filter(factId => !knownSupportingFacts.has(factId));
+      if (invalid.length > 0) return `Supporting-only component ${component.type} references evidence outside its approved support scope.`;
+    }
+    return null;
+  }
 
   const knownFactIds = new Set(unitFactIds);
   const ownedFactIds = new Set<string>();
@@ -274,6 +296,7 @@ export function validateLessonAuthorGeneratedUnitCoverage(
   const plan = Array.isArray(unit.component_plan) ? unit.component_plan : [];
   if (components.length !== plan.length) return 'Generated component count does not match the approved Blueprint plan.';
   const unitFactIds = new Set(uniqueFactIds(unit.source_fact_ids));
+  const unitSupportingEvidenceFactIds = new Set(uniqueFactIds(unit.supporting_evidence_fact_ids));
   const coveredFactIds = new Set<string>();
 
   for (const [index, component] of components.entries()) {
@@ -284,8 +307,24 @@ export function validateLessonAuthorGeneratedUnitCoverage(
     if (expectedOwnerIds.size !== declaredOwnerIds.size || [...expectedOwnerIds].some(id => !declaredOwnerIds.has(id))) {
       return `Generated component ${index + 1} does not match its Blueprint source fact ownership.`;
     }
+    const expectedSupportingEvidenceIds = new Set(uniqueFactIds(expected.supporting_evidence_fact_ids));
+    const declaredSupportingEvidenceIds = new Set(uniqueFactIds(component.supporting_evidence_fact_ids));
+    if (expectedSupportingEvidenceIds.size !== declaredSupportingEvidenceIds.size
+      || [...expectedSupportingEvidenceIds].some(id => !declaredSupportingEvidenceIds.has(id))) {
+      return `Generated component ${index + 1} does not match its approved supporting evidence.`;
+    }
+    const invalidSupportingEvidence = [...declaredSupportingEvidenceIds]
+      .filter(id => !unitSupportingEvidenceFactIds.has(id));
+    if (invalidSupportingEvidence.length > 0) {
+      return `Generated component ${index + 1} references supporting evidence outside its unit.`;
+    }
+    if (unitFactIds.size === 0 && declaredSupportingEvidenceIds.size === 0) {
+      return `Generated supporting-only component ${index + 1} must declare read-only supporting evidence.`;
+    }
     const declaredCoverage = new Set(uniqueFactIds(component.covered_source_fact_ids));
-    if (declaredCoverage.size === 0) return `Generated component ${index + 1} must declare covered_source_fact_ids.`;
+    if (unitFactIds.size === 0) {
+      if (declaredCoverage.size > 0) return `Generated supporting-only component ${index + 1} must not claim canonical source coverage.`;
+    } else if (declaredCoverage.size === 0) return `Generated component ${index + 1} must declare covered_source_fact_ids.`;
     const invalidCoverage = [...declaredCoverage].filter(id => !unitFactIds.has(id));
     if (invalidCoverage.length > 0) return `Generated component ${index + 1} covers source facts outside its unit.`;
     const missingOwnedCoverage = [...expectedOwnerIds].filter(id => !declaredCoverage.has(id));

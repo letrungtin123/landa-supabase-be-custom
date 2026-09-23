@@ -611,13 +611,88 @@ function escapeHtmlText(value: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
-function semanticTextValues(value: unknown, maxItems: number, maxLength: number): string[] {
+export const SEMANTIC_LEARNING_HTML_LIMITS = {
+  heading: 240,
+  paragraphs: { items: 12, characters: 2_000 },
+  bullet_points: { items: 20, characters: 800 },
+  ordered_steps: { items: 20, characters: 1_000 },
+  warnings: { items: 8, characters: 1_000 },
+  comparison_rows: { items: 30, labelCharacters: 500, valueCharacters: 1_000 },
+} as const;
+
+function semanticTextValues(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is string => typeof item === 'string')
-    .map(item => item.trim().slice(0, maxLength))
-    .filter(Boolean)
-    .slice(0, maxItems);
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function validateSemanticTextValues(
+  value: unknown,
+  label: keyof Pick<typeof SEMANTIC_LEARNING_HTML_LIMITS, 'paragraphs' | 'bullet_points' | 'ordered_steps' | 'warnings'>,
+): string | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) return `Semantic ${label} must be an array.`;
+  const limit = SEMANTIC_LEARNING_HTML_LIMITS[label];
+  if (value.length > limit.items) return `Semantic ${label} exceeds the ${limit.items}-item render limit.`;
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) return `Semantic ${label} contains an empty text value.`;
+    if (item.trim().length > limit.characters) return `Semantic ${label} contains text exceeding the ${limit.characters}-character render limit.`;
+  }
+  return null;
+}
+
+/**
+ * Reject semantic content that the deterministic renderer cannot preserve.
+ * This is intentionally a validation boundary, rather than a truncating
+ * presentation helper: generated content must never claim source coverage
+ * after rows, steps, or text have been silently discarded.
+ */
+export function validateSemanticLearningHtmlPayload(value: unknown): string | null {
+  const content = asRecord(value);
+  if (Object.keys(content).length === 0) return 'Semantic content must be a non-empty object.';
+  let hasRenderableText = false;
+  if (content.heading !== undefined) {
+    if (typeof content.heading !== 'string' || !content.heading.trim()) return 'Semantic heading must be non-empty text.';
+    if (content.heading.trim().length > SEMANTIC_LEARNING_HTML_LIMITS.heading) {
+      return `Semantic heading exceeds the ${SEMANTIC_LEARNING_HTML_LIMITS.heading}-character render limit.`;
+    }
+    hasRenderableText = true;
+  }
+  const semanticFields: Array<[
+    keyof Pick<typeof SEMANTIC_LEARNING_HTML_LIMITS, 'paragraphs' | 'bullet_points' | 'ordered_steps' | 'warnings'>,
+    unknown,
+  ]> = [
+    ['paragraphs', content.paragraphs],
+    ['bullet_points', content.bullet_points ?? content.bullets],
+    ['ordered_steps', content.ordered_steps ?? content.steps],
+    ['warnings', content.warnings ?? content.warning],
+  ];
+  for (const [label, fieldValue] of semanticFields) {
+    const failure = validateSemanticTextValues(fieldValue, label);
+    if (failure) return failure;
+    if (Array.isArray(fieldValue) && fieldValue.length > 0) hasRenderableText = true;
+  }
+  const rows = content.comparison_rows ?? content.table_rows;
+  if (rows !== undefined && rows !== null) {
+    if (!Array.isArray(rows)) return 'Semantic comparison_rows must be an array.';
+    if (rows.length > SEMANTIC_LEARNING_HTML_LIMITS.comparison_rows.items) {
+      return `Semantic comparison_rows exceeds the ${SEMANTIC_LEARNING_HTML_LIMITS.comparison_rows.items}-row render limit.`;
+    }
+    for (const rowValue of rows) {
+      const row = asRecord(rowValue);
+      const label = typeof row.label === 'string' ? row.label.trim() : '';
+      const rowValueText = typeof row.value === 'string' ? row.value.trim() : '';
+      if (!label || !rowValueText) return 'Semantic comparison_rows contains an incomplete row.';
+      if (label.length > SEMANTIC_LEARNING_HTML_LIMITS.comparison_rows.labelCharacters
+        || rowValueText.length > SEMANTIC_LEARNING_HTML_LIMITS.comparison_rows.valueCharacters) {
+        return 'Semantic comparison_rows contains text exceeding the render limit.';
+      }
+    }
+    if (rows.length > 0) hasRenderableText = true;
+  }
+  return hasRenderableText ? null : 'Semantic content has no renderer-visible text.';
 }
 
 /**
@@ -628,18 +703,20 @@ function semanticTextValues(value: unknown, maxItems: number, maxLength: number)
 export function renderSemanticLearningHtml(value: unknown): string | null {
   const content = asRecord(value);
   if (Object.keys(content).length === 0) return null;
-  const heading = typeof content.heading === 'string' ? content.heading.trim().slice(0, 240) : '';
-  const paragraphs = semanticTextValues(content.paragraphs, 12, 2_000);
-  const bullets = semanticTextValues(content.bullet_points ?? content.bullets, 20, 800);
-  const orderedSteps = semanticTextValues(content.ordered_steps ?? content.steps, 20, 1_000);
-  const warnings = semanticTextValues(content.warnings ?? content.warning, 8, 1_000);
+  const preservationFailure = validateSemanticLearningHtmlPayload(content);
+  if (preservationFailure) throw new Error(`Semantic learning content is not lossless: ${preservationFailure}`);
+  const heading = typeof content.heading === 'string' ? content.heading.trim() : '';
+  const paragraphs = semanticTextValues(content.paragraphs);
+  const bullets = semanticTextValues(content.bullet_points ?? content.bullets);
+  const orderedSteps = semanticTextValues(content.ordered_steps ?? content.steps);
+  const warnings = semanticTextValues(content.warnings ?? content.warning);
   const rows = Array.isArray(content.comparison_rows ?? content.table_rows)
     ? (content.comparison_rows ?? content.table_rows) as unknown[]
     : [];
-  const tableRows = rows.slice(0, 30).flatMap(rowValue => {
+  const tableRows = rows.flatMap(rowValue => {
     const row = asRecord(rowValue);
-    const left = typeof row.label === 'string' ? row.label.trim().slice(0, 500) : '';
-    const right = typeof row.value === 'string' ? row.value.trim().slice(0, 1_000) : '';
+    const left = typeof row.label === 'string' ? row.label.trim() : '';
+    const right = typeof row.value === 'string' ? row.value.trim() : '';
     return left && right ? [`<tr><th>${escapeHtmlText(left)}</th><td>${escapeHtmlText(right)}</td></tr>`] : [];
   });
   const output = [

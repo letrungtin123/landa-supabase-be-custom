@@ -82,6 +82,10 @@ import {
 import { getLessonAuthorBlueprintReviewNotes } from './lesson-author-blueprint-quality.logic.js';
 import { getNextBlueprintChapterIndex } from './lesson-author-blueprint-sequencing.logic.js';
 import {
+  normalizeLessonAuthorMediaReview as normalizeMediaReviewArtifact,
+  type LessonAuthorBlueprintMediaReview,
+} from './lesson-author-media-review.logic.js';
+import {
   completeLessonAuthorContentContract,
   sanitizeLessonAuthorHtml,
   shouldUseBoundedLessonAuthorGeneration,
@@ -1785,6 +1789,8 @@ export interface LessonAuthorBlueprintComponentPlan {
   rationale: string;
   purpose?: LessonAuthorContentContractPlan['purpose'];
   source_fact_ids?: string[];
+  /** Read-only evidence for a V5 supporting/reinforcement treatment. */
+  supporting_evidence_fact_ids?: string[];
   content_requirements?: string[];
   reason_code?: string;
   learning_block_ids?: string[];
@@ -1809,6 +1815,8 @@ export interface LessonAuthorBlueprintUnit {
   learning_objective_refs?: string[];
   source_refs?: string[];
   source_fact_ids?: string[];
+  /** Resolved from approved supporting evidence scopes; not canonical ownership. */
+  supporting_evidence_fact_ids?: string[];
   /** Phase 2 intermediate representation; persisted in existing blueprint JSON. */
   learning_blocks?: SemanticLearningBlock[];
   media_plan?: LessonAuthorBlueprintMediaPlan;
@@ -1855,6 +1863,7 @@ export interface LessonAuthorBlueprint {
   source_map?: LessonAuthorSourceMap;
   source_fact_allocation?: LessonAuthorSourceFactAllocation;
   source_evidence_scope_allocation?: LessonAuthorSourceEvidenceScopeAllocation;
+  media_review?: LessonAuthorBlueprintMediaReview;
 }
 
 /** Server-generated provenance allocation; it never contains model reasoning. */
@@ -3634,6 +3643,7 @@ function normalizeLessonAuthorComponentPlan(value: unknown): LessonAuthorCompone
     const title = readString(item.title ?? item.label ?? item.name, '', 180);
     const rationale = readString(item.rationale ?? item.selection_rationale, '', 600);
     const sourceFactIds = readServerOwnedSourceFactIds(item.source_fact_ids);
+    const supportingEvidenceFactIds = readServerOwnedSourceFactIds(item.supporting_evidence_fact_ids);
     const purpose = readString(item.purpose ?? item.instructional_purpose, '', 32).toLowerCase();
     const contentRequirements = readStringArray(item.content_requirements, 8, 500);
     const reasonCode = readString(item.reason_code ?? item.reasonCode, '', 80);
@@ -3657,6 +3667,7 @@ function normalizeLessonAuthorComponentPlan(value: unknown): LessonAuthorCompone
       ...(title ? { title } : {}),
       ...(rationale ? { rationale } : {}),
       ...(sourceFactIds.length > 0 ? { source_fact_ids: sourceFactIds } : {}),
+      ...(supportingEvidenceFactIds.length > 0 ? { supporting_evidence_fact_ids: supportingEvidenceFactIds } : {}),
       ...(purpose ? { purpose: purpose as NonNullable<LessonAuthorComponentPlan['purpose']> } : {}),
       ...(contentRequirements.length > 0 ? { content_requirements: contentRequirements } : {}),
       ...(reasonCode ? { reason_code: reasonCode } : {}),
@@ -3683,9 +3694,13 @@ function getLessonAuthorComponentProvenance(component: Record<string, unknown>):
   const coveredSourceFactIds = readServerOwnedSourceFactIds(
     component.covered_source_fact_ids ?? nestedMetadata.covered_source_fact_ids,
   );
+  const supportingEvidenceFactIds = readServerOwnedSourceFactIds(
+    component.supporting_evidence_fact_ids ?? nestedMetadata.supporting_evidence_fact_ids,
+  );
   return {
     ...(sourceFactIds.length > 0 ? { source_fact_ids: sourceFactIds } : {}),
     ...(coveredSourceFactIds.length > 0 ? { covered_source_fact_ids: coveredSourceFactIds } : {}),
+    ...(supportingEvidenceFactIds.length > 0 ? { supporting_evidence_fact_ids: supportingEvidenceFactIds } : {}),
     ...(rationale ? { component_selection_rationale: rationale } : {}),
   };
 }
@@ -4711,6 +4726,24 @@ function isV4SupportingFactlessUnit(
     && blocks.every(block => (block.primary_concept_ids?.length ?? 0) === 0);
 }
 
+function resolveV5SupportingEvidenceFactIds(
+  blueprint: LessonAuthorBlueprint,
+  unit: Pick<LessonAuthorBlueprintUnit, 'supporting_evidence_scope_ids' | 'learning_blocks'>,
+): string[] {
+  const allocation = blueprint.source_fact_allocation;
+  if (blueprint.architecture_contract_version !== 5 || allocation?.version !== 'source-fact-allocation-v3') return [];
+  const supportingScopeIds = new Set([
+    ...(unit.supporting_evidence_scope_ids ?? []),
+    ...(unit.learning_blocks ?? []).flatMap(block => block.supporting_evidence_scope_ids ?? []),
+  ]);
+  if (supportingScopeIds.size === 0) return [];
+  return Array.from(new Set(
+    allocation.allocations
+      .filter(item => supportingScopeIds.has(item.evidence_scope_id))
+      .map(item => item.fact_id),
+  ));
+}
+
 function normalizeLessonAuthorSourceFactAllocation(value: unknown): LessonAuthorSourceFactAllocation | null {
   const raw = asRecord(value);
   const requiredCount = raw.required_count;
@@ -4825,6 +4858,22 @@ function normalizeLessonAuthorSourceEvidenceScopeAllocation(value: unknown): Les
     required_count: raw.required_count, allocated_count: raw.allocated_count, complete: raw.complete, allocations, unallocated };
 }
 
+function normalizeLessonAuthorMediaReview(
+  value: unknown,
+  chapters: readonly LessonAuthorBlueprintChapter[],
+): LessonAuthorBlueprintMediaReview | null {
+  const placements: Array<{ unit_path: string; has_media_plan: boolean }> = [];
+  for (const [chapterIndex, chapter] of chapters.entries()) {
+    for (const [lessonIndex, lesson] of chapter.lessons.entries()) {
+      for (const [unitIndex, unit] of lesson.units.entries()) {
+        const path = `chapter_${chapterIndex + 1}.lesson_${lessonIndex + 1}.unit_${unitIndex + 1}`;
+        placements.push({ unit_path: path, has_media_plan: Boolean(unit.media_plan) });
+      }
+    }
+  }
+  return normalizeMediaReviewArtifact(value, placements);
+}
+
 function applySemanticLearningBlockPlanner(
   blueprint: LessonAuthorBlueprint,
   allowedComponentTypes?: ReadonlySet<CourseComponentType>,
@@ -4850,6 +4899,10 @@ function applySemanticLearningBlockPlanner(
             source_fact_ids: sourceFactIds,
             metadata: { adapter: 'empty_legacy_component_plan' },
           }];
+        const supportingEvidenceFactIds = resolveV5SupportingEvidenceFactIds(blueprint, {
+          supporting_evidence_scope_ids: unit.supporting_evidence_scope_ids,
+          learning_blocks: blocks,
+        });
         // A v4 supporting/reinforcement unit deliberately owns no canonical
         // fact. Do not turn it into a source-claiming component merely to
         // satisfy a legacy content-plan shape.
@@ -4857,7 +4910,26 @@ function applySemanticLearningBlockPlanner(
           ...unit,
           learning_blocks: blocks,
         })) {
-          return { ...unit, learning_blocks: blocks, component_plan: [] };
+          if (blueprint.architecture_contract_version !== 5 || supportingEvidenceFactIds.length === 0) {
+            return { ...unit, learning_blocks: blocks, component_plan: [] };
+          }
+          const supportingPlans = planSemanticLearningBlocks({
+            blocks,
+            unit_source_fact_ids: [],
+            allowed_component_types: allowedComponentTypes,
+          }).map((plan): LessonAuthorBlueprintComponentPlan => ({
+            ...plan,
+            title: readString(plan.title, componentTypeLabel(plan.type, 'vi'), 180),
+            rationale: readString(plan.rationale, `Học liệu củng cố mục tiêu của ${unit.title}.`, 240),
+            source_fact_ids: [],
+            supporting_evidence_fact_ids: supportingEvidenceFactIds,
+          }));
+          return {
+            ...unit,
+            learning_blocks: blocks,
+            supporting_evidence_fact_ids: supportingEvidenceFactIds,
+            component_plan: supportingPlans,
+          };
         }
         const planned = planSemanticLearningBlocks({
           blocks,
@@ -4890,10 +4962,20 @@ function applyPhaseOneContentContract(
       ...lesson,
       units: lesson.units.map(unit => {
         if (isV4SupportingFactlessUnit(plannedBlueprint.architecture_contract_version, unit)) {
-          return { ...unit, component_plan: [] };
+          if ((unit.supporting_evidence_fact_ids?.length ?? 0) === 0) {
+            return { ...unit, component_plan: [] };
+          }
+          const supportingFailure = validateLessonAuthorContentContractUnit({
+            source_fact_ids: [],
+            supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids,
+            component_plan: unit.component_plan,
+          });
+          if (supportingFailure) throw new Error(`Supporting Blueprint unit "${unit.title}" violates the content contract: ${supportingFailure}`);
+          return unit;
         }
         const componentPlan = completeLessonAuthorContentContract({
           source_fact_ids: unit.source_fact_ids,
+          supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids,
           component_plan: unit.component_plan,
         }).map((plan): LessonAuthorBlueprintComponentPlan => ({
           type: plan.type,
@@ -4901,6 +4983,7 @@ function applyPhaseOneContentContract(
           rationale: readString(plan.rationale, `Học liệu hỗ trợ mục tiêu của ${unit.title}.`, 240),
           purpose: plan.purpose,
           source_fact_ids: plan.source_fact_ids,
+          ...(plan.supporting_evidence_fact_ids?.length ? { supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids } : {}),
           content_requirements: plan.content_requirements,
           ...(plan.reason_code ? { reason_code: plan.reason_code } : {}),
           ...(plan.learning_block_ids?.length ? { learning_block_ids: plan.learning_block_ids } : {}),
@@ -4908,6 +4991,7 @@ function applyPhaseOneContentContract(
         }));
         const failure = validateLessonAuthorContentContractUnit({
           source_fact_ids: unit.source_fact_ids,
+          supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids,
           component_plan: componentPlan,
         });
         if (failure) throw new Error(`Blueprint unit "${unit.title}" violates the Phase-1 content contract: ${failure}`);
@@ -5144,6 +5228,7 @@ function normalizeLessonAuthorBlueprint(
     };
   });
 
+  const mediaReview = normalizeLessonAuthorMediaReview(raw.media_review, chapters);
   const learningOutcomes = readStringArray(raw.learning_outcomes, MAX_BLUEPRINT_LEARNING_OUTCOMES, 500);
   if (learningOutcomes.length === 0) {
     throw new Error('AI blueprint must contain measurable learning outcomes');
@@ -5184,6 +5269,7 @@ function normalizeLessonAuthorBlueprint(
     ...(normalizeLessonAuthorSourceMap(raw.source_map) ? { source_map: normalizeLessonAuthorSourceMap(raw.source_map)! } : {}),
     ...(sourceFactAllocation ? { source_fact_allocation: sourceFactAllocation } : {}),
     ...(sourceEvidenceScopeAllocation ? { source_evidence_scope_allocation: sourceEvidenceScopeAllocation } : {}),
+    ...(mediaReview ? { media_review: mediaReview } : {}),
   };
   return options.requirePhaseOneContract
     ? applyPhaseOneContentContract(normalized, options.allowedComponentTypes)
@@ -5206,7 +5292,9 @@ function buildLessonAuthorBlueprintQualityReport(
     chapter.lessons.every(lesson =>
       lesson.units.length > 0
       && lesson.units.every(unit => isV4SupportingFactlessUnit(blueprint.architecture_contract_version, unit)
-        || (unit.component_plan.length > 0 && unit.component_plan.some(plan => plan.type === 'html'))),
+        ? blueprint.architecture_contract_version !== 5
+          || (resolveV5SupportingEvidenceFactIds(blueprint, unit).length > 0 && unit.component_plan.length > 0)
+        : (unit.component_plan.length > 0 && unit.component_plan.some(plan => plan.type === 'html'))),
     ),
   );
   // RAG must prove that at least one source chunk was actually returned. A
@@ -6896,7 +6984,11 @@ function hasDraftableBlueprintArchitecture(blueprint: LessonAuthorBlueprint): bo
   return blueprint.chapters.every(chapter => chapter.lessons.every(lesson => (
     lesson.units.length > 0
     && lesson.units.every(unit => isV4SupportingFactlessUnit(blueprint.architecture_contract_version, unit)
-      || (unit.component_plan.length > 0
+      ? blueprint.architecture_contract_version !== 5
+        || (resolveV5SupportingEvidenceFactIds(blueprint, unit).length > 0
+          && unit.component_plan.length > 0
+          && unit.component_plan.some(plan => plan.type === 'html'))
+      : (unit.component_plan.length > 0
         && unit.component_plan.some(plan => plan.type === 'html')
         && (unit.source_fact_ids?.length ?? 0) > 0))
   )));
@@ -7103,6 +7195,7 @@ function formatBlueprintDraftContext(context: BlueprintDraftContext): string {
         learning_objective_refs: unit.learning_objective_refs ?? [],
         source_refs: unit.source_refs ?? [],
         source_fact_ids: unit.source_fact_ids ?? [],
+        supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids ?? [],
         learning_blocks: unit.learning_blocks ?? [],
         component_plan: unit.component_plan.map((plan) => ({
           type: plan.type,
@@ -7110,6 +7203,7 @@ function formatBlueprintDraftContext(context: BlueprintDraftContext): string {
           rationale: plan.rationale,
           purpose: plan.purpose,
           source_fact_ids: plan.source_fact_ids ?? [],
+          supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids ?? [],
           content_requirements: plan.content_requirements ?? [],
           reason_code: plan.reason_code,
           learning_block_ids: plan.learning_block_ids ?? [],
@@ -7171,6 +7265,7 @@ function blueprintDraftArchitecture(
         // Omitting them made RAG regroup the chapter facts and the backend
         // correctly rejected the resulting proposal as a source mismatch.
         source_fact_ids: unit.source_fact_ids ?? [],
+        supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids ?? [],
         learning_blocks: unit.learning_blocks ?? [],
         component_plan: unit.component_plan.map((plan) => ({
           type: plan.type,
@@ -7178,6 +7273,7 @@ function blueprintDraftArchitecture(
           rationale: plan.rationale,
           purpose: plan.purpose,
           source_fact_ids: plan.source_fact_ids ?? [],
+          supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids ?? [],
           content_requirements: plan.content_requirements ?? [],
           reason_code: plan.reason_code,
           learning_block_ids: plan.learning_block_ids ?? [],
@@ -7194,6 +7290,7 @@ function readGeneratedComponentContentContract(
   type: LessonAuthorComponentType;
   source_fact_ids: string[];
   covered_source_fact_ids: string[];
+  supporting_evidence_fact_ids: string[];
   html?: string;
   data?: unknown;
 } {
@@ -7202,6 +7299,7 @@ function readGeneratedComponentContentContract(
     type: component.type,
     source_fact_ids: readServerOwnedSourceFactIds(metadata.source_fact_ids),
     covered_source_fact_ids: readServerOwnedSourceFactIds(metadata.covered_source_fact_ids),
+    supporting_evidence_fact_ids: readServerOwnedSourceFactIds(metadata.supporting_evidence_fact_ids),
     ...(component.type === 'html' && typeof component.data === 'string' ? { html: component.data } : {}),
     data: component.data,
   };
@@ -7245,17 +7343,12 @@ function lockProposalToBlueprintChapter(
         expectedUnit,
       );
       if (supportingFactless) {
-        if (actualTypes.length !== 0 || (unit.source_fact_ids?.length ?? 0) !== 0) {
-          throw new Error(`Factless supporting Blueprint unit ${lessonIndex + 1}.${unitIndex + 1} must not generate source-claiming components.`);
+        if ((expectedUnit.supporting_evidence_fact_ids?.length ?? 0) === 0) {
+          throw new Error(`Supporting Blueprint unit ${lessonIndex + 1}.${unitIndex + 1} has no resolved read-only evidence.`);
         }
-        return {
-          ...unit,
-          title: expectedUnit.title,
-          source_refs: expectedUnit.source_refs?.length ? expectedUnit.source_refs : unit.source_refs,
-          source_fact_ids: [],
-          component_plan: [],
-          components: [],
-        };
+        if ((unit.source_fact_ids?.length ?? 0) !== 0) {
+          throw new Error(`Supporting Blueprint unit ${lessonIndex + 1}.${unitIndex + 1} must not claim canonical source facts.`);
+        }
       }
       if (
         actualTypes.length !== expectedTypes.length
@@ -7266,8 +7359,7 @@ function lockProposalToBlueprintChapter(
       const expectedFactIds = expectedUnit.source_fact_ids ?? [];
       const actualFactIds = unit.source_fact_ids ?? [];
       if (
-        expectedFactIds.length === 0
-        || expectedFactIds.length !== actualFactIds.length
+        expectedFactIds.length !== actualFactIds.length
         || expectedFactIds.some(factId => !actualFactIds.includes(factId))
       ) {
         throw new Error(`Detailed proposal does not match the approved source coverage for Blueprint unit ${lessonIndex + 1}.${unitIndex + 1}.`);
@@ -7276,6 +7368,7 @@ function lockProposalToBlueprintChapter(
         const failure = validateLessonAuthorGeneratedUnitCoverage(
           {
             source_fact_ids: expectedFactIds,
+            supporting_evidence_fact_ids: expectedUnit.supporting_evidence_fact_ids,
             component_plan: expectedUnit.component_plan,
           },
           (unit.components ?? []).map(readGeneratedComponentContentContract),
@@ -7289,12 +7382,14 @@ function lockProposalToBlueprintChapter(
         title: expectedUnit.title,
         source_refs: expectedUnit.source_refs?.length ? expectedUnit.source_refs : unit.source_refs,
         source_fact_ids: expectedFactIds,
+        ...(expectedUnit.supporting_evidence_fact_ids?.length ? { supporting_evidence_fact_ids: expectedUnit.supporting_evidence_fact_ids } : {}),
         component_plan: expectedUnit.component_plan.map(plan => ({
           type: plan.type,
           title: plan.title,
           rationale: plan.rationale,
           purpose: plan.purpose,
           source_fact_ids: plan.source_fact_ids ?? expectedFactIds,
+          ...(plan.supporting_evidence_fact_ids?.length ? { supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids } : {}),
           content_requirements: plan.content_requirements ?? [],
           ...(plan.reason_code ? { reason_code: plan.reason_code } : {}),
           ...(plan.learning_block_ids?.length ? { learning_block_ids: plan.learning_block_ids } : {}),

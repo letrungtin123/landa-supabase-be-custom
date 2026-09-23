@@ -42,6 +42,29 @@ test('rejects a unit source fact without an owning component', () => {
   assert.match(failure ?? '', /no owning component/);
 });
 
+test('accepts supporting-only evidence without turning it into canonical fact ownership', () => {
+  const plan = [{
+    type: 'problem' as const,
+    source_fact_ids: [],
+    supporting_evidence_fact_ids: ['p1-f1'],
+  }];
+  assert.equal(validateLessonAuthorContentContractUnit({
+    source_fact_ids: [],
+    supporting_evidence_fact_ids: ['p1-f1'],
+    component_plan: plan,
+  }), null);
+  assert.equal(validateLessonAuthorGeneratedUnitCoverage({
+    source_fact_ids: [],
+    supporting_evidence_fact_ids: ['p1-f1'],
+    component_plan: plan,
+  }, [{
+    type: 'problem',
+    source_fact_ids: [],
+    covered_source_fact_ids: [],
+    supporting_evidence_fact_ids: ['p1-f1'],
+  }]), null);
+});
+
 test('rejects generated component topology that changes the Blueprint', () => {
   const failure = validateLessonAuthorGeneratedUnitCoverage(
     { source_fact_ids: sourceFacts, component_plan: phaseOnePlan() },
