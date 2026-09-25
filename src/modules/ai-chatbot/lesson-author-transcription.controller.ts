@@ -9,6 +9,7 @@ import {
   prepareLessonAuthorTranscriptionUpload,
   toPublicLessonAuthorTranscriptionJob,
 } from './lesson-author-transcription.service.js';
+import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -30,9 +31,12 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
   const file = req.file;
   const conversationId = req.params.conversationId;
   const idempotencyKey = typeof req.body?.idempotency_key === 'string' ? req.body.idempotency_key : '';
+  const clientAttemptId = normalizeLessonAuthorUploadAttemptId(req.get('x-lesson-author-upload-attempt'))
+    ?? normalizeLessonAuthorUploadAttemptId(idempotencyKey);
   const startedAt = Date.now();
   if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(idempotencyKey)) {
     console.warn('[LessonAuthorTranscription] upload rejected', {
+      client_attempt_id: clientAttemptId,
       conversation_id: conversationId,
       error_code: 'VIDEO_UPLOAD_IDENTIFIER_INVALID',
       source_size_bytes: file?.size ?? null,
@@ -44,6 +48,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
   }
   if (!file) {
     console.warn('[LessonAuthorTranscription] upload rejected', {
+      client_attempt_id: clientAttemptId,
       conversation_id: conversationId,
       error_code: 'VIDEO_FILE_MISSING',
       source_size_bytes: null,
@@ -66,6 +71,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
       locale: locale(req.body?.locale),
     });
     console.info('[LessonAuthorTranscription] upload accepted', {
+      client_attempt_id: clientAttemptId,
       conversation_id: conversationId,
       job_id: result.job.id,
       status: result.job.status,
@@ -79,6 +85,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
     }, undefined, result.already_exists ? 200 : 202);
   } catch (error: unknown) {
     console.warn('[LessonAuthorTranscription] upload rejected', {
+      client_attempt_id: clientAttemptId,
       conversation_id: conversationId,
       error_code: errorCode(error) ?? null,
       status_code: errorStatus(error),

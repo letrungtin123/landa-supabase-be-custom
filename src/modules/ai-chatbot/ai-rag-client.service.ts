@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { readSafeBlueprintFailure } from './lesson-author-capabilities.logic.js';
 import https from 'node:https';
 import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -130,6 +131,7 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   generation_mode?: 'auto' | 'staged' | 'single';
   max_attempts?: number;
   blueprint_architecture?: {
+    component_capabilities?: import('./lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
     architecture_contract_version?: 4 | 5;
     chapter_title: string;
     source_refs?: string[];
@@ -161,6 +163,8 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
           learning_objective_refs?: string[];
         }>;
         component_plan: Array<{
+          component_plan_id?: string;
+          learning_objective_refs?: string[];
           type: string;
           title: string;
           rationale: string;
@@ -180,6 +184,7 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
 }
 
 export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {
+  component_capabilities?: import('./lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
   outline_context: string;
   blueprint_schema_hint: string;
   max_attempts?: number;
@@ -214,6 +219,7 @@ export interface RagIndexResponse {
 }
 
 export class RagServiceError extends AppError {
+  public readonly diagnostics: Record<string, string | number>;
   public readonly usage?: Partial<AiUsage>;
 
   constructor(
@@ -221,10 +227,12 @@ export class RagServiceError extends AppError {
     statusCode: number,
     code: string,
     usage?: Partial<AiUsage>,
+    diagnostics?: unknown,
   ) {
     super(message, statusCode, code);
     this.name = 'RagServiceError';
     this.usage = usage;
+    this.diagnostics = readSafeBlueprintFailure(diagnostics);
   }
 }
 
@@ -276,6 +284,7 @@ async function requestRagJson(
   path: string,
   body: Record<string, unknown>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ statusCode: number; payload: unknown }> {
   const requestBody = JSON.stringify(body);
   const url = new URL(`${requireRagServiceUrl()}${path}`);
@@ -290,6 +299,7 @@ async function requestRagJson(
         ...(getRagServiceToken() ? { 'X-Landa-AI-Service-Token': getRagServiceToken() } : {}),
       },
       timeout: timeoutMs,
+      ...(signal ? { signal } : {}),
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer | string) => {
@@ -319,9 +329,10 @@ async function postRagJson<T>(
   path: string,
   body: Record<string, unknown>,
   timeoutMs = env.AI_RAG_REQUEST_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<T> {
   try {
-    const response = await requestRagJson(path, body, timeoutMs);
+    const response = await requestRagJson(path, body, timeoutMs, signal);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const { payload } = response;
       const payloadRecord = asRecord(payload);
@@ -338,6 +349,7 @@ async function postRagJson<T>(
         response.statusCode >= 500 ? 503 : response.statusCode,
         code,
         readSafeUsage(detailRecord?.usage),
+        detailRecord,
       );
     }
     return response.payload as T;
@@ -370,12 +382,14 @@ export async function generateRagLessonAuthorProposal(
 
 export async function generateRagLessonAuthorBlueprint(
   request: RagLessonAuthorBlueprintRequest,
+  execution?: { timeoutMs: number; signal: AbortSignal },
 ): Promise<RagLessonAuthorBlueprintResponse> {
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   return postRagJson<RagLessonAuthorBlueprintResponse>('/v1/lesson-author/blueprint', {
     ...request,
     api_key: apiKey,
-  });
+  }, execution ? Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, execution.timeoutMs) : env.AI_RAG_REQUEST_TIMEOUT_MS,
+  execution?.signal);
 }
 
 export async function indexRagDocument(input: {

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts, blueprintValidationDiagnostics } from './lesson-author-blueprint-acceptance.logic.js';
 import {
   normalizeLessonAuthorSourceMap,
+  normalizeSourceChapterPolicy,
   validateLessonAuthorBlueprintArchitecture,
   type BlueprintArchitecture,
   type LessonAuthorSourceMap,
@@ -56,6 +61,141 @@ function copy<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function codes(value: ReturnType<typeof validateLessonAuthorBlueprintArchitecture>): string[] {
   return [...value.errors, ...value.warnings, ...value.info].map(item => item.code);
 }
+
+function mixedObjectiveFixture(locale: 'en' | 'vi' = 'en') {
+  const map: LessonAuthorSourceMap = { ...copy(sourceMap), version: 'source-map-v2',
+    source_evidence_scopes: sourceMap.sections.map((section, i) => ({
+      id: `scope-${i + 1}`, document_id: section.document_id, section_id: section.id,
+      concept_ids: [sourceMap.concepts[i].id], source_ref: section.source_ref,
+      source_fact_ids: section.source_fact_ids, fact_count: 1, evidence_char_count: 80,
+      evidence_token_estimate: 20, derivation_basis: 'FALLBACK_PAGE_FACT_ORDINAL_RANGE', provenance_complete: true,
+    })), coverage: { ...sourceMap.coverage, evidence_scope_complete: true, evidence_scope_count: 2 } };
+  const candidate = blueprint();
+  candidate.architecture_contract_version = 5;
+  const lesson = candidate.chapters[0].lessons[0];
+  lesson.objective = locale === 'en' ? 'Identify hazards and apply controls.' : 'Nhận diện nguy cơ và thực hiện kiểm soát.';
+  lesson.learning_objectives = locale === 'en' ? ['Identify hazards.', 'Apply controls.'] : ['Nhận diện nguy cơ.', 'Thực hiện kiểm soát.'];
+  lesson.primary_concept_ids = map.concepts.map(c => c.id);
+  lesson.assessment_required = false;
+  lesson.assessment_objective_refs = [];
+  lesson.units = map.sections.map((section, i) => ({
+    title: `Source treatment ${i + 1}`, purpose: '', concept_ids: [map.concepts[i].id],
+    learning_objective_refs: [`lo_${i + 1}`], source_refs: [section.source_ref], source_fact_ids: section.source_fact_ids,
+    learning_blocks: [{ id: `block-${i}`, intent: i ? 'procedure' : 'concept_explanation',
+      concept_ids: [map.concepts[i].id], source_refs: [section.source_ref], source_fact_ids: section.source_fact_ids,
+      learning_objective_refs: [`lo_${i + 1}`], primary_evidence_scope_ids: [`scope-${i + 1}`], supporting_evidence_scope_ids: [] }],
+  }));
+  candidate.chapters[0].lessons = [lesson];
+  candidate.source_evidence_scope_allocation = { version: 'source-evidence-scope-allocation-v1', authority: 'server', architecture_contract_version: 5,
+    complete: true, required_count: 2, allocated_count: 2, unallocated: [], allocations: map.source_evidence_scopes!.map((scope, i) => ({
+      evidence_scope_id: scope.id, unit_path: `chapter_1.lesson_1.unit_${i + 1}`, learning_block_id: `block-${i}`, basis: 'PRIMARY_EVIDENCE_SCOPE' })) };
+  candidate.source_fact_allocation = { version: 'source-fact-allocation-v3', authority: 'server', architecture_contract_version: 5,
+    complete: true, required_count: 2, allocated_count: 2, unallocated: [], allocations: map.facts.map((fact, i) => ({
+      fact_id: fact.id, evidence_scope_id: `scope-${i + 1}`, unit_path: `chapter_1.lesson_1.unit_${i + 1}`, learning_block_id: `block-${i}`, basis: 'PRIMARY_EVIDENCE_SCOPE' })) };
+  return { candidate, map, lesson };
+}
+
+function pythonCoherenceCodes(candidate: BlueprintArchitecture): string[] {
+  const cwd = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
+  const python = resolve(cwd, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const response = spawnSync(python, ['-X', 'utf8', '-B', '-c',
+    'import json,sys; from app.main import validate_v5_instructional_coherence; r=validate_v5_instructional_coherence(json.load(sys.stdin)); print(json.dumps([i["code"] for i in r.errors]))'],
+  { cwd, input: JSON.stringify(candidate), encoding: 'utf8', timeout: 20_000 });
+  assert.equal(response.status, 0, response.stderr);
+  return JSON.parse(response.stdout);
+}
+
+test('V5 source chapter policy preserves identity and rejects cross-document/primary-scope leakage', () => {
+  const { candidate, map } = mixedObjectiveFixture();
+  candidate.chapters[0].title = 'Foundation';
+  candidate.chapters[0].source_refs = ['src-001'];
+  candidate.source_chapter_policy = { version: 1, mode: 'SOURCE_LOCKED_TOC', complete: true, reason_codes: [],
+    chapters: [{ document_id: 'doc-1', source_ref: 'src-001', title: 'Foundation', source_title: 'Foundation', basis: 'SOURCE_LOCKED_TOC', parser_version: 'source-structure-v2' }] };
+  assert.notEqual(validateLessonAuthorBlueprintArchitecture(candidate, map).status, 'FAIL');
+  for (const change of [(b: BlueprintArchitecture) => { b.chapters[0].title = 'Invented'; },
+    (b: BlueprintArchitecture) => { b.chapters[0].source_refs = ['src-002']; },
+    (b: BlueprintArchitecture) => { b.source_chapter_policy!.chapters[0].document_id = 'other-tenant-document'; }]) {
+    const changed = copy(candidate); change(changed);
+    assert.ok(validateLessonAuthorBlueprintArchitecture(changed, map).errors.some(e => e.code === 'BLUEPRINT_SOURCE_STRUCTURE_MISMATCH'));
+  }
+  const unrelatedMap = copy(map); unrelatedMap.sections[1].parent_id = null;
+  assert.ok(validateLessonAuthorBlueprintArchitecture(candidate, unrelatedMap).errors.some(e => e.code === 'BLUEPRINT_SOURCE_STRUCTURE_MISMATCH'));
+  assert.equal(normalizeSourceChapterPolicy(undefined), undefined);
+  assert.throws(() => normalizeSourceChapterPolicy({ ...candidate.source_chapter_policy, complete: false }), /SOURCE_CHAPTER_POLICY_INVALID/);
+  assert.throws(() => normalizeSourceChapterPolicy({ ...candidate.source_chapter_policy, chapters: [] }), /SOURCE_CHAPTER_POLICY_INVALID/);
+  const bindings = candidate.source_chapter_policy.chapters;
+  assert.throws(() => normalizeSourceChapterPolicy({ ...candidate.source_chapter_policy, chapters: [...bindings, ...bindings] }), /SOURCE_CHAPTER_POLICY_INVALID/);
+});
+
+test('V5 Python/Node action coherence is scoped to assigned unit objectives in EN and VI', () => {
+  for (const locale of ['en', 'vi'] as const) {
+    const { candidate, map, lesson } = mixedObjectiveFixture(locale);
+    assert.deepEqual(pythonCoherenceCodes(candidate), []);
+    assert.equal(validateLessonAuthorBlueprintArchitecture(candidate, map).status, 'PASS');
+    lesson.units[1].learning_blocks![0].intent = 'concept_explanation';
+    assert.ok(pythonCoherenceCodes(candidate).includes('ACTION_OBJECTIVE_INSTRUCTION_MISMATCH'));
+    const result = validateLessonAuthorBlueprintArchitecture(candidate, map);
+    assert.deepEqual(result.errors.filter(e => e.code === 'ACTION_OBJECTIVE_INSTRUCTION_MISMATCH').map(e => e.path), ['chapters[0].lessons[0].units[1]']);
+  }
+});
+
+test('V5 every assessment objective requires its own compatible prior primary teaching', () => {
+  const { candidate, map, lesson } = mixedObjectiveFixture();
+  lesson.assessment_required = true;
+  lesson.assessment_objective_refs = ['lo_1', 'lo_2'];
+  lesson.units[1].concept_ids = map.concepts.map(c => c.id);
+  const check = { id: 'check', intent: 'knowledge_check', concept_ids: map.concepts.map(c => c.id),
+    learning_objective_refs: ['lo_1', 'lo_2'], source_refs: map.sections.map(s => s.source_ref), source_fact_ids: [],
+    primary_evidence_scope_ids: [], supporting_evidence_scope_ids: ['scope-1', 'scope-2'] };
+  lesson.units[1].learning_blocks!.push(check);
+  assert.deepEqual(pythonCoherenceCodes(candidate), []);
+  assert.equal(validateLessonAuthorBlueprintArchitecture(candidate, map).status, 'PASS');
+  lesson.units[1].learning_blocks![0].learning_objective_refs = ['lo_1'];
+  assert.ok(pythonCoherenceCodes(candidate).includes('ASSESSMENT_OBJECTIVE_NOT_COVERED'));
+  assert.ok(codes(validateLessonAuthorBlueprintArchitecture(candidate, map)).includes('ASSESSMENT_OBJECTIVE_NOT_COVERED'));
+});
+
+test('V5 rejects malformed, missing and duplicate unit objective references', () => {
+  for (const refs of [[], ['lo_99'], ['lo_1', 'lo_1'], ['Identify hazards.']]) {
+    const { candidate, map, lesson } = mixedObjectiveFixture();
+    lesson.units[0].learning_objective_refs = refs;
+    assert.ok(codes(validateLessonAuthorBlueprintArchitecture(candidate, map)).includes('OBJECTIVE_ALIGNMENT_INVALID'));
+  }
+});
+
+test('Node acceptance logs safe findings before rejection and never persists invalid Python-ready candidate', async () => {
+  const { candidate, map, lesson } = mixedObjectiveFixture();
+  lesson.units[1].learning_blocks![0].intent = 'concept_explanation';
+  candidate.title = 'PRIVATE_SENTINEL';
+  let writes = 0;
+  const events: unknown[] = [];
+  await assert.rejects(acceptAndPersistLessonAuthorBlueprint(candidate, map, d => events.push(d), async () => { writes++; return 'id'; }), err => {
+    assert.ok(err instanceof BlueprintAcceptanceError);
+    assert.equal(err.failure_stage, 'node_blueprint_validation');
+    assert.equal(err.code, 'LESSON_AUTHOR_BLUEPRINT_ARCHITECTURE_INVALID');
+    assert.ok(err.diagnostics.findings.some(f => f.code === 'ACTION_OBJECTIVE_INSTRUCTION_MISMATCH' && f.path === 'chapters[0].lessons[0].units[1]'));
+    return true;
+  });
+  assert.equal(writes, 0);
+  assert.equal(events.length, 1);
+  assert.doesNotMatch(JSON.stringify([events, blueprintBoundaryCounts(candidate)]), /PRIVATE_SENTINEL/);
+  lesson.units[1].learning_blocks![0].intent = 'procedure';
+  const id = await acceptAndPersistLessonAuthorBlueprint(candidate, map, d => events.push(d), async validation => {
+    assert.notEqual(validation.status, 'FAIL'); writes++; return 'persisted-review-id';
+  });
+  assert.equal(id, 'persisted-review-id');
+  assert.equal(writes, 1);
+  await assert.rejects(acceptAndPersistLessonAuthorBlueprint(candidate, map, () => {}, async () => { throw new Error('PERSISTENCE_FAILED'); }), /PERSISTENCE_FAILED/);
+});
+
+test('validation diagnostics are bounded and exclude private messages and non-structural paths', () => {
+  const result = validateLessonAuthorBlueprintArchitecture(blueprint(), sourceMap);
+  result.errors = Array.from({ length: 45 }, () => ({ code: 'SAFE_CODE', severity: 'error', path: 'PRIVATE_SENTINEL', message: 'PRIVATE_SENTINEL', repair_scope: 'unit' }));
+  const diagnostics = blueprintValidationDiagnostics(result);
+  assert.equal(diagnostics.findings.length, 40);
+  assert.equal(diagnostics.omitted_finding_count, 5 + result.warnings.length + result.info.length);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /PRIVATE_SENTINEL/);
+});
 
 test('valid Source-Map blueprint has full concept/source coverage and stable ownership', () => {
   const result = validateLessonAuthorBlueprintArchitecture(blueprint(), sourceMap);

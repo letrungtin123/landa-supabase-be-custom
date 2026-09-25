@@ -124,6 +124,9 @@ export async function expireTenantAiTokenReservations(batchSize = 500): Promise<
        FROM ai_token_reservations
        WHERE status = 'reserved'
          AND expires_at <= now()
+         -- Durable jobs settle or release explicitly. An uncertain paid call
+         -- remains held for reconciliation, even if its job is later deleted.
+         AND budget_metadata ->> 'durable_generation' IS DISTINCT FROM 'true'
        ORDER BY expires_at ASC, id ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED

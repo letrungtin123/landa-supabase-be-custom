@@ -9,8 +9,20 @@ import {
   isLessonAuthorNewChapterDraftRequest,
   matchesLessonAuthorBlueprintChapterDraft,
   resolveLessonAuthorOutputLocale,
+  resolveLessonAuthorDraftLocale,
   stripLessonAuthorSourceRangeSuffix,
 } from './lesson-author-intent.logic.js';
+
+test('approved Blueprint locale survives UI and draft-button language changes without changing explicit precedence', () => {
+  assert.equal(resolveLessonAuthorDraftLocale('Draft the first chapter', 'en', 'vi'), 'vi');
+  assert.equal(resolveLessonAuthorDraftLocale('Soạn chương đầu tiên', 'vi', 'en'), 'en');
+  assert.equal(resolveLessonAuthorDraftLocale('Soạn chương bằng tiếng Anh', 'vi', 'vi'), 'en');
+  assert.equal(resolveLessonAuthorDraftLocale('Write in Vietnamese', 'en', 'en'), 'vi');
+  assert.equal(resolveLessonAuthorDraftLocale('Draft the chapter', 'vi'), 'en');
+  assert.equal(resolveLessonAuthorDraftLocale('Soạn chương đầu tiên', 'en', null), 'vi');
+  assert.equal(resolveLessonAuthorDraftLocale('OK', 'en', 'unknown'), 'en');
+  assert.equal(resolveLessonAuthorDraftLocale('OK', 'vi', 'en'), 'en');
+});
 
 test('routes an edit request to content update instead of course creation', () => {
   const plan = classifyLessonAuthorIntent({
@@ -181,13 +193,33 @@ test('does not turn an unspecific course-content request into a new chapter', ()
   assert.equal(plan.target_type, 'course');
 });
 
-test('does not treat a broad course reference as a blueprint request', () => {
-  const plan = classifyLessonAuthorIntent({
-    message: 'Tạo nội dung cho khóa học',
-  });
+test('routes explicit course creation without requiring depth adjectives', () => {
+  for (const message of [
+    'Tạo nội dung cho khóa học',
+    'Tạo nội dung khoá học',
+    'Soạn khóa học từ file này',
+    'Create course content',
+    'Build a course from this PDF',
+  ]) {
+    const plan = classifyLessonAuthorIntent({ message, mode: 'auto' });
+    assert.equal(plan.operation, 'course_blueprint', message);
+    assert.equal(plan.target_type, 'course', message);
+    assert.ok(plan.signals.includes('explicit_course_create'), message);
+  }
+});
 
-  assert.equal(plan.operation, 'clarify');
-  assert.equal(plan.target_type, 'course');
+test('does not widen an artifact request or a selected-node request into a course blueprint', () => {
+  const quiz = classifyLessonAuthorIntent({ message: 'Tạo quiz cho khóa học' });
+  assert.notEqual(quiz.operation, 'course_blueprint');
+  assert.equal(quiz.target_type, 'component');
+
+  const selected = classifyLessonAuthorIntent({
+    message: 'Tạo nội dung khóa học cho chương này',
+    mention: { block_id: 'chapter-id', block_type: 'chapter', display_name: 'Chương hiện tại' },
+    mentionSource: 'editor_context',
+  });
+  assert.notEqual(selected.operation, 'course_blueprint');
+  assert.equal(selected.target_type, 'chapter');
 });
 
 test('does not treat an ordinary question as a mutation', () => {

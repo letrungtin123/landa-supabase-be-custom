@@ -81,6 +81,26 @@ test('pedagogical validator accepts taught, assessed, source-covered lesson', ()
   assert.equal(report.scores.assessment_alignment, 1);
 });
 
+test('instance assessments use approved supporting evidence without claiming ownership and all must align', () => {
+  const expected = blueprint();
+  const u = expected.lessons[0]!.units[0]!;
+  u.component_plan = [
+    { type: 'html', component_plan_id: 'cp2_' + '0'.repeat(32), source_fact_ids: ['fact-1', 'fact-2'], learning_objective_refs: ['lo_1'] },
+    ...[1, 2].map(n => ({ type: 'problem' as const, component_plan_id: 'cp2_' + String(n).repeat(32),
+      source_fact_ids: [], supporting_evidence_fact_ids: [`fact-${n}`], learning_objective_refs: ['lo_1'] })),
+  ];
+  const components = [html(), problem([]), problem([])];
+  components[2]!.data = '<problem><stringresponse answer="approved"><label>Which safety procedure follows equipment inspection?</label><textline/></stringresponse></problem>';
+  components.forEach((c, i) => Object.assign(c.metadata, {
+    component_plan_id: u.component_plan![i]!.component_plan_id,
+    supporting_evidence_fact_ids: u.component_plan![i]!.supporting_evidence_fact_ids ?? [],
+  }));
+  const actual = proposal([unit(components)]);
+  assert.notEqual(validateLessonAuthorPedagogicalQuality({ proposal: actual, blueprint_chapter: expected }).status, 'FAIL');
+  Object.assign(components[2]!.metadata, { supporting_evidence_fact_ids: ['alien'] });
+  assert.ok(validateLessonAuthorPedagogicalQuality({ proposal: actual, blueprint_chapter: expected }).findings.some(f => f.code === 'ASSESSMENT_NOT_ALIGNED'));
+});
+
 test('pedagogical validator detects missing source coverage and an unaligned assessment', () => {
   const candidate = proposal([unit([
     html(['fact-1']),

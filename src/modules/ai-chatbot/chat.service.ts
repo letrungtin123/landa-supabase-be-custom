@@ -5,8 +5,15 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { Type, type Schema } from '@google/genai';
+import { composeV5BlueprintPolicy } from './lesson-author-prompt-policy.logic.js';
+import { resolveLessonAuthorDraftLocale } from './lesson-author-intent.logic.js';
+import { assessmentGapMessage, assertComponentInstancePlan, ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from './lesson-author-capabilities.logic.js';
 import { createHash, randomUUID } from 'crypto';
 import { query } from '../../config/database.js';
+import { hasPermission } from '../../middleware/authorize.js';
+import { GenerationJobError, generationSnapshotHash, hasCompleteGenerationUsage, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
+import type { PreparedGenerationJob } from './lesson-author-generation-job.repository.js';
+import type { GenerationAdmissionStage } from './lesson-author-generation-admission.logic.js';
 import { env } from '../../config/env.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
@@ -103,10 +110,13 @@ import {
   readServerOwnedSourceFactIds,
   renderSemanticLearningHtml,
   type SemanticLearningBlock,
+  type ComponentPlannerDiagnostic,
 } from './lesson-author-component-registry.logic.js';
 import { assertLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
+import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts } from './lesson-author-blueprint-acceptance.logic.js';
 import {
   normalizeLessonAuthorSourceMap,
+  normalizeSourceChapterPolicy,
   validateLessonAuthorBlueprintArchitecture,
   type BlueprintArchitectureValidationResult,
   type LessonAuthorSourceMap,
@@ -115,6 +125,7 @@ import {
   formatLessonAuthorApprovalMessage,
   formatLessonAuthorBlueprintReadyMessage,
   formatLessonAuthorProposalReadyMessage,
+  formatBlueprintProviderTimeout,
   LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY,
 } from './lesson-author-message.logic.js';
 import { runStoredInputFilter } from './input-filter/input-filter.service.js';
@@ -234,8 +245,9 @@ interface DistributedStreamLock {
  * than one backend process. Redis is an optimization: the local lock remains
  * the safe fallback when Redis is unavailable.
  */
-async function acquireDistributedStreamLock(conversationId: string): Promise<DistributedStreamLock | null> {
+async function acquireDistributedStreamLock(conversationId: string, requireDistributedFence = false): Promise<DistributedStreamLock | null> {
   const redis = getRedisClient();
+  if (!redis && requireDistributedFence) throw new AppError('Dịch vụ khóa tác vụ chưa sẵn sàng.', 503, 'GENERATION_LOCK_UNAVAILABLE');
   if (!redis) return { release: async () => {} };
 
   const key = `landa:ai-chat:stream:${conversationId}`;
@@ -244,6 +256,7 @@ async function acquireDistributedStreamLock(conversationId: string): Promise<Dis
     const acquired = await redis.set(key, token, { NX: true, PX: DISTRIBUTED_STREAM_LOCK_TTL_MS });
     if (acquired !== 'OK') return null;
   } catch {
+    if (requireDistributedFence) throw new AppError('Dịch vụ khóa tác vụ chưa sẵn sàng.', 503, 'GENERATION_LOCK_UNAVAILABLE');
     // Redis must never turn an otherwise healthy chat request into an outage.
     return { release: async () => {} };
   }
@@ -1742,6 +1755,8 @@ function logChatCourseFlow(stage: string, details: Record<string, unknown> = {})
 }
 
 export interface ChatStreamOptions {
+  /** Server-created, never read from request body/headers. */
+  correlationId?: string;
   target?: ChatTarget;
   courseId?: string;
   mode?: 'chat' | 'draft_lesson' | 'course_blueprint' | 'auto';
@@ -1755,6 +1770,188 @@ export interface ChatStreamOptions {
   canAccessReports?: boolean;
   reportActorRole?: UserRole;
   reportFilters?: ReportChatFilterInput;
+}
+
+/** Short admission lock shared with old chat; never held during queued generation. */
+export async function withLessonAuthorConversationLock<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
+  if (streamLocks.has(conversationId)) throw new GenerationJobError('GENERATION_ALREADY_ACTIVE');
+  streamLocks.add(conversationId);
+  let lock: DistributedStreamLock | null = null;
+  try {
+    lock = await acquireDistributedStreamLock(conversationId, true);
+    if (!lock) throw new GenerationJobError('GENERATION_ALREADY_ACTIVE');
+    return await work();
+  } finally { streamLocks.delete(conversationId); await lock?.release(); }
+}
+
+/** Fresh worker authorization: no JWT/role or provider secret is persisted in jobs. */
+export async function assertDurableBlueprintActor(userId: string, tenantId: string): Promise<void> {
+  const result = await query<{ role: UserRole }>(`SELECT u.role FROM users u
+    JOIN tenants t ON t.id=$2 AND t.is_active=true
+    WHERE u.id=$1 AND u.is_active=true AND u.role IN ('staff','superuser','superadmin')
+      AND (u.role='superadmin' OR u.tenant_id=$2 OR (u.role='superuser' AND EXISTS
+        (SELECT 1 FROM user_tenants ut WHERE ut.user_id=u.id AND ut.tenant_id=$2)))`, [userId, tenantId]);
+  const role = result.rows[0]?.role;
+  if (!role || !await hasPermission({ id: userId, tenantId, role }, 'courses', 'can_edit')) {
+    throw new AppError('Không có quyền tạo khóa học.', 403, 'GENERATION_FORBIDDEN');
+  }
+}
+
+/** Reuses the existing source/editor/routing/budget/acceptance functions. No provider call or write here. */
+export async function prepareDurableBlueprint(
+  conversationId: string, userId: string, tenantId: string, content: string,
+  options: ChatStreamOptions, replay?: GenerationJobRow,
+  admissionStage: (stage: GenerationAdmissionStage) => void = () => {},
+) {
+  admissionStage('actor_authorization');
+  await assertDurableBlueprintActor(userId, tenantId);
+  if (!replay) checkRateLimit(userId);
+  admissionStage('conversation_context');
+  const ctx = await loadConversationContext(conversationId, userId, tenantId, 'lesson_author');
+  if (options.courseId && options.courseId !== ctx.courseId) throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  const freshKb = await getActiveKbAssignmentFresh(tenantId);
+  if (!freshKb) throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  ctx.botKbId = freshKb.kb_id;
+  const trimmed = content.trim();
+  if (!trimmed || trimmed.length > MAX_USER_MESSAGE_LENGTH) throw new AppError('Tin nhắn không hợp lệ.', 400, 'GENERATION_INPUT_INVALID');
+  admissionStage('runtime_settings');
+  const settings = await getTenantAiRuntimeSettings(tenantId);
+  if (settings.activeEngine !== 'self_built_rag' || options.blueprintId || options.mode === 'draft_lesson') return null;
+  admissionStage('editor_context');
+  const mentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
+  const editor = await validateLessonAuthorEditorContext(ctx, options.editorContext);
+  admissionStage('intent_routing');
+  const classified = classifyLessonAuthorIntentV2(trimmed, mentions, options.mode ?? 'auto', mentions.length ? 'current' : undefined);
+  if (classified.intent !== 'course_blueprint') return null;
+  const plan = await resolveLessonAuthorOperationPlan(ctx, classified.operationPlan, trimmed, mentions.slice(0, 1));
+  const command = buildNormalizedLessonAuthorCommand({ plan, userInstruction: trimmed,
+    sourceDocumentIds: (options.sourceDocuments ?? []).flatMap(document => document.document_id ? [document.document_id] : []) });
+  if (plan.operation !== 'course_blueprint' || isSimpleDeterministicLessonAuthorCommand(command)) return null;
+  if (!settings.hasGoogleAiStudioKey) throw new AppError('Chưa cấu hình API key AI.', 400, 'AI_PROVIDER_KEY_MISSING');
+  admissionStage('source_validation');
+  let sources = await validateLessonAuthorSourceDocuments(ctx, ctx.botKbId,
+    options.sourceDocuments?.length ? options.sourceDocuments : replay?.source_document_ids.map(document_id => ({ document_id })) ?? [],
+    { requireGeminiMapping: false });
+  if (!sources.length && !replay && shouldCarryForwardLessonAuthorSourceDocuments(trimmed)) {
+    const carried = await getLatestConversationSourceDocuments(ctx);
+    sources = await validateLessonAuthorSourceDocuments(ctx, ctx.botKbId, carried, { requireGeminiMapping: false });
+  }
+  if (!sources.length) throw new AppError('Vui lòng chọn tài liệu nguồn đã học.', 400, 'SOURCE_SCOPE_INCOMPLETE');
+  admissionStage('course_context');
+  const course = await getDraftCourseOutlineForPrompt(ctx.courseId!, tenantId);
+  const allowed = await getTenantAllowedCourseComponentTypeSet(tenantId);
+  const capabilities = createComponentCapabilities(allowed);
+  const mentionRows = await getOutlineMentionContextRows(ctx, mentions);
+  const mentionContext = formatMentionContextRowsForPrompt(mentionRows);
+  const targetScope = buildTargetLockedProposalInstruction(trimmed, mentions, mentionRows);
+  const sourceContext = formatSourceDocumentsForPrompt(sources);
+  const currentTurn = buildCurrentTurnText(trimmed, mentions, mentionContext, sources);
+  // Exclude the persisted current turn on restart, without storing prompt copies.
+  admissionStage('history_context');
+  const historyRows = await query<{ role: string; content: string }>(`SELECT m.role,m.content FROM chat_messages m
+    WHERE m.conversation_id=$1 AND ($2::uuid IS NULL OR
+      (m.created_at,m.id) < (SELECT created_at,id FROM chat_messages WHERE id=$2 AND conversation_id=$1))
+    ORDER BY m.created_at DESC,m.id DESC LIMIT $3`, [conversationId, replay?.user_message_id ?? null, HISTORY_CONTEXT_LIMIT - 1]);
+  const history = historyRows.rows.reverse().map(m => ({ role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content.slice(0, HISTORY_MESSAGE_MAX_CHARS) }] }));
+  const locale = resolveLessonAuthorOutputLocale(trimmed, options.locale ?? 'vi');
+  const policy = composeV5BlueprintPolicy(locale, ctx.systemPrompt ?? '');
+  const budget = buildAiTurnTokenBudget({ engine: 'self_built_rag', operation: 'lesson_author', isCourseBlueprint: true,
+    promptParts: [policy.prompt, currentTurn, mentionContext, targetScope, sourceContext,
+      ...history.map(m => m.parts.map(p => p.text).join('\n'))] });
+  admissionStage('snapshot_preparation');
+  const hash = generationSnapshotHash;
+  const identity: Omit<PreparedGenerationJob, 'idempotencyKey' | 'correlationId'> = {
+    tenantId, userId, conversationId, courseId: ctx.courseId!, botId: ctx.botId, kbId: ctx.botKbId,
+    requestHash: hash({ content: trimmed, locale, editor: editor?.context ?? {}, mentions,
+      sources: sources.map(s => s.document_id), course: ctx.courseId, bot: ctx.botId, kb: ctx.botKbId }),
+    sourceSnapshotHash: createLessonAuthorBlueprintSourceSnapshotHash(ctx, ctx.botKbId, sources),
+    courseOutlineHash: createHash('sha256').update(course.outline).digest('hex'),
+    runtimeConfigHash: hash({ policy: policy.prompt, history, model: settings.lessonAuthorModel,
+      embeddingModel: settings.embeddingModel, dimensions: settings.embeddingDimensions, capabilities, budget }),
+    locale, model: settings.lessonAuthorModel, sourceDocumentIds: sources.map(s => s.document_id),
+    editorContext: editor?.context ?? null,
+  };
+  return {
+    identity,
+    embeddingModel: settings.embeddingModel,
+    markAccepted() { markRateLimit(userId); },
+    async filterInput() {
+      checkRateLimit(userId);
+      const outcome = await runStoredInputFilter({ message: trimmed, sessionId: conversationId,
+        tenantId, botId: ctx.botId, rawConfig: ctx.inputFilterConfig, redisClient: getRedisClient() });
+      if (outcome.blocked) throw new AppError('Yêu cầu không được bộ lọc đầu vào chấp nhận.', 400, 'GENERATION_INPUT_REJECTED');
+    },
+    async reserveAndCreateMessage(correlationId: string) {
+      admissionStage('quota_reservation');
+      if (env.AI_TOKEN_RESERVATION_SECONDS < 600) throw new AppError('Cấu hình thời hạn quota chưa phù hợp.', 503, 'GENERATION_RESERVATION_LIFETIME_INVALID');
+      const reserved = await reserveTenantAiTokens({ tenantId, userId, conversationId, target: 'lesson_author',
+        engine: 'self_built_rag', provider: settings.provider, model: settings.lessonAuthorModel, operation: 'lesson_author',
+        minimumTokens: budget.minimumTokens, maximumTokens: budget.maximumTokens,
+        budget: { inputTokens: budget.fixedInputTokens, outputTokens: budget.targetOutputTokens,
+          embeddingTokens: budget.embeddingTokens, maxOutputTokens: budget.targetOutputTokens,
+          metadata: { budget_version: 2, operation: 'lesson_author', engine: 'self_built_rag',
+            durable_generation: true, generation_correlation_id: correlationId } } });
+      const attempts = budget.maxGenerationAttempts > 1 && reserved.reservedTokens >= budget.retryMinimumTokens ? budget.maxGenerationAttempts : 1;
+      admissionStage('user_message_write');
+      const saved = await query<{ id: string }>(`INSERT INTO chat_messages (conversation_id,role,content,metadata)
+        VALUES ($1,'user',$2,$3) RETURNING id`, [conversationId, trimmed, {
+        source_documents: sources.map(toSourceDocumentMetadata), outline_mentions: mentions,
+        ...(editor ? { editor_context: editor.context } : {}), locale, correlation_id: correlationId,
+        ...(options.inputMode === 'voice' ? { input_mode: 'voice' } : {}),
+      }]);
+      admissionStage('conversation_update');
+      await query(`UPDATE chat_conversations SET updated_at=now(), title=CASE WHEN $3 THEN $4 ELSE title END
+        WHERE id=$1 AND tenant_id=$2`, [conversationId, tenantId, ctx.messageCount === 0,
+        trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : '')]);
+      return { userMessageId: saved.rows[0].id, reservationId: reserved.id,
+        maxAttempts: attempts, maxOutputTokens: grantedOutputTokenLimit(budget, reserved.reservedTokens, attempts) };
+    },
+    async generate(job: GenerationJobRow, signal: AbortSignal, timeoutMs: number) {
+      return generateRagLessonAuthorBlueprint({ component_capabilities: capabilities,
+        correlation_id: job.correlation_id, course_id: ctx.courseId!, tenant_id: tenantId, kb_id: ctx.botKbId!,
+        conversation_id: conversationId, target: 'lesson_author', model: job.model,
+        max_output_tokens: Math.min(job.max_output_tokens, RAG_LESSON_AUTHOR_BLUEPRINT_MAX_OUTPUT_TOKENS),
+        max_attempts: job.max_attempts, embedding_model: settings.embeddingModel, embedding_dimensions: settings.embeddingDimensions,
+        system_prompt: policy.prompt, user_message: trimmed, history: toRagChatHistory(history),
+        source_documents: toRagSourceDocuments(sources), course_context: course.outline, outline_context: mentionContext,
+        blueprint_schema_hint: getLessonAuthorBlueprintSchemaHint(), locale,
+      }, { signal, timeoutMs });
+    },
+    async persist(job: GenerationJobRow, response: Awaited<ReturnType<typeof generateRagLessonAuthorBlueprint>>) {
+      const log = (event: string, metadata: Record<string, unknown>) => logLessonAuthorFlow(event, {
+        ...metadata, correlation_id: job.correlation_id, conversation_id: conversationId, job_id: job.id });
+      const raw = asRecord(response.blueprint);
+      if (JSON.stringify(readComponentCapabilities(raw.component_capabilities)) !== JSON.stringify(capabilities)) {
+        throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+      }
+      const blueprint = withAuthoritativeCourseTitle(normalizeLessonAuthorBlueprint({ ...raw,
+        ...(response.source_map !== undefined ? { source_map: response.source_map } : {}) }, {
+        requireContentArchitecture: true, requirePhaseOneContract: true, allowedComponentTypes: allowed,
+        onComponentDecision: d => log('blueprint_component_selection', { ...d }),
+        onBoundary: (stage, value) => log('blueprint_contract_boundary', { stage, ...blueprintBoundaryCounts(value) }),
+      }), course.courseName);
+      return acceptAndPersistLessonAuthorBlueprint(blueprint, blueprint.source_map,
+        d => log('blueprint_node_validation', { ...d }), async validation => {
+          const report = buildLessonAuthorBlueprintQualityReport(blueprint, sources.length, response.retrieval ?? null, locale, validation);
+          const blueprintId = await createLessonAuthorBlueprint(ctx, userId, trimmed, ctx.botKbId!, blueprint, report,
+            course.outline, sources, 'self_built_rag', job.model, false);
+          const assistant = await query<{ id: string }>(`INSERT INTO chat_messages (conversation_id,role,content,metadata)
+            VALUES ($1,'assistant',$2,$3) RETURNING id`, [conversationId, formatBlueprintPreview(blueprint, report, locale), {
+            lesson_author_blueprint_id: blueprintId, kind: 'lesson_author_blueprint', locale,
+            lesson_author_blueprint_status: 'proposed', source_documents: sources.map(toSourceDocumentMetadata),
+            generation_job_id: job.id, correlation_id: job.correlation_id,
+          }]);
+          if (hasCompleteGenerationUsage(response.usage)) await finalizeTenantAiTokens({ reservationId: job.ai_reservation_id!, tenantId,
+            usage: normalizeAiUsage(response.usage), embeddingModel: settings.embeddingModel,
+            source: { service: 'self_built_rag', operation: 'lesson_author', usage_source: 'rag_response' },
+            metadata: { generation_job_id: job.id, lesson_author_blueprint_id: blueprintId } });
+          else log('generation_usage_pending_reconciliation', { usage_source: 'unavailable' });
+          await query('UPDATE chat_conversations SET updated_at=now() WHERE id=$1 AND tenant_id=$2', [conversationId, tenantId]);
+          return { blueprintId, assistantMessageId: assistant.rows[0].id };
+        });
+    },
+  };
 }
 
 export interface LessonAuthorOutlineMention {
@@ -1784,6 +1981,8 @@ export interface LessonAuthorBlueprintLesson {
 }
 
 export interface LessonAuthorBlueprintComponentPlan {
+  component_plan_id?: string;
+  learning_objective_refs?: string[];
   type: LessonAuthorComponentType;
   title: string;
   rationale: string;
@@ -1849,6 +2048,8 @@ export interface LessonAuthorBlueprintQualityReport {
 }
 
 export interface LessonAuthorBlueprint {
+  source_chapter_policy?: import('./lesson-author-blueprint-validator.logic.js').SourceChapterPolicy;
+  component_capabilities?: import('./lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
   architecture_contract_version?: 3 | 4 | 5;
   content_contract_version?: 1;
   title: string;
@@ -2349,6 +2550,7 @@ async function validateLessonAuthorSourceDocuments(
 }
 
 interface LessonAuthorBlueprintRow {
+  output_locale?: 'vi' | 'en' | null;
   id: string;
   tenant_id: string;
   course_id: string;
@@ -3633,12 +3835,15 @@ function normalizeComponentType(value: unknown): LessonAuthorComponentProposal['
 
 function normalizeLessonAuthorComponentPlan(value: unknown): LessonAuthorComponentPlan[] {
   if (!Array.isArray(value)) return [];
+  const instances = value.some(item => asRecord(item).component_plan_id != null);
+  if (instances) assertComponentInstancePlan(value.map(item => asRecord(item) as { component_plan_id?: string }));
   const plan: LessonAuthorComponentPlan[] = [];
   const seen = new Set<LessonAuthorComponentType>();
   for (const itemValue of value) {
     const item = asRecord(itemValue);
     const type = normalizeComponentType(item.type ?? item.block_type);
-    if (!type || seen.has(type)) continue;
+    if (instances && !type) throw new Error('COMPONENT_PLAN_TYPE_INVALID');
+    if (!type || (!instances && seen.has(type))) continue;
     seen.add(type);
     const title = readString(item.title ?? item.label ?? item.name, '', 180);
     const rationale = readString(item.rationale ?? item.selection_rationale, '', 600);
@@ -3664,9 +3869,10 @@ function normalizeLessonAuthorComponentPlan(value: unknown): LessonAuthorCompone
       : [];
     plan.push({
       type,
+      ...(instances ? { component_plan_id: item.component_plan_id as string, learning_objective_refs: readCanonicalBlueprintIds(item.learning_objective_refs, 12) } : {}),
       ...(title ? { title } : {}),
       ...(rationale ? { rationale } : {}),
-      ...(sourceFactIds.length > 0 ? { source_fact_ids: sourceFactIds } : {}),
+      ...(instances || sourceFactIds.length > 0 ? { source_fact_ids: sourceFactIds } : {}),
       ...(supportingEvidenceFactIds.length > 0 ? { supporting_evidence_fact_ids: supportingEvidenceFactIds } : {}),
       ...(purpose ? { purpose: purpose as NonNullable<LessonAuthorComponentPlan['purpose']> } : {}),
       ...(contentRequirements.length > 0 ? { content_requirements: contentRequirements } : {}),
@@ -3699,6 +3905,7 @@ function getLessonAuthorComponentProvenance(component: Record<string, unknown>):
   );
   return {
     ...(sourceFactIds.length > 0 ? { source_fact_ids: sourceFactIds } : {}),
+    ...(typeof (component.component_plan_id ?? nestedMetadata.component_plan_id) === 'string' ? { component_plan_id: component.component_plan_id ?? nestedMetadata.component_plan_id } : {}),
     ...(coveredSourceFactIds.length > 0 ? { covered_source_fact_ids: coveredSourceFactIds } : {}),
     ...(supportingEvidenceFactIds.length > 0 ? { supporting_evidence_fact_ids: supportingEvidenceFactIds } : {}),
     ...(rationale ? { component_selection_rationale: rationale } : {}),
@@ -3789,7 +3996,7 @@ function normalizeProblemChoices(
         const text = readScalarString(choiceValue, '', 500);
         return {
           text,
-          correct: answerSet.size > 0 ? answerSet.has(normalizeComparableText(text)) : index === 0,
+          correct: answerSet.has(normalizeComparableText(text)),
         };
       }
       const choice = asRecord(choiceValue);
@@ -3809,12 +4016,13 @@ function normalizeProblemChoices(
     throw new Error('Problem component requires at least 2 answer choices');
   }
 
-  const firstCorrectIndex = choices.findIndex(choice => choice.correct);
-  if (singleChoice) {
-    const correctIndex = firstCorrectIndex >= 0 ? firstCorrectIndex : 0;
-    return choices.map((choice, index) => ({ ...choice, correct: index === correctIndex }));
+  if (new Set(choices.map(choice => normalizeComparableText(choice.text))).size !== choices.length) {
+    throw new Error('PROBLEM_DUPLICATE_CHOICES');
   }
-  if (firstCorrectIndex < 0) choices[0].correct = true;
+  const correctCount = choices.filter(choice => choice.correct).length;
+  if (!correctCount || (singleChoice && correctCount !== 1)) {
+    throw new Error('PROBLEM_CORRECT_ANSWER_INVALID');
+  }
   return choices;
 }
 
@@ -3877,7 +4085,7 @@ function normalizeDropdownChoices(component: Record<string, unknown>): Array<{ t
         const text = readScalarString(optionValue, '', 500);
         return {
           text,
-          correct: answerSet.size > 0 ? answerSet.has(normalizeComparableText(text)) : index === 0,
+          correct: answerSet.has(normalizeComparableText(text)),
         };
       }
 
@@ -3894,20 +4102,17 @@ function normalizeDropdownChoices(component: Record<string, unknown>): Array<{ t
     .filter(choice => choice.text)
     .slice(0, 8);
 
-  if (answerSet.size > 0 && choices.every(choice => !choice.correct)) {
-    const answer = answers[0];
-    const existingIndex = choices.findIndex(choice => normalizeComparableText(choice.text) === normalizeComparableText(answer));
-    if (existingIndex >= 0) choices[existingIndex].correct = true;
-    else choices.unshift({ text: answer, correct: true });
-  }
-
   if (choices.length < 2) {
     throw new Error('Dropdown problem component requires at least 2 options');
   }
 
-  const correctIndex = choices.findIndex(choice => choice.correct);
-  const safeCorrectIndex = correctIndex >= 0 ? correctIndex : 0;
-  return choices.map((choice, index) => ({ ...choice, correct: index === safeCorrectIndex }));
+  if (new Set(choices.map(choice => normalizeComparableText(choice.text))).size !== choices.length) {
+    throw new Error('PROBLEM_DUPLICATE_CHOICES');
+  }
+  if (choices.filter(choice => choice.correct).length !== 1) {
+    throw new Error('PROBLEM_CORRECT_ANSWER_INVALID');
+  }
+  return choices;
 }
 
 function buildDropdownProblemXml(
@@ -4504,6 +4709,14 @@ function normalizeLessonAuthorUnitComponents(unit: Record<string, unknown>, unit
       ? normalizedUnit.blocks
       : [];
 
+  const rawInstanceIds = rawComponents.map(value => {
+    const component = asRecord(value);
+    return { component_plan_id: (component.component_plan_id ?? asRecord(component.metadata).component_plan_id) as string | undefined };
+  });
+  if (rawInstanceIds.some(value => value.component_plan_id != null)) {
+    assertComponentInstancePlan(rawInstanceIds);
+  }
+
   const components = rawComponents
     .slice(0, MAX_COMPONENTS_PER_UNIT)
     .map((componentValue, componentIndex) => normalizeLessonAuthorComponent(
@@ -4582,7 +4795,7 @@ function convertChangesToChapters(changes: unknown[]): unknown[] {
   return chapters;
 }
 
-function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal {
+export function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorProposal {
   const raw = asRecord(rawValue);
 
   // ── Convert system prompt's `changes` format to `chapters` format ──
@@ -4877,12 +5090,14 @@ function normalizeLessonAuthorMediaReview(
 function applySemanticLearningBlockPlanner(
   blueprint: LessonAuthorBlueprint,
   allowedComponentTypes?: ReadonlySet<CourseComponentType>,
+  onComponentDecision?: (diagnostics: ComponentPlannerDiagnostic) => void,
 ): LessonAuthorBlueprint {
-  const chapters = blueprint.chapters.map(chapter => ({
+  const chapters = blueprint.chapters.map((chapter, chapterIndex) => ({
     ...chapter,
-    lessons: chapter.lessons.map(lesson => ({
+    lessons: chapter.lessons.map((lesson, lessonIndex) => ({
       ...lesson,
-      units: lesson.units.map(unit => {
+      units: lesson.units.map((unit, unitIndex) => {
+        const instanceContext = { component_capabilities: blueprint.component_capabilities, unit_path: `chapter_${chapterIndex + 1}.lesson_${lessonIndex + 1}.unit_${unitIndex + 1}`, on_diagnostics: onComponentDecision };
         const sourceFactIds = unit.source_fact_ids ?? [];
         const semanticBlocks = unit.learning_blocks && unit.learning_blocks.length > 0
           ? normalizeSemanticLearningBlocks(unit.learning_blocks, sourceFactIds, {
@@ -4914,6 +5129,7 @@ function applySemanticLearningBlockPlanner(
             return { ...unit, learning_blocks: blocks, component_plan: [] };
           }
           const supportingPlans = planSemanticLearningBlocks({
+            ...instanceContext,
             blocks,
             unit_source_fact_ids: [],
             allowed_component_types: allowedComponentTypes,
@@ -4922,24 +5138,35 @@ function applySemanticLearningBlockPlanner(
             title: readString(plan.title, componentTypeLabel(plan.type, 'vi'), 180),
             rationale: readString(plan.rationale, `Học liệu củng cố mục tiêu của ${unit.title}.`, 240),
             source_fact_ids: [],
-            supporting_evidence_fact_ids: supportingEvidenceFactIds,
+            supporting_evidence_fact_ids: blueprint.component_capabilities
+              ? resolveV5SupportingEvidenceFactIds(blueprint, { learning_blocks: blocks.filter(block => plan.learning_block_ids?.includes(block.id)) })
+              : supportingEvidenceFactIds,
           }));
           return {
             ...unit,
             learning_blocks: blocks,
             supporting_evidence_fact_ids: supportingEvidenceFactIds,
-            component_plan: supportingPlans,
+            component_plan: [...supportingPlans.filter(plan => plan.type !== 'la_faq'), ...supportingPlans.filter(plan => plan.type === 'la_faq')],
           };
         }
         const planned = planSemanticLearningBlocks({
+          ...instanceContext,
           blocks,
           unit_source_fact_ids: sourceFactIds,
           allowed_component_types: allowedComponentTypes,
         });
+        if (blueprint.component_capabilities) {
+          for (const plan of planned) {
+            plan.supporting_evidence_fact_ids = resolveV5SupportingEvidenceFactIds(blueprint, {
+              learning_blocks: blocks.filter(block => plan.learning_block_ids?.includes(block.id)),
+            });
+          }
+        }
         return {
           ...unit,
           learning_blocks: blocks,
-          component_plan: planned.map((plan): LessonAuthorBlueprintComponentPlan => ({
+          ...(blueprint.component_capabilities ? { supporting_evidence_fact_ids: supportingEvidenceFactIds } : {}),
+          component_plan: [...planned.filter(plan => plan.type !== 'la_faq'), ...planned.filter(plan => plan.type === 'la_faq')].map((plan): LessonAuthorBlueprintComponentPlan => ({
             ...plan,
             title: readString(plan.title, componentTypeLabel(plan.type, 'vi'), 180),
             rationale: readString(plan.rationale, `Học liệu hỗ trợ mục tiêu của ${unit.title}.`, 240),
@@ -4954,8 +5181,9 @@ function applySemanticLearningBlockPlanner(
 function applyPhaseOneContentContract(
   blueprint: LessonAuthorBlueprint,
   allowedComponentTypes?: ReadonlySet<CourseComponentType>,
+  onComponentDecision?: (diagnostics: ComponentPlannerDiagnostic) => void,
 ): LessonAuthorBlueprint {
-  const plannedBlueprint = applySemanticLearningBlockPlanner(blueprint, allowedComponentTypes);
+  const plannedBlueprint = applySemanticLearningBlockPlanner(blueprint, allowedComponentTypes, onComponentDecision);
   const chapters = plannedBlueprint.chapters.map(chapter => ({
     ...chapter,
     lessons: chapter.lessons.map(lesson => ({
@@ -4978,6 +5206,8 @@ function applyPhaseOneContentContract(
           supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids,
           component_plan: unit.component_plan,
         }).map((plan): LessonAuthorBlueprintComponentPlan => ({
+          component_plan_id: plan.component_plan_id,
+          learning_objective_refs: plan.learning_objective_refs,
           type: plan.type,
           title: readString(plan.title, componentTypeLabel(plan.type, 'vi'), 180),
           rationale: readString(plan.rationale, `Học liệu hỗ trợ mục tiêu của ${unit.title}.`, 240),
@@ -4999,18 +5229,29 @@ function applyPhaseOneContentContract(
       }),
     })),
   }));
+  if (plannedBlueprint.component_capabilities && chapters.reduce((sum, c) => sum + c.lessons.reduce((n, l) => n + l.units.reduce((m, u) => m + u.component_plan.length, 0), 0), 0) > MAX_COMPACT_BLUEPRINT_TOTAL_COMPONENTS) {
+    throw new ComponentCapabilityError('COMPONENT_PLAN_COURSE_CAPACITY_EXCEEDED');
+  }
   return { ...plannedBlueprint, content_contract_version: 1, chapters };
 }
 
-function normalizeLessonAuthorBlueprint(
+export function normalizeLessonAuthorBlueprint(
   rawValue: unknown,
   options: {
     requireContentArchitecture?: boolean;
     requirePhaseOneContract?: boolean;
     allowedComponentTypes?: ReadonlySet<CourseComponentType>;
+    onBoundary?: (stage: 'node_blueprint_normalization' | 'node_component_planner', value: unknown) => void;
+    onComponentDecision?: (diagnostics: ComponentPlannerDiagnostic) => void;
   } = {},
 ): LessonAuthorBlueprint {
   const raw = asRecord(rawValue);
+  let sourceChapterPolicy: LessonAuthorBlueprint['source_chapter_policy'];
+  try {
+    sourceChapterPolicy = normalizeSourceChapterPolicy(raw.source_chapter_policy);
+  } catch {
+    throw new AppError('Blueprint source chapter policy is invalid.', 422, 'SOURCE_CHAPTER_POLICY_INVALID');
+  }
   const architectureContractVersion = raw.architecture_contract_version === 3 || raw.architecture_contract_version === 4 || raw.architecture_contract_version === 5
     ? raw.architecture_contract_version
     : undefined;
@@ -5077,6 +5318,8 @@ function normalizeLessonAuthorBlueprint(
         const componentPlan = normalizeLessonAuthorComponentPlan(
           unit.component_plan ?? unit.components ?? unit.planned_components,
         ).map((plan): LessonAuthorBlueprintComponentPlan => ({
+          component_plan_id: plan.component_plan_id,
+          learning_objective_refs: plan.learning_objective_refs,
           type: plan.type,
           title: readString(
             plan.title,
@@ -5089,18 +5332,29 @@ function normalizeLessonAuthorBlueprint(
             240,
           ),
           ...(plan.purpose ? { purpose: plan.purpose } : {}),
-          ...(plan.source_fact_ids?.length ? { source_fact_ids: plan.source_fact_ids } : {}),
+          ...(plan.component_plan_id || plan.source_fact_ids?.length ? { source_fact_ids: plan.source_fact_ids ?? [] } : {}),
+          ...(plan.supporting_evidence_fact_ids?.length ? { supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids } : {}),
           ...(plan.content_requirements?.length ? { content_requirements: plan.content_requirements } : {}),
           ...(plan.reason_code ? { reason_code: plan.reason_code } : {}),
           ...(plan.learning_block_ids?.length ? { learning_block_ids: plan.learning_block_ids } : {}),
           ...(plan.required_artifacts?.length ? { required_artifacts: plan.required_artifacts } : {}),
         }));
-        if (options.requireContentArchitecture && componentPlan.length > MAX_COMPACT_BLUEPRINT_COMPONENTS_PER_UNIT) {
+        if (raw.component_capabilities && componentPlan.length) assertComponentInstancePlan(componentPlan);
+        if (options.requireContentArchitecture && componentPlan.length > (raw.component_capabilities ? 4 : MAX_COMPACT_BLUEPRINT_COMPONENTS_PER_UNIT)) {
           throw new Error(`Blueprint unit ${chapterIndex + 1}.${lessonIndex + 1}.${unitIndex + 1} exceeds ${MAX_COMPACT_BLUEPRINT_COMPONENTS_PER_UNIT} component plans`);
         }
         // A v4 Blueprint's canonical allocation is server-owned. Never use a
         // display-oriented truncating normalizer for valid provenance IDs.
         const sourceFactIds = readServerOwnedSourceFactIds(unit.source_fact_ids);
+        if (architectureContractVersion === 5) {
+          const rawBlocks = unit.learning_blocks ?? unit.semantic_learning_blocks;
+          if (!Array.isArray(rawBlocks) || rawBlocks.length > 12) throw new AppError('Blueprint learning block cardinality is invalid.', 422, 'V5_LEARNING_BLOCK_CARDINALITY_INVALID');
+          const refs = unit.learning_objective_refs;
+          if (!Array.isArray(refs) || refs.length === 0 || refs.some(ref => typeof ref !== 'string')
+            || new Set(refs.map(ref => String(ref).trim())).size !== refs.length) {
+            throw new AppError('Blueprint unit objective references are invalid.', 422, 'V5_UNIT_OBJECTIVE_REFS_INVALID');
+          }
+        }
         const learningBlocks = normalizeSemanticLearningBlocks(
           unit.learning_blocks ?? unit.semantic_learning_blocks,
           sourceFactIds,
@@ -5150,6 +5404,7 @@ function normalizeLessonAuthorBlueprint(
           ...(unitLearningObjectiveRefs.length > 0 ? { learning_objective_refs: unitLearningObjectiveRefs } : {}),
           source_refs: unitSourceRefs,
           source_fact_ids: sourceFactIds,
+          ...(raw.component_capabilities ? { supporting_evidence_fact_ids: readServerOwnedSourceFactIds(unit.supporting_evidence_fact_ids) } : {}),
           ...(learningBlocks.length > 0 ? { learning_blocks: learningBlocks } : {}),
           ...(mediaPlan ? { media_plan: mediaPlan } : {}),
         };
@@ -5255,6 +5510,7 @@ function normalizeLessonAuthorBlueprint(
   }
 
   const normalized: LessonAuthorBlueprint = {
+    ...(raw.component_capabilities ? { component_capabilities: readComponentCapabilities(raw.component_capabilities) } : {}),
     ...(architectureContractVersion ? { architecture_contract_version: architectureContractVersion } : {}),
     title: readString(raw.title, 'Bản thiết kế khóa học', 220),
     summary: readString(raw.summary, 'Bản thiết kế khóa học đang chờ duyệt.', 1400),
@@ -5270,9 +5526,12 @@ function normalizeLessonAuthorBlueprint(
     ...(sourceFactAllocation ? { source_fact_allocation: sourceFactAllocation } : {}),
     ...(sourceEvidenceScopeAllocation ? { source_evidence_scope_allocation: sourceEvidenceScopeAllocation } : {}),
     ...(mediaReview ? { media_review: mediaReview } : {}),
+    ...(sourceChapterPolicy ? { source_chapter_policy: sourceChapterPolicy } : {}),
   };
+  options.onBoundary?.('node_blueprint_normalization', normalized);
+  if (options.requirePhaseOneContract) options.onBoundary?.('node_component_planner', normalized);
   return options.requirePhaseOneContract
-    ? applyPhaseOneContentContract(normalized, options.allowedComponentTypes)
+    ? applyPhaseOneContentContract(normalized, options.allowedComponentTypes, options.onComponentDecision)
     : normalized;
 }
 
@@ -5519,7 +5778,17 @@ function formatLessonAuthorFailurePreview(err: any, locale: 'vi' | 'en' = 'vi'):
 }
 
 function formatLessonAuthorBlueprintFailurePreview(err: any, locale: 'vi' | 'en' = 'vi'): string {
-  const code = err instanceof AppError ? err.code : undefined;
+  if (err instanceof RagServiceError && err.diagnostics.internal_failure_code === 'AI_PROVIDER_TIMEOUT') {
+    return formatBlueprintProviderTimeout(locale);
+  }
+  const code = err instanceof AppError || err instanceof ComponentCapabilityError ? err.code : undefined;
+  const assessmentGap = assessmentGapMessage(code, locale);
+  if (assessmentGap) return assessmentGap;
+  if (code === 'SOURCE_STRUCTURE_REVIEW_REQUIRED') {
+    return locale === 'vi'
+      ? 'Chưa thể tạo Bản thiết kế: cấu trúc chương trong nguồn chưa đầy đủ hoặc chưa xác minh được. Hãy kiểm tra mục lục/đề mục và phạm vi tài liệu đã chọn. Chưa áp dụng thay đổi nào.'
+      : 'The source chapter structure is incomplete or cannot be verified. Review the source outline and selected document scope. No changes have been applied.';
+  }
   if (code === 'SOURCE_SCOPE_INCOMPLETE' || code === 'SOURCE_MAP_SCOPE_INCOMPLETE'
     || code === 'SOURCE_FACT_EXTRACTION_CAPACITY_EXCEEDED' || code === 'ARCHITECT_CONTEXT_CANNOT_REPRESENT_SOURCE') {
     return locale === 'en'
@@ -6886,6 +7155,7 @@ async function createLessonAuthorBlueprint(
   sourceDocuments: LessonAuthorSourceDocument[],
   engine: 'gemini_file_search' | 'self_built_rag',
   model: string,
+  emitCreatedLog = true,
 ): Promise<string> {
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
   const requestHash = createLessonAuthorRequestHash(ctx, kbId, prompt, sourceDocuments);
@@ -6919,7 +7189,7 @@ async function createLessonAuthorBlueprint(
     ],
   );
   const blueprintId = result.rows[0].id;
-  logLessonAuthorFlow('blueprint_created', {
+  if (emitCreatedLog) logLessonAuthorFlow('blueprint_created', {
     conversation_id: ctx.conversationId,
     course_id: ctx.courseId,
     blueprint_id: blueprintId,
@@ -6974,6 +7244,7 @@ async function createFailedLessonAuthorBlueprint(
 }
 
 interface BlueprintDraftContext {
+  outputLocale?: 'vi' | 'en';
   id: string;
   chapterIndex: number;
   blueprint: LessonAuthorBlueprint;
@@ -7038,6 +7309,14 @@ async function loadLessonAuthorBlueprintForDraft(
   if (!isValidUUID(blueprintId)) throw new Error('Blueprint ID không hợp lệ.');
   const result = await query<LessonAuthorBlueprintRow>(
     `SELECT id, tenant_id, course_id, status, blueprint, quality_report,
+            (SELECT message.metadata ->> 'locale'
+             FROM chat_messages message
+             WHERE message.conversation_id = lesson_author_blueprints.conversation_id
+               AND message.role = 'assistant'
+               AND message.metadata ->> 'kind' = 'lesson_author_blueprint'
+               AND message.metadata ->> 'lesson_author_blueprint_id' = lesson_author_blueprints.id::text
+               AND message.metadata ->> 'locale' IN ('vi', 'en')
+             ORDER BY message.created_at ASC, message.id ASC LIMIT 1) AS output_locale,
             kb_id, source_documents, source_snapshot_hash, course_outline_hash
      FROM lesson_author_blueprints
      WHERE id = $1
@@ -7128,7 +7407,9 @@ async function loadLessonAuthorBlueprintForDraft(
       'LESSON_AUTHOR_BLUEPRINT_CHAPTER_SEQUENCE',
     );
   }
-  return { id: stored.id, chapterIndex: requestedChapterIndex, blueprint, sourceDocuments };
+  return { id: stored.id, chapterIndex: requestedChapterIndex, blueprint, sourceDocuments,
+    ...(stored.output_locale === 'vi' || stored.output_locale === 'en' ? { outputLocale: stored.output_locale } : {}),
+  };
 }
 
 async function tryLoadMatchingLessonAuthorBlueprintDraft(
@@ -7232,11 +7513,12 @@ function blueprintStructureKey(value: string): string {
     .trim();
 }
 
-function blueprintDraftArchitecture(
+export function blueprintDraftArchitecture(
   context: BlueprintDraftContext,
 ): NonNullable<RagLessonAuthorRequest['blueprint_architecture']> {
   const chapter = context.blueprint.chapters[context.chapterIndex];
   return {
+    ...(context.blueprint.component_capabilities ? { component_capabilities: context.blueprint.component_capabilities } : {}),
     ...((context.blueprint.architecture_contract_version === 4 || context.blueprint.architecture_contract_version === 5)
       ? { architecture_contract_version: context.blueprint.architecture_contract_version }
       : {}),
@@ -7268,6 +7550,8 @@ function blueprintDraftArchitecture(
         supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids ?? [],
         learning_blocks: unit.learning_blocks ?? [],
         component_plan: unit.component_plan.map((plan) => ({
+          component_plan_id: plan.component_plan_id,
+          learning_objective_refs: plan.learning_objective_refs,
           type: plan.type,
           title: plan.title,
           rationale: plan.rationale,
@@ -7287,6 +7571,7 @@ function blueprintDraftArchitecture(
 function readGeneratedComponentContentContract(
   component: LessonAuthorComponentProposal,
 ): {
+  component_plan_id?: string;
   type: LessonAuthorComponentType;
   source_fact_ids: string[];
   covered_source_fact_ids: string[];
@@ -7296,6 +7581,7 @@ function readGeneratedComponentContentContract(
 } {
   const metadata = asRecord(component.metadata);
   return {
+    ...(typeof metadata.component_plan_id === 'string' ? { component_plan_id: metadata.component_plan_id } : {}),
     type: component.type,
     source_fact_ids: readServerOwnedSourceFactIds(metadata.source_fact_ids),
     covered_source_fact_ids: readServerOwnedSourceFactIds(metadata.covered_source_fact_ids),
@@ -7309,7 +7595,7 @@ function requiresPhaseOneContentContract(blueprint: LessonAuthorBlueprint): bool
   return blueprint.content_contract_version === 1;
 }
 
-function lockProposalToBlueprintChapter(
+export function lockProposalToBlueprintChapter(
   proposal: LessonAuthorProposal,
   context: BlueprintDraftContext,
 ): LessonAuthorProposal {
@@ -7384,6 +7670,8 @@ function lockProposalToBlueprintChapter(
         source_fact_ids: expectedFactIds,
         ...(expectedUnit.supporting_evidence_fact_ids?.length ? { supporting_evidence_fact_ids: expectedUnit.supporting_evidence_fact_ids } : {}),
         component_plan: expectedUnit.component_plan.map(plan => ({
+          component_plan_id: plan.component_plan_id,
+          learning_objective_refs: plan.learning_objective_refs,
           type: plan.type,
           title: plan.title,
           rationale: plan.rationale,
@@ -7833,7 +8121,14 @@ export async function sendMessageStream(
     return;
   }
   streamLocks.add(conversationId);
-  const distributedStreamLock = await acquireDistributedStreamLock(conversationId);
+  let distributedStreamLock: DistributedStreamLock | null;
+  try { distributedStreamLock = await acquireDistributedStreamLock(conversationId,
+    env.LESSON_AUTHOR_GENERATION_ENABLED && options.target === LESSON_AUTHOR_TARGET); }
+  catch {
+    streamLocks.delete(conversationId);
+    onError(new AppError('Chưa thể khóa cuộc hội thoại. Vui lòng thử lại sau.', 503, 'CHAT_LOCK_UNAVAILABLE'));
+    return;
+  }
   if (!distributedStreamLock) {
     streamLocks.delete(conversationId);
     onError(new Error('Đang xử lý tin nhắn trước đó. Vui lòng đợi.'));
@@ -7867,10 +8162,15 @@ export async function sendMessageStream(
     // 1. Load context (CTE: 1 query for conversation + persona + prompt + msg count)
     const ctx = await loadConversationContext(conversationId, userId, tenantId, options.target);
     ctxForError = ctx;
+    if (env.LESSON_AUTHOR_GENERATION_ENABLED && ctx.target === LESSON_AUTHOR_TARGET) {
+      const active = await query(`SELECT id FROM lesson_author_generation_jobs
+        WHERE tenant_id=$1 AND conversation_id=$2 AND status IN ('queued','running') LIMIT 1`, [tenantId, conversationId]);
+      if (active.rows.length) throw new AppError('Đang tạo Bản thiết kế khóa học. Vui lòng đợi kết quả.', 409, 'GENERATION_ALREADY_ACTIVE');
+    }
     // One correlation ID is owned by Node and follows a Blueprint through the
     // internal Python workflow. It is diagnostics-only and is never persisted
     // as a user-controlled target or authorization input.
-    lessonAuthorCorrelationId = ctx.target === LESSON_AUTHOR_TARGET ? randomUUID() : null;
+    lessonAuthorCorrelationId = ctx.target === LESSON_AUTHOR_TARGET ? options.correlationId ?? randomUUID() : null;
     const inputMode = options.inputMode === 'voice' ? 'voice' : 'text';
     const isVoiceTurn = inputMode === 'voice';
     logLessonAuthorFlow('stream_context_loaded', {
@@ -8111,11 +8411,17 @@ export async function sendMessageStream(
       ? aiSettings.lessonAuthorModel
       : aiSettings.chatModel;
     const requestedLocale = ctx.target === LESSON_AUTHOR_TARGET
-      ? resolveLessonAuthorOutputLocale(trimmed, options.locale ?? 'vi')
+      ? resolveLessonAuthorDraftLocale(trimmed, options.locale ?? 'vi', blueprintDraftContext?.outputLocale)
       : options.locale ?? 'vi';
     const isCourseBlueprint = preClassify?.intent === 'course_blueprint';
+    const v5Policy = isCourseBlueprint && aiSettings.activeEngine === 'self_built_rag'
+      ? composeV5BlueprintPolicy(requestedLocale, ctx.systemPrompt ?? '') : null;
+    if (v5Policy) logLessonAuthorFlow('blueprint_policy_composed', {
+      correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+      ...v5Policy.diagnostics,
+    });
     const blueprintSystemPrompt = isCourseBlueprint
-      ? getLessonAuthorBlueprintSystemInstruction(requestedLocale, ctx.systemPrompt)
+      ? v5Policy?.prompt ?? getLessonAuthorBlueprintSystemInstruction(requestedLocale, ctx.systemPrompt)
       : null;
     const budgetSystemPrompt = blueprintSystemPrompt ?? ctx.systemPrompt;
     const historyPromptParts = aiSettings.activeEngine === 'gemini_file_search' && aiOperation === 'lesson_author'
@@ -8422,6 +8728,8 @@ export async function sendMessageStream(
       confidence: resolvedOperationPlan.confidence,
       score: intentScore,
       input_locale: inputLocale,
+      output_locale: requestedLocale,
+      approved_blueprint_locale: blueprintDraftContext?.outputLocale ?? null,
       mention_source: outlineMentionSource,
       command_intent: normalizedLessonAuthorCommand?.intent ?? null,
       command_scope: normalizedLessonAuthorCommand?.scope ?? null,
@@ -8498,6 +8806,12 @@ export async function sendMessageStream(
       let blueprintUsage: Partial<AiUsage> | null = null;
       let blueprintRetrieval: RagRetrievalDiagnostics | null = null;
       let course: DraftCourseOutline | null = null;
+      let blueprintFailureStage = 'node_blueprint_preparation';
+      const blueprintStartedAt = Date.now();
+      const logBlueprintBoundary = (stage: string, details: Record<string, unknown>) => logLessonAuthorFlow(stage, {
+        ...details, correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+        timestamp_utc: new Date().toISOString(), duration_ms: Date.now() - blueprintStartedAt,
+      });
 
       logLessonAuthorFlow('blueprint_branch_enter', {
         correlation_id: lessonAuthorCorrelationId,
@@ -8516,7 +8830,9 @@ export async function sendMessageStream(
         onSideEvent?.({ type: 'progress', stage: 'ANALYZING_SOURCE', detail: 'Đang phân tích phạm vi tài liệu nguồn' });
 
         if (aiSettings.activeEngine === 'self_built_rag') {
+          const componentCapabilities = createComponentCapabilities(allowedComponentTypes);
           const ragResponse = await generateRagLessonAuthorBlueprint({
+            component_capabilities: componentCapabilities,
             correlation_id: lessonAuthorCorrelationId ?? undefined,
             course_id: ctx.courseId ?? undefined,
             tenant_id: ctx.tenantId,
@@ -8541,6 +8857,14 @@ export async function sendMessageStream(
           blueprintRetrieval = ragResponse.retrieval ?? null;
           emitRagWorkflowProgress(onSideEvent, ragResponse.workflow);
           const ragBlueprint = asRecord(ragResponse.blueprint);
+          blueprintFailureStage = 'node_blueprint_normalization';
+          logBlueprintBoundary('blueprint_python_response_received', {
+            correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+            ...blueprintBoundaryCounts(ragBlueprint),
+          });
+          if (JSON.stringify(readComponentCapabilities(ragBlueprint.component_capabilities)) !== JSON.stringify(componentCapabilities)) {
+            throw new Error('COMPONENT_CAPABILITY_PROFILE_NOT_ACKNOWLEDGED');
+          }
           blueprint = normalizeLessonAuthorBlueprint({
             ...ragBlueprint,
             ...(ragResponse.source_map !== undefined ? { source_map: ragResponse.source_map } : {}),
@@ -8548,6 +8872,18 @@ export async function sendMessageStream(
             requireContentArchitecture: true,
             requirePhaseOneContract: true,
             allowedComponentTypes,
+            onComponentDecision: diagnostics => logBlueprintBoundary('blueprint_component_selection', { ...diagnostics }),
+            onBoundary: (stage, value) => {
+              blueprintFailureStage = stage;
+              logBlueprintBoundary('blueprint_contract_boundary', {
+                correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+                stage, ...blueprintBoundaryCounts(value),
+              });
+            },
+          });
+          logBlueprintBoundary('blueprint_component_plan_completed', {
+            correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+            ...blueprintBoundaryCounts(blueprint),
           });
           logLessonAuthorFlow('blueprint_branch_rag_retrieval', {
             correlation_id: lessonAuthorCorrelationId,
@@ -8585,38 +8921,34 @@ export async function sendMessageStream(
 
         blueprint = withAuthoritativeCourseTitle(blueprint, course.courseName);
         onSideEvent?.({ type: 'progress', stage: 'validating' });
-        const architectureValidation = validateLessonAuthorBlueprintArchitecture(
-          blueprint,
-          blueprint.source_map,
-        );
-        if (architectureValidation.status === 'FAIL') {
-          throw new AppError(
-            'Bản thiết kế khóa học không đạt kiểm tra kiến trúc và provenance.',
-            422,
-            'LESSON_AUTHOR_BLUEPRINT_ARCHITECTURE_INVALID',
+        blueprintFailureStage = 'node_blueprint_validation';
+        const candidateBlueprint = blueprint;
+        const candidateCourse = course;
+        const blueprintKbId = ctx.botKbId;
+        const accepted = await acceptAndPersistLessonAuthorBlueprint(candidateBlueprint, candidateBlueprint.source_map, diagnostics => {
+          logBlueprintBoundary('blueprint_node_validation', {
+            correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+            failure_stage: diagnostics.status === 'FAIL' ? 'node_blueprint_validation' : null,
+            ...diagnostics,
+          });
+        }, async architectureValidation => {
+          blueprintFailureStage = 'node_blueprint_quality_report';
+          const report = buildLessonAuthorBlueprintQualityReport(
+            candidateBlueprint, sourceDocuments.length, blueprintRetrieval,
+            requestedLocale, architectureValidation,
           );
-        }
-        qualityReport = buildLessonAuthorBlueprintQualityReport(
-          blueprint,
-          sourceDocuments.length,
-          blueprintRetrieval,
-          requestedLocale,
-          architectureValidation,
-        );
-        blueprintId = await createLessonAuthorBlueprint(
-          ctx,
-          userId,
-          trimmed,
-          ctx.botKbId,
-          blueprint,
-          qualityReport,
-          course.outline,
-          sourceDocuments,
-          aiSettings.activeEngine,
-          aiSettings.lessonAuthorModel,
-        );
+          blueprintFailureStage = 'node_blueprint_persistence';
+          const id = await createLessonAuthorBlueprint(
+            ctx, userId, trimmed, blueprintKbId, candidateBlueprint, report,
+            candidateCourse.outline, sourceDocuments, aiSettings.activeEngine, aiSettings.lessonAuthorModel,
+          );
+          return { id, report };
+        });
+        blueprintId = accepted.id;
+        qualityReport = accepted.report;
+        blueprintFailureStage = 'node_blueprint_response';
         assistantText = formatBlueprintPreview(blueprint, qualityReport, requestedLocale);
-        logLessonAuthorFlow('blueprint_branch_ready', {
+        logBlueprintBoundary('blueprint_branch_ready', {
           correlation_id: lessonAuthorCorrelationId,
           conversation_id: conversationId,
           blueprint_id: blueprintId,
@@ -8627,7 +8959,22 @@ export async function sendMessageStream(
         if (err instanceof RagServiceError && err.usage) {
           blueprintUsage = err.usage;
         }
-        const errorReason = sanitizeInternalErrorReason(err);
+        // Failed-record persistence must never make a candidate review-ready.
+        qualityReport = null;
+        logBlueprintBoundary('blueprint_branch_rejected', {
+          correlation_id: lessonAuthorCorrelationId, conversation_id: conversationId,
+          failure_stage: blueprintFailureStage,
+          internal_failure_code: err instanceof BlueprintAcceptanceError ? err.internal_failure_code
+            : err instanceof ComponentCapabilityError || err instanceof AppError ? err.code ?? 'NODE_BLUEPRINT_BRANCH_FAILED' : 'NODE_BLUEPRINT_BRANCH_FAILED',
+          ...(err instanceof BlueprintAcceptanceError ? err.diagnostics : {}),
+          ...(err instanceof RagServiceError ? err.diagnostics : {}),
+        });
+        // Blueprint input/normalizer errors can embed private titles. Keep
+        // operational codes above; never persist/log the arbitrary exception.
+        const errorReason = err instanceof BlueprintAcceptanceError ? err.message
+          : err instanceof ComponentCapabilityError ? err.code
+            : err instanceof RagServiceError ? 'AI_RAG_BLUEPRINT_FAILED'
+              : 'Không thể hoàn tất Bản thiết kế khóa học ở bước kiểm tra hoặc lưu kết quả.';
         blueprintId = await createFailedLessonAuthorBlueprint(
           ctx,
           userId,
@@ -8641,6 +8988,14 @@ export async function sendMessageStream(
         );
         assistantText = formatLessonAuthorBlueprintFailurePreview(err, requestedLocale);
         logLessonAuthorFlow('blueprint_branch_failed', {
+          timestamp_utc: new Date().toISOString(), duration_ms: Date.now() - blueprintStartedAt,
+          failure_stage: blueprintFailureStage,
+          internal_failure_code: err instanceof BlueprintAcceptanceError ? err.internal_failure_code
+            : err instanceof ComponentCapabilityError || err instanceof AppError ? err.code ?? 'NODE_BLUEPRINT_BRANCH_FAILED' : 'NODE_BLUEPRINT_BRANCH_FAILED',
+          external_failure_code: err instanceof AppError ? err.code ?? 'LESSON_AUTHOR_BLUEPRINT_FAILED' : 'LESSON_AUTHOR_BLUEPRINT_FAILED',
+          ...(err instanceof BlueprintAcceptanceError ? err.diagnostics : {}),
+          ...(err instanceof RagServiceError ? err.diagnostics : {}),
+          ...(err instanceof ComponentCapabilityError ? { internal_failure_code: err.code, failure_stage: 'node_component_planner', unit_path: err.unit_path } : {}),
           correlation_id: lessonAuthorCorrelationId,
           conversation_id: conversationId,
           blueprint_id: blueprintId,

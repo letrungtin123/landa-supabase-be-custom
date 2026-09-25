@@ -78,7 +78,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id', 'X-UI-Locale', 'Range', 'If-Range'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id', 'X-UI-Locale', 'X-Lesson-Author-Job-Key', 'Range', 'If-Range'],
   exposedHeaders: ['Accept-Ranges', 'Content-Range', 'Content-Length', 'Content-Type', 'Content-Disposition', 'ETag', 'Last-Modified', 'Cache-Control'],
 }));
 

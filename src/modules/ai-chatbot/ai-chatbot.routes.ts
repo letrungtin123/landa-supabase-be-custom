@@ -6,7 +6,10 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
-import { checkPermission } from '../../middleware/authorize.js';
+import { checkPermission, hasPermission } from '../../middleware/authorize.js';
+import { withDatabaseTransaction } from '../../config/database.js';
+import { createGenerationJobRepository } from './lesson-author-generation-job.repository.js';
+import { createGenerationStatusHandler } from './lesson-author-generation-status.controller.js';
 import { sendError } from '../../utils/response.js';
 import * as kbCtrl from './kb.controller.js';
 import * as botCtrl from './bot.controller.js';
@@ -17,6 +20,7 @@ import { env } from '../../config/env.js';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
 
 const router = Router();
 
@@ -81,6 +85,7 @@ function parseLessonAuthorVideoUpload(req: Request, res: Response, next: NextFun
   lessonAuthorVideoUpload.single('video')(req, res, (error?: unknown) => {
     if (!error) {
       console.info('[LessonAuthorTranscription] multipart parsed', {
+        client_attempt_id: normalizeLessonAuthorUploadAttemptId(req.get('x-lesson-author-upload-attempt')),
         conversation_id: req.params.conversationId,
         source_size_bytes: req.file?.size ?? null,
         has_video: Boolean(req.file),
@@ -101,6 +106,7 @@ function parseLessonAuthorVideoUpload(req: Request, res: Response, next: NextFun
       ? `Video vượt quá giới hạn ${env.LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB}MB.`
       : 'Không thể đọc video tải lên.';
     console.warn('[LessonAuthorTranscription] multipart rejected', {
+      client_attempt_id: normalizeLessonAuthorUploadAttemptId(req.get('x-lesson-author-upload-attempt')),
       conversation_id: req.params.conversationId,
       error_code: code,
       multer_code: error instanceof multer.MulterError ? error.code : null,
@@ -112,15 +118,28 @@ function parseLessonAuthorVideoUpload(req: Request, res: Response, next: NextFun
 
 function observeLessonAuthorTranscriptionRequest(req: Request, res: Response, next: NextFunction): void {
   const startedAt = Date.now();
+  const clientAttemptId = normalizeLessonAuthorUploadAttemptId(req.get('x-lesson-author-upload-attempt'));
+  let finished = false;
   console.info('[LessonAuthorTranscription] request received', {
+    client_attempt_id: clientAttemptId,
     conversation_id: req.params.conversationId,
     content_length: req.headers['content-length'] ?? null,
     content_type: req.headers['content-type']?.split(';', 1)[0] ?? null,
   });
   res.once('finish', () => {
+    finished = true;
     console.info('[LessonAuthorTranscription] request completed', {
+      client_attempt_id: clientAttemptId,
       conversation_id: req.params.conversationId,
       status_code: res.statusCode,
+      duration_ms: Date.now() - startedAt,
+    });
+  });
+  res.once('close', () => {
+    if (finished) return;
+    console.warn('[LessonAuthorTranscription] request aborted', {
+      client_attempt_id: clientAttemptId,
+      conversation_id: req.params.conversationId,
       duration_ms: Date.now() - startedAt,
     });
   });
@@ -191,6 +210,14 @@ router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
 router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
 router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
 router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+// No enqueue route/poller until quota preparation and recovery accounting are integrated.
+const generationJobRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
+router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId', createGenerationStatusHandler({
+  enabled: () => env.LESSON_AUTHOR_GENERATION_STATUS_ENABLED || env.LESSON_AUTHOR_GENERATION_ENABLED,
+  canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  findOwned: (owner, jobId) => generationJobRepository.findOwned(owner, jobId),
+  reportFailure: record => console.warn('[LessonAuthorGeneration] ' + JSON.stringify(record)),
+}));
 router.post('/chat/lesson-author/conversations/:conversationId/transcriptions', observeLessonAuthorTranscriptionRequest, checkPermission('courses', 'can_edit'), parseLessonAuthorVideoUpload, transcriptCtrl.createLessonAuthorTranscription);
 router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId', checkPermission('courses', 'can_edit'), transcriptCtrl.getLessonAuthorTranscription);
 router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/download', checkPermission('courses', 'can_edit'), transcriptCtrl.downloadLessonAuthorTranscript);

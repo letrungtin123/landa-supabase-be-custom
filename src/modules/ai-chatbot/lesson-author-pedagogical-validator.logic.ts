@@ -285,7 +285,48 @@ function unitExpectedFacts(unit: LessonAuthorPedagogicalBlueprintUnit | undefine
   return readServerOwnedSourceFactIds(unit?.source_fact_ids);
 }
 
-function assessmentHasTeaching(components: ComponentLocation[]): boolean {
+function assessmentHasTeaching(components: ComponentLocation[], lesson: LessonAuthorPedagogicalBlueprintLesson): boolean {
+  const instances = lesson.units.flatMap((unit, unitIndex) => (unit.component_plan ?? []).map(plan => ({ plan, unitIndex })));
+  if (instances.some(item => item.plan.component_plan_id)) {
+    // Read-only supporting evidence is not canonical ownership. Trust it only
+    // when the exact approved instance and evidence set match, for EVERY check.
+    const checks = instances.filter(item => item.plan.type === 'problem');
+    const coveredObjectives = new Set<string>();
+    const equalIds = (a: string[], b: string[]) => a.length === b.length && a.every(id => b.includes(id));
+    if (!checks.length) return false;
+    for (const { plan, unitIndex } of checks) {
+      if (!plan.component_plan_id) return false;
+      const actual = components.filter(item => item.unitIndex === unitIndex && item.component.type === 'problem'
+        && asRecord(item.component.metadata).component_plan_id === plan.component_plan_id);
+      if (actual.length !== 1) return false;
+      const check = actual[0]!;
+      const support = readServerOwnedSourceFactIds(asRecord(check.component.metadata).supporting_evidence_fact_ids);
+      const owned = readServerOwnedSourceFactIds(plan.source_fact_ids);
+      const approvedSupport = readServerOwnedSourceFactIds(plan.supporting_evidence_fact_ids);
+      if (!equalIds(check.sourceFactIds, owned) || !equalIds(support, approvedSupport)) return false;
+      const evidence = new Set([...owned, ...approvedSupport]);
+      const refs = localObjectiveRefs(plan.learning_objective_refs);
+      if (!refs.length || !evidence.size) return false;
+      for (const ref of refs) {
+        const taught = components.some(item => {
+          if (item.component.type !== 'html' || tokens(item.text).length < 12
+            || item.unitIndex > unitIndex || (item.unitIndex === unitIndex && item.componentIndex >= check.componentIndex)) return false;
+          const teachingPlan = instances.find(p => p.unitIndex === item.unitIndex && p.plan.type === 'html'
+            && p.plan.component_plan_id === asRecord(item.component.metadata).component_plan_id)?.plan;
+          if (!teachingPlan || !localObjectiveRefs(teachingPlan.learning_objective_refs).includes(ref)) return false;
+          // A supporting-only teaching unit can read existing primary evidence,
+          // but it cannot enlarge its approved evidence set here.
+          const teachingSupport = readServerOwnedSourceFactIds(asRecord(item.component.metadata).supporting_evidence_fact_ids);
+          if (!equalIds(item.sourceFactIds, readServerOwnedSourceFactIds(teachingPlan.source_fact_ids))
+            || !equalIds(teachingSupport, readServerOwnedSourceFactIds(teachingPlan.supporting_evidence_fact_ids))) return false;
+          return [...item.sourceFactIds, ...teachingSupport].some(id => evidence.has(id));
+        });
+        if (!taught) return false;
+        coveredObjectives.add(ref);
+      }
+    }
+    return localObjectiveRefs(lesson.assessment_objective_refs).every(ref => coveredObjectives.has(ref));
+  }
   const explainedFacts = new Set(components
     .filter(item => item.component.type === 'html')
     .flatMap(item => item.sourceFactIds));
@@ -446,7 +487,10 @@ export function validateLessonAuthorPedagogicalQuality(input: {
         const actualTypes = actualComponents.map(item => item.component.type);
         for (const planItem of plan) {
           purposeTotal += 1;
-          const expectedTypePresent = actualTypes.includes(planItem.type);
+          const expectedTypePresent = planItem.component_plan_id
+            ? actualComponents.some(item => item.component.type === planItem.type
+              && asRecord(item.component.metadata).component_plan_id === planItem.component_plan_id)
+            : actualTypes.includes(planItem.type);
           if (expectedTypePresent) purposeCovered += 1;
           else findings.push(finding('COMPONENT_PURPOSE_INVALID', unitPath, `The generated unit omitted the approved ${planItem.type} learning treatment.`, {
             learning_block_ids: planItem.learning_block_ids,
@@ -483,7 +527,7 @@ export function validateLessonAuthorPedagogicalQuality(input: {
 
       if (expectedLesson.assessment_required) {
         assessmentTotal += 1;
-        if (assessmentHasTeaching(lessonComponents)) assessmentCovered += 1;
+        if (assessmentHasTeaching(lessonComponents, expectedLesson)) assessmentCovered += 1;
         else findings.push(finding('ASSESSMENT_NOT_ALIGNED', lessonPath, 'An assessment-required lesson needs a source-linked problem after explanatory teaching.', {
           objective_ids: textList(expectedLesson.assessment_objective_refs, 12, 80),
         }));

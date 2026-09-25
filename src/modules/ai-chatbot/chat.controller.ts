@@ -4,6 +4,10 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
+import { tryEnqueueDurableBlueprint } from './lesson-author-durable-blueprint.service.js';
+import { respondToGenerationAdmission } from './lesson-author-generation-admission.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { query } from '../../config/database.js';
 import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../config/cache-invalidation.js';
@@ -620,6 +624,20 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     }
   }
 
+  // Opt-in transport contract: a queued Blueprint returns promptly, before SSE.
+  // Older clients and ineligible operations keep their existing streaming path.
+  const generationKey = req.header('X-Lesson-Author-Job-Key');
+  if (generationKey && target === 'lesson_author') {
+    const handled = await respondToGenerationAdmission(res, admission =>
+      tryEnqueueDurableBlueprint(conversationId, userId, tenantId, content, generationKey, {
+        target, courseId, mode: mode === 'draft_lesson' ? 'draft_lesson' : mode === 'course_blueprint' ? 'course_blueprint' : mode === 'chat' ? 'chat' : 'auto',
+        outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [], editorContext: editor_context,
+        sourceDocuments: Array.isArray(source_documents) ? source_documents : [], blueprintId: blueprint_id,
+        inputMode, locale: locale === 'en' ? 'en' : 'vi',
+      }, admission), { conversationId });
+    if (handled) return;
+  }
+
   // Set SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -628,14 +646,17 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     'X-Accel-Buffering': 'no',
   });
 
+  const correlationId = randomUUID();
+  const stream = createChatStreamLifecycle(res, {
+    correlation_id: correlationId, conversation_id: conversationId,
+  }, record => console.info('[ChatStream]', JSON.stringify(record)));
   let clientDisconnected = false;
 
   // Helper to write SSE event
   const writeSSE = (data: Record<string, unknown>): boolean => {
     if (clientDisconnected || res.writableEnded || res.destroyed) return false;
     try {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-      return true;
+      return stream.writeEvent(data);
     } catch {
       clientDisconnected = true;
       return false;
@@ -645,17 +666,17 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const endSSE = () => {
     if (clientDisconnected || res.writableEnded || res.destroyed) return;
     try {
-      res.end();
+      stream.finish();
     } catch {
       clientDisconnected = true;
     }
   };
 
   // Handle real response disconnects. req.close can fire after the request body is read on long SSE responses.
-  req.on('aborted', () => { clientDisconnected = true; });
-  res.on('close', () => {
-    if (!res.writableEnded) clientDisconnected = true;
-  });
+  const onAborted = () => { clientDisconnected = true; stream.disconnect(); };
+  const onClosed = () => { if (!res.writableEnded) onAborted(); };
+  req.on('aborted', onAborted);
+  res.on('close', onClosed);
 
   // Commit the streaming response before the Lesson Author performs source,
   // course, and intent lookups. This prevents same-origin proxies from seeing
@@ -669,12 +690,14 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     });
   }
 
+  try {
   await chatService.sendMessageStream(
     conversationId,
     userId,
     tenantId,
     content,
     {
+      correlationId,
       target,
       courseId,
       mode: mode === 'draft_lesson'
@@ -720,5 +743,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       if (!clientDisconnected) writeSSE(event);
     },
   );
+  } finally {
+    stream.dispose();
+    req.off('aborted', onAborted);
+    res.off('close', onClosed);
+  }
 }
 

@@ -114,6 +114,7 @@ export interface BlueprintArchitectureChapter {
 }
 
 export interface BlueprintArchitecture {
+  source_chapter_policy?: SourceChapterPolicy;
   architecture_contract_version?: number;
   title: string;
   learning_outcomes: string[];
@@ -139,6 +140,64 @@ export interface BlueprintArchitecture {
     allocations: Array<{ evidence_scope_id: string; unit_path: string; learning_block_id: string; basis: string }>;
     unallocated: Array<{ evidence_scope_id: string; code: string; path: string }>;
   };
+}
+
+export interface SourceChapterPolicy {
+  version: 1;
+  mode: 'MODEL_DESIGNED' | 'SOURCE_LOCKED_TOC' | 'SOURCE_LOCKED_HEADINGS';
+  complete: true;
+  reason_codes: string[];
+  chapters: Array<{ document_id: string; source_ref: string; title: string; source_title: string; basis: string; parser_version: string | null }>;
+}
+
+/** Additive server metadata; absent on stored V3/V4/earlier V5 records. */
+export function normalizeSourceChapterPolicy(value: unknown): SourceChapterPolicy | undefined {
+  if (value === undefined) return undefined;
+  const raw = asRecord(value);
+  const fail = (): never => { throw new Error('SOURCE_CHAPTER_POLICY_INVALID'); };
+  if (!raw || raw.version !== 1 || raw.complete !== true
+    || !['MODEL_DESIGNED', 'SOURCE_LOCKED_TOC', 'SOURCE_LOCKED_HEADINGS'].includes(String(raw.mode))
+    || !Array.isArray(raw.reason_codes) || raw.reason_codes.length !== 0
+    || !Array.isArray(raw.chapters) || raw.chapters.length > 12) return fail();
+  const chapters = raw.chapters.map(value => {
+    const node = asRecord(value);
+    if (!node || ['document_id', 'source_ref', 'title', 'source_title'].some(key => typeof node[key] !== 'string' || !String(node[key]).trim())
+      || !['SOURCE_LOCKED_TOC', 'SOURCE_LOCKED_HEADINGS'].includes(String(node.basis))
+      || (node.parser_version !== null && typeof node.parser_version !== 'string')) return fail();
+    return { document_id: node.document_id as string, source_ref: node.source_ref as string,
+      title: node.title as string, source_title: node.source_title as string, basis: node.basis as string,
+      parser_version: node.parser_version as string | null };
+  });
+  if ((raw.mode === 'MODEL_DESIGNED') !== (chapters.length === 0)
+    || new Set(chapters.map(c => `${c.document_id}:${c.source_ref}`)).size !== chapters.length) return fail();
+  return { version: 1, mode: raw.mode as SourceChapterPolicy['mode'], complete: true, reason_codes: [], chapters };
+}
+
+function validateSourceChapterPolicy(blueprint: BlueprintArchitecture, sourceMap: LessonAuthorSourceMap): BlueprintValidationIssue[] {
+  const errors: BlueprintValidationIssue[] = [];
+  const reject = (path: string) => errors.push(issue('error', 'BLUEPRINT_SOURCE_STRUCTURE_MISMATCH', path, 'Source chapter identity or primary evidence boundary differs from the server policy.', 'chapter'));
+  let policy: SourceChapterPolicy | undefined;
+  try { policy = normalizeSourceChapterPolicy(blueprint.source_chapter_policy); }
+  catch { reject('blueprint'); return errors; }
+  if (!policy || policy.mode === 'MODEL_DESIGNED') return errors;
+  if (policy.chapters.length !== blueprint.chapters.length) { reject('blueprint'); return errors; }
+  const scopes = new Map(sourceMap.source_evidence_scopes?.map(scope => [scope.id, scope]));
+  policy.chapters.forEach((binding, index) => {
+    const path = `chapters[${index}]`;
+    const chapter = blueprint.chapters[index];
+    const roots = sourceMap.sections.filter(s => s.document_id === binding.document_id && s.source_ref === binding.source_ref);
+    if (roots.length !== 1 || chapter.title !== binding.title || chapter.source_refs?.length !== 1 || chapter.source_refs[0] !== binding.source_ref) {
+      reject(path); return;
+    }
+    const owned = new Set([roots[0].id]);
+    for (let pass = 0; pass < sourceMap.sections.length; pass++) {
+      const size = owned.size;
+      sourceMap.sections.forEach(s => { if (s.parent_id && owned.has(s.parent_id) && s.document_id === binding.document_id) owned.add(s.id); });
+      if (size === owned.size) break;
+    }
+    if (chapter.lessons.some(l => l.units.some(u => u.learning_blocks?.some(b => b.primary_evidence_scope_ids?.some(id => !owned.has(scopes.get(id)?.section_id ?? '')))))) reject(path);
+  });
+  return errors;
 }
 
 export interface BlueprintValidationIssue {
@@ -347,7 +406,9 @@ const V5_TEACHING_INTENTS = new Set([
   'procedure', 'comparison', 'warning', 'tip',
 ]);
 const V5_GENERIC_EXPLANATION_INTENTS = new Set(['concept_explanation', 'definition', 'introduction']);
-const V5_ACTION_OR_PROCEDURE_OBJECTIVE = /\b(?:apply|perform|demonstrate|execute|practice|procedure|process|áp\s+dụng|thực\s+hiện|thực\s+hành|quy\s+trình|vận\s+hành)\b/i;
+// JS \b is ASCII-based, unlike Python re's Unicode boundary. Keep VI/EN
+// action vocabulary identical without matching it inside another word.
+const V5_ACTION_OR_PROCEDURE_OBJECTIVE = /(?:^|[^\p{L}\p{N}_])(?:apply|perform|demonstrate|execute|practice|procedure|process|áp\s+dụng|thực\s+hiện|thực\s+hành|quy\s+trình|vận\s+hành)(?=$|[^\p{L}\p{N}_])/iu;
 
 function blockIntent(block: NonNullable<BlueprintArchitectureUnit['learning_blocks']>[number]): string {
   return typeof block.intent === 'string' ? block.intent.trim() : '';
@@ -403,6 +464,7 @@ function validateV5EvidenceScopeBlueprint(
     add(issue('error', 'SOURCE_MAP_INCOMPLETE', 'source_map', 'Source Map does not represent a complete evidence-scope inventory.', 'blueprint'));
   }
   const scopes = new Map(sourceMap.source_evidence_scopes.map(scope => [scope.id, scope]));
+  validateSourceChapterPolicy(blueprint, sourceMap).forEach(add);
   const facts = new Set(sourceMap.facts.map(fact => fact.id));
   const concepts = new Map(sourceMap.concepts.map(concept => [concept.id, concept]));
   const sourceRefs = new Set(sourceMap.sections.map(section => section.source_ref));
@@ -485,10 +547,23 @@ function validateV5EvidenceScopeBlueprint(
 
           for (const check of checks) {
             const checkRefs = [...canonicalIdSet(check.block.learning_objective_refs)].filter(ref => assessmentRefs.has(ref));
-            const priorTeaching = orderedBlocks.filter(candidate => candidate.position < check.position
-              && V5_TEACHING_INTENTS.has(blockIntent(candidate.block))
-              && [...canonicalIdSet(candidate.block.learning_objective_refs)].some(ref => checkRefs.includes(ref)));
-            if (checkRefs.length > 0 && priorTeaching.length === 0) {
+            // Mirror evaluate_assessment_teaching_anchor's FULL alignment for
+            // EACH local objective. Base-eligible alone is repair authority,
+            // not acceptance. orderedBlocks is already scoped to this lesson.
+            const teachingByObjective = checkRefs.map(ref => orderedBlocks.filter(candidate => {
+              const teaching = candidate.block;
+              const teachingRefs = canonicalIdSet(teaching.source_refs);
+              const checkSourceRefs = canonicalIdSet(check.block.source_refs);
+              const concepts = canonicalIdSet(teaching.concept_ids);
+              return candidate.position < check.position && Boolean(candidate.blockId)
+                && V5_TEACHING_INTENTS.has(blockIntent(teaching))
+                && canonicalIdSet(teaching.primary_evidence_scope_ids).size > 0
+                && canonicalIdSet(teaching.learning_objective_refs).has(ref)
+                && [...canonicalIdSet(check.block.concept_ids)].some(id => concepts.has(id))
+                && (!teachingRefs.size || !checkSourceRefs.size || [...checkSourceRefs].some(id => teachingRefs.has(id)));
+            }));
+            const priorTeaching = teachingByObjective.flat();
+            if (teachingByObjective.some(anchors => anchors.length === 0)) {
               add(issue('error', 'ASSESSMENT_OBJECTIVE_NOT_COVERED', check.unitPath, 'Assessment objectives must be taught by an earlier explanatory or procedural semantic block.', 'unit'));
             }
             const priorPrimaryScopes = new Set<string>();
@@ -513,7 +588,14 @@ function validateV5EvidenceScopeBlueprint(
         add(issue('error', 'INSTRUCTIONAL_DEPTH_INSUFFICIENT', lessonPath, 'A multi-objective lesson with substantial server-owned evidence cannot use one generic explanatory block for all treatment.', 'lesson'));
       }
       lesson.units.forEach((unit, unitIndex) => {
-        const unitText = [lesson.objective, ...(lesson.learning_objectives ?? []), unit.purpose ?? ''].join(' ');
+        const refs = unit.learning_objective_refs ?? [];
+        const validRefs = refs.length > 0 && new Set(refs).size === refs.length
+          && refs.every(ref => objectiveRefs.has(ref) && isLocalObjectiveRef(ref, objectiveRefs.size));
+        if (!validRefs) {
+          add(issue('error', 'OBJECTIVE_ALIGNMENT_INVALID', `${lessonPath}.units[${unitIndex}]`, 'Unit must declare unique valid local objective references.', 'unit'));
+          return;
+        }
+        const unitText = [...refs.map(ref => lesson.learning_objectives![Number(ref.slice(3)) - 1]), unit.purpose ?? ''].join(' ');
         const intents = new Set((unit.learning_blocks ?? []).map(block => blockIntent(block)));
         if (V5_ACTION_OR_PROCEDURE_OBJECTIVE.test(unitText) && intents.size > 0
           && [...intents].every(intent => V5_GENERIC_EXPLANATION_INTENTS.has(intent))) {

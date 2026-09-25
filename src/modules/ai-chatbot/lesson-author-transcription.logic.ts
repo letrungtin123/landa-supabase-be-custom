@@ -1,5 +1,13 @@
 export type LessonAuthorTranscriptLocale = 'vi' | 'en';
 
+const SAFE_UPLOAD_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Browser supplied for diagnostics/idempotency only; never an authority ID. */
+export function normalizeLessonAuthorUploadAttemptId(value: unknown): string | null {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return SAFE_UPLOAD_ATTEMPT_ID.test(normalized) ? normalized.toLowerCase() : null;
+}
+
 export const LESSON_AUTHOR_TRANSCRIPTION_STATUSES = [
   'queued',
   'running',
@@ -10,6 +18,23 @@ export const LESSON_AUTHOR_TRANSCRIPTION_STATUSES = [
 ] as const;
 
 export type LessonAuthorTranscriptionStatus = typeof LESSON_AUTHOR_TRANSCRIPTION_STATUSES[number];
+
+export const LESSON_AUTHOR_KB_DOCUMENT_STATUSES = ['draft', 'learning', 'learned', 'error'] as const;
+export type LessonAuthorKbDocumentStatus = typeof LESSON_AUTHOR_KB_DOCUMENT_STATUSES[number];
+
+export function normalizeLessonAuthorKbDocumentStatus(value: unknown): LessonAuthorKbDocumentStatus | null {
+  return LESSON_AUTHOR_KB_DOCUMENT_STATUSES.includes(value as LessonAuthorKbDocumentStatus)
+    ? value as LessonAuthorKbDocumentStatus
+    : null;
+}
+
+export function isLessonAuthorTranscriptSourceReady(
+  transcriptionStatus: LessonAuthorTranscriptionStatus,
+  kbDocumentStatus: unknown,
+): boolean {
+  return transcriptionStatus === 'committed'
+    && normalizeLessonAuthorKbDocumentStatus(kbDocumentStatus) === 'learned';
+}
 
 export const LESSON_AUTHOR_VIDEO_MIME_TYPE = 'video/mp4';
 // Supabase Storage compares this bucket's MIME allowlist literally. Charset

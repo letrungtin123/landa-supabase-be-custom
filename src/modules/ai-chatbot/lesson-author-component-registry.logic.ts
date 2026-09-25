@@ -1,3 +1,4 @@
+import { assertComponentInstancePlan, ComponentCapabilityError, componentPlanId, readComponentCapabilities, type LessonAuthorComponentCapabilities } from './lesson-author-capabilities.logic.js';
 import type {
   LessonAuthorComponentPlan,
   LessonAuthorComponentProposal,
@@ -91,6 +92,7 @@ export interface AiComponentDescriptor {
 }
 
 export type ComponentPlannerReasonCode =
+  | 'OPTIONAL_TREATMENT_HTML_FALLBACK'
   | 'EXPLANATION_DEFAULT'
   | 'ASSESS_OBJECTIVE'
   | 'FAQ_ANTICIPATED_QUESTIONS'
@@ -532,18 +534,81 @@ function selectCandidate(block: SemanticLearningBlock): Candidate {
  * components.  A caller may supply tenant capability; the global registry
  * never bypasses that intersection.
  */
-export function planSemanticLearningBlocks(input: {
+export interface ComponentPlannerDiagnostic {
+  status: 'PASS' | 'FAIL';
+  unit_path: string | null;
+  failure_code: string | null;
+  block_count: number;
+  omitted_block_count: number;
+  decisions: Array<{
+    block_index: number; intent: LearningBlockIntent | 'unknown'; role: 'required' | 'optional';
+    candidate_type: LessonAuthorComponentType; selected_type: LessonAuthorComponentType | null;
+    descriptor_eligible: boolean; tenant_permitted: boolean;
+    reason_code: string;
+  }>;
+}
+
+interface ComponentPlannerInput {
+  component_capabilities?: LessonAuthorComponentCapabilities;
+  unit_path?: string;
   blocks: readonly SemanticLearningBlock[];
   unit_source_fact_ids: readonly string[];
   allowed_component_types?: ReadonlySet<CourseComponentType>;
-}): PlannedLearningComponent[] {
+  on_diagnostics?: (diagnostics: ComponentPlannerDiagnostic) => void;
+}
+
+/** Operational projection only: no block IDs, descriptors or private prose. */
+export function planSemanticLearningBlocks(input: ComponentPlannerInput): PlannedLearningComponent[] {
+  let plans: PlannedLearningComponent[] = [];
+  let failure: unknown;
+  try {
+    plans = planSemanticLearningBlocksInternal(input);
+    return plans;
+  } catch (error) {
+    failure = error;
+    throw error;
+  } finally {
+    if (input.on_diagnostics) {
+      const failureCode = failure instanceof ComponentCapabilityError ? failure.code : failure ? 'COMPONENT_PLANNING_REJECTED' : null;
+      const diagnostics: ComponentPlannerDiagnostic = {
+        status: failure ? 'FAIL' : 'PASS',
+        unit_path: /^chapter_\d+\.lesson_\d+\.unit_\d+$/.test(input.unit_path ?? '') ? input.unit_path! : null,
+        failure_code: failureCode, block_count: input.blocks.length,
+        omitted_block_count: Math.max(0, input.blocks.length - 12),
+        decisions: input.blocks.slice(0, 12).map((block, block_index) => {
+          const candidate = selectCandidate(block);
+          const candidateType = candidate.type ?? 'html';
+          const represented = plans.filter(plan => plan.learning_block_ids?.includes(block.id));
+          const selected = represented.find(plan => plan.type !== 'html') ?? represented[0];
+          const permitted = isAllowed(candidateType, input.allowed_component_types);
+          const reason = failureCode ?? (!permitted ? 'TENANT_CAPABILITY_FALLBACK'
+            : candidate.type && selected?.type === 'html' ? 'OPTIONAL_TREATMENT_HTML_FALLBACK'
+              : !selected ? 'LEGACY_NOT_REPRESENTED' : candidate.reason_code);
+          return { block_index, intent: INTENTS.includes(block.intent) ? block.intent : 'unknown',
+            role: block.intent === 'knowledge_check' || block.importance === 'core' || block.importance === 'critical' || block.metadata?.required === true ? 'required' : 'optional',
+            candidate_type: candidateType, selected_type: selected?.type ?? null,
+            descriptor_eligible: candidate.reason_code !== 'INSUFFICIENT_EVIDENCE_FALLBACK',
+            tenant_permitted: permitted, reason_code: reason };
+        }),
+      };
+      // Diagnostic consumers cannot convert rejection to acceptance (or vice versa).
+      try { input.on_diagnostics(diagnostics); } catch { /* logging is non-authoritative */ }
+    }
+  }
+}
+
+function planSemanticLearningBlocksInternal(input: ComponentPlannerInput): PlannedLearningComponent[] {
   const allowed = input.allowed_component_types;
+  const capabilities = readComponentCapabilities(input.component_capabilities);
+  if (capabilities && !input.unit_path) throw new Error('COMPONENT_PLAN_UNIT_ADDRESS_REQUIRED');
+  if (capabilities && (input.blocks.some(b => !b.id) || new Set(input.blocks.map(b => b.id)).size !== input.blocks.length)) throw new Error('COMPONENT_PLAN_BLOCK_ADDRESS_AMBIGUOUS');
   if (!isAllowed('html', allowed)) {
     throw new Error('Tenant has disabled html, so Lesson Author cannot safely render the required explanatory content.');
   }
   const sourceFactIds = Array.from(new Set(input.unit_source_fact_ids));
   const explanatoryBlocks: SemanticLearningBlock[] = [];
-  const primaryCandidates: Array<{ block: SemanticLearningBlock; candidate: Candidate }> = [];
+  const assessmentCandidates: Array<{ block: SemanticLearningBlock; candidate: Candidate }> = [];
+  const instructionalCandidates: Array<{ block: SemanticLearningBlock; candidate: Candidate }> = [];
   const faqCandidates: Array<{ block: SemanticLearningBlock; candidate: Candidate }> = [];
   let tenantCapabilityFallback = false;
 
@@ -554,12 +619,17 @@ export function planSemanticLearningBlocks(input: {
       continue;
     }
     if (!isAllowed(candidate.type, allowed)) {
+      if (capabilities && block.intent === 'knowledge_check') throw new ComponentCapabilityError('ASSESSMENT_TENANT_CAPABILITY_GAP', input.unit_path);
+      if (capabilities && (block.importance === 'core' || block.importance === 'critical' || block.metadata?.required === true)) {
+        throw new ComponentCapabilityError('MANDATORY_COMPONENT_CAPACITY_EXCEEDED', input.unit_path);
+      }
       tenantCapabilityFallback = true;
       explanatoryBlocks.push(block);
       continue;
     }
     if (candidate.type === 'la_faq') faqCandidates.push({ block, candidate });
-    else primaryCandidates.push({ block, candidate });
+    else if (candidate.type === 'problem') assessmentCandidates.push({ block, candidate });
+    else instructionalCandidates.push({ block, candidate });
   }
 
   // All source facts remain owned by explanatory HTML. This avoids dropping a
@@ -575,23 +645,53 @@ export function planSemanticLearningBlocks(input: {
   htmlPlan.source_fact_ids = sourceFactIds;
 
   const plans: PlannedLearningComponent[] = [htmlPlan];
-  // Do not make a lesson visually varied by force: at most one non-FAQ
-  // interaction is selected for a compact unit, then an evidence-backed FAQ.
-  const chosenPrimary = primaryCandidates.sort((left, right) => {
+  // Assessment is mandatory when the approved semantic plan contains a
+  // knowledge check. It must not consume the one optional treatment slot:
+  // an evidence-backed diagram/sortable/crossword may still be instructionally
+  // necessary. Legacy plans remain bounded to three; profile2 allows four.
+  const chosenAssessment = assessmentCandidates[0];
+  if (capabilities) {
+    if (assessmentCandidates.length && !capabilities.assessment_enabled) throw new ComponentCapabilityError('ASSESSMENT_TENANT_CAPABILITY_GAP', input.unit_path);
+    if (assessmentCandidates.length > capabilities.max_assessments_per_unit) throw new ComponentCapabilityError('ASSESSMENT_PLAN_DOWNSTREAM_CAPABILITY_GAP', input.unit_path);
+    for (const assessment of assessmentCandidates) plans.push(makePlan('problem', [assessment.block], assessment.candidate.reason_code));
+  } else if (chosenAssessment) {
+    plans.push(makePlan('problem', [chosenAssessment.block], chosenAssessment.candidate.reason_code));
+  }
+  const optionalCandidates = [...instructionalCandidates, ...faqCandidates].sort((left, right) => {
+    const isRequired = (b: SemanticLearningBlock) => b.importance === 'core' || b.importance === 'critical' || b.metadata?.required === true;
+    if (capabilities && isRequired(left.block) !== isRequired(right.block)) return isRequired(left.block) ? -1 : 1;
     const leftPriority = AI_COMPONENT_REGISTRY[left.candidate.type!].selection_priority;
     const rightPriority = AI_COMPONENT_REGISTRY[right.candidate.type!].selection_priority;
     return leftPriority - rightPriority;
-  })[0];
-  if (chosenPrimary) plans.push(makePlan(chosenPrimary.candidate.type!, [chosenPrimary.block], chosenPrimary.candidate.reason_code));
-  const chosenFaq = faqCandidates[0];
-  if (chosenFaq) plans.push(makePlan('la_faq', [chosenFaq.block], chosenFaq.candidate.reason_code));
+  });
+  const optionalLimit = capabilities ? capabilities.max_components_per_unit - plans.length : chosenAssessment ? 1 : 2;
+  if (capabilities && optionalCandidates.some((item, index) => index >= optionalLimit && (item.block.importance === 'core' || item.block.importance === 'critical' || item.block.metadata?.required === true))) {
+    throw new ComponentCapabilityError('MANDATORY_COMPONENT_CAPACITY_EXCEEDED', input.unit_path);
+  }
+  for (const chosen of optionalCandidates.slice(0, optionalLimit)) {
+    plans.push(makePlan(chosen.candidate.type!, [chosen.block], chosen.candidate.reason_code));
+  }
+  if (capabilities) {
+    // Optional representation can fall back to explanation, never disappear.
+    const omitted = optionalCandidates.slice(optionalLimit).map(item => item.block);
+    if (omitted.length) {
+      const fallback = makePlan('html', [...new Map([...htmlBlocks, ...omitted].map(block => [block.id, block])).values()], 'EXPLANATION_DEFAULT');
+      fallback.reason_code = 'OPTIONAL_TREATMENT_HTML_FALLBACK';
+      plans[0] = { ...fallback, source_fact_ids: sourceFactIds };
+    }
+  }
 
   for (const plan of plans) {
+    if (capabilities) {
+      plan.component_plan_id = componentPlanId(input.unit_path!, plan.type, plan.learning_block_ids ?? []);
+      plan.learning_objective_refs = [...new Set(input.blocks.filter(b => plan.learning_block_ids?.includes(b.id)).flatMap(b => b.learning_objective_refs ?? []))];
+    }
     if (!GENERATABLE_TYPES.has(plan.type)) throw new Error(`Registry selected unsupported AI component ${plan.type}.`);
     if (!isAllowed(plan.type, allowed)) {
       throw new Error(`Tenant does not permit Lesson Author component ${plan.type}.`);
     }
   }
+  if (capabilities) assertComponentInstancePlan(plans);
   return plans;
 }
 

@@ -137,6 +137,9 @@ export interface DeleteAssetByStoragePathResult {
 export type LessonAuthorComponentType = 'html' | 'problem' | 'la_faq' | 'la_sortable' | 'la_crossword' | 'la_diagram';
 
 export interface LessonAuthorComponentPlan {
+  supporting_evidence_fact_ids?: string[];
+  component_plan_id?: string;
+  learning_objective_refs?: string[];
   type: LessonAuthorComponentType;
   title?: string;
   rationale?: string;

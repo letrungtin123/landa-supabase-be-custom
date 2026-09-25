@@ -67,6 +67,12 @@ const QUESTION_WORDS = /(^|\b)(la gi|giai thich|tom tat|cho biet|phan tich|tai s
 const COURSE_BLUEPRINT_WORDS = /(^|\b)(toan bo khoa hoc|toan khoa|ca khoa hoc|course blueprint|curriculum|chuong trinh dao tao|ban thiet ke khoa hoc|khung khoa hoc|thiet ke mot khoa hoc|xay dung mot khoa hoc|entire course|whole course|full course|complete course)(\b|$)/i;
 const COURSE_SCOPE_WORDS = /(^|\b)(khoa hoc|course|chuong trinh|curriculum)(\b|$)/i;
 const DETAILED_COURSE_AUTHORING_WORDS = /(^|\b)(chi tiet|chuyen sau|day du|hoan chinh|detailed|in[-\s]?depth|comprehensive)(\b|$)/i;
+// Explicitly creating a course (or its course-level content) is enough to
+// request a review-only Blueprint. Depth adjectives improve the request but
+// are not routing authority. Keep this phrase-level matcher narrower than the
+// generic CREATE/CONTENT signals so "create a quiz for this course" still
+// requires a concrete lesson target.
+const EXPLICIT_COURSE_CREATION_WORDS = /(?:^|\b)(?:(?:tao|soan|xay dung|thiet ke|lap|viet)\s+(?:(?:noi dung|chuong trinh)\s+)?(?:cho\s+)?(?:mot\s+)?(?:khoa hoc|chuong trinh)|(?:create|build|design|draft|generate|write)\s+(?:(?:the|this|a)\s+)?(?:course(?:\s+content)?|content\s+for\s+(?:(?:the|this|a)\s+)?course))(?:\b|$)/i;
 const COMPOUND_CONNECTOR_WORDS = /(^|\b)(va|and|dong thoi|at the same time|sau do|then|also)(\b|$)/i;
 const NEGATED_DELETE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(xoa|delete|remove|bo di|go bo|loai bo)(\b|$)/i;
 const NEGATED_CREATE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(tao|them|add|insert|create|generate|build)(\b|$)/i;
@@ -116,6 +122,22 @@ export function resolveLessonAuthorOutputLocale(
 
   const inputLocale = detectLessonAuthorInputLocale(value);
   return inputLocale === 'en' || inputLocale === 'vi' ? inputLocale : fallback;
+}
+
+/** Approved Blueprint locale is stable across UI/draft-button language changes.
+ * Explicit output requests keep existing precedence; legacy records fall back
+ * to the unchanged message/UI resolver. Locked titles are never translated. */
+export function resolveLessonAuthorDraftLocale(
+  value: string,
+  fallback: 'vi' | 'en',
+  approvedLocale?: unknown,
+): 'vi' | 'en' {
+  const folded = fold(String(value ?? ''));
+  const english = ENGLISH_OUTPUT_LANGUAGE_WORDS.test(folded);
+  const vietnamese = VIETNAMESE_OUTPUT_LANGUAGE_WORDS.test(folded);
+  if (english !== vietnamese) return english ? 'en' : 'vi';
+  if (approvedLocale === 'vi' || approvedLocale === 'en') return approvedLocale;
+  return resolveLessonAuthorOutputLocale(value, fallback);
 }
 
 function hasTargetReference(text: string): boolean {
@@ -273,7 +295,12 @@ export function classifyLessonAuthorIntent(input: {
     && DETAILED_COURSE_AUTHORING_WORDS.test(text)
     && !hasSpecificOutlineTarget
     && !hasMention;
-  const isCourseWideBlueprintRequest = (isBlueprint || isDetailedCourseAuthoringRequest)
+  const isExplicitCourseCreationRequest = EXPLICIT_COURSE_CREATION_WORDS.test(text)
+    && targetType === 'course'
+    && COURSE_SCOPE_WORDS.test(text)
+    && !hasSpecificOutlineTarget
+    && !hasMention;
+  const isCourseWideBlueprintRequest = (isBlueprint || isDetailedCourseAuthoringRequest || isExplicitCourseCreationRequest)
     && isCreate
     && !isEdit
     && !isTitleEdit
@@ -346,7 +373,16 @@ export function classifyLessonAuthorIntent(input: {
   // Whole-course creation must be routed to the review-only blueprint branch
   // before the generic "content" signal can classify it as a node update.
   if (isCourseWideBlueprintRequest) {
-    return makePlan('course_blueprint', 'course', [], 0.96, false, 'none', ['create_verb', 'course_scope'], []);
+    return makePlan(
+      'course_blueprint',
+      'course',
+      [],
+      0.96,
+      false,
+      'none',
+      ['create_verb', 'course_scope', ...(isExplicitCourseCreationRequest ? ['explicit_course_create'] : [])],
+      [],
+    );
   }
 
   if (isTitleEdit) {

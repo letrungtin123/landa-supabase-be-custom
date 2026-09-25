@@ -15,7 +15,10 @@ import {
   isSupportedLessonAuthorVideo,
   LESSON_AUTHOR_VIDEO_MIME_TYPE,
   normalizeTranscriptText,
+  normalizeLessonAuthorKbDocumentStatus,
+  isLessonAuthorTranscriptSourceReady,
   transcriptFileName,
+  type LessonAuthorKbDocumentStatus,
   type LessonAuthorTranscriptLocale,
   type LessonAuthorTranscriptionStatus,
 } from './lesson-author-transcription.logic.js';
@@ -47,6 +50,7 @@ export interface LessonAuthorTranscriptionJob {
   lease_expires_at: string | null;
   last_error: string | null;
   kb_document_id: string | null;
+  kb_document_status?: LessonAuthorKbDocumentStatus | null;
   expires_at: string | null;
   created_at: string;
   updated_at: string;
@@ -61,6 +65,8 @@ export interface PublicLessonAuthorTranscriptionJob {
   transcript_language: string | null;
   transcript_char_count: number | null;
   kb_document_id: string | null;
+  kb_document_status: LessonAuthorKbDocumentStatus | null;
+  source_ready: boolean;
   can_add_to_kb: boolean;
   can_retry: boolean;
   error_reason: string | null;
@@ -80,6 +86,7 @@ export type PreparedLessonAuthorTranscriptUpload = {
 };
 
 export function toPublicLessonAuthorTranscriptionJob(job: LessonAuthorTranscriptionJob): PublicLessonAuthorTranscriptionJob {
+  const kbDocumentStatus = normalizeLessonAuthorKbDocumentStatus(job.kb_document_status);
   return {
     id: job.id,
     conversation_id: job.conversation_id,
@@ -89,6 +96,8 @@ export function toPublicLessonAuthorTranscriptionJob(job: LessonAuthorTranscript
     transcript_language: job.transcript_language,
     transcript_char_count: job.transcript_char_count,
     kb_document_id: job.kb_document_id,
+    kb_document_status: kbDocumentStatus,
+    source_ready: isLessonAuthorTranscriptSourceReady(job.status, kbDocumentStatus),
     can_add_to_kb: job.status === 'succeeded' && !job.kb_document_id,
     can_retry: job.status === 'failed',
     // A transcript can be created successfully while its automatic KB handoff
@@ -168,6 +177,8 @@ function transcriptChatMetadata(job: LessonAuthorTranscriptionJob, locale: Lesso
       ? job.last_error
       : null,
     lesson_author_kb_document_id: job.kb_document_id,
+    lesson_author_kb_document_status: normalizeLessonAuthorKbDocumentStatus(job.kb_document_status),
+    lesson_author_source_ready: isLessonAuthorTranscriptSourceReady(job.status, job.kb_document_status),
   };
 }
 
@@ -346,10 +357,13 @@ export async function getLessonAuthorTranscriptionJob(input: {
   userId: string;
 }): Promise<PublicLessonAuthorTranscriptionJob> {
   const result = await query<LessonAuthorTranscriptionJob>(
-    `SELECT job.*
+    `SELECT job.*, document.status AS kb_document_status
      FROM lesson_author_transcription_jobs job
      JOIN chat_conversations conversation ON conversation.id = job.conversation_id
      JOIN courses course ON course.id = job.course_id AND course.deleted_at IS NULL
+     LEFT JOIN kb_documents document
+       ON document.id = job.kb_document_id
+      AND document.tenant_id = job.tenant_id
      WHERE job.id = $1::uuid
        AND job.conversation_id = $2::uuid
        AND job.tenant_id = $3::uuid
@@ -629,7 +643,11 @@ export async function commitLessonAuthorTranscriptToKnowledgebase(input: {
       kb_document_id: document.id,
       last_error: null,
     }, input.locale);
-    return { job: toPublicLessonAuthorTranscriptionJob(committed), created: true };
+    const committedWithKbStatus: LessonAuthorTranscriptionJob = {
+      ...committed,
+      kb_document_status: normalizeLessonAuthorKbDocumentStatus(document.status),
+    };
+    return { job: toPublicLessonAuthorTranscriptionJob(committedWithKbStatus), created: true };
   });
 }
 

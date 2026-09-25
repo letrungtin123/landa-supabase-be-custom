@@ -23,6 +23,8 @@ export interface LessonAuthorStructuredArtifactRequirement {
 }
 
 export interface LessonAuthorContentContractPlan {
+  component_plan_id?: string;
+  learning_objective_refs?: string[];
   type: LessonAuthorComponentType;
   title?: string;
   rationale?: string;
@@ -44,6 +46,7 @@ export interface LessonAuthorContentContractUnit {
 }
 
 export interface LessonAuthorGeneratedComponentContract {
+  component_plan_id?: string;
   type: LessonAuthorComponentType;
   source_fact_ids?: string[];
   covered_source_fact_ids?: string[];
@@ -140,7 +143,7 @@ export function completeLessonAuthorContentContract(
   return plan.map((item): LessonAuthorContentContractPlan => {
     const suppliedFactIds = uniqueFactIds(item.source_fact_ids);
     let sourceFactIds = suppliedFactIds;
-    if (sourceFactIds.length === 0 && unitFactIds.length > 0) {
+    if (sourceFactIds.length === 0 && unitFactIds.length > 0 && !item.component_plan_id) {
       if (item.type === 'html') {
         // The explanatory component is the guaranteed owner of every source
         // fact, including requirements and warnings which must not be lost.
@@ -195,6 +198,11 @@ export function validateLessonAuthorContentContractUnit(
   const ownedFactIds = new Set<string>();
   for (const component of plan) {
     const sourceFactIds = uniqueFactIds(component.source_fact_ids);
+    if (component.component_plan_id && !sourceFactIds.length) {
+      const support = uniqueFactIds(component.supporting_evidence_fact_ids);
+      if (!support.length || support.some(id => !supportingEvidenceFactIds.includes(id))) return 'Assessment instance requires exact approved read-only evidence.';
+      continue;
+    }
     if (sourceFactIds.length === 0) {
       return `Component ${component.type} must own at least one source_fact_id.`;
     }
@@ -300,6 +308,7 @@ export function validateLessonAuthorGeneratedUnitCoverage(
   const coveredFactIds = new Set<string>();
 
   for (const [index, component] of components.entries()) {
+    if (plan[index]?.component_plan_id && component.component_plan_id !== plan[index].component_plan_id) return 'Generated component instance does not match its approved Blueprint plan.';
     const expected = plan[index];
     if (component.type !== expected.type) return `Generated component ${index + 1} changed the approved component type.`;
     const expectedOwnerIds = new Set(uniqueFactIds(expected.source_fact_ids));
@@ -322,7 +331,7 @@ export function validateLessonAuthorGeneratedUnitCoverage(
       return `Generated supporting-only component ${index + 1} must declare read-only supporting evidence.`;
     }
     const declaredCoverage = new Set(uniqueFactIds(component.covered_source_fact_ids));
-    if (unitFactIds.size === 0) {
+    if (unitFactIds.size === 0 || (expected.component_plan_id && expectedOwnerIds.size === 0)) {
       if (declaredCoverage.size > 0) return `Generated supporting-only component ${index + 1} must not claim canonical source coverage.`;
     } else if (declaredCoverage.size === 0) return `Generated component ${index + 1} must declare covered_source_fact_ids.`;
     const invalidCoverage = [...declaredCoverage].filter(id => !unitFactIds.has(id));

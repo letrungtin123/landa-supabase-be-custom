@@ -5,6 +5,12 @@
 export type LessonAuthorApprovalOperation = string | null | undefined;
 export type LessonAuthorMessageLocale = 'vi' | 'en';
 
+export function formatBlueprintProviderTimeout(locale: LessonAuthorMessageLocale): string {
+  return locale === 'vi'
+    ? 'Dịch vụ AI phản hồi quá thời gian cho phép khi thiết kế khóa học. Chưa tạo được Bản thiết kế và chưa áp dụng thay đổi nào. Hệ thống không tự gửi lại yêu cầu này.'
+    : 'The AI service timed out while designing the course. No blueprint was created and no changes were applied. This request was not automatically resubmitted.';
+}
+
 export function formatLessonAuthorBlueprintReadyMessage(
   locale: LessonAuthorMessageLocale,
 ): string {

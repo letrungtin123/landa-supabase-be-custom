@@ -4,8 +4,15 @@ import {
   formatLessonAuthorApprovalMessage,
   formatLessonAuthorBlueprintReadyMessage,
   formatLessonAuthorProposalReadyMessage,
+  formatBlueprintProviderTimeout,
   LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY,
 } from './lesson-author-message.logic.js';
+
+test('provider timeout copy is localized, not a network error or promise of automatic retry', () => {
+  assert.match(formatBlueprintProviderTimeout('en'), /AI service timed out/);
+  assert.match(formatBlueprintProviderTimeout('vi'), /AI phản hồi quá thời gian/);
+  assert.doesNotMatch(formatBlueprintProviderTimeout('vi'), /không thể kết nối/i);
+});
 
 test('proposal hydration query uses the job tenant scope without an undeclared alias', () => {
   assert.match(LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY, /FROM lesson_author_jobs laj/);
