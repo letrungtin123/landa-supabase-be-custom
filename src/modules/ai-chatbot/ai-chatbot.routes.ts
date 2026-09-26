@@ -210,6 +210,7 @@ router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
 router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
 router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
 router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+router.get('/chat/lesson-author/conversations/:conversationId/chapter-checkpoint', checkPermission('courses','can_edit'), chatCtrl.getChapterCheckpoint);
 // No enqueue route/poller until quota preparation and recovery accounting are integrated.
 const generationJobRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
 router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId', createGenerationStatusHandler({

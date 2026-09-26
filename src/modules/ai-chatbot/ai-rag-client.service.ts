@@ -5,6 +5,8 @@ import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { AiChatTarget, AiUsage } from './ai-engine.types.js';
 import { getGoogleAiStudioApiKey } from './ai-settings.service.js';
+import { assertRagChapterCheckpointRequest, readRagChapterCheckpointResponse,
+  type RagChapterCheckpointRequest, type RagChapterCheckpointResponse } from './lesson-author-chapter-rag-contract.logic.js';
 
 export interface RagChatMessage {
   role: 'user' | 'assistant' | 'model';
@@ -153,6 +155,7 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
         learning_objective_refs?: string[];
         source_refs?: string[];
         source_fact_ids?: string[];
+        supporting_evidence_fact_ids?: string[];
         learning_blocks?: Array<{
           id: string;
           intent: string;
@@ -378,6 +381,26 @@ export async function generateRagLessonAuthorProposal(
     ...request,
     api_key: apiKey,
   });
+}
+
+/** Opt-in internal chapter boundary. Existing proposal/chat/Blueprint transports are unchanged. */
+export async function generateRagLessonAuthorCheckpoint(
+  request: RagChapterCheckpointRequest,
+  execution: { timeoutMs: number; signal: AbortSignal },
+): Promise<RagChapterCheckpointResponse> {
+  assertRagChapterCheckpointRequest(request);
+  if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
+    throw new AppError('Chapter execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  }
+  const startedAt = Date.now();
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const remainingMs = Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, execution.timeoutMs,
+    request.remaining_workflow_budget_ms) - Math.max(0, Date.now() - startedAt);
+  if (remainingMs <= 0) throw new AppError('Chapter execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  const response = await postRagJson<unknown>('/v1/lesson-author/chapter-checkpoint', {
+    ...request, remaining_workflow_budget_ms: remainingMs, api_key: apiKey,
+  }, remainingMs, execution.signal);
+  return readRagChapterCheckpointResponse(response, request);
 }
 
 export async function generateRagLessonAuthorBlueprint(

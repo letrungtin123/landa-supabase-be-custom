@@ -11,6 +11,7 @@ import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
 import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesson-author-transcription.worker.js';
 import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/lesson-author-durable-blueprint.service.js';
+import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/lesson-author-chapter-runtime.service.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
@@ -157,6 +158,7 @@ async function bootstrap() {
     await assertAuthRevocationRedisReady();
   }
   await startDurableBlueprintWorker();
+  await startChapterCheckpointMaintenance();
 
   // 2. Ensure temp dir for Gemini worker
   try {
@@ -251,6 +253,7 @@ setInterval(async function cleanupAuditLogs() {
 async function gracefulShutdown(signal: string) {
   console.log(`[Server] ${signal} received, shutting down...`);
   await stopDurableBlueprintWorker();
+  await stopChapterCheckpointMaintenance();
   await closeRedis();
   await closeRabbitMQ();
   process.exit(0);

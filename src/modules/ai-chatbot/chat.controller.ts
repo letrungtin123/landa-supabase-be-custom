@@ -563,6 +563,19 @@ export async function downloadReportPdfJob(req: Request, res: Response): Promise
  *   data: {"type":"done"}
  *   data: {"type":"error","message":"..."}
  */
+export async function getChapterCheckpoint(req: Request,res: Response):Promise<void> {
+  res.setHeader('Cache-Control','no-store');
+  if (isDemoIframeSession(req.user) || !req.user?.tenantId) {sendError(res,'Không có quyền truy cập.',403);return;}
+  const id=req.params.conversationId;
+  const draftId=typeof req.query.draft_id==='string'?req.query.draft_id:undefined;
+  if (!UUID_REGEX.test(id ?? '') || (draftId!==undefined && !UUID_REGEX.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
+  try {sendSuccess(res,await chatService.getChapterCheckpointStatus(id,req.user.id,req.user.tenantId,draftId));}
+  catch (error) {
+    const code=error instanceof AppError?error.code:'CHAPTER_CHECKPOINT_UNAVAILABLE';
+    res.status(error instanceof AppError?error.statusCode:503).json({success:false,code,message:'Chưa thể đọc trạng thái chương.'});
+  }
+}
+
 export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
@@ -578,6 +591,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     input_mode,
     locale,
     report_filters,
+    chapter_resume,
   } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
@@ -606,6 +620,14 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     sendError(res, 'blueprint_chapter_index không hợp lệ', 400); return;
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
+  const checkpointKey = req.header('X-Lesson-Author-Chapter-Key');
+  if ((checkpointKey !== undefined && !UUID_REGEX.test(checkpointKey)) || (chapter_resume !== undefined &&
+    (!chapter_resume || typeof chapter_resume!=='object' || Array.isArray(chapter_resume)
+      || Object.keys(chapter_resume).sort().join(',')!=='draft_id,previous_attempt_id'
+      || !UUID_REGEX.test(chapter_resume.draft_id ?? '') || !UUID_REGEX.test(chapter_resume.previous_attempt_id ?? '')
+      || !checkpointKey || target!=='lesson_author'))) {
+    sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
+  }
   let parsedReportFilters: ReturnType<typeof parseReportFilters>;
   try {
     parsedReportFilters = parseReportFilters(report_filters);
@@ -627,7 +649,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   // Opt-in transport contract: a queued Blueprint returns promptly, before SSE.
   // Older clients and ineligible operations keep their existing streaming path.
   const generationKey = req.header('X-Lesson-Author-Job-Key');
-  if (generationKey && target === 'lesson_author') {
+  if (generationKey && target === 'lesson_author' && !chapter_resume) {
     const handled = await respondToGenerationAdmission(res, admission =>
       tryEnqueueDurableBlueprint(conversationId, userId, tenantId, content, generationKey, {
         target, courseId, mode: mode === 'draft_lesson' ? 'draft_lesson' : mode === 'course_blueprint' ? 'course_blueprint' : mode === 'chat' ? 'chat' : 'auto',
@@ -714,6 +736,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
       blueprintId: blueprint_id,
       blueprintChapterIndex: blueprint_chapter_index,
+      chapterCheckpointKey: checkpointKey,
+      ...(chapter_resume ? {chapterResume:{draftId:chapter_resume.draft_id,previousAttemptId:chapter_resume.previous_attempt_id}} : {}),
       inputMode,
       locale: locale === 'en' ? 'en' : 'vi',
       canAccessReports,
