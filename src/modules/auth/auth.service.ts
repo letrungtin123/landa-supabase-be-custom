@@ -5,7 +5,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
-import { query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
@@ -203,11 +203,13 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const refreshToken = uuidv4();
   const refreshHash = hashToken(refreshToken);
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
+  const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
   // Lưu refresh token hash vào DB
   await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)`,
-    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE],
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE, sessionId],
   );
 
   // Cập nhật last_login_at
@@ -261,11 +263,14 @@ export async function login(username: string, password: string, clientApp?: 'adm
  * Refresh token — rotate: cấp token mới, revoke token cũ.
  */
 export async function refresh(refreshToken: string, selectedTenantId?: string) {
+  const outcome = await withDatabaseTransaction(async () => {
   const tokenHash = hashToken(refreshToken);
 
-  // Tìm và validate refresh token (1 query JOIN user)
+  // Lock the token row for the whole rotation. A frontend mutex cannot protect
+  // duplicate requests from separate browser tabs or devices.
   const result = await query(
     `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at, rt.revoked_at,
+            rt.session_id,
             COALESCE(rt.session_mode, 'normal') AS session_mode,
             u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id,
@@ -274,7 +279,8 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
      JOIN users u ON u.id = rt.user_id
      LEFT JOIN tenants t ON t.id = u.tenant_id
      WHERE rt.token_hash = $1
-     LIMIT 1`,
+     LIMIT 1
+     FOR UPDATE OF rt`,
     [tokenHash],
   );
 
@@ -290,13 +296,28 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     const elapsed = Date.now() - revokedAt;
 
     if (!row.revoked_at || elapsed > RACE_CONDITION_GRACE_MS) {
-      // Token bị reuse SAU grace period → khả năng token theft
-      // Nuclear revoke: hủy TẤT CẢ tokens active của user → force re-login
-      await query(
-        'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1 AND revoked = false',
-        [row.user_id],
-      );
-      throw new AppError('Phiên đăng nhập đã bị thu hồi — vui lòng đăng nhập lại', 401);
+      // Superadmin sessions are isolated by login/device. A suspected reuse
+      // must end only the affected session family; other roles retain the
+      // existing account-wide policy for now.
+      if (row.role === 'superadmin' && row.session_id) {
+        await query(
+          `UPDATE refresh_tokens
+           SET revoked = true, revoked_at = COALESCE(revoked_at, now())
+           WHERE user_id = $1 AND session_id = $2 AND revoked = false`,
+          [row.user_id, row.session_id],
+        );
+      } else if (row.role !== 'superadmin') {
+        await query(
+          'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1 AND revoked = false',
+          [row.user_id],
+        );
+      }
+      // Return the business error so the transaction can COMMIT the revocation.
+      // Throwing here would make withDatabaseTransaction roll it back.
+      return {
+        ok: false as const,
+        error: new AppError('Phiên đăng nhập đã bị thu hồi — vui lòng đăng nhập lại', 401),
+      };
     }
 
     // Token bị reuse TRONG grace period → race condition từ FE
@@ -319,16 +340,25 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
 
   // Revoke token cũ — ghi timestamp để grace period detection
   const sessionMode = normalizeSessionMode(row.session_mode);
+  // Legacy rows have no session_id until the manual migration is run. If one
+  // reaches this code after a partial rollout, start a new isolated family.
+  const sessionId = row.role === 'superadmin' ? (row.session_id || uuidv4()) : null;
   const isActiveIframeLearner = row.role === 'learner'
     ? await isActiveDemoIframeAccount(row.user_id)
     : false;
   if (isActiveIframeLearner && sessionMode !== 'demo_iframe') {
     await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
-    throw new AppError('Tài khoản đang được khóa cho demo iframe', 403);
+    return {
+      ok: false as const,
+      error: new AppError('Tài khoản đang được khóa cho demo iframe', 403),
+    };
   }
   if (sessionMode === 'demo_iframe' && !isActiveIframeLearner) {
     await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
-    throw new AppError('Phiên demo iframe không còn khả dụng', 401);
+    return {
+      ok: false as const,
+      error: new AppError('Phiên demo iframe không còn khả dụng', 401),
+    };
   }
 
   await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE id = $1', [row.rt_id]);
@@ -347,8 +377,9 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   const newRefreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
-    [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode],
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode, sessionId],
   );
 
   // Lấy permissions + tenant modules mới
@@ -370,28 +401,37 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     : [];
 
   return {
-    access_token: newAccessToken,
-    refresh_token: newRefreshToken,
-    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
-    session_mode: sessionMode,
-    user: {
-      id: row.user_id,
-      username: row.username,
-      email: row.email,
-      full_name: row.full_name,
-      phone: row.phone,
-      avatar_url: row.avatar_url,
-      role: row.role,
-      tenant_id: row.tenant_id,
-      tenant_name: row.tenant_name,
+    ok: true as const,
+    response: {
+      access_token: newAccessToken,
+      refresh_token: newRefreshToken,
+      expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+      session_mode: sessionMode,
+      user: {
+        id: row.user_id,
+        username: row.username,
+        email: row.email,
+        full_name: row.full_name,
+        phone: row.phone,
+        avatar_url: row.avatar_url,
+        role: row.role,
+        tenant_id: row.tenant_id,
+        tenant_name: row.tenant_name,
+      },
+      permissions,
+      tenant_modules: tenantModules,
+      managed_tenants: managedTenants,
+      role_labels: roleLabels,
+      group_labels: groupLabels,
+      member_groups: memberGroups,
     },
-    permissions,
-    tenant_modules: tenantModules,
-    managed_tenants: managedTenants,
-    role_labels: roleLabels,
-    group_labels: groupLabels,
-    member_groups: memberGroups,
   };
+  });
+
+  if (!outcome.ok) {
+    throw outcome.error;
+  }
+  return outcome.response;
 }
 
 /**
@@ -448,10 +488,12 @@ export async function issueSessionForUserId(
   const refreshToken = uuidv4();
   const refreshHash = hashToken(refreshToken);
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
+  const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
-    [user.id, refreshHash, refreshExpiresAt, sessionMode],
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [user.id, refreshHash, refreshExpiresAt, sessionMode, sessionId],
   );
   if (options?.updateLastLogin !== false) {
     await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
@@ -796,10 +838,12 @@ export async function exchangeOTT(token: string) {
   const refreshToken = uuidv4();
   const refreshHash = hashToken(refreshToken);
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
+  const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
   await query(
-    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode) VALUES ($1, $2, $3, $4)',
-    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE],
+    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE, sessionId],
   );
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
