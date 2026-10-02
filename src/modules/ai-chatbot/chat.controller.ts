@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
 import { tryEnqueueDurableBlueprint } from './lesson-author-durable-blueprint.service.js';
 import { respondToGenerationAdmission } from './lesson-author-generation-admission.logic.js';
+import { resolveLessonAuthorAction } from './lesson-author-action.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { query } from '../../config/database.js';
 import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../config/cache-invalidation.js';
@@ -580,7 +581,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id: conversationId } = req.params;
-  const {
+  let {
     content,
     mode,
     outline_mentions,
@@ -595,6 +596,14 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   } = req.body ?? {};
   const target = resolveTarget(req);
   const courseId = resolveCourseId(req);
+  let buttonAction: ReturnType<typeof resolveLessonAuthorAction>;
+  try {
+    buttonAction = resolveLessonAuthorAction(req.body ?? {}, target);
+    if (buttonAction) { content = buttonAction.content; mode = buttonAction.mode; }
+  } catch {
+    res.status(400).json({ success: false, code: 'LESSON_AUTHOR_ACTION_INVALID', message: 'Thao tác Chuyên gia bài học không hợp lệ.' });
+    return;
+  }
   if (isDemoIframeSession(req.user)) {
     sendError(res, 'Phiên demo iframe không thể gửi tin nhắn', 403);
     return;
@@ -656,6 +665,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
         outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [], editorContext: editor_context,
         sourceDocuments: Array.isArray(source_documents) ? source_documents : [], blueprintId: blueprint_id,
         inputMode, locale: locale === 'en' ? 'en' : 'vi',
+        lessonAuthorAction: buttonAction?.action,
       }, admission), { conversationId });
     if (handled) return;
   }
@@ -720,6 +730,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     content,
     {
       correlationId,
+      lessonAuthorAction: buttonAction?.action,
       target,
       courseId,
       mode: mode === 'draft_lesson'

@@ -26,6 +26,7 @@ import {
 } from './lesson-author-components.logic.js';
 import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/lesson-author-component-registry.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
+import { applyGeneratedUnitComponents, ComponentApplyError, type StoredComponentRow } from './lesson-author-component-apply.logic.js';
 import { getDefaultProblemXml, type CourseComponentLocale } from './course-authoring-problem-defaults.logic.js';
 import {
   formatChapterTitle,
@@ -2212,6 +2213,9 @@ export const LESSON_AUTHOR_OUTLINE_BUSY_CODE = 'LESSON_AUTHOR_OUTLINE_BUSY';
 
 function normalizeLessonAuthorApplyError(error: unknown): unknown {
   if (error instanceof AppError) return error;
+  if (error instanceof ComponentApplyError) {
+    return new AppError('Chưa thể áp dụng đầy đủ các component. Không có thay đổi nào được lưu. Vui lòng kiểm tra lại đề xuất.', 409, error.code);
+  }
 
   const databaseCode = (error as { code?: unknown })?.code;
   // A short lock timeout prevents the widget from waiting for the global
@@ -2785,24 +2789,38 @@ export async function applyLessonAuthorProposalToCourse(
             created: verticalBlock.created,
           });
 
-          for (const [componentIndex, component] of getLessonAuthorComponents(unit).entries()) {
-            const generatedComponent = buildGeneratedComponentBlock(
+          const generatedComponents = getLessonAuthorComponents(unit).map((component, componentIndex) => {
+            const generated = buildGeneratedComponentBlock(
               component,
               unitTitle,
               { ...baseMetadata, ai_index: unitIndex },
               componentIndex,
             );
-            assertCourseComponentTypeAllowed(allowedComponentTypes, generatedComponent.blockType);
-            const componentBlock = await getOrCreateGeneratedBlock(
-              client,
-              input.courseId,
-              verticalBlock.id,
-              generatedComponent.blockType,
-              generatedComponent.displayName,
-              generatedComponent.data,
-              generatedComponent.metadata,
-              { updateExisting: true },
-            );
+            assertCourseComponentTypeAllowed(allowedComponentTypes, generated.blockType);
+            return generated;
+          });
+          const componentResults = await applyGeneratedUnitComponents(generatedComponents, {
+            list: async () => (await client.query<StoredComponentRow>(
+              `SELECT cb.id, cb.block_type, cb.display_name, cb.data, cb.metadata
+               FROM course_blocks cb JOIN courses c ON c.id = cb.course_id
+               WHERE cb.course_id = $1 AND cb.parent_id = $2 AND c.tenant_id = $3
+                 AND c.deleted_at IS NULL AND cb.deleted_at IS NULL
+               ORDER BY cb.sort_order ASC, cb.created_at ASC, cb.id ASC
+               FOR UPDATE OF cb`,
+              [input.courseId, verticalBlock.id, input.tenantId],
+            )).rows,
+            insert: generated => insertGeneratedBlock(client, input.courseId, verticalBlock.id,
+              generated.blockType, generated.displayName, generated.data, generated.metadata),
+            update: (id, generated) => updateGeneratedBlockContent(client, id, input.courseId, verticalBlock.id,
+              generated.blockType, generated.data, generated.metadata),
+          });
+          logLessonAuthorApply('component_parity_passed', {
+            job_id: input.jobId ?? null, course_id: input.courseId, unit_id: verticalBlock.id,
+            expected_component_count: generatedComponents.length,
+            persisted_component_count: componentResults.length, identity_contract: 'component-apply-identity-1',
+          });
+          for (const [componentIndex, componentBlock] of componentResults.entries()) {
+            const generatedComponent = generatedComponents[componentIndex];
             if (componentBlock.created) createdBlockIds.push(componentBlock.id);
             if (componentBlock.updated) updatedBlockIds.push(componentBlock.id);
             logLessonAuthorApply('component_ready', {
@@ -2813,6 +2831,7 @@ export async function applyLessonAuthorProposalToCourse(
               id: componentBlock.id,
               created: componentBlock.created,
               updated: componentBlock.updated,
+              component_plan_id: componentBlock.component_plan_id ?? null,
             });
           }
           await moveFaqComponentsToUnitEnd(client, input.courseId, verticalBlock.id);
@@ -2839,6 +2858,8 @@ export async function applyLessonAuthorProposalToCourse(
       logLessonAuthorApply('transaction_aborted', {
         course_id: input.courseId,
         job_id: input.jobId ?? null,
+        ...(error instanceof ComponentApplyError ? { internal_failure_code: error.code, component_index: error.componentIndex ?? null,
+          failure_stage: 'component_apply_identity_parity' } : {}),
         error: normalizedError instanceof Error ? normalizedError.message : String(normalizedError),
       });
       throw normalizedError;

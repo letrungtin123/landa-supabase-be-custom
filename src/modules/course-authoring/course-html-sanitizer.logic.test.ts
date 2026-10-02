@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sanitizeCourseHtmlData } from './course-authoring.controller.js';
+import { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
 
 test('keeps supported lesson-table structure and italic text', () => {
   const result = sanitizeCourseHtmlData(`

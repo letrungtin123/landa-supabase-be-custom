@@ -12,6 +12,41 @@ import { assertLessonAuthorProposalComponentsValid } from './lesson-author-compo
 import { assertLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
 import { COURSE_COMPONENT_TYPES } from '../tenants/tenant-course-components.constants.js';
 
+test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node acceptance', async t => {
+  const pg = await import('pg');
+  t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
+  t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
+  t.mock.method(globalThis, 'fetch', () => { throw new Error('TEST_HTTP_ACCESS_FORBIDDEN'); });
+  const nativeInterval = globalThis.setInterval;
+  t.mock.method(globalThis, 'setInterval', (...args: Parameters<typeof setInterval>) => {
+    const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
+  });
+  const { normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('./chat.service.js');
+  const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
+  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_multi_component_repair_slots', '--node-fixture'],
+    { cwd: root, encoding: 'utf8', timeout: 20000, maxBuffer: 4000000 });
+  assert.equal(out.status, 0, out.error?.message ?? out.stderr);
+  const response = JSON.parse(out.stdout);
+  assert.equal(response.provider_calls, 2);
+  assert.equal(readRagChapterCheckpointResponse(response.unit_result, { ...response.request, checkpoint_units: undefined }).status, 'unit_ready');
+  const ready = readRagChapterCheckpointResponse(response.result, { ...response.request,
+    checkpoint_action: 'validate_chapter', checkpoint_unit_index: undefined,
+    checkpoint_units: [{ unit_index: 0, unit: response.unit_result.unit }] });
+  assert.equal(ready.status, 'ready'); if (ready.status !== 'ready') throw new Error('NOT_READY');
+  const architecture = response.request.blueprint_architecture;
+  const chapter = { title: architecture.chapter_title, lessons: architecture.lessons };
+  const context = { chapterIndex: 0, blueprint: { architecture_contract_version: 5, content_contract_version: 1,
+    chapters: [chapter] } } as Parameters<typeof lockProposalToBlueprintChapter>[1];
+  const proposal = lockProposalToBlueprintChapter(normalizeLessonAuthorProposal(ready.proposal), context);
+  assertLessonAuthorProposalComponentsValid(proposal, new Set(COURSE_COMPONENT_TYPES));
+  assertLessonAuthorPedagogicalQuality({ proposal, blueprint_chapter: chapter });
+  const diagram = response.unit_result.unit.components[3];
+  assert.equal(diagram.type, 'la_diagram');
+  assert.equal(diagram.covered_source_fact_ids.length, 32);
+  assert.deepEqual(diagram.covered_source_fact_ids, diagram.source_fact_ids);
+});
+
 test('offline Node→Python unit contract→timeout→explicit resume→Python whole validation→Node acceptance→mock publication',async t=>{
   const pg=await import('pg');
   t.mock.method(pg.default.Pool.prototype,'query',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});
@@ -101,7 +136,7 @@ test('wiring retains legacy paths, four-step UI, safe metadata and explicit roll
   assert.doesNotMatch(runtime,/DELETE FROM lesson_author_chapter_units|UPDATE courses|UPDATE course_blocks/);
 });
 
-for (const action of ['instance_repair', 'coverage_repair'] as const)
+for (const action of ['instance_repair', 'coverage_repair', 'duplicate_claim_repair', 'null_claim_repair'] as const)
 test(`offline ${action}→scoped repair→Python full validation→Node acceptance`,async t=>{
   const pg=await import('pg');
   t.mock.method(pg.default.Pool.prototype,'query',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});
@@ -137,6 +172,17 @@ test(`offline ${action}→scoped repair→Python full validation→Node acceptan
     assert.equal(component.covered_source_fact_ids.length, 23);
     assert.deepEqual(component.source_fact_ids, architecture.lessons[0].units[0].component_plan[2].source_fact_ids);
   }
+  if (action === 'duplicate_claim_repair' || action === 'null_claim_repair') {
+    const component = response.unit_result.unit.components[0];
+    assert.equal(component.type, 'html');
+    assert.equal(component.semantic_content.version, 2);
+    assert.equal(component.covered_source_fact_ids.length, 54);
+    assert.equal(new Set(component.covered_source_fact_ids).size, 54);
+    assert.deepEqual(component.source_fact_ids, architecture.lessons[0].units[0].component_plan[0].source_fact_ids);
+    assert.deepEqual(component.covered_source_fact_ids, component.source_fact_ids);
+    assert.ok(response.unit_result.unit.components.slice(1).every((c:any) => c.source_fact_ids.length === 0 && c.covered_source_fact_ids.length === 0));
+  }
   assert.deepEqual(response.events.filter((e:any)=>e.event==='passed').map((e:any)=>e.stage),[
+    'chapter_instructional_plan_preflight',
     'chapter_checkpoint_content_validation','chapter_checkpoint_pedagogical_validation','chapter_checkpoint_duplication_validation']);
 });

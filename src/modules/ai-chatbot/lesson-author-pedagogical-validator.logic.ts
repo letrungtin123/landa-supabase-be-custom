@@ -431,9 +431,11 @@ export function detectLessonAuthorGeneratedContentDuplicates(
   return findings;
 }
 
-export function validateLessonAuthorPedagogicalQuality(input: {
+function validatePedagogy(input: {
   proposal: LessonAuthorProposal;
   blueprint_chapter?: LessonAuthorPedagogicalBlueprintChapter;
+  readyUnits?: ReadonlySet<string>;
+  deferred?: Array<{ code: string; path: string }>;
 }): LessonAuthorPedagogicalQualityReport {
   const { proposal, blueprint_chapter: blueprintChapter } = input;
   const components = proposalComponents(proposal);
@@ -456,12 +458,17 @@ export function validateLessonAuthorPedagogicalQuality(input: {
       const expectedObjectives = textList(expectedLesson.learning_objectives, 12, 300);
       const expectedUnits = expectedLesson.units ?? [];
       const lessonComponents = components.filter(item => item.chapterIndex === 0 && item.lessonIndex === lessonIndex);
+      const ready = (index: number) => !input.readyUnits || input.readyUnits.has(`${lessonIndex}:${index}`);
 
       expectedObjectives.forEach((_objective, objectiveIndex) => {
         const ref = `lo_${objectiveIndex + 1}`;
-        objectiveTotal += 1;
         const mappedUnitIndexes = expectedUnits.flatMap((unit, unitIndex) =>
           localObjectiveRefs(unit.learning_objective_refs).includes(ref) ? [unitIndex] : []);
+        if (mappedUnitIndexes.some(index => !ready(index))) {
+          input.deferred?.push({ code: 'OBJECTIVE_NOT_TAUGHT', path: lessonPath });
+          return;
+        }
+        objectiveTotal += 1;
         const teaching = mappedUnitIndexes.some(unitIndex => lessonComponents.some(item => item.unitIndex === unitIndex && item.component.type === 'html' && tokens(item.text).length >= 12));
         if (teaching) objectiveCovered += 1;
         else findings.push(finding('OBJECTIVE_NOT_TAUGHT', mappedUnitIndexes.length === 1 ? `${lessonPath}.unit_${mappedUnitIndexes[0]! + 1}` : lessonPath, 'An approved learning objective has no substantive explanatory treatment.', {
@@ -472,6 +479,10 @@ export function validateLessonAuthorPedagogicalQuality(input: {
 
       expectedUnits.forEach((expectedUnit, unitIndex) => {
         const unitPath = `${lessonPath}.unit_${unitIndex + 1}`;
+        if (!ready(unitIndex)) {
+          input.deferred?.push({ code: 'UNIT_CONTENT_PENDING', path: unitPath });
+          return;
+        }
         const actualComponents = lessonComponents.filter(item => item.unitIndex === unitIndex);
         const expectedFacts = unitExpectedFacts(expectedUnit);
         if (expectedFacts.length > 0) {
@@ -526,11 +537,24 @@ export function validateLessonAuthorPedagogicalQuality(input: {
       });
 
       if (expectedLesson.assessment_required) {
-        assessmentTotal += 1;
-        if (assessmentHasTeaching(lessonComponents, expectedLesson)) assessmentCovered += 1;
-        else findings.push(finding('ASSESSMENT_NOT_ALIGNED', lessonPath, 'An assessment-required lesson needs a source-linked problem after explanatory teaching.', {
-          objective_ids: textList(expectedLesson.assessment_objective_refs, 12, 80),
-        }));
+        const complete = expectedUnits.every((_unit, index) => ready(index));
+        const readyChecks = expectedUnits.flatMap((unit, index) => ready(index)
+          ? (unit.component_plan ?? []).filter(plan => plan.type === 'problem') : []);
+        if (!complete) input.deferred?.push({ code: 'LESSON_ASSESSMENT_COMPLETENESS', path: lessonPath });
+        // Every already-ready check still needs real preceding teaching. A
+        // pending later unit cannot hide regression in an earlier ready check.
+        if (complete || readyChecks.length) {
+          const assessedLesson = complete ? expectedLesson : {
+            ...expectedLesson,
+            units: expectedUnits.map((unit, index) => ready(index) ? unit : { ...unit, component_plan: [] }),
+            assessment_objective_refs: [...new Set(readyChecks.flatMap(plan => localObjectiveRefs(plan.learning_objective_refs)))],
+          };
+          assessmentTotal += 1;
+          if (assessmentHasTeaching(lessonComponents, assessedLesson)) assessmentCovered += 1;
+          else findings.push(finding('ASSESSMENT_NOT_ALIGNED', lessonPath, 'An assessment-required lesson needs a source-linked problem after explanatory teaching.', {
+            objective_ids: textList(assessedLesson.assessment_objective_refs, 12, 80),
+          }));
+        }
       }
 
       if (expectedObjectives.some(objective => ACTION_OBJECTIVE.test(objective))) {
@@ -575,6 +599,30 @@ export function validateLessonAuthorPedagogicalQuality(input: {
     findings,
     duplicate_count: duplicates.length,
   };
+}
+
+/** Legacy/final acceptance always validates the complete supplied scope. */
+export function validateLessonAuthorPedagogicalQuality(input: {
+  proposal: LessonAuthorProposal;
+  blueprint_chapter?: LessonAuthorPedagogicalBlueprintChapter;
+}): LessonAuthorPedagogicalQualityReport {
+  // Do not forward extra JS properties into the workspace-only readiness mode.
+  return validatePedagogy({ proposal: input.proposal, blueprint_chapter: input.blueprint_chapter });
+}
+
+/** Save-only workspace gate. Caller has verified exact topology, complete ready
+ * units and EMPTY pending units. This is NOT an Apply/final-course receipt.
+ * Indexes stay authoritative; no objective renumbering or finding suppression.
+ */
+export function validateReadyWorkspacePedagogy(input: {
+  proposal: LessonAuthorProposal;
+  blueprint_chapter: LessonAuthorPedagogicalBlueprintChapter;
+  readyUnits: ReadonlySet<string>;
+}) {
+  const deferred: Array<{ code: string; path: string }> = [];
+  const report = validatePedagogy({ ...input, deferred });
+  return { ...report, deferred_checks: deferred,
+    scope_complete: input.blueprint_chapter.lessons.every((lesson, li) => lesson.units.every((_unit, ui) => input.readyUnits.has(`${li}:${ui}`))) };
 }
 
 /** Node remains the proposal acceptance gate after Python generation. */

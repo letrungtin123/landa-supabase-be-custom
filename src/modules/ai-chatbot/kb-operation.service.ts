@@ -8,6 +8,7 @@
 import { randomUUID } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 
 export type KbOperationType =
   | 'document_upload'
@@ -106,13 +107,15 @@ export async function enqueueKbOperation(input: EnqueueKbOperationInput): Promis
 export async function claimDueKbOperations(limit = env.KB_OPERATION_WORKER_BATCH_SIZE): Promise<KbOperationJob[]> {
   const safeLimit = Math.max(1, Math.min(limit, env.KB_OPERATION_WORKER_BATCH_SIZE));
   return withDatabaseTransaction(async () => {
+    const tenantFence = runtimeTenantSql('tenant_id', 3);
     const claimed = await query<KbOperationJob>(
       `WITH ranked AS (
          SELECT id, tenant_id, next_attempt_at,
                 row_number() OVER (PARTITION BY tenant_id ORDER BY next_attempt_at ASC, id ASC) AS tenant_position
          FROM kb_operation_jobs
-         WHERE (status = 'queued' AND next_attempt_at <= now())
-            OR (status = 'running' AND lease_expires_at <= now())
+         WHERE ((status = 'queued' AND next_attempt_at <= now())
+            OR (status = 'running' AND lease_expires_at <= now()))
+         ${tenantFence.clause}
        ), candidates AS (
          SELECT job.id
          FROM kb_operation_jobs job
@@ -131,7 +134,7 @@ export async function claimDueKbOperations(limit = env.KB_OPERATION_WORKER_BATCH
        FROM candidates
        WHERE job.id = candidates.id
        RETURNING job.*`,
-      [safeLimit, env.KB_OPERATION_WORKER_LEASE_SECONDS],
+      [safeLimit, env.KB_OPERATION_WORKER_LEASE_SECONDS, ...tenantFence.params],
     );
     return claimed.rows;
   });

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+.env.development.local
 *.log
 .env.production
 tmp/course-assets/

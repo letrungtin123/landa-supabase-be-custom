@@ -5,6 +5,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { Type, type Schema } from '@google/genai';
+import { projectBlueprintDraftArchitecture } from './lesson-author-blueprint-draft-architecture.logic.js';
+import { lessonAuthorSourceInfoSummary as getSourceInfoSummary, lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from './lesson-author-source-snapshot.logic.js';
 import { composeV5BlueprintPolicy } from './lesson-author-prompt-policy.logic.js';
 import { resolveLessonAuthorDraftLocale } from './lesson-author-intent.logic.js';
 import { assessmentGapMessage, assertComponentInstancePlan, ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from './lesson-author-capabilities.logic.js';
@@ -69,6 +71,7 @@ import {
   type RagWorkflowDiagnostics,
 } from './ai-rag-client.service.js';
 import {
+  buildLessonAuthorCreationContext,
   classifyLessonAuthorIntent,
   detectLessonAuthorInputLocale,
   extractLessonAuthorTargetNumberPath,
@@ -80,7 +83,9 @@ import {
   stripLessonAuthorStructuralPrefix,
   stripLessonAuthorSourceRangeSuffix,
   type LessonAuthorIntentPlan,
+  type LessonAuthorCreationContext,
 } from './lesson-author-intent.logic.js';
+import type { LessonAuthorAction } from './lesson-author-action.logic.js';
 import {
   buildNormalizedLessonAuthorCommand,
   isSimpleDeterministicLessonAuthorCommand,
@@ -1760,6 +1765,7 @@ function logChatCourseFlow(stage: string, details: Record<string, unknown> = {})
 }
 
 export interface ChatStreamOptions {
+  lessonAuthorAction?: LessonAuthorAction;
   /** Server-created, never read from request body/headers. */
   correlationId?: string;
   target?: ChatTarget;
@@ -1807,7 +1813,8 @@ export async function assertDurableBlueprintActor(userId: string, tenantId: stri
 /** Reuses the existing source/editor/routing/budget/acceptance functions. No provider call or write here. */
 export async function prepareDurableBlueprint(
   conversationId: string, userId: string, tenantId: string, content: string,
-  options: ChatStreamOptions, replay?: GenerationJobRow,
+  options: ChatStreamOptions,
+  replay?: { source_document_ids: string[]; user_message_id?: string | null },
   admissionStage: (stage: GenerationAdmissionStage) => void = () => {},
 ) {
   admissionStage('actor_authorization');
@@ -1828,7 +1835,8 @@ export async function prepareDurableBlueprint(
   const mentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
   const editor = await validateLessonAuthorEditorContext(ctx, options.editorContext);
   admissionStage('intent_routing');
-  const classified = classifyLessonAuthorIntentV2(trimmed, mentions, options.mode ?? 'auto', mentions.length ? 'current' : undefined);
+  const creationContext = buildLessonAuthorCreationContext(options, editor?.context);
+  const classified = classifyLessonAuthorIntentV2(trimmed, mentions, options.mode ?? 'auto', mentions.length ? 'current' : undefined, creationContext);
   if (classified.intent !== 'course_blueprint') return null;
   const plan = await resolveLessonAuthorOperationPlan(ctx, classified.operationPlan, trimmed, mentions.slice(0, 1));
   const command = buildNormalizedLessonAuthorCommand({ plan, userInstruction: trimmed,
@@ -1906,6 +1914,7 @@ export async function prepareDurableBlueprint(
         source_documents: sources.map(toSourceDocumentMetadata), outline_mentions: mentions,
         ...(editor ? { editor_context: editor.context } : {}), locale, correlation_id: correlationId,
         ...(options.inputMode === 'voice' ? { input_mode: 'voice' } : {}),
+        ...(options.lessonAuthorAction ? { lesson_author_action: options.lessonAuthorAction } : {}),
       }]);
       admissionStage('conversation_update');
       await query(`UPDATE chat_conversations SET updated_at=now(), title=CASE WHEN $3 THEN $4 ELSE title END
@@ -1961,6 +1970,78 @@ export async function prepareDurableBlueprint(
   };
 }
 
+/** New workspace path only. Reuses the existing source, prompt/schema, budget
+ * and locale authorities without requiring an earlier chapter to be Applied.
+ * No writes, reservation, rate-limit charge or provider call occur here.
+ * Caller must load the accepted Blueprint and fresh source/actor fences from
+ * its private workspace transaction; never expose this request through HTTP.
+ */
+export async function prepareWorkspaceContentRuntime(input: {
+  tenantId: string; userId: string; conversationId: string; courseId: string;
+  botId: string; kbId: string; correlationId: string; sourceSnapshotHash: string;
+  sourceDocumentIds: string[]; locale: 'vi' | 'en'; blueprint: LessonAuthorBlueprint;
+  chapterIndex: number; architectureMessageId: string;
+}) {
+  await assertDurableBlueprintActor(input.userId,input.tenantId);
+  const ctx = await loadConversationContext(input.conversationId,input.userId,input.tenantId,'lesson_author');
+  const kb = await getActiveKbAssignmentFresh(input.tenantId);
+  if (ctx.courseId !== input.courseId || ctx.botId !== input.botId || kb?.kb_id !== input.kbId
+    || input.blueprint.architecture_contract_version !== 5 || input.blueprint.content_contract_version !== 1
+    || !input.blueprint.chapters[input.chapterIndex]) throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  ctx.botKbId = kb.kb_id;
+  const settings = await getTenantAiRuntimeSettings(input.tenantId, { requireExisting:true });
+  if (settings.activeEngine !== 'self_built_rag' || !settings.hasGoogleAiStudioKey)
+    throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  const sources = await validateLessonAuthorSourceDocuments(ctx,kb.kb_id,input.sourceDocumentIds.map(document_id=>({document_id})),{requireGeminiMapping:false});
+  if (sources.length !== input.sourceDocumentIds.length
+    || createLessonAuthorBlueprintSourceSnapshotHash(ctx,kb.kb_id,sources) !== input.sourceSnapshotHash)
+    throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  const allowed = await getTenantAllowedCourseComponentTypeSet(input.tenantId);
+  const architecture = projectBlueprintDraftArchitecture(input.blueprint,input.chapterIndex);
+  for (const lesson of architecture.lessons) for (const unit of lesson.units) for (const plan of unit.component_plan) {
+    if (!isCourseComponentType(plan.type) || !allowed.has(plan.type) || !AI_COMPONENT_REGISTRY[plan.type].ai_generatable)
+      throw new AppError('Thành phần trong chương không được phép tạo bằng AI.',403,'CHAPTER_COMPONENT_NOT_ALLOWED');
+  }
+  // Freeze history BEFORE the creation action. Later Save/Apply/conversation
+  // messages must not change inputs or trigger regeneration of accepted units.
+  const message = await query(`SELECT id FROM chat_messages WHERE id=$1 AND conversation_id=$2 AND role='user'`,
+    [input.architectureMessageId,input.conversationId]);
+  if (message.rows.length !== 1) throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
+  const historyRows = await query<{role:string;content:string}>(`SELECT m.role,m.content FROM chat_messages m
+    WHERE m.conversation_id=$1 AND (m.created_at,m.id)<(SELECT created_at,id FROM chat_messages WHERE id=$2 AND conversation_id=$1)
+    ORDER BY m.created_at DESC,m.id DESC LIMIT $3`,[input.conversationId,input.architectureMessageId,HISTORY_CONTEXT_LIMIT-1]);
+  const history = historyRows.rows.reverse().map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content.slice(0,HISTORY_MESSAGE_MAX_CHARS)}]}));
+  const chapter = input.blueprint.chapters[input.chapterIndex];
+  const content = input.locale==='en' ? `Draft the approved chapter: ${chapter.title}` : `Soạn nội dung chương đã duyệt: ${chapter.title}`;
+  const approved: BlueprintDraftContext = {
+    id: '', blueprint: input.blueprint, chapterIndex: input.chapterIndex, outputLocale: input.locale,
+    sourceDocuments: sources,
+  };
+  const scope = formatBlueprintDraftContext(approved);
+  const systemPrompt = `${ctx.systemPrompt}\n\nYou are an Instructional Design expert. Build rigorous learner-centered course content from the provided source material. Return only a pending proposal for approval.`;
+  const schema = getLessonAuthorOutputSchemaHint();
+  const budget = buildAiTurnTokenBudget({engine:'self_built_rag',operation:'lesson_author',promptParts:[ctx.systemPrompt,
+    buildCurrentTurnText(content,[], '',sources),scope,formatSourceDocumentsForPrompt(sources),...history.map(m=>m.parts.map(p=>p.text).join('\n'))]});
+  const attempts = budget.maxGenerationAttempts>1 && budget.maximumTokens>=budget.retryMinimumTokens ? budget.maxGenerationAttempts : 1;
+  const output = grantedOutputTokenLimit(budget,budget.maximumTokens,attempts);
+  const runtimeHash = generationSnapshotHash({ version:'workspace-content-runtime-1',policy:systemPrompt,schema,history,
+    model:settings.lessonAuthorModel,embeddingModel:settings.embeddingModel,dimensions:settings.embeddingDimensions,
+    key:settings.apiKeyFingerprint,types:[...allowed].sort(),locale:input.locale });
+  const request: RagLessonAuthorRequest & {correlation_id:string} = {
+    correlation_id:input.correlationId,tenant_id:input.tenantId,kb_id:input.kbId,conversation_id:input.conversationId,
+    target:'lesson_author',model:settings.lessonAuthorModel,max_output_tokens:output,max_attempts:attempts,
+    embedding_model:settings.embeddingModel,embedding_dimensions:settings.embeddingDimensions,system_prompt:systemPrompt,
+    user_message:content,history:toRagChatHistory(history),source_documents:toRagSourceDocuments(sources),
+    // Approved workspace architecture is generation authority. Current course
+    // draft may change through our own Apply and is not a generation dependency.
+    course_context:JSON.stringify({title:input.blueprint.title,chapters:input.blueprint.chapters.map(c=>({title:c.title,objective:c.objective}))}),
+    outline_context:'',target_scope_instruction:scope,blueprint_architecture:architecture,output_schema_hint:schema,
+    operation:'create',target_type:'chapter',generation_mode:'staged',locale:input.locale,
+  };
+  return { request, runtimeHash, allowed, model:settings.lessonAuthorModel,provider:settings.provider,embeddingModel:settings.embeddingModel,
+    budget:{fixed_input_tokens:budget.fixedInputTokens,embedding_tokens:budget.embeddingTokens,output_tokens:output,max_provider_attempts:attempts} };
+}
+
 export interface LessonAuthorOutlineMention {
   block_id: string;
   block_type: string;
@@ -2007,6 +2088,11 @@ export interface LessonAuthorBlueprintMediaPlan {
   type: 'video' | 'static_infographic';
   title: string;
   content_outline: string;
+  brief_version?: 2;
+  content_points?: string[];
+  context_description?: string;
+  evidence_language?: 'original';
+  content_basis?: 'SOURCE_EXCERPTS';
   rationale: string;
 }
 
@@ -2453,18 +2539,6 @@ function normalizeSourceDocumentIds(inputs: LessonAuthorSourceDocumentInput[] = 
     if (ids.length >= MAX_SOURCE_DOCUMENTS) break;
   }
   return ids;
-}
-
-function getSourceInfoSummary(sourceInfo: Record<string, unknown> | null): string {
-  if (!sourceInfo) return '';
-  const parts: string[] = [];
-  const extension = typeof sourceInfo.extension === 'string' ? sourceInfo.extension : '';
-  const mimeType = typeof sourceInfo.mime_type === 'string' ? sourceInfo.mime_type : '';
-  const size = typeof sourceInfo.size === 'number' ? sourceInfo.size : null;
-  if (extension) parts.push(`extension=${extension}`);
-  if (mimeType) parts.push(`mime_type=${mimeType}`);
-  if (size && Number.isFinite(size)) parts.push(`size=${size}`);
-  return parts.join(', ');
 }
 
 function toSourceDocumentMetadata(doc: LessonAuthorSourceDocument): Omit<LessonAuthorSourceDocument, 'content_excerpt' | 'gemini_path'> {
@@ -5392,6 +5466,15 @@ export function normalizeLessonAuthorBlueprint(
           if (!mediaPlan.title || !mediaPlan.rationale) {
             throw new Error(`Blueprint unit ${chapterIndex + 1}.${lessonIndex + 1}.${unitIndex + 1} media plan is incomplete`);
           }
+          if (media.brief_version === 2) {
+            if (!Array.isArray(media.content_points) || media.content_points.length < 1 || media.content_points.length > 6
+              || media.content_points.some(p => typeof p !== 'string' || !p.trim() || p.length > 500)
+              || typeof media.context_description !== 'string' || !media.context_description.trim() || media.context_description.length > 1000) {
+              throw new Error('Structured media brief has invalid points or context');
+            }
+            Object.assign(mediaPlan, { brief_version: 2, content_points: media.content_points, context_description: media.context_description,
+              evidence_language: 'original', content_basis: 'SOURCE_EXCERPTS' });
+          }
         }
         const unitLearningObjectiveRefs = architectureContractVersion === 4 || architectureContractVersion === 5
           ? readLocalLearningObjectiveRefs(unit.learning_objective_refs, 24)
@@ -6461,6 +6544,7 @@ function classifyLessonAuthorIntentV2(
   outlineMentions: LessonAuthorOutlineMention[],
   mode: 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto',
   mentionSource?: 'current' | 'editor_context' | 'carried_forward',
+  creationContext?: LessonAuthorCreationContext,
 ): IntentClassificationResult {
   const operationPlan = classifyLessonAuthorIntent({
     message: userPrompt,
@@ -6468,6 +6552,7 @@ function classifyLessonAuthorIntentV2(
     mention: outlineMentions[0] ?? null,
     carriedTarget: outlineMentions.length > 0,
     mentionSource,
+    creationContext,
   });
   const signals: IntentSignal[] = operationPlan.signals.map((name) => ({
     name: name === 'delete_verb' ? 'delete_intent' : name,
@@ -7132,26 +7217,6 @@ function createLessonAuthorRequestHash(
     .digest('hex');
 }
 
-function createLessonAuthorBlueprintSourceSnapshotHash(
-  ctx: ConversationContext,
-  kbId: string,
-  sourceDocuments: LessonAuthorSourceDocument[],
-): string {
-  const sourceKey = sourceDocuments
-    .map(document => [
-      document.document_id,
-      document.name,
-      document.status ?? '',
-      document.updated_at,
-      getSourceInfoSummary(document.source_info),
-    ].join(':'))
-    .sort()
-    .join('|');
-  return createHash('sha256')
-    .update([ctx.tenantId, ctx.courseId, kbId, sourceKey].join('|'))
-    .digest('hex');
-}
-
 async function createLessonAuthorBlueprint(
   ctx: ConversationContext,
   userId: string,
@@ -7524,56 +7589,7 @@ function blueprintStructureKey(value: string): string {
 export function blueprintDraftArchitecture(
   context: BlueprintDraftContext,
 ): NonNullable<RagLessonAuthorRequest['blueprint_architecture']> {
-  const chapter = context.blueprint.chapters[context.chapterIndex];
-  return {
-    ...(context.blueprint.component_capabilities ? { component_capabilities: context.blueprint.component_capabilities } : {}),
-    ...((context.blueprint.architecture_contract_version === 4 || context.blueprint.architecture_contract_version === 5)
-      ? { architecture_contract_version: context.blueprint.architecture_contract_version }
-      : {}),
-    chapter_title: chapter.title,
-    source_refs: chapter.source_refs ?? [],
-    lessons: chapter.lessons.map((lesson) => ({
-      title: lesson.title,
-      source_refs: lesson.source_refs ?? [],
-      // Phase-5 quality validation must receive the approved Phase-3/2
-      // scope, not infer it from generated components.
-      learning_objectives: lesson.learning_objectives ?? [],
-      primary_concept_ids: lesson.primary_concept_ids ?? [],
-      supporting_concept_ids: lesson.supporting_concept_ids ?? [],
-      assessment_required: lesson.assessment_required ?? false,
-      assessment_objective_refs: lesson.assessment_objective_refs ?? [],
-      units: lesson.units.map((unit) => ({
-        title: unit.title,
-        purpose: unit.purpose ?? '',
-        concept_ids: unit.concept_ids ?? [],
-        primary_concept_ids: unit.primary_concept_ids ?? [],
-        primary_evidence_scope_ids: unit.primary_evidence_scope_ids ?? [],
-        supporting_evidence_scope_ids: unit.supporting_evidence_scope_ids ?? [],
-        learning_objective_refs: unit.learning_objective_refs ?? [],
-        source_refs: unit.source_refs ?? [],
-        // These persisted IDs are the Blueprint-to-draft coverage contract.
-        // Omitting them made RAG regroup the chapter facts and the backend
-        // correctly rejected the resulting proposal as a source mismatch.
-        source_fact_ids: unit.source_fact_ids ?? [],
-        supporting_evidence_fact_ids: unit.supporting_evidence_fact_ids ?? [],
-        learning_blocks: unit.learning_blocks ?? [],
-        component_plan: unit.component_plan.map((plan) => ({
-          component_plan_id: plan.component_plan_id,
-          learning_objective_refs: plan.learning_objective_refs,
-          type: plan.type,
-          title: plan.title,
-          rationale: plan.rationale,
-          purpose: plan.purpose,
-          source_fact_ids: plan.source_fact_ids ?? [],
-          supporting_evidence_fact_ids: plan.supporting_evidence_fact_ids ?? [],
-          content_requirements: plan.content_requirements ?? [],
-          reason_code: plan.reason_code,
-          learning_block_ids: plan.learning_block_ids ?? [],
-          required_artifacts: plan.required_artifacts ?? [],
-        })),
-      })),
-    })),
-  };
+  return projectBlueprintDraftArchitecture(context.blueprint, context.chapterIndex);
 }
 
 function readGeneratedComponentContentContract(
@@ -7843,6 +7859,7 @@ async function executeChapterCheckpoint(ctx: ConversationContext, userId: string
     const saved=await query<{id:string}>(`INSERT INTO chat_messages(conversation_id,role,content,metadata)
       VALUES ($1,'user',$2,$3) RETURNING id`,[ctx.conversationId,content,{locale,correlation_id:correlationId,
       chapter_draft_id:draftId,chapter_attempt_id:attemptId,lesson_author_blueprint_id:approved.id,
+      ...(options.lessonAuthorAction ? { lesson_author_action: options.lessonAuthorAction } : {}),
       lesson_author_blueprint_chapter_index:approved.chapterIndex,outline_mentions:mentions,
       ...(editor?{editor_context:editor.context}:{}),source_documents:sourceDocuments.map(toSourceDocumentMetadata)}]);
     await query('UPDATE chat_conversations SET updated_at=now() WHERE id=$1 AND tenant_id=$2',[ctx.conversationId,ctx.tenantId]);
@@ -8554,12 +8571,14 @@ export async function sendMessageStream(
     const requestedOutlineMentions = await validateLessonAuthorOutlineMentions(ctx, options.outlineMentions ?? []);
     const validatedEditorContext = await validateLessonAuthorEditorContext(ctx, options.editorContext);
     const requestedMode = (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto';
+    const creationContext = buildLessonAuthorCreationContext(options, validatedEditorContext?.context);
     const initialPreClassify = ctx.target === LESSON_AUTHOR_TARGET
       ? classifyLessonAuthorIntentV2(
         trimmed,
         requestedOutlineMentions,
         requestedMode,
         requestedOutlineMentions.length > 0 ? 'current' : undefined,
+        creationContext,
       )
       : null;
     const editorTarget = initialPreClassify && validatedEditorContext
@@ -8606,6 +8625,7 @@ export async function sendMessageStream(
         outlineMentions,
         requestedMode,
         outlineMentionSource === 'none' ? undefined : outlineMentionSource,
+        creationContext,
       )
       : null;
     const mentionContextRows = await getOutlineMentionContextRows(ctx, outlineMentions);
@@ -8800,6 +8820,7 @@ export async function sendMessageStream(
         trimmed,
         {
           ...(isVoiceTurn ? { input_mode: 'voice' } : {}),
+          ...(options.lessonAuthorAction ? { lesson_author_action: options.lessonAuthorAction } : {}),
           ...(outlineMentions.length > 0 ? { outline_mentions: outlineMentions, outline_mentions_source: outlineMentionSource } : {}),
           ...(validatedEditorContext ? { editor_context: validatedEditorContext.context } : {}),
           ...(sourceDocuments.length > 0 ? { source_documents: sourceDocuments.map(toSourceDocumentMetadata), source_documents_source: sourceDocumentSource } : {}),
@@ -8963,6 +8984,7 @@ export async function sendMessageStream(
         outlineMentions,
         (options.mode as 'chat' | 'course_blueprint' | 'draft_lesson' | 'auto') ?? 'auto',
         outlineMentionSource === 'none' ? undefined : outlineMentionSource,
+        creationContext,
       )
       : {
         intent: 'chat' as LessonAuthorIntent,
@@ -9036,6 +9058,7 @@ export async function sendMessageStream(
       command_route: normalizedLessonAuthorCommand?.route ?? null,
       matched: intentSignals.filter(s => s.matched).map(s => `${s.name}(${s.weight > 0 ? '+' : ''}${s.weight})`),
       requested_mode: options.mode ?? 'auto',
+      lesson_author_action: options.lessonAuthorAction ?? null,
     });
 
     if (ctx.target === LESSON_AUTHOR_TARGET && resolvedOperationPlan.operation === 'clarify') {

@@ -1924,7 +1924,7 @@ export async function getReportCourseCompletionLearners(
      FROM report_enrollments re
      JOIN users u ON u.id = re.user_id
      WHERE ${filters.join(' AND ')}
-     ORDER BY CASE WHEN re.is_completed THEN 1 WHEN re.has_started THEN 2 ELSE 3 END, COALESCE(NULLIF(u.full_name, ''), u.username), u.username
+     ORDER BY unaccent(LOWER(COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username))), u.username, re.enrollment_id
      LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     params,
   );

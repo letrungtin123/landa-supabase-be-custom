@@ -7,11 +7,21 @@ module.exports = {
       interpreter: "node",
       env: {
         NODE_ENV: "production",
-        EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false"
+        EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
+        LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "true"
       },
       env_production: {
         NODE_ENV: "production",
-        EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false"
+        EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
+        LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "true"
       }
     },
     {

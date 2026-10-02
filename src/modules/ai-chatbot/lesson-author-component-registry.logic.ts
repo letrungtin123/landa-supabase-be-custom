@@ -634,7 +634,13 @@ function planSemanticLearningBlocksInternal(input: ComponentPlannerInput): Plann
 
   // All source facts remain owned by explanatory HTML. This avoids dropping a
   // warning/procedure when an optional interaction is also selected.
-  const htmlBlocks = explanatoryBlocks.length > 0 ? explanatoryBlocks : input.blocks;
+  // If HTML owns a primary block's facts it must also teach that block's
+  // objectives, even when a diagram/sortable provides an additional treatment.
+  // A supporting check does not become teaching merely by sharing evidence.
+  const unitFacts = new Set(sourceFactIds);
+  const teachingBlocks = input.blocks.filter(block => block.intent !== 'knowledge_check'
+    && (explanatoryBlocks.includes(block) || block.source_fact_ids.some(id => unitFacts.has(id))));
+  const htmlBlocks = teachingBlocks.length > 0 ? teachingBlocks : explanatoryBlocks.length > 0 ? explanatoryBlocks : input.blocks;
   const htmlPlan = makePlan('html', htmlBlocks, htmlBlocks.some(block => block.intent === 'warning')
     ? 'WARNING_EXPLANATION'
     : htmlBlocks.some(block => block.intent === 'procedure')
@@ -749,8 +755,41 @@ function validateSemanticTextValues(
  * presentation helper: generated content must never claim source coverage
  * after rows, steps, or text have been silently discarded.
  */
-export function validateSemanticLearningHtmlPayload(value: unknown): string | null {
+export function flattenOrderedLearningContent(value: unknown): Record<string, unknown> {
   const content = asRecord(value);
+  if (content.version !== 2) {
+    if ((content.version != null && content.version !== 1) || (Array.isArray(content.sections) ? content.sections.length > 0 : content.sections != null)) throw new Error('Unsupported semantic content version.');
+    return content;
+  }
+  const legacy = ['heading', 'paragraphs', 'bullet_points', 'ordered_steps', 'warnings', 'comparison_rows'];
+  if (Object.keys(content).some(k => !['version', 'sections', ...legacy].includes(k))
+      || legacy.some(k => Array.isArray(content[k]) ? (content[k] as unknown[]).length > 0 : Boolean(content[k]))) throw new Error('Mixed ordered and legacy semantic content.');
+  if (!Array.isArray(content.sections) || content.sections.length < 1 || content.sections.length > 12) throw new Error('Ordered content requires 1-12 sections.');
+  const mapping: Record<string, string> = { paragraph: 'paragraphs', task: 'paragraphs', bullets: 'bullet_points', steps: 'ordered_steps', warning: 'warnings', table: 'comparison_rows' };
+  const flat: Record<string, unknown[]> = { paragraphs: [], bullet_points: [], ordered_steps: [], warnings: [], comparison_rows: [] };
+  for (const raw of content.sections) {
+    const section = asRecord(raw);
+    if (Object.keys(section).some(k => !['heading', 'learning_block_ids', 'blocks'].includes(k))
+      || typeof section.heading !== 'string' || !section.heading.trim() || section.heading.trim().length > 240) throw new Error('Invalid semantic section heading.');
+    const refs = section.learning_block_ids ?? [];
+    if (!Array.isArray(refs) || refs.length > 24 || refs.some(r => typeof r !== 'string' || !r.trim() || r.length > 160) || new Set(refs).size !== refs.length) throw new Error('Invalid section learning block references.');
+    if (!Array.isArray(section.blocks) || section.blocks.length < 1 || section.blocks.length > 12) throw new Error('Section requires 1-12 ordered blocks.');
+    for (const rawBlock of section.blocks) {
+      const block = asRecord(rawBlock);
+      if (typeof block.kind !== 'string' || !Object.hasOwn(mapping, block.kind) || Object.keys(block).some(k => !['kind', 'text', 'items', 'rows'].includes(k))) throw new Error('Unknown ordered block kind or field.');
+      const field = block.kind === 'table' ? 'rows' : ['bullets', 'steps'].includes(block.kind) ? 'items' : 'text';
+      if (['text', 'items', 'rows'].filter(k => k !== field).some(k => Array.isArray(block[k]) ? (block[k] as unknown[]).length > 0 : Boolean(block[k]))) throw new Error('Mixed ordered block fields.');
+      const data = block[field];
+      if (field === 'text' ? typeof data !== 'string' || !data.trim() : !Array.isArray(data) || data.length === 0) throw new Error('Ordered block content required.');
+      flat[mapping[block.kind]].push(...(field === 'text' ? [data] : data as unknown[]));
+    }
+  }
+  return flat;
+}
+
+export function validateSemanticLearningHtmlPayload(value: unknown): string | null {
+  let content: Record<string, unknown>;
+  try { content = flattenOrderedLearningContent(value); } catch (error) { return (error as Error).message; }
   if (Object.keys(content).length === 0) return 'Semantic content must be a non-empty object.';
   let hasRenderableText = false;
   if (content.heading !== undefined) {
@@ -805,6 +844,29 @@ export function renderSemanticLearningHtml(value: unknown): string | null {
   if (Object.keys(content).length === 0) return null;
   const preservationFailure = validateSemanticLearningHtmlPayload(content);
   if (preservationFailure) throw new Error(`Semantic learning content is not lossless: ${preservationFailure}`);
+  if (content.version === 2) {
+    const fragments: string[] = [];
+    for (const raw of content.sections as unknown[]) {
+      const section = asRecord(raw);
+      fragments.push(`<h2>${escapeHtmlText(section.heading)}</h2>`);
+      for (const rawBlock of section.blocks as unknown[]) {
+        const block = asRecord(rawBlock);
+        if (block.kind === 'table') {
+          fragments.push(`<table><tbody>${(block.rows as Array<{label: string; value: string}>).map(row => `<tr><th>${escapeHtmlText(row.label)}</th><td>${escapeHtmlText(row.value)}</td></tr>`).join('')}</tbody></table>`);
+        } else if (block.kind === 'bullets' || block.kind === 'steps') {
+          const tag = block.kind === 'steps' ? 'ol' : 'ul';
+          fragments.push(`<${tag}>${(block.items as string[]).map(item => `<li>${escapeHtmlText(item)}</li>`).join('')}</${tag}>`);
+        } else {
+          const tag = block.kind === 'warning' ? 'blockquote' : 'p';
+          fragments.push(`<${tag}>${escapeHtmlText(block.text)}</${tag}>`);
+        }
+      }
+    }
+    const html = sanitizeLessonAuthorHtml(fragments.join(''));
+    const failure = validateLessonAuthorHtmlContract(html);
+    if (failure) throw new Error(`Deterministic semantic HTML is invalid: ${failure}`);
+    return html;
+  }
   const heading = typeof content.heading === 'string' ? content.heading.trim() : '';
   const paragraphs = semanticTextValues(content.paragraphs);
   const bullets = semanticTextValues(content.bullet_points ?? content.bullets);

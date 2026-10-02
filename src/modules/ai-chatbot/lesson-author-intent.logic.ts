@@ -1,6 +1,30 @@
 // Deterministic intent routing for the Lesson Author.
 // This module deliberately has no database, model, or HTTP dependencies. The
 // caller resolves the target and authorizes the operation after classification.
+import type { ValidatedLessonAuthorEditorContext } from './lesson-author-command.logic.js';
+
+export interface LessonAuthorCreationContext {
+  hasCurrentSourceDocuments: boolean;
+  hasEditorNode: boolean;
+  hasBlueprintTarget: boolean;
+}
+
+/** Routing hints only, NOT source authorization. Callers must still validate
+ * source ownership before enqueue/provider dispatch. Never pass carried sources
+ * here: an old attachment must not turn an ambiguous edit into course creation. */
+export function buildLessonAuthorCreationContext(
+  options: { sourceDocuments?: ReadonlyArray<{ document_id?: string }>; blueprintId?: string },
+  editor: ValidatedLessonAuthorEditorContext | null | undefined,
+): LessonAuthorCreationContext {
+  return {
+    hasCurrentSourceDocuments: Boolean(options.sourceDocuments?.some(source => source.document_id?.trim())),
+    hasEditorNode: Boolean(editor && (
+      editor.current_chapter_id || editor.current_lesson_id || editor.current_unit_id || editor.current_component_id
+      || (editor.selected_entity && editor.selected_entity.type !== 'course')
+    )),
+    hasBlueprintTarget: Boolean(options.blueprintId),
+  };
+}
 
 export type LessonAuthorIntentOperation =
   | 'answer'
@@ -73,6 +97,9 @@ const DETAILED_COURSE_AUTHORING_WORDS = /(^|\b)(chi tiet|chuyen sau|day du|hoan 
 // generic CREATE/CONTENT signals so "create a quiz for this course" still
 // requires a concrete lesson target.
 const EXPLICIT_COURSE_CREATION_WORDS = /(?:^|\b)(?:(?:tao|soan|xay dung|thiet ke|lap|viet)\s+(?:(?:noi dung|chuong trinh)\s+)?(?:cho\s+)?(?:mot\s+)?(?:khoa hoc|chuong trinh)|(?:create|build|design|draft|generate|write)\s+(?:(?:the|this|a)\s+)?(?:course(?:\s+content)?|content\s+for\s+(?:(?:the|this|a)\s+)?course))(?:\b|$)/i;
+// Entire utterance, not a keyword match: named/numbered/deictic lessons,
+// questions, negations and compound edits must retain target resolution.
+const SOURCE_ATTACHED_LEARNING_CREATION = /^(?:(?:hay\s+)?(?:tao|soan|viet)\s+(?:noi dung\s+bai hoc|bai hoc|hoc lieu)(?:\s+(?:tu|dua tren)\s+(?:file|tai lieu)(?:\s+(?:da chon|dinh kem))?)?|(?:please\s+)?(?:create|generate|draft|write)\s+(?:lesson content|learning content|learning materials|a lesson)(?:\s+(?:from|based on)\s+(?:the\s+)?(?:selected|attached)\s+(?:file|document))?)[.!]*$/i;
 const COMPOUND_CONNECTOR_WORDS = /(^|\b)(va|and|dong thoi|at the same time|sau do|then|also)(\b|$)/i;
 const NEGATED_DELETE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(xoa|delete|remove|bo di|go bo|loai bo)(\b|$)/i;
 const NEGATED_CREATE_WORDS = /(^|\b)(khong|dung|do not|dont|without)\s+(?:can|duoc|the)?\s*(tao|them|add|insert|create|generate|build)(\b|$)/i;
@@ -221,6 +248,7 @@ export function classifyLessonAuthorIntent(input: {
   mention?: LessonAuthorIntentMention | null;
   carriedTarget?: boolean;
   mentionSource?: 'current' | 'editor_context' | 'carried_forward';
+  creationContext?: LessonAuthorCreationContext;
 }): LessonAuthorIntentPlan {
   const text = fold(input.message);
   const mentionTarget = targetTypeFromMention(input.mention);
@@ -274,6 +302,15 @@ export function classifyLessonAuthorIntent(input: {
       ['forced_draft_lesson'],
       targetType || hasMention ? [] : ['Chưa xác định được phạm vi cần soạn.'],
     );
+  }
+
+  if (input.creationContext?.hasCurrentSourceDocuments
+    && !input.creationContext.hasEditorNode
+    && !input.creationContext.hasBlueprintTarget
+    && !hasMention && !input.carriedTarget
+    && SOURCE_ATTACHED_LEARNING_CREATION.test(text)) {
+    return makePlan('course_blueprint', 'course', [], 0.96, false, 'none',
+      ['create_verb', 'course_scope', 'source_attached_learning_create'], []);
   }
 
   const isDelete = hasActiveSignal(DELETE_WORDS, text, NEGATED_DELETE_WORDS);

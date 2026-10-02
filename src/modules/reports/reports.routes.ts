@@ -18,6 +18,7 @@ router.get('/chart', checkPermission('report_summary', 'can_view'), ctrl.getChar
 router.get('/top-courses', checkPermission('report_summary', 'can_view'), ctrl.getTopCourses);
 router.get('/course-completion-ranking', checkPermission('report_summary', 'can_view'), ctrl.getCourseCompletionRanking);
 router.get('/course-completion-ranking/:courseId/learners', checkPermission('report_summary', 'can_view'), ctrl.getCourseCompletionLearners);
+router.get('/course-completion-ranking/:courseId/export.xlsx', checkPermission('report_summary', 'can_view'), ctrl.exportCourseCompletionLearners);
 router.get('/learners', checkPermission('report_summary', 'can_view'), ctrl.getLearners);
 router.get('/export.xlsx', checkPermission('report_summary', 'can_view'), ctrl.exportExcel);
 router.get('/learner-detail', checkPermission('report_summary', 'can_view'), ctrl.getLearnerDetail);

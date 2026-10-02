@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+import { buildNormalizedLessonAuthorCommand } from './lesson-author-command.logic.js';
 import {
+  buildLessonAuthorCreationContext,
   classifyLessonAuthorIntent,
   detectLessonAuthorInputLocale,
   extractLessonAuthorTargetNumberPath,
@@ -12,6 +16,105 @@ import {
   resolveLessonAuthorDraftLocale,
   stripLessonAuthorSourceRangeSuffix,
 } from './lesson-author-intent.logic.js';
+
+const attachedCreationContext = buildLessonAuthorCreationContext({
+  sourceDocuments: [{ document_id: '825c18ff-d1b2-42e6-b87b-3096426db3b5' }],
+}, null);
+
+test('latest UAT generic learning-content request with current source enters review-only FULL_SOURCE Blueprint', () => {
+  for (const message of ['tạo nội dung bài học', 'Soạn bài học', 'Hãy tạo học liệu.',
+    'Tạo nội dung bài học từ file đã chọn', 'Soạn bài học dựa trên tài liệu đính kèm',
+    'Create lesson content', 'Please generate learning materials from the attached document']) {
+    const plan = classifyLessonAuthorIntent({ message, mode: 'auto', creationContext: attachedCreationContext });
+    assert.equal(plan.operation, 'course_blueprint', message);
+    assert.equal(plan.target_type, 'course');
+    assert.equal(plan.target_source, 'none');
+    assert.ok(plan.signals.includes('source_attached_learning_create'));
+    const command = buildNormalizedLessonAuthorCommand({ plan, userInstruction: message, sourceDocumentIds: ['source'] });
+    assert.equal(command.intent, 'GENERATE_COURSE');
+    assert.equal(command.scope, 'FULL_COURSE');
+    assert.equal(command.source_mode, 'FULL_SOURCE');
+  }
+});
+
+test('creation context uses only current-turn source hints; missing/empty hints retain legacy target resolution', () => {
+  for (const options of [{}, { sourceDocuments: [] }, { sourceDocuments: [{}] }, { sourceDocuments: [{ document_id: ' ' }] }]) {
+    const creationContext = buildLessonAuthorCreationContext(options, null);
+    assert.equal(creationContext.hasCurrentSourceDocuments, false);
+    const input = { message: 'tạo nội dung bài học' };
+    assert.deepEqual(classifyLessonAuthorIntent({ ...input, creationContext }), classifyLessonAuthorIntent(input));
+  }
+  // Presence is a hint, not permission: validation remains downstream in both paths.
+  assert.equal(buildLessonAuthorCreationContext({ sourceDocuments: [{ document_id: 'not-authorized' }] }, null).hasCurrentSourceDocuments, true);
+});
+
+test('course-root editor permits generic source creation; every non-course editor boundary blocks promotion', () => {
+  const source = { sourceDocuments: [{ document_id: 'source' }] };
+  const root = { course_id: 'course', selected_entity: { id: 'course', type: 'course' as const } };
+  const input = { message: 'tạo nội dung bài học' };
+  assert.equal(classifyLessonAuthorIntent({ ...input, creationContext: buildLessonAuthorCreationContext(source, root) }).operation, 'course_blueprint');
+  for (const editor of [
+    { course_id: 'course', current_chapter_id: 'chapter' },
+    { course_id: 'course', current_lesson_id: 'lesson' },
+    { course_id: 'course', current_unit_id: 'unit' },
+    { course_id: 'course', current_component_id: 'component' },
+    { course_id: 'course', selected_entity: { id: 'unit', type: 'unit' as const } },
+  ]) {
+    const creationContext = buildLessonAuthorCreationContext(source, editor);
+    assert.equal(creationContext.hasEditorNode, true);
+    assert.deepEqual(classifyLessonAuthorIntent({ ...input, creationContext }), classifyLessonAuthorIntent(input));
+  }
+});
+
+test('explicit/carried/editor targets, Blueprint drafts and forced modes are never widened by current sources', () => {
+  for (const mentionSource of ['current', 'editor_context', 'carried_forward'] as const) {
+    const input = { message: 'tạo nội dung bài học', mention: { block_id: 'unit', block_type: 'vertical' }, mentionSource };
+    assert.deepEqual(classifyLessonAuthorIntent({ ...input, creationContext: attachedCreationContext }), classifyLessonAuthorIntent(input));
+  }
+  const carried = { message: 'tạo nội dung bài học', carriedTarget: true };
+  assert.deepEqual(classifyLessonAuthorIntent({ ...carried, creationContext: attachedCreationContext }), classifyLessonAuthorIntent(carried));
+  for (const mode of ['chat', 'draft_lesson', 'course_blueprint'] as const) {
+    const input = { message: 'tạo nội dung bài học', mode };
+    assert.deepEqual(classifyLessonAuthorIntent({ ...input, creationContext: attachedCreationContext }), classifyLessonAuthorIntent(input));
+  }
+  const blueprintContext = buildLessonAuthorCreationContext({ sourceDocuments: [{ document_id: 'source' }], blueprintId: 'blueprint' }, null);
+  assert.notEqual(classifyLessonAuthorIntent({ message: 'tạo nội dung bài học', creationContext: blueprintContext }).operation, 'course_blueprint');
+});
+
+test('source hint never promotes named/numbered/deictic targets, edits, negations, compound commands or chat', () => {
+  for (const message of ['Tạo nội dung bài học 2', 'Tạo nội dung bài học An toàn', 'Soạn bài học này',
+    'Create lesson content for lesson 2', 'Create lesson content for this lesson', 'Create lesson content about safety',
+    'Sửa nội dung bài học', 'Đổi tên bài học', 'Xóa bài học', 'Di chuyển bài học',
+    'Không tạo nội dung bài học', 'Đừng soạn bài học', 'Do not create lesson content',
+    'Tạo nội dung bài học và xóa chương 1', 'Tạo nội dung bài học?', 'Tạo nội dung bài học như thế nào?',
+    'ok cảm ơn bạn', 'Giải thích tài liệu này', 'Soạn chi tiết Chương 3: An toàn']) {
+    const baseline = classifyLessonAuthorIntent({ message });
+    const actual = classifyLessonAuthorIntent({ message, creationContext: attachedCreationContext });
+    assert.deepEqual(actual, baseline, message);
+    assert.notEqual(actual.operation, 'course_blueprint', message);
+  }
+});
+
+test('durable admission and all stream classifications share creation context without bypassing source validation', () => {
+  const source = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const ast = ts.createSourceFile('chat.service.ts', source, ts.ScriptTarget.Latest, true);
+  const calls: ts.CallExpression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'classifyLessonAuthorIntentV2') calls.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(calls.length, 4);
+  for (const call of calls) assert.equal(call.arguments[4]?.getText(ast), 'creationContext');
+  assert.ok(source.includes('buildLessonAuthorCreationContext(options, editor?.context)'));
+  assert.ok(source.includes('buildLessonAuthorCreationContext(options, validatedEditorContext?.context)'));
+  const admission = source.slice(source.indexOf('export async function prepareDurableBlueprint('), source.indexOf('function classifyLessonAuthorIntentV2('));
+  const classification = admission.indexOf('const classified = classifyLessonAuthorIntentV2');
+  const validation = admission.indexOf('await validateLessonAuthorSourceDocuments');
+  assert.ok(classification > 0 && validation > classification);
+  assert.ok(admission.includes("if (!sources.length) throw new AppError('Vui lòng chọn tài liệu nguồn đã học.'"));
+  assert.ok(admission.indexOf('await validateLessonAuthorEditorContext') < classification);
+});
 
 test('approved Blueprint locale survives UI and draft-button language changes without changing explicit precedence', () => {
   assert.equal(resolveLessonAuthorDraftLocale('Draft the first chapter', 'en', 'vi'), 'vi');

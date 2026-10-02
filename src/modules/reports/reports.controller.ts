@@ -7,7 +7,13 @@ import { createTransactionalAuditEntry, runAuditedTransaction } from '../../midd
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
-import { buildReportExcelFileName, normalizeReportExcelLocale, streamReportExcel } from './reports-export.service.js';
+import {
+  buildCourseLearnerExcelFileName,
+  buildReportExcelFileName,
+  normalizeReportExcelLocale,
+  streamCourseLearnerExcel,
+  streamReportExcel,
+} from './reports-export.service.js';
 import { enforceReportScope as enforceSharedReportScope, readReportScopeId, type ReportScope } from './report-access.service.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
 
@@ -191,6 +197,74 @@ export async function getCourseCompletionLearners(req: Request, res: Response) {
     tenantId, courseId, page, pageSize, search, month, year, scope.groupId, scope.subgroupId, scope.teamId, status, dateRange,
   );
   sendSuccess(res, result);
+}
+
+/** GET /api/reports/course-completion-ranking/:courseId/export.xlsx */
+export async function exportCourseCompletionLearners(req: Request, res: Response) {
+  if (req.user!.role === 'learner_plus') {
+    return sendError(res, 'Không có quyền xuất file báo cáo', 403);
+  }
+
+  const tenantId = req.user!.tenantId!;
+  const courseId = req.params.courseId;
+  if (!courseId) return sendError(res, 'courseId is required', 400);
+
+  const course = await query<{ display_name: string }>(
+    `SELECT display_name
+     FROM courses
+     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+     LIMIT 1`,
+    [courseId, tenantId],
+  );
+  if (!course.rows[0]) return sendError(res, 'Không tìm thấy khóa học', 404);
+
+  const now = new Date();
+  const dateRange = parseReportDateRange(req);
+  const year = Math.max(parseInt(req.query.year as string) || dateRange?.startDate.getFullYear() || now.getFullYear(), 2000);
+  const rawMonth = req.query.month ? parseInt(req.query.month as string) : undefined;
+  const month = dateRange ? undefined : rawMonth && rawMonth >= 1 && rawMonth <= 12 ? rawMonth : undefined;
+  const locale = normalizeReportExcelLocale(req.query.locale);
+  const scope = await enforceReportScope(req);
+  if (scope.allowedGroupIds?.length === 0) {
+    return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
+  }
+
+  const courseName = course.rows[0].display_name;
+  const fileName = buildCourseLearnerExcelFileName(locale, courseName, dateRange, month, year);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  res.setHeader('Cache-Control', 'no-store');
+
+  try {
+    await streamCourseLearnerExcel({
+      stream: res,
+      tenantId,
+      courseId,
+      courseName,
+      year,
+      month,
+      dateRange,
+      scope: {
+        groupId: scope.groupId,
+        subgroupId: scope.subgroupId,
+        teamId: scope.teamId,
+      },
+      labels: {
+        group: (req.query.group_label as string) || (locale === 'en' ? 'Company' : 'Công ty'),
+        subgroup: (req.query.subgroup_label as string) || (locale === 'en' ? 'Branch' : 'Chi nhánh'),
+        team: (req.query.team_label as string) || (locale === 'en' ? 'Department' : 'Phòng ban'),
+      },
+      exporterName: req.user!.username || 'Admin',
+      locale,
+    });
+  } catch (err) {
+    console.error('[CourseLearnersExport] Error:', err);
+    if (!res.headersSent) {
+      sendError(res, 'Có lỗi xảy ra khi xuất danh sách học viên khóa học', 500);
+      return;
+    }
+    res.destroy(err instanceof Error ? err : undefined);
+  }
 }
 
 /** GET /api/reports/learners */

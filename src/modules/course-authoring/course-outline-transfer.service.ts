@@ -9,11 +9,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import {
   invalidateBlockReadCaches,
   invalidateCourseReadCaches,
 } from '../../config/cache-invalidation.js';
-import { buildStoragePath, downloadFileBuffer, getPublicUrl, uploadFile, deleteFiles } from '../../config/storage.js';
+import { buildStoragePath, downloadFileBuffer, getPublicUrl, uploadFile, deleteFiles, extractStoragePath } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import {
@@ -212,19 +213,27 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function normalizeStoragePath(value: unknown): string | null {
+/**
+ * Accept both current public URLs and legacy raw bucket keys. Course IDs are
+ * opaque and may legitimately contain `:` and `+`, so do not constrain the
+ * path to a filename-style character set here.
+ */
+export function normalizeCourseOutlineTransferStoragePath(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const raw = value.trim();
   if (!raw || raw.length > 1_200) return null;
-  if (/^[0-9a-f-]{36}\/courses\/[\w.\-/]+$/i.test(raw)) return raw;
-  const marker = '/object/public/landa-storage/';
-  const markerIndex = raw.indexOf(marker);
-  if (markerIndex < 0) return null;
+
+  let extracted: string | null;
   try {
-    return decodeURIComponent(raw.slice(markerIndex + marker.length).split(/[?#]/, 1)[0]);
+    extracted = extractStoragePath(raw);
   } catch {
     return null;
   }
+
+  const path = extracted?.split(/[?#]/, 1)[0] || '';
+  if (!path || path.length > 1_200) return null;
+  if (path.startsWith('/') || path.includes('//') || path.includes('..') || /[\s<>"'`\\]/.test(path)) return null;
+  return path;
 }
 
 function collectStringValues(value: unknown, output: string[]): void {
@@ -257,7 +266,7 @@ function collectReferencedAssetPaths(payloadRows: PayloadRow[], tenantId: string
     collectStringValues(row.published_data, strings);
     collectStringValues(row.published_metadata, strings);
     for (const value of strings) {
-      const direct = normalizeStoragePath(value);
+      const direct = normalizeCourseOutlineTransferStoragePath(value);
       if (direct?.startsWith(tenantCoursePrefix)) paths.add(direct);
       for (const match of value.matchAll(matcher)) {
         const candidate = match[0].split(/[?#]/, 1)[0].replace(/[.,;:!?]+$/, '');
@@ -325,7 +334,8 @@ async function prepareTransferAssets(job: TransferJobRow): Promise<void> {
 
   const assetByPath = new Map<string, typeof assetResult.rows[number]>();
   for (const asset of assetResult.rows) {
-    const path = normalizeStoragePath(asset.storage_path) || normalizeStoragePath(asset.url);
+    const path = normalizeCourseOutlineTransferStoragePath(asset.storage_path)
+      || normalizeCourseOutlineTransferStoragePath(asset.url);
     if (path) assetByPath.set(path, asset);
   }
 
@@ -773,12 +783,14 @@ async function markJobRetryable(job: TransferJobRow, error: unknown): Promise<vo
 
 async function claimNextJob(): Promise<TransferJobRow | null> {
   const leaseToken = randomUUID();
+  const tenantFence = runtimeTenantSql('tenant_id', 3);
   const result = await query<TransferJobRow>(
     `WITH candidate AS (
        SELECT id
          FROM course_outline_transfer_jobs
-        WHERE (status = 'queued' AND next_attempt_at <= now())
-           OR (status = 'running' AND lease_expires_at < now())
+        WHERE ((status = 'queued' AND next_attempt_at <= now())
+           OR (status = 'running' AND lease_expires_at < now()))
+          ${tenantFence.clause}
         ORDER BY created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -790,7 +802,7 @@ async function claimNextJob(): Promise<TransferJobRow | null> {
        FROM candidate
       WHERE job.id = candidate.id
       RETURNING job.*`,
-    [leaseToken, JOB_LEASE_SECONDS],
+    [leaseToken, JOB_LEASE_SECONDS, ...tenantFence.params],
   );
   return result.rows[0] ?? null;
 }

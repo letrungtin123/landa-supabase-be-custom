@@ -23,6 +23,14 @@ if (result.error) {
 }
 console.log(`[Env] Loaded ${envFile}`);
 
+// Local-only overrides make `npm run dev` usable without editing or copying
+// production secrets. The file is gitignored and is never loaded by PM2.
+if (!isProd) {
+  const localEnvPath = path.resolve(rootDir, '.env.development.local');
+  const localResult = dotenvConfig({ path: localEnvPath, override: true });
+  if (!localResult.error) console.log('[Env] Loaded .env.development.local overrides');
+}
+
 /**
  * Đọc biến môi trường bắt buộc — throw nếu thiếu hoặc rỗng.
  */
@@ -98,9 +106,24 @@ function optionalString(key: string, fallback: string): string {
   return process.env[key]?.trim() || fallback;
 }
 
+function optionalOneOf<const T extends readonly string[]>(key: string, fallback: T[number], allowed: T): T[number] {
+  const value = optionalString(key, fallback);
+  if (!allowed.includes(value as T[number])) {
+    throw new Error(`[ENV] ${key} must be one of ${allowed.join(', ')}, received: "${value}"`);
+  }
+  return value as T[number];
+}
+
 export const env = {
   NODE_ENV: required('NODE_ENV'),
   PORT: requiredInt('PORT'),
+  // Runtime fencing allows a localhost working tree and the always-on DEMO
+  // snapshot to share one Supabase project without competing for another
+  // runtime's tenant jobs. Empty lists preserve historical behaviour.
+  RUNTIME_LANE: optionalString('RUNTIME_LANE', 'default'),
+  RUNTIME_TENANT_ALLOWLIST: optionalCsv('RUNTIME_TENANT_ALLOWLIST'),
+  RUNTIME_TENANT_DENYLIST: optionalCsv('RUNTIME_TENANT_DENYLIST'),
+  RUNTIME_GLOBAL_MAINTENANCE_ENABLED: optionalBoolean('RUNTIME_GLOBAL_MAINTENANCE_ENABLED', true),
   // Existing direct deployments retain the default. Behind Nginx, bind to
   // 127.0.0.1 so the API cannot bypass the gateway on a LAN/public interface.
   BIND_HOST: optionalString('BIND_HOST', '0.0.0.0'),
@@ -129,9 +152,11 @@ export const env = {
 
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
+  RABBITMQ_QUEUE_PREFIX: optionalString('RABBITMQ_QUEUE_PREFIX', ''),
 
   // Redis (optional; DB fallback is used if unavailable)
   REDIS_URL: process.env.REDIS_URL?.trim() || '',
+  REDIS_DATABASE: optionalNonNegativeInt('REDIS_DATABASE', 0),
   REDIS_CONNECT_TIMEOUT_MS: optionalInt('REDIS_CONNECT_TIMEOUT_MS', 2_000),
   AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION: optionalBoolean('AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION', true),
 
@@ -152,9 +177,52 @@ export const env = {
   AI_RAG_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_REQUEST_TIMEOUT_MS', 600_000, 1_000, 900_000),
   // Read-only durable-job API. Does not enable enqueue or start any worker.
   LESSON_AUTHOR_GENERATION_STATUS_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_STATUS_ENABLED', false),
+  // Reads only; does not enable workspace admission, generation, editing or Apply.
+  LESSON_AUTHOR_WORKSPACE_READ_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_READ_ENABLED', false),
+  // Authenticated metadata-only server push. It is separately gated from all
+  // generation/edit/Apply behavior and requires the manual SQL notification
+  // trigger to have been installed before production enablement.
+  LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED', false),
+  // Save/Reset only. Requires reads too; never enables admission, workers or Apply.
+  LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false),
+  LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED', false),
+  // Draft-only course Apply. Requires READ, EDIT and EXECUTION plus the
+  // installed workspace execution schema; this flag is intentionally separate
+  // so a worker rollout can never publish course blocks by accident.
+  LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED', false),
   // Enables durable self-built-RAG Blueprint admission and its bounded worker.
   LESSON_AUTHOR_GENERATION_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_ENABLED', false),
   LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED: optionalBoolean('LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED', false),
+  // Server-owned workspace launch switch. It admits durable V2 work in the API
+  // transaction only when workspace execution is also enabled. Execution stays
+  // isolated in a dedicated process with exactly one dispatcher/worker role.
+  LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED: optionalBoolean(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED', false,
+  ),
+  LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY: optionalBoundedInt(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY', 16, 1, 1_024,
+  ),
+  LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: optionalBoundedInt(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY', 4, 1, 128,
+  ),
+  LESSON_AUTHOR_ORCHESTRATION_V2_ENABLED: optionalBoolean('LESSON_AUTHOR_ORCHESTRATION_V2_ENABLED', false),
+  LESSON_AUTHOR_ORCHESTRATION_V2_ROLE: optionalOneOf(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_ROLE', 'disabled', ['disabled', 'dispatcher', 'worker'] as const,
+  ),
+  LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT', 1, 1, 4_096),
+  LESSON_AUTHOR_ORCHESTRATION_V2_LANE_INDEX: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_LANE_INDEX', 0, 0, 4_095),
+  LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_LEASE_SECONDS', 30, 5, 300),
+  LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_MAX_ATTEMPTS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_MAX_ATTEMPTS', 8, 1, 100),
+  LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS', 1_000, 1, 3_600_000),
+  LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS', 60_000, 1, 86_400_000),
+  LESSON_AUTHOR_ORCHESTRATION_V2_PUBLISHED_RECOVERY_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_PUBLISHED_RECOVERY_SECONDS', 120, 5, 3_600),
+  LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE', 25, 1, 500),
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE', 25, 1, 500),
+  LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS', 1_000, 100, 300_000),
+  LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY', 64, 1, 4_096),
+  LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY', 8, 1, 4_096),
+  LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS', 30, 5, 45),
+  LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE', 25, 1, 500),
   AI_RAG_INDEX_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_INDEX_REQUEST_TIMEOUT_MS', 900_000, 10_000, 3_600_000),
   AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),
@@ -257,6 +325,7 @@ export const env = {
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
+  GEMINI_LESSON_AUTHOR_MODEL: process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 
   /** Kiểm tra môi trường production */

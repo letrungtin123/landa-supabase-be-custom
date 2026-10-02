@@ -7,6 +7,22 @@ import type { AiChatTarget, AiUsage } from './ai-engine.types.js';
 import { getGoogleAiStudioApiKey } from './ai-settings.service.js';
 import { assertRagChapterCheckpointRequest, readRagChapterCheckpointResponse,
   type RagChapterCheckpointRequest, type RagChapterCheckpointResponse } from './lesson-author-chapter-rag-contract.logic.js';
+import {
+  readOrchestrationV2ChapterShardResponse,
+  readOrchestrationV2CourseSkeletonResponse,
+  readOrchestrationV2SourceSnapshotPageResponse,
+  type OrchestrationV2ChapterShardPlan,
+  type OrchestrationV2ChapterShardResponse,
+  type OrchestrationV2CourseSkeleton,
+  type OrchestrationV2CourseSkeletonResponse,
+  type OrchestrationV2SourceFact,
+  type OrchestrationV2SourceAuthority,
+  type OrchestrationV2SourceSnapshotPageResponse,
+  type OrchestrationV2SourceScope,
+} from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import { readOrchestrationV2UnitProviderResponse,
+  type OrchestrationV2UnitGenerationContract,
+  type OrchestrationV2UnitProviderResponse } from './lesson-author-orchestration-v2-unit.logic.js';
 
 export interface RagChatMessage {
   role: 'user' | 'assistant' | 'model';
@@ -193,6 +209,51 @@ export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {
   max_attempts?: number;
   /** Node-resolved CMS identifier, diagnostic only; Python never authorises with it. */
   course_id?: string;
+}
+
+export interface RagLessonAuthorSourceSnapshotV2Request extends RagChatRequest {
+  contract_version: 2;
+  source_snapshot_hash: string;
+}
+
+export interface RagLessonAuthorSourceSnapshotV2Receipt {
+  contract_version: 2;
+  source_snapshot_hash: string;
+  source_revision: string;
+  page_count: number;
+  fact_count: number;
+  source_authority: OrchestrationV2SourceAuthority;
+}
+
+function compareSourceCursorV2(
+  left: { document_id: string; chunk_no: number }, right: { document_id: string; chunk_no: number },
+): number {
+  const documentOrder = left.document_id.toLowerCase().localeCompare(right.document_id.toLowerCase());
+  return documentOrder || left.chunk_no - right.chunk_no;
+}
+
+export interface RagLessonAuthorCourseSkeletonV2Request extends RagChatRequest {
+  contract_version: 2;
+  source_snapshot_hash: string;
+  scope_catalog: OrchestrationV2SourceScope[];
+  source_authority: OrchestrationV2SourceAuthority;
+  max_attempts: 1 | 2;
+}
+
+export interface RagLessonAuthorChapterShardV2Request extends RagChatRequest {
+  contract_version: 2;
+  skeleton: OrchestrationV2CourseSkeleton;
+  shard_plan: OrchestrationV2ChapterShardPlan;
+  source_facts: OrchestrationV2SourceFact[];
+  max_attempts: 1 | 2;
+}
+
+export interface RagLessonAuthorUnitV2Request extends RagChatRequest {
+  contract_version: 2;
+  unit_contract: OrchestrationV2UnitGenerationContract;
+  max_attempts: 1 | 2;
+  remaining_workflow_budget_ms: number;
+  fallback_only: boolean;
 }
 
 export interface RagLessonAuthorResponse {
@@ -413,6 +474,124 @@ export async function generateRagLessonAuthorBlueprint(
     api_key: apiKey,
   }, execution ? Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, execution.timeoutMs) : env.AI_RAG_REQUEST_TIMEOUT_MS,
   execution?.signal);
+}
+
+function orchestrationV2ExecutionTimeout(execution: { timeoutMs: number; signal: AbortSignal }): number {
+  if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
+    throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  }
+  return Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, execution.timeoutMs);
+}
+
+/** Internal V2 source authority boundary. It performs retrieval only and never calls the generation model. */
+export async function createRagLessonAuthorSourceSnapshotV2(
+  request: RagLessonAuthorSourceSnapshotV2Request,
+  execution: { timeoutMs: number; signal: AbortSignal },
+  consumePage: (page: OrchestrationV2SourceSnapshotPageResponse, startOrdinal: number) => Promise<void>,
+): Promise<RagLessonAuthorSourceSnapshotV2Receipt> {
+  if (!Number.isSafeInteger(execution.timeoutMs) || execution.timeoutMs <= 0) {
+    throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  }
+  const totalTimeoutMs = execution.timeoutMs;
+  const startedAt = Date.now();
+  let cursor: { document_id: string; chunk_no: number } | null = null;
+  let sourceRevision: string | undefined;
+  let sourceAuthority: OrchestrationV2SourceAuthority | undefined;
+  let pageCount = 0;
+  let factCount = 0;
+  const seenCursors = new Set<string>();
+  while (true) {
+    const remainingMs = totalTimeoutMs - Math.max(0, Date.now() - startedAt);
+    if (remainingMs <= 0) throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+    const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/source-snapshot', {
+      ...request, cursor, expected_source_revision: sourceRevision ?? null,
+      page_max_facts: 500, page_max_bytes: 4_194_304,
+    }, Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, remainingMs), execution.signal);
+    const page = readOrchestrationV2SourceSnapshotPageResponse(
+      response, request.source_snapshot_hash, sourceRevision,
+    );
+    let previousFactCursor: { document_id: string; chunk_no: number } | null = null;
+    for (const fact of page.facts) {
+      const factCursor = { document_id: fact.document_id, chunk_no: fact.source_chunk ?? -1 };
+      if (factCursor.chunk_no < 0 || (!previousFactCursor && cursor && compareSourceCursorV2(factCursor, cursor) <= 0)
+        || (previousFactCursor && compareSourceCursorV2(factCursor, previousFactCursor) < 0)) {
+        throw new AppError('Source snapshot facts are not in cursor order.', 422,
+          'ORCHESTRATION_V2_SOURCE_CURSOR_INVALID');
+      }
+      previousFactCursor = factCursor;
+    }
+    sourceRevision ??= page.source_revision;
+    if (sourceAuthority && sourceAuthority.structure_hash !== page.source_authority.structure_hash) {
+      throw new AppError('Source outline authority changed while paging.', 409,
+        'ORCHESTRATION_V2_SOURCE_AUTHORITY_CHANGED');
+    }
+    sourceAuthority ??= page.source_authority;
+    pageCount += 1;
+    if (pageCount > 100_000) throw new AppError('Source snapshot exceeded page safety limit.', 422,
+      'ORCHESTRATION_V2_SOURCE_PAGE_LIMIT');
+    if (page.facts.length) {
+      await consumePage(page, factCount);
+      factCount += page.facts.length;
+    }
+    if (!page.has_more) break;
+    const next = page.next_cursor!;
+    if ((cursor && compareSourceCursorV2(next, cursor) <= 0)
+      || (previousFactCursor && compareSourceCursorV2(next, previousFactCursor) < 0)) {
+      throw new AppError('Source snapshot cursor did not advance.', 422,
+        'ORCHESTRATION_V2_SOURCE_CURSOR_STALLED');
+    }
+    const key = `${next.document_id}:${next.chunk_no}`;
+    if (seenCursors.has(key)) throw new AppError('Source snapshot cursor did not advance.', 422,
+      'ORCHESTRATION_V2_SOURCE_CURSOR_STALLED');
+    seenCursors.add(key);
+    cursor = next;
+  }
+  if (!sourceRevision || !sourceAuthority || factCount < 1) throw new AppError('Source snapshot did not contain facts.', 422,
+    'ORCHESTRATION_V2_SOURCE_EMPTY');
+  return { contract_version: 2, source_snapshot_hash: request.source_snapshot_hash,
+    source_revision: sourceRevision, page_count: pageCount, fact_count: factCount,
+    source_authority: sourceAuthority };
+}
+
+/** One bounded provider call shape for global structure; it never asks the model for chapter content. */
+export async function generateRagLessonAuthorCourseSkeletonV2(
+  request: RagLessonAuthorCourseSkeletonV2Request,
+  execution: { timeoutMs: number; signal: AbortSignal },
+): Promise<OrchestrationV2CourseSkeletonResponse> {
+  const timeoutMs = orchestrationV2ExecutionTimeout(execution);
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/course-skeleton', {
+    ...request, api_key: apiKey,
+  }, timeoutMs, execution.signal);
+  return readOrchestrationV2CourseSkeletonResponse(response, request.source_snapshot_hash);
+}
+
+/** One independently retryable provider call shape, hard-bound to a single immutable chapter shard. */
+export async function generateRagLessonAuthorChapterShardV2(
+  request: RagLessonAuthorChapterShardV2Request,
+  execution: { timeoutMs: number; signal: AbortSignal },
+): Promise<OrchestrationV2ChapterShardResponse> {
+  const timeoutMs = orchestrationV2ExecutionTimeout(execution);
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/chapter-shard', {
+    ...request, api_key: apiKey,
+  }, timeoutMs, execution.signal);
+  return readOrchestrationV2ChapterShardResponse(response, request.skeleton, request.shard_plan);
+}
+
+/** One provider-dispatch-fenced Stage-2 content call for one immutable V2 unit. */
+export async function generateRagLessonAuthorUnitV2(
+  request: RagLessonAuthorUnitV2Request,
+  execution: { timeoutMs: number; signal: AbortSignal },
+): Promise<OrchestrationV2UnitProviderResponse> {
+  const timeoutMs = orchestrationV2ExecutionTimeout(execution);
+  const remaining = Math.min(timeoutMs, request.remaining_workflow_budget_ms);
+  if (remaining <= 0) throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/unit', {
+    ...request, remaining_workflow_budget_ms: remaining, api_key: apiKey,
+  }, remaining, execution.signal);
+  return readOrchestrationV2UnitProviderResponse(response, request.unit_contract);
 }
 
 export async function indexRagDocument(input: {

@@ -3,6 +3,7 @@ import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { createChapterCheckpointRepository } from './lesson-author-chapter-checkpoint.repository.js';
 import { releaseTenantAiTokenReservation } from './ai-token-quota.service.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 
 export const chapterCheckpointRepository = createChapterCheckpointRepository({transaction:withDatabaseTransaction});
 export const logChapterCheckpoint = (event: Record<string,unknown>) => console.info('[LessonAuthorChapter]',JSON.stringify(event));
@@ -48,12 +49,14 @@ export async function verifyChapterCheckpointSchema() {
 
 /** Only expires abandoned leases and retention. NEVER dispatches/retries paid work. */
 async function maintainChapterCheckpoints() {
+  const attemptTenantFence = runtimeTenantSql('a.tenant_id', 1);
   const expired = await query<{draft_id:string; id:string; tenant_id:string; course_id:string;
     conversation_id:string; requested_by:string; lease_token:string; correlation_id:string; dispatch_started_at:Date|null}>(`
     SELECT a.id,a.draft_id,a.tenant_id,a.course_id,a.lease_token,a.correlation_id,a.dispatch_started_at,
       d.conversation_id,d.requested_by FROM lesson_author_chapter_attempts a JOIN lesson_author_chapter_drafts d ON d.id=a.draft_id
     WHERE a.status='running' AND (a.lease_expires_at<=clock_timestamp() OR a.deadline_at<=clock_timestamp())
-    ORDER BY a.lease_expires_at LIMIT 8`);
+      ${attemptTenantFence.clause}
+    ORDER BY a.lease_expires_at LIMIT 8`,attemptTenantFence.params);
   for (const row of expired.rows) {
     try {
       await chapterCheckpointRepository.interrupt({draftId:row.draft_id,attemptId:row.id,tenantId:row.tenant_id,
@@ -71,10 +74,12 @@ async function maintainChapterCheckpoints() {
   }
   await withDatabaseTransaction(async () => {
     // Bounded parent-only retention; independent reservation holds are NOT released.
+    const draftTenantFence = runtimeTenantSql('d.tenant_id', 1);
     await query(`DELETE FROM lesson_author_chapter_drafts WHERE id IN (
       SELECT d.id FROM lesson_author_chapter_drafts d WHERE d.expires_at<=clock_timestamp()
         AND NOT EXISTS (SELECT 1 FROM lesson_author_chapter_attempts a WHERE a.draft_id=d.id AND a.status='running')
-      ORDER BY d.expires_at LIMIT 8 FOR UPDATE SKIP LOCKED)`);
+        ${draftTenantFence.clause}
+      ORDER BY d.expires_at LIMIT 8 FOR UPDATE SKIP LOCKED)`,draftTenantFence.params);
   });
 }
 export async function startChapterCheckpointMaintenance() {

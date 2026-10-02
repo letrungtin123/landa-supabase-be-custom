@@ -1409,7 +1409,18 @@ export async function updateDocumentStatus(
   errorReason?: string,
 ): Promise<void> {
   const result = await query<{ tenant_id: string }>(
-    `UPDATE kb_documents SET status = $1, error_reason = $2, updated_at = now() WHERE id = $3 RETURNING tenant_id`,
+    `WITH updated AS (
+       UPDATE kb_documents
+          SET status = $1, error_reason = $2, updated_at = now()
+        WHERE id = $3
+        RETURNING id, tenant_id, kb_id, status, updated_at
+     )
+     SELECT tenant_id,
+            pg_notify('lesson_author_source_document_event', json_build_object(
+              'document_id', id, 'tenant_id', tenant_id, 'kb_id', kb_id,
+              'status', status, 'updated_at', updated_at
+            )::text)
+       FROM updated`,
     [status, errorReason || null, docId],
   );
   const tenantId = result.rows[0]?.tenant_id;

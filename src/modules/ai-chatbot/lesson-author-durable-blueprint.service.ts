@@ -15,6 +15,7 @@ export const durableBlueprintRepository = createGenerationJobRepository({ transa
 type Prepared = NonNullable<Awaited<ReturnType<typeof prepareDurableBlueprint>>>;
 const log = (record: Record<string, unknown>) => console.info('[LessonAuthorGeneration]', JSON.stringify(record));
 let ready = false;
+export function isDurableBlueprintWorkerReady(): boolean { return ready; }
 
 /** Read-only deployment gate. No schema creation or drift-tolerating fallback. */
 export async function verifyDurableBlueprintSchema(): Promise<void> {

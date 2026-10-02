@@ -104,10 +104,14 @@ test('Python compiler/allocation → Node plan → staged Python generation → 
   oversized.chapters[0].lessons[0].units[0].learning_blocks = Array.from({ length: 13 }, (_, i) => ({ ...rawBlueprint.chapters[0].lessons[0].units[0].learning_blocks[0], id: `block_${i}` }));
   assert.throws(() => normalizeLessonAuthorBlueprint(oversized), { code: 'V5_LEARNING_BLOCK_CARDINALITY_INVALID' });
   // Preserve VI/EN media artifacts through the actual stored-JSON read path.
-  for (const title of ['Safe work demonstration', 'Minh họa làm việc an toàn']) {
+  for (const title of ['Safe work demonstration', 'Minh họa làm việc an toàn']) for (const structured of [false, true]) {
     const media = structuredClone(rawBlueprint);
     media.chapters[0].lessons[0].units[0].media_plan = { type: 'video', title,
       content_outline: 'Demonstrate the documented safety sequence.', rationale: 'Show the source-supported procedure.' };
+    if (structured) Object.assign(media.chapters[0].lessons[0].units[0].media_plan, {
+      brief_version: 2, content_points: ['Check the documented condition.', 'Follow the approved sequence.'],
+      context_description: 'Use one scene per documented step.', evidence_language: 'original', content_basis: 'SOURCE_EXCERPTS',
+    });
     media.media_review = { version: 'media-review-v1', decisions: [{ unit_path: 'chapter_1.lesson_1.unit_1', status: 'PROPOSED', reason_code: 'SOURCE_SUPPORTED_PROCEDURE' }] };
     const normalizedMedia = normalizeLessonAuthorBlueprint({ ...media, source_map: sourceMapRaw }, { requirePhaseOneContract: true, allowedComponentTypes: allAllowed });
     const storedMedia = normalizeLessonAuthorBlueprint(JSON.parse(JSON.stringify(normalizedMedia)));
@@ -152,6 +156,19 @@ test('Python compiler/allocation → Node plan → staged Python generation → 
   assert.equal(validateLessonAuthorGeneratedUnitCoverage(unit, generated.components), null);
   assert.deepEqual(generated.components.map((p: any) => p.component_plan_id), unit.component_plan.map((p: any) => p.component_plan_id));
   const normalized = normalizeLessonAuthorProposal(proposal);
+  const orderedProposal = structuredClone(proposal);
+  const orderedHtml = orderedProposal.chapters[0].lessons[0].units[0].components.find((c: any) => c.type === 'html');
+  orderedHtml.semantic_content = { version: 2, sections: [
+    { heading: 'Ordered framework A', learning_block_ids: unit.component_plan.find((p: any) => p.type === 'html')!.learning_block_ids,
+      blocks: [{ kind: 'paragraph', text: 'Explain the documented safety condition before acting. '.repeat(15) },
+               { kind: 'table', rows: [{ label: 'Condition A', value: 'Observe the approved condition before proceeding.' }] }] },
+    { heading: 'Ordered framework B', learning_block_ids: [], blocks: [{ kind: 'bullets', items: ['Use the approved checklist.'] }] },
+  ] };
+  const orderedNormalized = lockProposalToBlueprintChapter(normalizeLessonAuthorProposal(orderedProposal), context);
+  const orderedData = String(orderedNormalized.chapters[0]!.lessons[0]!.units[0]!.components!.find(c => c.type === 'html')!.data);
+  assert.ok(orderedData.indexOf('Condition A') > orderedData.indexOf('Ordered framework A'));
+  assert.ok(orderedData.indexOf('Ordered framework B') > orderedData.indexOf('Condition A'));
+  assert.match(orderedData, /Use the approved checklist/);
   const locked = lockProposalToBlueprintChapter(normalized, context);
   const quality = validateLessonAuthorPedagogicalQuality({ proposal: locked, blueprint_chapter: blueprint.chapters[0] });
   assert.notEqual(quality.status, 'FAIL', JSON.stringify(quality.findings));
@@ -341,6 +358,29 @@ function planFor(blocks: SemanticLearningBlock[], allowed = allAllowed) {
   });
 }
 
+test('HTML teaching links include primary diagram facts/objectives, not supporting quiz or FAQ', () => {
+  const firstFacts = Array.from({ length: 32 }, (_, i) => `first-${i}`);
+  const diagramFacts = Array.from({ length: 14 }, (_, i) => `diagram-${i}`);
+  const blocks: SemanticLearningBlock[] = [
+    { ...block('concept_explanation'), source_fact_ids: firstFacts, learning_objective_refs: ['lo_1'] },
+    { ...block('relationship_visualization', { relationship_evidence: true, relationship_count: 2 }),
+      source_fact_ids: diagramFacts, learning_objective_refs: ['lo_2'] },
+    { ...block('knowledge_check'), source_fact_ids: [], learning_objective_refs: ['lo_2'] },
+    { ...block('faq', { anticipated_questions: true, question_count: 2 }), source_fact_ids: [], learning_objective_refs: ['lo_1'] },
+  ];
+  const before = structuredClone(blocks);
+  const plans = planSemanticLearningBlocks({ blocks, unit_source_fact_ids: [...firstFacts, ...diagramFacts],
+    unit_path: 'chapter_3.lesson_1.unit_1', allowed_component_types: allAllowed,
+    component_capabilities: createComponentCapabilities(allAllowed) });
+  assert.deepEqual(plans.map(p => p.type), ['html', 'problem', 'la_diagram', 'la_faq']);
+  assert.deepEqual(plans[0].learning_block_ids, [blocks[0].id, blocks[1].id]);
+  assert.deepEqual(plans[0].learning_objective_refs, ['lo_1', 'lo_2']);
+  assert.equal(plans[0].source_fact_ids?.length, 46);
+  assert.deepEqual(plans[2].learning_block_ids, [blocks[1].id]);
+  assert.deepEqual(plans[2].source_fact_ids, diagramFacts);
+  assert.deepEqual(blocks, before);
+});
+
 test('registry classifies every editor component exactly once', () => {
   assert.doesNotThrow(assertAiComponentRegistryCoverage);
   assert.deepEqual(Object.keys(AI_COMPONENT_REGISTRY).sort(), [...COURSE_COMPONENT_TYPES].sort());
@@ -503,6 +543,42 @@ test('semantic explanatory content rejects unknown or empty fields with no rende
 function htmlComponent(data = '<p>Nội dung hợp lệ.</p>'): LessonAuthorComponentProposal {
   return { type: 'html', title: 'HTML', data };
 }
+
+test('ordered semantic HTML retains heading/table/list adjacency with Python acceptance parity', () => {
+  const ordered = { version: 2, sections: [
+    { heading: 'Framework A', learning_block_ids: ['a'], blocks: [
+      { kind: 'paragraph', text: 'Explanation A' },
+      { kind: 'table', rows: [{ label: 'Level A', value: 'Condition A' }] },
+    ] },
+    { heading: 'Framework B', learning_block_ids: ['b'], blocks: [
+      { kind: 'bullets', items: ['Member B1', 'Member B2'] },
+      { kind: 'task', text: 'Fill the source canvas and justify each entry.' },
+      { kind: 'warning', text: '<script>not executable</script>' },
+    ] },
+  ] };
+  const before = JSON.stringify(ordered);
+  const html = renderSemanticLearningHtml(ordered)!;
+  const positions = ['Framework A', 'Explanation A', 'Level A', 'Condition A', 'Framework B', 'Member B1', 'Member B2', 'Fill the source canvas'].map(s => html.indexOf(s));
+  assert.ok(positions.every((n, i) => n >= 0 && (i === 0 || n > positions[i - 1])));
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.equal(JSON.stringify(ordered), before);
+  const cases: unknown[] = [ordered, { paragraphs: ['Legacy'] },
+    { ...ordered, version: 3 }, { ...ordered, paragraphs: ['Discarded?'] },
+    { version: 2, sections: [] },
+    { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'unknown', text: 'X' }] }] },
+    { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'paragraph', text: 'x'.repeat(2001) }] }] },
+    { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'bullets', items: Array(21).fill('x') }] }] },
+  ];
+  const ragDir = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
+  const python = resolve(ragDir, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const result = spawnSync(python, ['-X', 'utf8', '-B', '-c',
+    'import json,sys; from app.main import semantic_learning_visible_text; print(json.dumps([semantic_learning_visible_text(v)[1] is None for v in json.load(sys.stdin)]))'],
+    { cwd: ragDir, input: JSON.stringify(cases), encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), cases.map(v => validateSemanticLearningHtmlPayload(v) === null));
+  assert.deepEqual(JSON.parse(result.stdout), [true, true, false, false, false, false, false, false]);
+});
 
 function problemComponent(): LessonAuthorComponentProposal {
   return {

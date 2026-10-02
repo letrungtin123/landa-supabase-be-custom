@@ -23,6 +23,7 @@ export async function connectRedis(): Promise<void> {
 
   const client = createClient({
     url: env.REDIS_URL,
+    database: env.REDIS_DATABASE,
     socket: {
       connectTimeout: env.REDIS_CONNECT_TIMEOUT_MS,
       reconnectStrategy(retries) {
@@ -40,7 +41,7 @@ export async function connectRedis(): Promise<void> {
     await client.connect();
     await client.ping();
     redisClient = client as RedisClientType;
-    console.log(`[Redis] Connected: ${maskRedisUrl(env.REDIS_URL)}`);
+    console.log(`[Redis] Connected: ${maskRedisUrl(env.REDIS_URL)} database=${env.REDIS_DATABASE}`);
   } catch (err) {
     redisClient = null;
     try {

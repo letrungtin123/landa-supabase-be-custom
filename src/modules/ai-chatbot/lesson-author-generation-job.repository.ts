@@ -4,6 +4,7 @@ import {
   GENERATION_JOB_LEASE_MS, GenerationJobError, generationRecoveryAction,
   type GenerationJobLease, type GenerationJobOwner, type GenerationJobRow,
 } from './lesson-author-generation-job.logic.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 
 /** Injected DB boundary: importing this module never connects, polls or dispatches. */
 export interface GenerationJobSql {
@@ -186,10 +187,12 @@ export function createGenerationJobRepository(db: GenerationJobDatabase) {
 
     async claimNext(): Promise<GenerationJobRow | null> {
       return db.transaction(async tx => {
+        const tenantFence = runtimeTenantSql('tenant_id', 3);
         const result = await tx.query<GenerationJobRow>(
           `WITH candidate AS (
              SELECT id FROM lesson_author_generation_jobs
              WHERE status = 'queued' AND dispatch_started_at IS NULL AND deadline_at > clock_timestamp()
+               ${tenantFence.clause}
              ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
            ) UPDATE lesson_author_generation_jobs j SET
              status = 'running', claim_count = j.claim_count + 1, lease_token = $1,
@@ -197,7 +200,7 @@ export function createGenerationJobRepository(db: GenerationJobDatabase) {
              lease_expires_at = LEAST(j.deadline_at, clock_timestamp() + ($2 * interval '1 millisecond')),
              progress_code = 'PREPARING_BLUEPRINT'
            FROM candidate WHERE j.id = candidate.id RETURNING j.*`,
-          [randomUUID(), GENERATION_JOB_LEASE_MS],
+          [randomUUID(), GENERATION_JOB_LEASE_MS, ...tenantFence.params],
         );
         return result.rows[0] ?? null;
       });
@@ -304,10 +307,12 @@ export function createGenerationJobRepository(db: GenerationJobDatabase) {
         outcome: 'timeout' | 'outcome_unknown') => Promise<void | { assistantMessageId: string }>,
     ): Promise<GenerationJobRow | null> {
       return db.transaction(async tx => {
+        const tenantFence = runtimeTenantSql('tenant_id', 1);
         const locked = await tx.query<GenerationJobRow>(
           `SELECT * FROM lesson_author_generation_jobs WHERE status IN ('queued', 'running')
              AND (deadline_at <= clock_timestamp() OR (status = 'running' AND lease_expires_at <= clock_timestamp()))
-           ORDER BY deadline_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`,
+             ${tenantFence.clause}
+           ORDER BY deadline_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`, tenantFence.params,
         );
         const job = locked.rows[0];
         if (!job) return null;

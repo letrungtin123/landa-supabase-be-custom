@@ -7,9 +7,27 @@ import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission, hasPermission } from '../../middleware/authorize.js';
-import { withDatabaseTransaction } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { createGenerationJobRepository } from './lesson-author-generation-job.repository.js';
 import { createGenerationStatusHandler } from './lesson-author-generation-status.controller.js';
+import { createWorkspaceReadHandlers } from './lesson-author-workspace-read.controller.js';
+import { createWorkspaceStreamHandler } from './lesson-author-workspace-stream.controller.js';
+import { workspaceCommitHub } from './lesson-author-workspace-stream.service.js';
+import { createSourceDocumentStreamHandler } from './lesson-author-source-stream.controller.js';
+import { sourceDocumentHub } from './lesson-author-source-stream.service.js';
+import { createWorkspaceLaunchHandlers } from './lesson-author-workspace-launch.controller.js';
+import { createLessonAuthorWorkspace, isLessonAuthorWorkspaceReady } from './lesson-author-workspace-runtime.service.js';
+import { createWorkspaceV2LaunchService } from './lesson-author-workspace-v2-launch.service.js';
+import { createWorkspaceEditHandlers } from './lesson-author-workspace-edit.controller.js';
+import { createWorkspaceApplyHandler } from './lesson-author-workspace-apply.controller.js';
+import { createWorkspaceApplyRepository } from './lesson-author-workspace-apply.repository.js';
+import { createWorkspaceAcceptance } from './lesson-author-workspace-storyboard.repository.js';
+import { createOrchestrationV2AdmissionRepository } from './lesson-author-orchestration-v2-admission.repository.js';
+import { createOrchestrationV2AdmissionService } from './lesson-author-orchestration-v2-admission.service.js';
+import { loadOrchestrationV2AdmissionRuntime } from './lesson-author-orchestration-v2-execution.config.js';
+import { verifyOrchestrationV2Schema } from './lesson-author-orchestration-v2-schema.repository.js';
+import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
+import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
 import { sendError } from '../../utils/response.js';
 import * as kbCtrl from './kb.controller.js';
 import * as botCtrl from './bot.controller.js';
@@ -21,6 +39,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
+import { AppError } from '../../middleware/error-handler.js';
 
 const router = Router();
 
@@ -210,8 +229,105 @@ router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
 router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
 router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
 router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+router.get('/chat/lesson-author/source-documents/:documentId/stream', allowRuntimeChatTarget, createSourceDocumentStreamHandler({
+  db: { query },
+  canRead: async user => await hasPermission(user, 'courses', 'can_edit') && await hasPermission(user, 'ai_chatbot', 'can_view'),
+  subscribe: (documentId, listener) => sourceDocumentHub.subscribe(documentId, listener),
+  report: event => {
+    const line = '[LessonAuthorSourceStream] ' + JSON.stringify(event);
+    if (event.event === 'source_stream_failed') console.warn(line); else console.info(line);
+  },
+}));
 router.get('/chat/lesson-author/conversations/:conversationId/chapter-checkpoint', checkPermission('courses','can_edit'), chatCtrl.getChapterCheckpoint);
-// No enqueue route/poller until quota preparation and recovery accounting are integrated.
+const orchestrationV2Admit = createOrchestrationV2AdmissionService({
+  config: {
+    tenant_concurrency_limit: env.LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY,
+    workspace_concurrency_limit: env.LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY,
+    routing_shard_count: 4_096,
+  },
+  verifySchema: () => verifyOrchestrationV2Schema({ query }),
+  loadRuntime: loadOrchestrationV2AdmissionRuntime,
+  createRepository: user => {
+    const authority = createWorkspaceAuthority(user);
+    return createOrchestrationV2AdmissionRepository({
+      db: { transaction: withDatabaseTransaction },
+      canEdit: (tx, target) => authority.canEdit(tx, target),
+    });
+  },
+});
+const workspaceV2Launch = createWorkspaceV2LaunchService({
+  query, db: { transaction: withDatabaseTransaction }, AppError,
+  prepareDurableBlueprint, withLessonAuthorConversationLock, admit: orchestrationV2Admit,
+  report: event => console.info('[LessonAuthorOrchestrationV2Admission]', JSON.stringify(event)),
+});
+const orchestrationV2LaunchEnabled = () => env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED
+  && env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED;
+const workspaceLaunch = createWorkspaceLaunchHandlers({ readEnabled:()=>env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
+  editEnabled:()=>env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED,
+  executionReady:()=>env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED
+    ? orchestrationV2LaunchEnabled() : isLessonAuthorWorkspaceReady(),
+  db:{transaction:withDatabaseTransaction},
+  create:(user,input)=>env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED
+    ? workspaceV2Launch(user,input) : createLessonAuthorWorkspace(user,input),
+  report:event=>console.info('[LessonAuthorWorkspace]',JSON.stringify(event)) });
+router.get('/chat/lesson-author/courses/:courseId/workspaces/latest',workspaceLaunch.latest);
+router.post('/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces',workspaceLaunch.create);
+// Additive read-only workspace boundary; never falls back to generation on error.
+// V2 admission is internal to the single workspace Create transaction; no second
+// browser mutation route exists, so V1 and V2 cannot be launched together.
+const workspaceReads = createWorkspaceReadHandlers({
+  enabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
+  db: { query },
+  canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  report: record => {
+    // Successful polling is intentionally quiet; failures retain safe typed metadata.
+    if (record.event === 'workspace_read_failed') console.warn('[LessonAuthorWorkspace] ' + JSON.stringify(record));
+  },
+});
+const workspaceReadPath = '/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId';
+router.get(workspaceReadPath, workspaceReads.status);
+router.get(`${workspaceReadPath}/events`, workspaceReads.events);
+router.get(`${workspaceReadPath}/graph`, workspaceReads.graph);
+router.get(`${workspaceReadPath}/nodes/:nodeId`, workspaceReads.detail);
+// SSE carries only committed event metadata. Normal GET endpoints remain the
+// authorization-bound snapshot/detail recovery path; this route never starts
+// generation or performs a write.
+router.get(`${workspaceReadPath}/stream`, createWorkspaceStreamHandler({
+  enabled: () => env.LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED,
+  db: { query },
+  canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  subscribe: (workspaceId, listener) => workspaceCommitHub.subscribe(workspaceId, listener),
+  report: record => {
+    const line = '[LessonAuthorWorkspaceStream] ' + JSON.stringify(record);
+    if (record.event === 'workspace_stream_failed') console.warn(line); else console.info(line);
+  },
+}));
+// Separate default-off edit gate. Use real persisted-context validators and
+// transactional authority, never browser-supplied acceptance or Apply receipts.
+const workspaceEdits = createWorkspaceEditHandlers({
+  enabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED && env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED,
+  db: { transaction: withDatabaseTransaction },
+  validate: createWorkspaceAcceptance({
+    component: record => console.info('[LessonAuthorWorkspace] ' + JSON.stringify(record)),
+    storyboard: record => console.info('[LessonAuthorWorkspace] ' + JSON.stringify(record)),
+  }),
+  report: record => {
+    const line = '[LessonAuthorWorkspace] ' + JSON.stringify(record);
+    if (record.event === 'workspace_edit_failed') console.warn(line); else console.info(line);
+  },
+});
+router.post(`${workspaceReadPath}/nodes/:nodeId/save`, workspaceEdits.save);
+router.post(`${workspaceReadPath}/nodes/:nodeId/reset`, workspaceEdits.reset);
+// Apply has a separate hard gate from reads/editing/execution. The repository is
+// the only owner of draft course-block writes and the SQL receipt/mapping proof.
+const workspaceApplyRepository = createWorkspaceApplyRepository({ db: { transaction: withDatabaseTransaction } });
+const workspaceApply = createWorkspaceApplyHandler({
+  enabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED && env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED
+    && env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED && env.LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED,
+  apply: (user, target, expectedWorkspaceRevision) => workspaceApplyRepository.apply(user, target, expectedWorkspaceRevision),
+  report: event => console.info('[LessonAuthorWorkspace] ' + JSON.stringify(event)),
+});
+router.post(`${workspaceReadPath}/nodes/:nodeId/apply`, workspaceApply);
 const generationJobRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
 router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId', createGenerationStatusHandler({
   enabled: () => env.LESSON_AUTHOR_GENERATION_STATUS_ENABLED || env.LESSON_AUTHOR_GENERATION_ENABLED,

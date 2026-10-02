@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
   getReportExcelCopy,
   normalizeReportExcelLocale,
@@ -39,5 +40,13 @@ test('keeps Vietnamese filenames for legacy exports and uses English filenames w
   assert.equal(
     buildReportExcelFileName('en', dateRange, undefined, 2026),
     'learning-report-2026-07-01-to-2026-07-31.xlsx',
+  );
+  assert.equal(
+    buildCourseLearnerExcelFileName('vi', 'An toàn bảo mật hệ thống & AI', dateRange, undefined, 2026),
+    'chi-tiet-hoc-vien-an-toan-bao-mat-he-thong-ai-2026-07-01-den-2026-07-31.xlsx',
+  );
+  assert.equal(
+    buildCourseLearnerExcelFileName('en', 'System Security & AI', dateRange, undefined, 2026),
+    'course-learners-system-security-ai-2026-07-01-to-2026-07-31.xlsx',
   );
 });

@@ -11,6 +11,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { sendError } from '../utils/response.js';
 import { query } from '../config/database.js';
+import { isRuntimeTenantAllowed, runtimeTenantSql } from '../config/runtime-tenant-fence.js';
 
 // ── Tenant Status Cache — tránh query DB mỗi request ──
 const tenantCache = new Map<string, { active: boolean; expires: number }>();
@@ -57,14 +58,20 @@ export async function tenantContext(req: Request, res: Response, next: NextFunct
     const selectedTenantId = headerTenantId || tokenTenantId;
 
     if (selectedTenantId) {
+      if (!isRuntimeTenantAllowed(selectedTenantId)) {
+        sendError(res, 'Tenant không được phục vụ bởi runtime này', 403);
+        return;
+      }
       const status = await getTenantStatus(selectedTenantId);
       if (status === null) { sendError(res, 'Tenant không tồn tại', 404); return; }
       if (!status) { sendError(res, 'Tenant đã bị vô hiệu hóa', 403); return; }
       req.user.tenantId = selectedTenantId;
     } else {
       // Fallback: lấy tenant đầu tiên (active) — không cache vì hiếm khi gọi
+      const tenantFence = runtimeTenantSql('id', 1);
       const fallback = await query<{ id: string }>(
-        'SELECT id FROM tenants WHERE is_active = true ORDER BY created_at ASC LIMIT 1',
+        `SELECT id FROM tenants WHERE is_active = true${tenantFence.clause} ORDER BY created_at ASC LIMIT 1`,
+        tenantFence.params,
       );
       if (fallback.rowCount && fallback.rowCount > 0) {
         req.user.tenantId = fallback.rows[0].id;
@@ -80,6 +87,11 @@ export async function tenantContext(req: Request, res: Response, next: NextFunct
 
   if (!tenantId) {
     sendError(res, 'User không thuộc tenant nào', 403);
+    return;
+  }
+
+  if (!isRuntimeTenantAllowed(tenantId)) {
+    sendError(res, 'Tenant không được phục vụ bởi runtime này', 403);
     return;
   }
 

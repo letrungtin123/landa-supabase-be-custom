@@ -6,6 +6,7 @@
 
 import fs from 'fs/promises';
 import { env } from '../../config/env.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import { getClient, query } from '../../config/database.js';
 import { downloadToTempFile } from '../../config/storage.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
@@ -68,11 +69,12 @@ function estimateDocumentIndexTokens(doc: TransitionDocumentRow): number {
 }
 
 async function claimDueAiEngineTransitionJobs(): Promise<AiEngineTransitionJob[]> {
+  const tenantFence = runtimeTenantSql('tenant_id', 3);
   const claimed = await query<AiEngineTransitionJob>(
     `WITH candidates AS (
        SELECT id
        FROM ai_engine_transition_jobs
-       WHERE (status = 'queued' AND next_attempt_at <= now())
+       WHERE ((status = 'queued' AND next_attempt_at <= now())
           OR (
             status = 'queued'
             AND to_engine = 'self_built_rag'
@@ -84,7 +86,8 @@ async function claimDueAiEngineTransitionJobs(): Promise<AiEngineTransitionJob[]
               OR (phase = 'cleanup_source' AND last_error ILIKE '%PERMISSION_DENIED%')
             )
           )
-          OR (status = 'running' AND lease_expires_at <= now())
+          OR (status = 'running' AND lease_expires_at <= now()))
+       ${tenantFence.clause}
        ORDER BY updated_at ASC, id ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED
@@ -102,7 +105,7 @@ async function claimDueAiEngineTransitionJobs(): Promise<AiEngineTransitionJob[]
      RETURNING job.id::text, job.tenant_id::text, job.from_engine, job.to_engine,
                job.status, job.phase, job.attempt_count,
                job.lease_token::text, job.lease_expires_at::text`,
-    [env.AI_ENGINE_TRANSITION_WORKER_BATCH_SIZE, env.AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS],
+    [env.AI_ENGINE_TRANSITION_WORKER_BATCH_SIZE, env.AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS, ...tenantFence.params],
   );
   return claimed.rows;
 }

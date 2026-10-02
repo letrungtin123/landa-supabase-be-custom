@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'crypto';
 import { createReadStream } from 'fs';
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
+import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
   buildFileName,
@@ -447,6 +448,7 @@ export async function claimDueLessonAuthorTranscriptionJobs(
 ): Promise<LessonAuthorTranscriptionJob[]> {
   const safeLimit = Math.max(1, Math.min(limit, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE));
   return withDatabaseTransaction(async () => {
+    const tenantFence = runtimeTenantSql('job.tenant_id', 3);
     const claimed = await query<LessonAuthorTranscriptionJob>(
       `WITH candidates AS (
          SELECT job.id
@@ -457,6 +459,7 @@ export async function claimDueLessonAuthorTranscriptionJobs(
            AND course.deleted_at IS NULL
            AND ((job.status = 'queued' AND job.next_attempt_at <= now())
              OR (job.status = 'running' AND job.lease_expires_at <= now()))
+           ${tenantFence.clause}
          ORDER BY job.next_attempt_at ASC, job.id ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED
@@ -471,7 +474,7 @@ export async function claimDueLessonAuthorTranscriptionJobs(
        FROM candidates
        WHERE job.id = candidates.id
        RETURNING job.*`,
-      [safeLimit, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_LEASE_SECONDS],
+      [safeLimit, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_LEASE_SECONDS, ...tenantFence.params],
     );
     return claimed.rows;
   });
@@ -659,6 +662,7 @@ type ExpiredLessonAuthorTranscriptionJob = LessonAuthorTranscriptionJob & {
 /** Expire private artifacts after their retention window, including committed transcripts. */
 export async function expireLessonAuthorTranscriptionJobs(limit = 100): Promise<number> {
   const expired = await withDatabaseTransaction(async () => {
+    const tenantFence = runtimeTenantSql('job.tenant_id', 2);
     const result = await query<ExpiredLessonAuthorTranscriptionJob>(
       `WITH stale AS (
          SELECT job.id, job.source_storage_path, job.transcript_storage_path
@@ -667,6 +671,7 @@ export async function expireLessonAuthorTranscriptionJobs(limit = 100): Promise<
          WHERE job.expires_at <= now()
            AND course.deleted_at IS NULL
            AND job.status IN ('queued', 'running', 'succeeded', 'failed', 'committed')
+           ${tenantFence.clause}
          ORDER BY job.expires_at ASC, job.id ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED
@@ -682,7 +687,7 @@ export async function expireLessonAuthorTranscriptionJobs(limit = 100): Promise<
        WHERE job.id = stale.id
        RETURNING job.*, stale.source_storage_path AS purged_source_storage_path,
                  stale.transcript_storage_path AS purged_transcript_storage_path`,
-      [Math.max(1, Math.min(limit, 500))],
+      [Math.max(1, Math.min(limit, 500)), ...tenantFence.params],
     );
     return result.rows;
   });

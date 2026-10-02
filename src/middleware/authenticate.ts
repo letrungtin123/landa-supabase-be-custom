@@ -8,6 +8,7 @@ import { verifyAccessToken } from '../utils/jwt.js';
 import { sendError } from '../utils/response.js';
 import type { AuthUser } from '../types/express.js';
 import { isUserAccessRevoked } from '../modules/auth/auth-revocation.service.js';
+import { isRuntimeTenantAllowed } from '../config/runtime-tenant-fence.js';
 
 // ── In-memory blacklist: users cần force re-auth (role đã thay đổi) ──
 // Key = userId, Value = timestamp khi blacklist
@@ -103,6 +104,11 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       tenantId = headerTenantId;
     }
 
+    if (tenantId && !isRuntimeTenantAllowed(tenantId)) {
+      sendError(res, 'Tenant không được phục vụ bởi runtime này', 403);
+      return;
+    }
+
     // Gắn user info vào request
     req.user = {
       id: payload.sub,
@@ -152,6 +158,10 @@ export async function optionalAuth(req: Request, _res: Response, next: NextFunct
       const headerTenantId = req.headers['x-tenant-id'] as string | undefined;
       if (headerTenantId && payload.role === 'superadmin') {
         tenantId = headerTenantId;
+      }
+      if (tenantId && !isRuntimeTenantAllowed(tenantId)) {
+        next();
+        return;
       }
       req.user = {
         id: payload.sub,

@@ -171,9 +171,13 @@ export async function createTenant(
 
     await client.query(
       `INSERT INTO tenant_ai_settings (tenant_id, chat_model, lesson_author_model)
-       VALUES ($1, $2, $2)
+       VALUES ($1, $2, $3)
        ON CONFLICT (tenant_id) DO NOTHING`,
-      [tenant.id, process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash'],
+      [
+        tenant.id,
+        process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
+        process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
+      ],
     );
 
     // Tenant management và badge management cần được superadmin cấp riêng.

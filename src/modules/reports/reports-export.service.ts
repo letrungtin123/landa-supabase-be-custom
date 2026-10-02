@@ -27,6 +27,11 @@ export type ReportExcelExportOptions = {
   locale: ReportExcelLocale;
 };
 
+export type CourseLearnerExcelExportOptions = ReportExcelExportOptions & {
+  courseId: string;
+  courseName: string;
+};
+
 export type ReportExcelLocale = 'vi' | 'en';
 
 type ColumnDef = {
@@ -107,6 +112,8 @@ type CourseLearnerRow = {
   progress: string;
   status: 'not_started' | 'learning' | 'completed';
 };
+
+type SortedCourseLearnerRow = CourseLearnerRow & { sort_name: string };
 
 type ReportExcelCopy = {
   all: string;
@@ -193,6 +200,33 @@ export function buildReportExcelFileName(
   const prefix = locale === 'en' ? 'learning-report' : 'bao-cao-tong-hop';
   if (dateRange) return `${prefix}-${dateRange.dateFrom}-${locale === 'en' ? 'to' : 'den'}-${dateRange.dateTo}.xlsx`;
   return `${prefix}-${month ? `${month}-` : ''}${year}.xlsx`;
+}
+
+function courseNameSlug(courseName: string): string {
+  const slug = courseName
+    .replace(/[Đđ]/g, character => character === 'Đ' ? 'D' : 'd')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+    .replace(/-+$/g, '');
+  return slug || 'khoa-hoc';
+}
+
+export function buildCourseLearnerExcelFileName(
+  locale: ReportExcelLocale,
+  courseName: string,
+  dateRange: ReportDateRange | undefined,
+  month: number | undefined,
+  year: number,
+): string {
+  const prefix = locale === 'en' ? 'course-learners' : 'chi-tiet-hoc-vien';
+  const period = dateRange
+    ? `${dateRange.dateFrom}-${locale === 'en' ? 'to' : 'den'}-${dateRange.dateTo}`
+    : `${month ? `${month}-` : ''}${year}`;
+  return `${prefix}-${courseNameSlug(courseName)}-${period}.xlsx`;
 }
 
 const EXCEL_MAX_ROWS = 1_048_576;
@@ -1096,13 +1130,10 @@ async function fetchCourseLearnerBatch(
   );
   return result.rows;
 }
-async function writeCourseLearnerDetailSheets(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  options: ReportExcelExportOptions,
-  subtitle: string,
-): Promise<void> {
+
+function courseLearnerColumns(options: ReportExcelExportOptions): ColumnDef[] {
   const copy = getReportExcelCopy(options.locale);
-  const columns: ColumnDef[] = [
+  return [
     { header: copy.course, key: 'courseName', width: 42 },
     { header: 'Course ID', key: 'courseId', width: 38 },
     { header: copy.username, key: 'username', width: 24 },
@@ -1117,23 +1148,39 @@ async function writeCourseLearnerDetailSheets(
     { header: copy.enrolledAt, key: 'enrolledAt', width: 18 },
     { header: copy.completedAt, key: 'completedAt', width: 18 },
   ];
+}
+
+function addCourseLearnerRow(
+  writer: SplitWorksheetWriter,
+  item: CourseLearnerRow,
+  options: ReportExcelExportOptions,
+): void {
+  const copy = getReportExcelCopy(options.locale);
+  writer.addRow([
+    item.course_name, item.course_id, item.username, item.full_name || '', item.email,
+    item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status, options.locale), roundPercent(item.progress) / 100, item.is_completed ? copy.yes : copy.no, item.enrolled_at, item.completed_at,
+  ], (row) => {
+    row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
+    row.getCell(10).numFmt = '0.00%';
+    row.getCell(12).numFmt = dateTimeNumberFormat(options.locale);
+    row.getCell(13).numFmt = dateTimeNumberFormat(options.locale);
+  });
+}
+
+async function writeCourseLearnerDetailSheets(
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
+  options: ReportExcelExportOptions,
+  subtitle: string,
+): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
+  const columns = courseLearnerColumns(options);
   const writer = new SplitWorksheetWriter(workbook, copy.courseLearnerDetail, copy.courseEnrollmentDetail, subtitle, columns);
   let lastEnrolledAt: Date | null = null;
   let lastEnrollmentId: string | null = null;
   for (;;) {
     const rows = await fetchCourseLearnerBatch(options, lastEnrolledAt, lastEnrollmentId);
     if (rows.length === 0) break;
-    for (const item of rows) {
-      writer.addRow([
-        item.course_name, item.course_id, item.username, item.full_name || '', item.email,
-        item.group_names || '', item.subgroup_names || '', item.team_names || '', statusText(item.status, options.locale), roundPercent(item.progress) / 100, item.is_completed ? copy.yes : copy.no, item.enrolled_at, item.completed_at,
-      ], (row) => {
-        row.getCell(9).font = { name: 'Arial', size: 10, bold: true, color: { argb: statusColor(item.status) } };
-        row.getCell(10).numFmt = '0.00%';
-        row.getCell(12).numFmt = dateTimeNumberFormat(options.locale);
-        row.getCell(13).numFmt = dateTimeNumberFormat(options.locale);
-      });
-    }
+    for (const item of rows) addCourseLearnerRow(writer, item, options);
     const lastRow = rows[rows.length - 1];
     lastEnrolledAt = lastRow.enrolled_at;
     lastEnrollmentId = lastRow.enrollment_id;
@@ -1141,6 +1188,136 @@ async function writeCourseLearnerDetailSheets(
   }
   writer.finish();
 }
+
+async function fetchSingleCourseLearnerBatch(
+  options: CourseLearnerExcelExportOptions,
+  cursor: Pick<SortedCourseLearnerRow, 'sort_name' | 'username' | 'enrollment_id'> | null,
+): Promise<SortedCourseLearnerRow[]> {
+  const { startDate, endDate } = getExportPeriodRange(options);
+  const cohort = buildReportEnrollmentCte({
+    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
+    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
+  });
+  const courseParam = 4 + cohort.params.length;
+  const cursorNameParam = courseParam + 1;
+  const cursorUsernameParam = cursorNameParam + 1;
+  const cursorIdParam = cursorUsernameParam + 1;
+  const limitParam = cursorIdParam + 1;
+  const membershipScope = options.scope.teamId
+    ? 'AND t.id = $4'
+    : options.scope.subgroupId
+      ? 'AND sg.id = $4'
+      : options.scope.groupId
+        ? 'AND og.id = $4'
+        : '';
+  const displayNameSql = "COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username)";
+  const sortNameSql = `unaccent(LOWER(${displayNameSql}))`;
+  const result = await query<SortedCourseLearnerRow>(
+    `WITH ${cohort.sql},
+      selected_enrollments AS (
+        SELECT
+          re.*,
+          u.username,
+          u.email,
+          u.full_name,
+          ${sortNameSql} AS sort_name
+        FROM report_enrollments re
+        JOIN users u ON u.id = re.user_id
+        WHERE re.course_id = $${courseParam}
+          AND (
+            $${cursorNameParam}::text IS NULL
+            OR (
+              ${sortNameSql},
+              u.username,
+              re.enrollment_id
+            ) > ($${cursorNameParam}, $${cursorUsernameParam}, $${cursorIdParam}::uuid)
+          )
+        ORDER BY sort_name, u.username, re.enrollment_id
+        LIMIT $${limitParam}
+      ),
+      memberships AS (
+        SELECT
+          tm.user_id,
+          string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
+          string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
+          string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
+        FROM selected_enrollments se
+        JOIN team_members tm ON tm.user_id = se.user_id
+        JOIN teams t ON t.id = tm.team_id
+        JOIN sub_groups sg ON sg.id = t.sub_group_id
+        JOIN org_groups og ON og.id = sg.org_group_id
+        WHERE og.tenant_id = $1 ${membershipScope}
+        GROUP BY tm.user_id
+      )
+      SELECT
+        se.enrollment_id,
+        se.user_id,
+        se.username,
+        se.email,
+        se.full_name,
+        se.sort_name,
+        m.group_names,
+        m.subgroup_names,
+        m.team_names,
+        se.course_id,
+        se.course_name,
+        se.enrolled_at,
+        se.completed_at,
+        se.is_completed,
+        se.progress,
+        CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
+      FROM selected_enrollments se
+      LEFT JOIN memberships m ON m.user_id = se.user_id
+      ORDER BY se.sort_name, se.username, se.enrollment_id`,
+    [
+      options.tenantId, startDate, endDate, ...cohort.params, options.courseId,
+      cursor?.sort_name ?? null, cursor?.username ?? null, cursor?.enrollment_id ?? null, STREAM_BATCH_SIZE,
+    ],
+  );
+  return result.rows;
+}
+
+export async function streamCourseLearnerExcel(options: CourseLearnerExcelExportOptions): Promise<void> {
+  const copy = getReportExcelCopy(options.locale);
+  const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
+  const subtitle = [
+    `${copy.course}: ${options.courseName}`,
+    `${copy.dataPeriod}: ${getExportPeriodLabel(options)}`,
+    `${options.labels.group}: ${scopeNames.groupName}`,
+    `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
+    `${options.labels.team}: ${scopeNames.teamName}`,
+    `${copy.exportedBy}: ${options.exporterName}`,
+  ].join(' | ');
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream: options.stream,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  workbook.creator = 'Landa';
+  workbook.lastModifiedBy = options.exporterName || 'Landa';
+  workbook.created = new Date();
+  workbook.modified = new Date();
+
+  const writer = new SplitWorksheetWriter(
+    workbook,
+    copy.courseLearnerDetail,
+    copy.courseEnrollmentDetail,
+    subtitle,
+    courseLearnerColumns(options),
+  );
+  let cursor: Pick<SortedCourseLearnerRow, 'sort_name' | 'username' | 'enrollment_id'> | null = null;
+  for (;;) {
+    const rows = await fetchSingleCourseLearnerBatch(options, cursor);
+    if (rows.length === 0) break;
+    for (const item of rows) addCourseLearnerRow(writer, item, options);
+    const lastRow = rows[rows.length - 1];
+    cursor = { sort_name: lastRow.sort_name, username: lastRow.username, enrollment_id: lastRow.enrollment_id };
+    if (rows.length < STREAM_BATCH_SIZE) break;
+  }
+  writer.finish();
+  await workbook.commit();
+}
+
 export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
   const copy = getReportExcelCopy(options.locale);
   const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);

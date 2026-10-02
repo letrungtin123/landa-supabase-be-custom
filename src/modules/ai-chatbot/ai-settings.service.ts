@@ -96,14 +96,14 @@ export function currentAiUsagePeriodStart(timeZone = 'Asia/Saigon', now = new Da
 async function ensureSettingsRow(tenantId: string): Promise<void> {
   await query(
     `INSERT INTO tenant_ai_settings (tenant_id, chat_model, lesson_author_model, embedding_model, embedding_dimensions)
-     VALUES ($1, $2, $2, $3, 768)
+     VALUES ($1, $2, $3, $4, 768)
      ON CONFLICT (tenant_id) DO NOTHING`,
-    [tenantId, env.GEMINI_CHAT_MODEL, DEFAULT_EMBEDDING_MODEL],
+    [tenantId, env.GEMINI_CHAT_MODEL, env.GEMINI_LESSON_AUTHOR_MODEL, DEFAULT_EMBEDDING_MODEL],
   );
 }
 
-async function loadSettingsRow(tenantId: string): Promise<TenantAiSettingsRow> {
-  await ensureSettingsRow(tenantId);
+async function loadSettingsRow(tenantId: string, requireExisting = false): Promise<TenantAiSettingsRow> {
+  if (!requireExisting) await ensureSettingsRow(tenantId);
   const result = await query<TenantAiSettingsRow>(
     `SELECT
        s.tenant_id::text,
@@ -216,8 +216,8 @@ export async function getOptionalGoogleAiStudioApiKeyFingerprint(tenantId: strin
   return legacyKey ? fingerprintAiProviderKey(legacyKey) : null;
 }
 
-export async function getTenantAiRuntimeSettings(tenantId: string): Promise<TenantAiRuntimeSettings> {
-  const row = await loadSettingsRow(tenantId);
+export async function getTenantAiRuntimeSettings(tenantId: string, options: { requireExisting?: boolean } = {}): Promise<TenantAiRuntimeSettings> {
+  const row = await loadSettingsRow(tenantId, options.requireExisting === true);
   const hasNewKey = Boolean(row.encrypted_api_key);
   const legacyKey = hasNewKey ? null : await getLegacyGeminiApiKey(tenantId);
   return {

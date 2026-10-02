@@ -11,6 +11,7 @@ import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
 import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesson-author-transcription.worker.js';
 import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/lesson-author-durable-blueprint.service.js';
+import { startLessonAuthorWorkspaceWorker, stopLessonAuthorWorkspaceWorker } from './modules/ai-chatbot/lesson-author-workspace-runtime.service.js';
 import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/lesson-author-chapter-runtime.service.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
@@ -18,6 +19,7 @@ import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
 import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
+import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
@@ -148,6 +150,7 @@ async function initRabbitMQ(): Promise<void> {
 
 // ── Bootstrap ──
 async function bootstrap() {
+  console.log('[RuntimeTenantFence]', JSON.stringify(runtimeTenantDiagnostics()));
   // 1. Init RabbitMQ (MUST succeed — crash otherwise)
   await initRabbitMQ();
   await connectRedis();
@@ -158,6 +161,7 @@ async function bootstrap() {
     await assertAuthRevocationRedisReady();
   }
   await startDurableBlueprintWorker();
+  await startLessonAuthorWorkspaceWorker();
   await startChapterCheckpointMaintenance();
 
   // 2. Ensure temp dir for Gemini worker
@@ -179,24 +183,26 @@ async function bootstrap() {
       console.error('[Storage] Bucket init failed:', err);
     }
 
-    // Dọn tokens ngay khi start
-    try {
-      const deleted = await cleanupExpiredTokens();
-      if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired/revoked tokens`);
-    } catch { /* ignore */ }
+    if (env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) {
+      // Dọn tokens ngay khi start
+      try {
+        const deleted = await cleanupExpiredTokens();
+        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired/revoked tokens`);
+      } catch { /* ignore */ }
 
-    try {
-      const deleted = await cleanupExpiredAuthRevocations();
-      if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired access revocations`);
-    } catch { /* ignore */ }
+      try {
+        const deleted = await cleanupExpiredAuthRevocations();
+        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired access revocations`);
+      } catch { /* ignore */ }
 
-    try {
-      const deleted = await cleanupCompletedDeletionJobs();
-      if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
-    } catch { /* ignore */ }
+      try {
+        const deleted = await cleanupCompletedDeletionJobs();
+        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
+      } catch { /* ignore */ }
 
-    // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
-    await runAuditLogRetentionCleanup('startup');
+      // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
+      await runAuditLogRetentionCleanup('startup');
+    }
   });
 
   // Node defaults to a five-minute request budget. That can cut off a valid
@@ -214,6 +220,7 @@ bootstrap().catch(err => {
 
 // Dọn refresh tokens hết hạn mỗi 6 giờ
 setInterval(async function cleanupTokens() {
+  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupExpiredTokens();
     if (deleted > 0) {
@@ -226,6 +233,7 @@ setInterval(async function cleanupTokens() {
 
 // Keep deletion metadata only for a finite operational support window.
 setInterval(async function cleanupDeletionJobs() {
+  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupCompletedDeletionJobs();
     if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} completed deletion job records`);
@@ -236,6 +244,7 @@ setInterval(async function cleanupDeletionJobs() {
 
 // Access-token revocations only need to live through the maximum access-token TTL.
 setInterval(async function cleanupAccessRevocations() {
+  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupExpiredAuthRevocations();
     if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} expired access revocations`);
@@ -246,12 +255,14 @@ setInterval(async function cleanupAccessRevocations() {
 
 // Dọn audit logs cũ hơn 30 ngày — chạy mỗi 24 giờ
 setInterval(async function cleanupAuditLogs() {
+  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   await runAuditLogRetentionCleanup('daily');
 }, 24 * 60 * 60 * 1000);
 
 // Graceful shutdown
 async function gracefulShutdown(signal: string) {
   console.log(`[Server] ${signal} received, shutting down...`);
+  await stopLessonAuthorWorkspaceWorker();
   await stopDurableBlueprintWorker();
   await stopChapterCheckpointMaintenance();
   await closeRedis();
