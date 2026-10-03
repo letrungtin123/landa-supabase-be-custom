@@ -232,6 +232,10 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
       const course=await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`,[input.courseId,tenantId]);
       if(course.rows.length!==1)reject('WORKSPACE_RUNTIME_FORBIDDEN');
       if(!await a.canEdit(tx,target))reject('WORKSPACE_RUNTIME_FORBIDDEN');
+      const deleting=await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs WHERE tenant_id=$1 AND course_id=$2
+        AND requested_by=$3 AND conversation_id=$4 AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
+      [tenantId,input.courseId,user.id,input.conversationId]);
+      if(deleting.rows.length)reject('WORKSPACE_SESSION_DELETING');
       const active=await tx.query(`SELECT id FROM lesson_author_workspaces WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3
         AND status IN ('queued','designing','drafting') AND idempotency_key<>$4 FOR UPDATE`,[tenantId,input.courseId,user.id,input.operationId]);
       if(active.rows.length)reject('WORKSPACE_ALREADY_ACTIVE');

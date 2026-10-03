@@ -77,6 +77,7 @@ function fixture(kind: WorkspaceStoryboardKind = 'chapter', locale: 'vi' | 'en' 
     else if (sql.startsWith('SELECT r.id::text AS run_id')) result = state.missingArchitecture ? []
       : [{ run_id: runId, payload: state.architecturePayload, artifact_hash: state.architectureHash }];
     else if (sql.startsWith('SELECT id FROM courses')) result = [{ id: target.courseId }];
+    else if (sql.includes('FROM lesson_author_session_deletion_jobs')) result = [];
     else if (sql.startsWith('SELECT w.id,w.status')) result = [{ id: target.workspaceId, status: 'drafting', contract_version: 1, content_locale: locale, correlation_id: uuid(90), source_snapshot_hash: 'a'.repeat(64) }];
     else if (sql.startsWith('SELECT id,kind,content_state')) result = [{ ...node, id: scopeTarget.nodeId, protected_contract: binding, contract_hash: row.contract_hash }];
     else if (sql.startsWith('SELECT revision,parent_revision')) result = revisions.filter(r => r.revision === 0 || r.revision === node.current_revision || r.operation_id === params[5]);

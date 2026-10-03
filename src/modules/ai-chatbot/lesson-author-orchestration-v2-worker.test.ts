@@ -110,6 +110,9 @@ test('exact deterministic claim serializes limits and consumes delivery atomical
   assert.match(f.queries[1]!.sql, /pg_advisory_xact_lock/);
   assert.match(f.queries[4]!.sql, /provider_running/);
   assert.match(f.queries[5]!.sql, /attempt_count=attempt_count\+1,dispatch_epoch=dispatch_epoch\+1/);
+  assert.match(f.queries[5]!.sql, /FROM \(SELECT clock_timestamp\(\) AS claimed_at\) claim_clock/);
+  assert.equal((f.queries[5]!.sql.match(/clock_timestamp\(\)/g) ?? []).length, 1,
+    'claim timestamps must come from one database instant');
   assert.match(f.queries[6]!.sql, /status='consumed'/);
   assert.deepEqual(f.events, ['BEGIN', 'COMMIT']); f.done();
 });

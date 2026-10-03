@@ -107,6 +107,11 @@ export function createWorkspaceEditRepository(deps: {
         if (!await deps.canEdit(tx, target)) fail('WORKSPACE_EDIT_FORBIDDEN');
         const course = await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
         if (course.rows.length !== 1) fail('WORKSPACE_EDIT_NOT_FOUND');
+        const deleting = await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs
+          WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND conversation_id=$4
+            AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
+        [target.tenantId, target.courseId, target.userId, target.conversationId]);
+        if (deleting.rows.length) fail('WORKSPACE_EDIT_UNAVAILABLE');
         const workspaces = await tx.query(`SELECT w.id,w.status,w.contract_version,w.content_locale,w.correlation_id,w.source_snapshot_hash
           FROM lesson_author_workspaces w JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
             AND c.user_id=w.requested_by AND c.course_id=w.course_id AND c.bot_id=w.bot_id AND c.target='lesson_author'

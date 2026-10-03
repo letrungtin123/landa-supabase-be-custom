@@ -11,7 +11,7 @@ import { composeV5BlueprintPolicy } from './lesson-author-prompt-policy.logic.js
 import { resolveLessonAuthorDraftLocale } from './lesson-author-intent.logic.js';
 import { assessmentGapMessage, assertComponentInstancePlan, ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from './lesson-author-capabilities.logic.js';
 import { createHash, randomUUID } from 'crypto';
-import { query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { hasPermission } from '../../middleware/authorize.js';
 import { GenerationJobError, generationSnapshotHash, hasCompleteGenerationUsage, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
 import type { PreparedGenerationJob } from './lesson-author-generation-job.repository.js';
@@ -1065,9 +1065,16 @@ export async function createConversation(
 
   if (!personaId || !isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
 
-  // Single CTE: count + validate persona in one round-trip
-  const result = await query<ChatConversation & { conv_count: number; persona_valid: boolean; assignment_valid: boolean }>(
-    `WITH counts AS (
+  return withDatabaseTransaction(async () => {
+    // Serializes the per-user/course cap across every backend instance. The
+    // transaction lock is short and never surrounds provider or network work.
+    await query(`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 20261002))`, [
+      `chat-conversation-create:${tenantId}:${userId}:${target}:${courseId ?? ''}`,
+    ]);
+
+    // Count + authority checks remain in the same transaction as INSERT.
+    const result = await query<ChatConversation & { conv_count: number; persona_valid: boolean; assignment_valid: boolean }>(
+      `WITH counts AS (
        SELECT COUNT(*)::int AS cnt
        FROM chat_conversations
        WHERE user_id = $1
@@ -1090,23 +1097,24 @@ export async function createConversation(
      SELECT counts.cnt AS conv_count,
             persona_check.valid AS persona_valid,
             assignment_check.valid AS assignment_valid
-     FROM counts, persona_check, assignment_check`,
-    [userId, tenantId, botId, personaId, target, courseId ?? null],
-  );
+      FROM counts, persona_check, assignment_check`,
+      [userId, tenantId, botId, personaId, target, courseId ?? null],
+    );
 
-  const { conv_count, persona_valid, assignment_valid } = result.rows[0];
-  if (!assignment_valid) throw new Error('Chưa có bot nào được triển khai cho khu vực này');
-  if (conv_count >= MAX_CONVERSATIONS_PER_USER) {
-    throw new Error(`Tối đa ${MAX_CONVERSATIONS_PER_USER} cuộc hội thoại. Vui lòng xoá bớt.`);
-  }
-  if (!persona_valid) throw new Error('Nhân cách không hợp lệ cho bot này');
+    const { conv_count, persona_valid, assignment_valid } = result.rows[0];
+    if (!assignment_valid) throw new Error('Chưa có bot nào được triển khai cho khu vực này');
+    if (conv_count >= MAX_CONVERSATIONS_PER_USER) {
+      throw new Error(`Tối đa ${MAX_CONVERSATIONS_PER_USER} cuộc hội thoại. Vui lòng xoá bớt.`);
+    }
+    if (!persona_valid) throw new Error('Nhân cách không hợp lệ cho bot này');
 
-  const insertResult = await query<ChatConversation>(
-    `INSERT INTO chat_conversations (tenant_id, bot_id, persona_id, user_id, target, course_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [tenantId, botId, personaId, userId, target, courseId ?? null, { created_from: target }],
-  );
-  return insertResult.rows[0];
+    const insertResult = await query<ChatConversation>(
+      `INSERT INTO chat_conversations (tenant_id, bot_id, persona_id, user_id, target, course_id, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [tenantId, botId, personaId, userId, target, courseId ?? null, { created_from: target }],
+    );
+    return insertResult.rows[0];
+  });
 }
 
 export async function deleteConversation(
@@ -1116,6 +1124,9 @@ export async function deleteConversation(
   expectedTarget?: ChatTarget,
 ): Promise<boolean> {
   if (!isValidUUID(conversationId)) throw new Error('ID không hợp lệ');
+  if (expectedTarget === LESSON_AUTHOR_TARGET) {
+    throw new Error('Phiên AI Instructional Design phải được xóa từ danh sách bản thảo.');
+  }
 
   const result = await query(
     `DELETE FROM chat_conversations
@@ -1128,6 +1139,7 @@ export async function deleteConversation(
        AND tba.bot_id = chat_conversations.bot_id
        AND c.id = chat_conversations.bot_id
        AND c.tenant_id = chat_conversations.tenant_id
+       AND chat_conversations.target <> 'lesson_author'
        AND ($4::text IS NULL OR chat_conversations.target = $4)`,
     [conversationId, userId, tenantId, expectedTarget ?? null],
   );

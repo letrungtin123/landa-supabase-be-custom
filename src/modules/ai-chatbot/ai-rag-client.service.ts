@@ -344,15 +344,24 @@ function isRagRequestTimeout(error: unknown): boolean {
   return error instanceof Error && error.message === 'AI_RAG_REQUEST_TIMEOUT';
 }
 
+interface PreparedRagRequest {
+  requestBody: string;
+  url: URL;
+  transport: typeof http | typeof https;
+}
+
+function prepareRagRequest(path: string, body: Record<string, unknown>): PreparedRagRequest {
+  const requestBody = JSON.stringify(body);
+  const url = new URL(`${requireRagServiceUrl()}${path}`);
+  return { requestBody, url, transport: url.protocol === 'https:' ? https : http };
+}
+
 async function requestRagJson(
-  path: string,
-  body: Record<string, unknown>,
+  prepared: PreparedRagRequest,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ statusCode: number; payload: unknown }> {
-  const requestBody = JSON.stringify(body);
-  const url = new URL(`${requireRagServiceUrl()}${path}`);
-  const transport = url.protocol === 'https:' ? https : http;
+  const { requestBody, url, transport } = prepared;
 
   return new Promise((resolve, reject) => {
     const req = transport.request(url, {
@@ -394,9 +403,12 @@ async function postRagJson<T>(
   body: Record<string, unknown>,
   timeoutMs = env.AI_RAG_REQUEST_TIMEOUT_MS,
   signal?: AbortSignal,
+  beforeRequestDispatch?: () => Promise<void>,
 ): Promise<T> {
+  const prepared = prepareRagRequest(path, body);
+  await beforeRequestDispatch?.();
   try {
-    const response = await requestRagJson(path, body, timeoutMs, signal);
+    const response = await requestRagJson(prepared, timeoutMs, signal);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const { payload } = response;
       const payloadRecord = asRecord(payload);
@@ -556,41 +568,49 @@ export async function createRagLessonAuthorSourceSnapshotV2(
 /** One bounded provider call shape for global structure; it never asks the model for chapter content. */
 export async function generateRagLessonAuthorCourseSkeletonV2(
   request: RagLessonAuthorCourseSkeletonV2Request,
-  execution: { timeoutMs: number; signal: AbortSignal },
+  execution: { timeoutMs: number; signal: AbortSignal;
+    beforeProviderDispatch: () => Promise<void> },
 ): Promise<OrchestrationV2CourseSkeletonResponse> {
   const timeoutMs = orchestrationV2ExecutionTimeout(execution);
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/course-skeleton', {
     ...request, api_key: apiKey,
-  }, timeoutMs, execution.signal);
+  }, timeoutMs, execution.signal, execution.beforeProviderDispatch);
   return readOrchestrationV2CourseSkeletonResponse(response, request.source_snapshot_hash);
 }
 
 /** One independently retryable provider call shape, hard-bound to a single immutable chapter shard. */
 export async function generateRagLessonAuthorChapterShardV2(
   request: RagLessonAuthorChapterShardV2Request,
-  execution: { timeoutMs: number; signal: AbortSignal },
+  execution: { timeoutMs: number; signal: AbortSignal;
+    beforeProviderDispatch: () => Promise<void> },
 ): Promise<OrchestrationV2ChapterShardResponse> {
   const timeoutMs = orchestrationV2ExecutionTimeout(execution);
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/chapter-shard', {
     ...request, api_key: apiKey,
-  }, timeoutMs, execution.signal);
+  }, timeoutMs, execution.signal, execution.beforeProviderDispatch);
   return readOrchestrationV2ChapterShardResponse(response, request.skeleton, request.shard_plan);
 }
 
 /** One provider-dispatch-fenced Stage-2 content call for one immutable V2 unit. */
 export async function generateRagLessonAuthorUnitV2(
   request: RagLessonAuthorUnitV2Request,
-  execution: { timeoutMs: number; signal: AbortSignal },
+  execution: { timeoutMs: number; signal: AbortSignal;
+    beforeProviderDispatch?: () => Promise<void> },
 ): Promise<OrchestrationV2UnitProviderResponse> {
   const timeoutMs = orchestrationV2ExecutionTimeout(execution);
   const remaining = Math.min(timeoutMs, request.remaining_workflow_budget_ms);
   if (remaining <= 0) throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  if (!request.fallback_only) {
+    if (!execution.beforeProviderDispatch) {
+      throw new AppError('Provider dispatch fence is required.', 500, 'ORCHESTRATION_V2_DISPATCH_FENCE_REQUIRED');
+    }
+  }
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/unit', {
     ...request, remaining_workflow_budget_ms: remaining, api_key: apiKey,
-  }, remaining, execution.signal);
+  }, remaining, execution.signal, request.fallback_only ? undefined : execution.beforeProviderDispatch);
   return readOrchestrationV2UnitProviderResponse(response, request.unit_contract);
 }
 

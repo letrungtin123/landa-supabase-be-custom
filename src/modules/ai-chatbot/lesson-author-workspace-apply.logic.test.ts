@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compileWorkspaceApply, workspaceApplyMaterializationPlan, workspaceApplyTargetHash, workspaceApplyWriteAlreadyMaterialized,
+import { compileWorkspaceApply, workspaceApplyEstablishedParentOffsets, workspaceApplyMaterializationPlan, workspaceApplyTargetHash, workspaceApplyWriteAlreadyMaterialized,
   WorkspaceApplyCompileError, type WorkspaceApplyCompileInput, type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
 import { workspaceInventoryFixture } from './lesson-author-workspace-inventory.fixture.js';
 import { buildWorkspaceInventory } from './lesson-author-workspace-inventory.logic.js';
@@ -232,6 +232,22 @@ test('later independent chapter can Apply first and writes never expand to earli
   const input = fixture(twoChapters(), 'chapter_2'); const output = compileWorkspaceApply(input);
   assert.ok(output.writes.every(w => w.canonical_path.startsWith('chapter_2')));
   assert.deepEqual(output.required_applied_dependencies, []);
+});
+
+test('out-of-order sibling Apply reuses one established parent offset', () => {
+  const parent = uuid(9900);
+  const offsets = workspaceApplyEstablishedParentOffsets([
+    { parent_node_id: parent, node_sort_order: 0, target_sort_order: 0 },
+    { parent_node_id: parent, node_sort_order: 2, target_sort_order: 2 },
+    { parent_node_id: parent, node_sort_order: 4, target_sort_order: 4 },
+    { parent_node_id: parent, node_sort_order: 5, target_sort_order: 5 },
+  ]);
+  assert.equal(offsets.get(parent), 0);
+  assert.equal(1 + offsets.get(parent)!, 1, 'chapter 2 fills its canonical gap instead of appending after chapter 6');
+  assert.throws(() => workspaceApplyEstablishedParentOffsets([
+    { parent_node_id: parent, node_sort_order: 0, target_sort_order: 0 },
+    { parent_node_id: parent, node_sort_order: 2, target_sort_order: 7 },
+  ]), { code: 'WORKSPACE_APPLY_TARGET_CHANGED' });
 });
 test('out-of-scope later chapter nodes are not required or written', () => {
   const input = fixture(twoChapters());

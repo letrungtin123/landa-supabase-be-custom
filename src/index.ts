@@ -16,6 +16,7 @@ import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } f
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
+import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/lesson-author-session-deletion.worker.js';
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
 import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
@@ -52,6 +53,15 @@ async function cleanupCompletedDeletionJobs(): Promise<number> {
        ORDER BY finished_at ASC
        LIMIT $2::int
      ) DELETE FROM user_deletion_jobs job USING doomed WHERE job.ctid = doomed.ctid`,
+    `WITH doomed AS (
+       SELECT ctid
+       FROM lesson_author_session_deletion_jobs
+       WHERE status = 'succeeded'
+         AND is_terminal = TRUE
+         AND finished_at < now() - ($1::int * interval '1 day')
+       ORDER BY finished_at ASC
+       LIMIT $2::int
+     ) DELETE FROM lesson_author_session_deletion_jobs job USING doomed WHERE job.ctid = doomed.ctid`,
   ];
   let deleted = 0;
   for (const statement of statements) {
@@ -123,9 +133,10 @@ async function initRabbitMQ(): Promise<void> {
     await assertQueue(QUEUES.GEMINI_RESTORE);
     await assertQueue(QUEUES.COURSE_DELETE);
     await assertQueue(QUEUES.USER_DELETE);
+    await assertQueue(QUEUES.LESSON_AUTHOR_SESSION_DELETE);
     await assertQueue(QUEUES.EMAIL_OUTBOX);
     await assertQueue(QUEUES.COURSE_PROGRESS_RECALC);
-    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.GEMINI_RESTORE}, ${QUEUES.COURSE_DELETE}, ${QUEUES.USER_DELETE}, ${QUEUES.EMAIL_OUTBOX}, ${QUEUES.COURSE_PROGRESS_RECALC}`);
+    console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.GEMINI_RESTORE}, ${QUEUES.COURSE_DELETE}, ${QUEUES.USER_DELETE}, ${QUEUES.LESSON_AUTHOR_SESSION_DELETE}, ${QUEUES.EMAIL_OUTBOX}, ${QUEUES.COURSE_PROGRESS_RECALC}`);
 
     // Start consumers (workers)
     await startUploadWorker();
@@ -136,6 +147,7 @@ async function initRabbitMQ(): Promise<void> {
     await startAiEngineTransitionWorker();
     await startCourseDeletionWorker();
     await startUserDeletionWorker();
+    await startLessonAuthorSessionDeletionWorker();
     await startCourseProgressRecalculationWorker();
     if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
       await startEmailOutboxRabbitConsumer();

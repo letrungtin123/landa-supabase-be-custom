@@ -7,7 +7,7 @@ import type { CourseComponentType } from '../tenants/tenant-course-components.co
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
-import { compileWorkspaceApply, workspaceApplyMaterializationPlan, workspaceApplyScopeChapter, workspaceApplyTargetHash, workspaceApplyWriteAlreadyMaterialized,
+import { compileWorkspaceApply, workspaceApplyEstablishedParentOffsets, workspaceApplyMaterializationPlan, workspaceApplyScopeChapter, workspaceApplyTargetHash, workspaceApplyWriteAlreadyMaterialized,
   WorkspaceApplyCompileError, type WorkspaceApplyMapping, type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
 import { hydrateWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
 import { readWorkspaceContent, workspaceLocale } from './lesson-author-workspace.logic.js';
@@ -54,6 +54,11 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         if (locked.rows[0]?.acquired !== true) throw new WorkspaceApplyError('WORKSPACE_APPLY_REVISION_CONFLICT');
         const course = await tx.query(`SELECT id,display_name FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
         if (course.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
+        const deleting = await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs
+          WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND conversation_id=$4
+            AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
+        [target.tenantId, target.courseId, target.userId, target.conversationId]);
+        if (deleting.rows.length) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         failureStage = 'workspace_authority';
         const workspace = await tx.query(`SELECT w.id,w.status,w.event_head,w.content_locale,w.correlation_id,w.source_snapshot_hash,
             COALESCE(run.runtime_config_hash,v2.runtime_config_hash) AS runtime_config_hash,
@@ -220,7 +225,23 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const mappingsByNode = new Map(mappings.map(mapping => [mapping.node_id, mapping]));
         const materialization = workspaceApplyMaterializationPlan(compiled.writes, mappings, target.nodeId);
         const targetIds = new Map(mappings.map(m => [m.node_id, m.target_block_id])); const targetHashes = new Map(mappings.map(m => [m.node_id, m.target_hash]));
-        const parentOffsets = new Map<string, number>(); const delta: Array<Record<string, unknown>> = []; let created = 0, updated = 0;
+        // Offset authority must include every already-mapped sibling, including
+        // later chapters outside the selected prefix. These rows are identity
+        // metadata only; content/revision authority remains the scoped compile
+        // input above.
+        const offsetRows = await tx.query(`SELECT mapped_node.parent_id::text AS parent_node_id,
+            mapped_node.sort_order AS node_sort_order,m.target_sort_order
+          FROM lesson_author_workspace_apply_mappings m
+          JOIN lesson_author_workspace_nodes mapped_node ON mapped_node.workspace_id=m.workspace_id AND mapped_node.id=m.node_id
+            AND mapped_node.tenant_id=m.tenant_id AND mapped_node.course_id=m.course_id
+          WHERE m.workspace_id=$1 AND m.tenant_id=$2 AND m.course_id=$3
+          ORDER BY mapped_node.parent_id,mapped_node.sort_order,mapped_node.id FOR SHARE OF m,mapped_node`,
+        [target.workspaceId,target.tenantId,target.courseId]);
+        const parentOffsets = workspaceApplyEstablishedParentOffsets(offsetRows.rows.map((row: Row) => ({
+          parent_node_id: text(row.parent_node_id), node_sort_order: integer(row.node_sort_order),
+          target_sort_order: integer(row.target_sort_order),
+        })));
+        const delta: Array<Record<string, unknown>> = []; let created = 0, updated = 0;
         failureStage = 'materialize_blocks';
         for (const write of materialization.writes) {
           failureStage = `materialize_block:${write.node_id}`;

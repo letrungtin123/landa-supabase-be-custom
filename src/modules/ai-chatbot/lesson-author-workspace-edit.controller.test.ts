@@ -36,6 +36,7 @@ function fixture() {
     else if (sql.includes('FROM user_permission_groups')) result = [{ can_edit: state.grant }];
     else if (sql.startsWith('SELECT settings')) result = [{ settings: state.settings }];
     else if (sql.startsWith('SELECT id FROM courses')) result = [{ id: params.courseId }];
+    else if (sql.includes('FROM lesson_author_session_deletion_jobs')) result = [];
     else if (sql.includes('FROM lesson_author_workspaces w')) result = p[0] === params.workspaceId && p[1] === user.tenantId && p[3] === params.conversationId && p[4] === user.id
       ? [{ id: params.workspaceId, status: 'drafting', contract_version: 1, content_locale: 'vi', correlation_id: root, source_snapshot_hash: sourceHash,
         blueprint_id: blueprint, blueprint_source_hash: sourceHash, bot_id: bot, kb_id: kb, source_document_ids: [source.document_id] }] : [];

@@ -85,7 +85,7 @@ test('inventory task is deterministic, zero-token, and bound to the validated as
   assert.notEqual(first.contract_hash, buildOrchestrationV2InventoryTask(hash('e'), 60_000).contract_hash);
 });
 
-function serviceFixture(kind: OrchestrationV2TaskLease['kind']) {
+function serviceFixture(kind: OrchestrationV2TaskLease['kind'], failBeforeDispatch = false) {
   const events: string[] = [];
   const authority = { tenant_id: uuid(4), kb_id: uuid(8), conversation_id: uuid(9), correlation_id: uuid(10),
     locale: 'vi' as const, source_documents: [{ document_id: uuid(11), kb_id: uuid(8), name: 'raw.pdf', type: 'file', status: 'learned' }] };
@@ -131,10 +131,18 @@ function serviceFixture(kind: OrchestrationV2TaskLease['kind']) {
       assert.equal(request.max_output_tokens, 1); await consumePage(sourcePage, 0);
       return { contract_version: 2 as const, source_snapshot_hash: hash('a'), source_revision: hash('d'),
         page_count: 1, fact_count: 1, source_authority: sourcePage.source_authority }; },
-    skeleton: async (request: Record<string, unknown>) => { events.push('skeleton-call');
+    skeleton: async (request: Record<string, unknown>, execution: { beforeProviderDispatch: () => Promise<void> }) => {
+      events.push('skeleton-preflight');
+      if (failBeforeDispatch) throw new Error('skeleton pre-dispatch failure');
+      await execution.beforeProviderDispatch();
+      events.push('skeleton-call');
       assert.deepEqual(request.scope_catalog, [scopes[0]!]);
       return { contract_version: 2 as const, skeleton }; },
-    chapter: async (request: Record<string, unknown>) => { events.push('chapter-call');
+    chapter: async (request: Record<string, unknown>, execution: { beforeProviderDispatch: () => Promise<void> }) => {
+      events.push('chapter-preflight');
+      if (failBeforeDispatch) throw new Error('chapter pre-dispatch failure');
+      await execution.beforeProviderDispatch();
+      events.push('chapter-call');
       assert.equal((request.shard_plan as { chapter_key: string }).chapter_key, 'chapter-1');
       return { contract_version: 2 as const, shard: { contract_version: 2 as const,
         source_snapshot_hash: hash('a'), chapter_key: 'chapter-1', order: 0, shard_index: 0, shard_count: 1,
@@ -157,9 +165,22 @@ for (const kind of ['source_snapshot', 'course_skeleton', 'chapter_blueprint', '
     } else if (kind === 'source_snapshot') {
       assert.deepEqual(f.events, ['authority', 'source-call', 'persist-source', 'persisted-catalog', 'complete-source']);
     } else if (kind === 'course_skeleton') {
-      assert.deepEqual(f.events, ['authority', 'catalog', 'source-authority', 'dispatch-marker', 'skeleton-call', 'complete-skeleton']);
+      assert.deepEqual(f.events, ['authority', 'catalog', 'source-authority', 'skeleton-preflight',
+        'dispatch-marker', 'skeleton-call', 'complete-skeleton']);
     } else {
-      assert.deepEqual(f.events, ['authority', 'chapter-input', 'dispatch-marker', 'chapter-call', 'complete-chapter']);
+      assert.deepEqual(f.events, ['authority', 'chapter-input', 'chapter-preflight',
+        'dispatch-marker', 'chapter-call', 'complete-chapter']);
     }
+  });
+}
+
+for (const kind of ['course_skeleton', 'chapter_blueprint'] as const) {
+  test(`planning ${kind} pre-dispatch failure never writes the provider dispatch fence`, async () => {
+    const f = serviceFixture(kind, true);
+    await assert.rejects(() => executeOrchestrationV2PlanningTask(lease(kind), f.planning as never,
+      f.worker as never, f.clients as never, { embedding_model: 'embedding', embedding_dimensions: 768, budgets },
+      async () => undefined, new AbortController().signal), /pre-dispatch failure/);
+    assert.equal(f.events.includes('dispatch-marker'), false);
+    assert.equal(f.events.some(event => event.startsWith('complete-')), false);
   });
 }

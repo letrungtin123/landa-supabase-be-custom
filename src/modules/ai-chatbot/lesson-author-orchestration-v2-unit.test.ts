@@ -192,7 +192,11 @@ test('unit service persists dispatch before exactly one provider call and one co
       events.push(`complete:${publication.nodes.length}`);
     } };
   const worker = { markProviderDispatched: async () => { events.push('dispatch'); } };
-  const client = { generate: async () => { events.push('provider'); return response; } };
+  const client = { generate: async (_request: unknown, execution: { beforeProviderDispatch?: () => Promise<void> }) => {
+    await execution.beforeProviderDispatch?.();
+    events.push('provider');
+    return response;
+  } };
   const normalizeProposal = (raw: unknown): LessonAuthorProposal => ({ summary: 'Unit generation',
     chapters: (raw as { chapters: LessonAuthorProposal['chapters'] }).chapters });
   const settleProvider = async () => undefined;
@@ -228,7 +232,11 @@ test('unit service retries a rolled-back completion transaction without calling 
       if (completionAttempts === 1) throw Object.assign(new Error('safe test deadlock'), { code: '40P01' });
     } };
   const worker = { markProviderDispatched: async () => undefined };
-  const client = { generate: async () => { providerCalls += 1; return response; } };
+  const client = { generate: async (_request: unknown, execution: { beforeProviderDispatch?: () => Promise<void> }) => {
+    await execution.beforeProviderDispatch?.();
+    providerCalls += 1;
+    return response;
+  } };
   await executeOrchestrationV2UnitTask(lease, repository as never, worker as never, client,
     { embedding_model: 'text-embedding', embedding_dimensions: 768,
       allowed_component_types: new Set<CourseComponentType>(['html']) },

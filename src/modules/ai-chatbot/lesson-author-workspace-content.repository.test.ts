@@ -57,6 +57,7 @@ function fixture() {
     else if (sql.startsWith('SELECT count(*)::text')) rows = [{ node_count: state.oversizedCount ? '2049' : String(nodes.length), scope_bytes: state.scopeBytes }];
     else if (sql.startsWith('SELECT n.id,n.parent_id')) rows = nodes;
     else if (sql.startsWith('SELECT id FROM courses')) rows = [{ id: target.courseId }];
+    else if (sql.includes('FROM lesson_author_session_deletion_jobs')) rows = [];
     else if (sql.startsWith('SELECT w.id,w.status')) rows = [{ id: target.workspaceId, status: 'drafting', contract_version: 1, content_locale: 'vi', correlation_id: uuid(50), source_snapshot_hash: 'a'.repeat(64) }];
     else if (sql.startsWith('SELECT id,kind,content_state')) rows = [nodes[4]];
     else if (sql.startsWith('SELECT revision,parent_revision')) rows = revisions.filter(r => r.revision === 0 || r.revision === nodes[4].current_revision || r.operation_id === params[5]);

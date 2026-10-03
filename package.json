@@ -18,7 +18,7 @@
     "wait:tenant-data-quota-worker": "tsx src/scripts/wait-tenant-data-quota-worker.ts",
     "verify:tenant-data-quota:release": "set NODE_ENV=production&& npm run wait:tenant-data-quota-worker -- --timeout-seconds=720 && npm run verify:tenant-data-quota -- --mode=fast --require-worker-heartbeat",
     "worker:tenant-data-quota": "tsx src/workers/tenant-data-quota.worker.ts",
-    "worker:lesson-author-orchestration-v2": "tsx src/workers/lesson-author-orchestration-v2.worker.ts",
+    "worker:lesson-author-orchestration-v2": "node scripts/start-local-lesson-author-orchestration-v2-worker.mjs",
     "test:lesson-author-orchestration-v2": "node scripts/test-lesson-author-orchestration-v2.mjs",
     "test:tenant-data-quota": "tsx --test src/modules/tenants/tenant-data-quota.logic.test.ts",
     "test:tenant-data-quota:integration": "tsx src/scripts/test-tenant-data-quota-integration.ts",

@@ -20,6 +20,10 @@ const outcomeReplayGuard = readFileSync(
   new URL('../../../../supabase/manual_sql/20261001_1715_lesson_author_orchestration_v2_outcome_replay_guard.sql', import.meta.url),
   'utf8',
 );
+const deterministicFallbackGuard = readFileSync(
+  new URL('../../../../supabase/manual_sql/20261002_2355_lesson_author_orchestration_v2_fallback_success_guard.sql', import.meta.url),
+  'utf8',
+);
 const executable = sql
   .split(/\r?\n/)
   .filter((line) => !line.trimStart().startsWith('--'))
@@ -41,7 +45,7 @@ test('reviewed guard hashes exactly match the manual SQL bodies', () => {
   for (const [signature, expected] of Object.entries(ORCHESTRATION_V2_GUARDS)) {
     const name = signature.slice(0, -2);
     const pattern = new RegExp(`CREATE (?:OR REPLACE )?FUNCTION public\\.${name}\\(\\)[\\s\\S]*?AS \\$guard\\$\\r?\\n([\\s\\S]*?)\\r?\\n\\$guard\\$;`);
-    const source = signature === 'guard_lesson_author_workspace_v2_task()' ? outcomeReplayGuard : sql;
+    const source = signature === 'guard_lesson_author_workspace_v2_task()' ? deterministicFallbackGuard : sql;
     const body = source.match(pattern)?.[1];
     assert.ok(body, `missing reviewed guard body: ${signature}`);
     assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'), expected);
@@ -53,12 +57,30 @@ test('outcome replay guard requires pessimistic accounting before one bounded re
   const body = outcomeReplayGuard.match(pattern)?.[1];
   assert.ok(body);
   assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'),
-    ORCHESTRATION_V2_GUARDS['guard_lesson_author_workspace_v2_task()']);
+    '22ed2b31cb88939fb9b5c55addfce85a');
   assert.match(body, /OLD\.status='outcome_unknown' AND NEW\.status='queued'/);
   assert.match(body, /OLD\.attempt_count>=OLD\.max_attempts/);
   assert.match(body, /r\.status='finalized'/);
   assert.match(body, /reconciled_ledgers<>1/);
   const executableCorrection = outcomeReplayGuard.split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  assert.doesNotMatch(executableCorrection, /\bDROP\b/i);
+  assert.match(executableCorrection, /^\s*BEGIN;/m);
+  assert.match(executableCorrection, /COMMIT;\s*$/);
+});
+
+test('deterministic unit fallback is the only undispatched provider success admitted by the current guard', () => {
+  const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.guard_lesson_author_workspace_v2_task\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
+  const body = deterministicFallbackGuard.match(pattern)?.[1];
+  assert.ok(body);
+  assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'),
+    ORCHESTRATION_V2_GUARDS['guard_lesson_author_workspace_v2_task()']);
+  assert.match(body, /deterministic_fallback:=NEW\.kind='generate_unit' AND NEW\.status='succeeded'/);
+  assert.match(body, /OLD\.attempt_count>=2 AND OLD\.dispatch_epoch>=2/);
+  assert.match(body, /NEW\.accounting_state='not_required' AND NEW\.ai_reservation_id IS NULL/);
+  assert.match(body, /NEW\.validation_contract='orchestration-unit-baseline-v2'/);
+  assert.match(body, /NEW\.status='succeeded' AND NOT deterministic_fallback/);
+  const executableCorrection = deterministicFallbackGuard.split(/\r?\n/)
     .filter((line) => !line.trimStart().startsWith('--')).join('\n');
   assert.doesNotMatch(executableCorrection, /\bDROP\b/i);
   assert.match(executableCorrection, /^\s*BEGIN;/m);

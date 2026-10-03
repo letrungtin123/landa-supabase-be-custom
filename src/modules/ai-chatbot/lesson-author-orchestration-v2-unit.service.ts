@@ -22,7 +22,8 @@ export interface OrchestrationV2UnitRuntime {
 
 export interface OrchestrationV2UnitClient {
   generate(request: RagLessonAuthorUnitV2Request,
-    execution: { timeoutMs: number; signal: AbortSignal }): Promise<OrchestrationV2UnitProviderResponse>;
+    execution: { timeoutMs: number; signal: AbortSignal;
+      beforeProviderDispatch?: () => Promise<void> }): Promise<OrchestrationV2UnitProviderResponse>;
 }
 
 export class OrchestrationV2UnitServiceError extends Error {
@@ -63,6 +64,34 @@ async function withTransientTransactionRetry<T>(operation: () => Promise<T>, sig
   }
 }
 
+type OrchestrationV2UnitStage =
+  | 'unit_authority_load'
+  | 'provider_dispatch_fence'
+  | 'provider_request'
+  | 'unit_acceptance'
+  | 'unit_publication';
+
+function throwAtStage(error: unknown, stage: OrchestrationV2UnitStage): never {
+  if (error && typeof error === 'object'
+    && typeof (error as { orchestration_stage?: unknown }).orchestration_stage !== 'string') {
+    try {
+      Object.defineProperty(error, 'orchestration_stage', { value: stage, enumerable: true });
+    } catch {
+      // Some third-party errors may be frozen. Preserve the authoritative
+      // error rather than replacing it only for telemetry metadata.
+    }
+  }
+  throw error;
+}
+
+async function atStage<T>(stage: OrchestrationV2UnitStage, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    return throwAtStage(error, stage);
+  }
+}
+
 /** Execute one claimed unit. Dispatch is persisted before the only provider call. */
 export async function executeOrchestrationV2UnitTask(
   lease: OrchestrationV2TaskLease,
@@ -80,7 +109,8 @@ export async function executeOrchestrationV2UnitTask(
     || !runtime.allowed_component_types.size) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
-  const input = await withTransientTransactionRetry(() => repository.load(lease), signal);
+  const input = await atStage('unit_authority_load',
+    () => withTransientTransactionRetry(() => repository.load(lease), signal));
   if (input.contract.component_plan.some(plan => !runtime.allowed_component_types.has(plan.type))) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
@@ -88,8 +118,16 @@ export async function executeOrchestrationV2UnitTask(
   // uncertain paid call must never dispatch another paid call; it asks the
   // Python service for the deterministic source-locked baseline instead.
   const fallbackOnly = lease.dispatch_epoch >= 2;
-  if (!fallbackOnly) await withTransientTransactionRetry(() => worker.markProviderDispatched(lease), signal);
-  const response = await client.generate({
+  let providerDispatchMarked = fallbackOnly;
+  const beforeProviderDispatch = fallbackOnly ? undefined : async () => {
+    if (providerDispatchMarked) {
+      throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
+    }
+    await atStage('provider_dispatch_fence',
+      () => withTransientTransactionRetry(() => worker.markProviderDispatched(lease), signal));
+    providerDispatchMarked = true;
+  };
+  const response = await atStage('provider_request', () => client.generate({
     tenant_id: input.authority.tenant_id, kb_id: input.authority.kb_id,
     conversation_id: input.authority.conversation_id, target: 'lesson_author', model: lease.model,
     max_output_tokens: lease.max_output_tokens, embedding_model: runtime.embedding_model,
@@ -101,14 +139,23 @@ export async function executeOrchestrationV2UnitTask(
     max_attempts: lease.provider_max_attempts as 1 | 2,
     remaining_workflow_budget_ms: Math.min(480_000, lease.execution_budget_ms),
     fallback_only: fallbackOnly,
-  }, { timeoutMs: lease.execution_budget_ms, signal });
+  }, { timeoutMs: lease.execution_budget_ms, signal, beforeProviderDispatch }));
+  if (!providerDispatchMarked) {
+    throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
+  }
   if ((fallbackOnly && response.usage_source !== 'deterministic_fallback')
     || (!fallbackOnly && response.usage_source === 'deterministic_fallback')) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
-  const publication = acceptOrchestrationV2GeneratedUnit({ contract: input.contract, response,
-    normalizeProposal, allowed: runtime.allowed_component_types });
-  await withTransientTransactionRetry(() => repository.complete(lease, publication, response.usage ?? {},
-    settleProvider, releaseUndispatched, response.usage_source), signal);
+  let publication: ReturnType<typeof acceptOrchestrationV2GeneratedUnit>;
+  try {
+    publication = acceptOrchestrationV2GeneratedUnit({ contract: input.contract, response,
+      normalizeProposal, allowed: runtime.allowed_component_types });
+  } catch (error) {
+    throwAtStage(error, 'unit_acceptance');
+  }
+  await atStage('unit_publication', () => withTransientTransactionRetry(
+    () => repository.complete(lease, publication, response.usage ?? {},
+      settleProvider, releaseUndispatched, response.usage_source), signal));
   return 'generate_unit';
 }

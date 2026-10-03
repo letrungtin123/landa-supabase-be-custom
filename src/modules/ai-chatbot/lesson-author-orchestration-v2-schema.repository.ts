@@ -16,7 +16,7 @@ export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_source_snapshot_v2()': '9c7df8552236baa01eb3fe517e2d145a',
   'guard_lesson_author_workspace_source_fact_v2()': '6e1aa7fd21af9c229bebc7388718cbfd',
   'guard_lesson_author_workspace_v2_run()': '5d4828cdad69bded21a4a55f4c2bb124',
-  'guard_lesson_author_workspace_v2_task()': '22ed2b31cb88939fb9b5c55addfce85a',
+  'guard_lesson_author_workspace_v2_task()': '22b6946da0d57898ecc7a28915c7cc94',
   'guard_lesson_author_workspace_v2_dependency()': 'dd347f4d6cb80814bb57d87e136f9c3e',
   'guard_lesson_author_workspace_v2_artifact()': '4cf67dccee7c7e00c87041b4ae5a2bbe',
   'guard_lesson_author_workspace_v2_outbox()': '183be9ec3e0f3b848b82ec15a90aae0a',

@@ -38,6 +38,7 @@ function fixture() {
     const tx: GenerationJobSql = { async query<R extends Record<string, unknown>>(text: string, params: unknown[] = []) {
       sql.push({ text, params }); let result: Row[];
       if (text.startsWith('SELECT id FROM courses')) result = missing ? [] : [{ id: target.courseId }];
+      else if (text.includes('FROM lesson_author_session_deletion_jobs')) result = [];
       else if (text.includes('FROM lesson_author_workspaces w')) result = [{ id: target.workspaceId, status: state,
         contract_version: 1, content_locale: locale, correlation_id: uuid(8), source_snapshot_hash: sourceHash }];
       else if (text.includes('FROM lesson_author_workspace_nodes WHERE')) result = [{ id: target.nodeId, kind: 'component',
@@ -94,8 +95,9 @@ test('Save validates before append; baseline/provenance untouched, pointer/event
   assert.deepEqual(f.stages, ['permission', 'source', 'validate', 'permission', 'source', 'insert', 'commit']);
   assert.deepEqual(f.rows()[0].content, baseline); assert.equal(f.rows()[1].actor_id, target.userId);
   assert.equal(f.rows()[1].origin, 'author_edit'); assert.equal(f.events().length, 1);
-  assert.ok(f.sql[0].text.includes('FROM courses')); assert.ok(f.sql[1].text.includes('FROM lesson_author_workspaces'));
-  assert.ok(f.sql[2].text.includes('FROM lesson_author_workspace_nodes'));
+  assert.ok(f.sql.some(query => query.text.includes('FROM courses')));
+  assert.ok(f.sql.some(query => query.text.includes('FROM lesson_author_workspaces')));
+  assert.ok(f.sql.some(query => query.text.includes('FROM lesson_author_workspace_nodes')));
   for (const query of f.sql.filter(q => /^(INSERT|UPDATE|DELETE)/.test(q.text))) assert.match(query.text, /^INSERT INTO lesson_author_workspace_revisions/);
   assert.equal('apply_ready' in result, false);
 });

@@ -61,11 +61,25 @@ function executionFailureCode(error: unknown): string {
 
 function safeExecutionMetadata(error: unknown): Readonly<Record<string, string>> {
   if (!error || typeof error !== 'object') return {};
-  const candidate = (error as { code?: unknown }).code;
+  const candidate = (error as { code?: unknown; orchestration_stage?: unknown;
+    constraint?: unknown; table?: unknown }).code;
   const sqlstate = typeof candidate === 'string' && /^[0-9A-Z]{5}$/.test(candidate) ? candidate : null;
   const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(error.name)
     ? error.name : null;
-  return Object.freeze({ ...(sqlstate ? { sqlstate } : {}), ...(errorName ? { error_name: errorName } : {}) });
+  const stage = typeof (error as { orchestration_stage?: unknown }).orchestration_stage === 'string'
+    && /^[a-z][a-z0-9_]{0,79}$/.test(String((error as { orchestration_stage: string }).orchestration_stage))
+    ? String((error as { orchestration_stage: string }).orchestration_stage) : null;
+  const constraint = typeof (error as { constraint?: unknown }).constraint === 'string'
+    && /^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(String((error as { constraint: string }).constraint))
+    ? String((error as { constraint: string }).constraint) : null;
+  const table = typeof (error as { table?: unknown }).table === 'string'
+    && /^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(String((error as { table: string }).table))
+    ? String((error as { table: string }).table) : null;
+  const databaseMessage = sqlstate && error instanceof Error
+    && /^[A-Za-z0-9 _./:()'=-]{1,180}$/.test(error.message) ? error.message : null;
+  return Object.freeze({ ...(sqlstate ? { sqlstate } : {}), ...(errorName ? { error_name: errorName } : {}),
+    ...(stage ? { execution_stage: stage } : {}), ...(constraint ? { db_constraint: constraint } : {}),
+    ...(table ? { db_table: table } : {}), ...(databaseMessage ? { db_message: databaseMessage } : {}) });
 }
 
 function reportSafely(

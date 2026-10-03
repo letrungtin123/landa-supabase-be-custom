@@ -30,6 +30,7 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean }
     state.sql.push(sql);
     if (sql.includes('FROM courses')) return [{ id: input.courseId }];
     if (sql.includes('FROM users u JOIN tenants')) return [{ role: 'superadmin', tenant_id: null, is_active: true, tenant_active: true }];
+    if (sql.includes('FROM lesson_author_session_deletion_jobs')) return [];
     if (sql.includes("status IN ('queued','designing','drafting')")) return [];
     if (sql.includes('FROM lesson_author_workspaces') && sql.includes('idempotency_key')) return workspace ? [workspace] : [];
     if (sql.includes('INSERT INTO lesson_author_workspaces')) {

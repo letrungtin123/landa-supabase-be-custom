@@ -130,6 +130,24 @@ test('claimed execution failure passes the configured accounting reconciler to a
   assert.equal(received, reconciler);
 });
 
+test('worker failure telemetry exposes only bounded stage and PostgreSQL diagnostics', async () => {
+  const failure = Object.assign(new Error('Provider V2 success requires dispatch and settled accounting'), {
+    code: '23514', orchestration_stage: 'unit_publication',
+    table: 'lesson_author_workspace_v2_tasks', constraint: 'trg_la_ws_v2_task_guard',
+  });
+  const failed = deps(async () => ({ disposition: 'claimed', lease }), async () => { throw failure; });
+  await handleOrchestrationV2Delivery(raw, failed.value);
+  const event = failed.events.find(candidate => candidate.event === 'worker_task_failed');
+  assert.deepEqual(event && {
+    sqlstate: event.sqlstate, stage: event.execution_stage, table: event.db_table,
+    constraint: event.db_constraint, message: event.db_message,
+  }, {
+    sqlstate: '23514', stage: 'unit_publication', table: 'lesson_author_workspace_v2_tasks',
+    constraint: 'trg_la_ws_v2_task_guard',
+    message: 'Provider V2 success requires dispatch and settled accounting',
+  });
+});
+
 test('worker recovery cycle is bounded and counts durable outcomes', async () => {
   const states: Array<'requeued' | 'outcome_unknown' | 'failed' | 'reconciled' | null> =
     ['requeued', 'outcome_unknown', 'failed', 'reconciled', null];

@@ -40,6 +40,13 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
 import { AppError } from '../../middleware/error-handler.js';
+import {
+  deleteLessonAuthorSessionController,
+  getLessonAuthorSessionDeleteImpactController,
+  getLessonAuthorSessionDeletionStatusController,
+  listLessonAuthorSessionController,
+  renameLessonAuthorSessionController,
+} from './lesson-author-session.controller.js';
 
 const router = Router();
 
@@ -271,6 +278,11 @@ const workspaceLaunch = createWorkspaceLaunchHandlers({ readEnabled:()=>env.LESS
     ? workspaceV2Launch(user,input) : createLessonAuthorWorkspace(user,input),
   report:event=>console.info('[LessonAuthorWorkspace]',JSON.stringify(event)) });
 router.get('/chat/lesson-author/courses/:courseId/workspaces/latest',workspaceLaunch.latest);
+router.get('/chat/lesson-author/courses/:courseId/sessions', checkPermission('courses', 'can_edit'), listLessonAuthorSessionController);
+router.patch('/chat/lesson-author/courses/:courseId/sessions/:conversationId', checkPermission('courses', 'can_edit'), renameLessonAuthorSessionController);
+router.get('/chat/lesson-author/courses/:courseId/sessions/:conversationId/delete-impact', checkPermission('courses', 'can_edit'), getLessonAuthorSessionDeleteImpactController);
+router.delete('/chat/lesson-author/courses/:courseId/sessions/:conversationId', checkPermission('courses', 'can_edit'), deleteLessonAuthorSessionController);
+router.get('/chat/lesson-author/courses/:courseId/session-deletions/:jobId', checkPermission('courses', 'can_edit'), getLessonAuthorSessionDeletionStatusController);
 router.post('/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces',workspaceLaunch.create);
 // Additive read-only workspace boundary; never falls back to generation on error.
 // V2 admission is internal to the single workspace Create transaction; no second

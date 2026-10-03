@@ -55,6 +55,10 @@ export function createWorkspaceLaunchHandlers(deps:{
               JOIN tenant_bot_assignments b ON b.tenant_id=w.tenant_id AND b.bot_id=w.bot_id AND b.target='lesson_author'
               JOIN tenant_kb_assignments k ON k.tenant_id=w.tenant_id AND k.kb_id=w.kb_id AND k.target='lesson_author'
               WHERE w.tenant_id=$1 AND w.course_id=$2 AND w.requested_by=$3 AND w.contract_version=1 AND w.engine='self_built_rag'
+                AND NOT EXISTS (SELECT 1 FROM lesson_author_session_deletion_jobs deletion
+                  WHERE deletion.tenant_id=w.tenant_id AND deletion.requested_by=w.requested_by
+                    AND deletion.course_id=w.course_id AND deletion.conversation_id=w.conversation_id
+                    AND deletion.is_terminal=false AND deletion.status IN ('queued','running','failed'))
                 AND cardinality(w.source_document_ids)=(SELECT count(*) FROM kb_documents d WHERE d.id=ANY(w.source_document_ids)
                   AND d.tenant_id=w.tenant_id AND d.kb_id=w.kb_id)
               ORDER BY w.created_at DESC,w.id DESC LIMIT 1`,[user.tenantId,courseId,user.id]);

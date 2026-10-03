@@ -25,6 +25,10 @@ const role = value => ({
   LESSON_AUTHOR_ORCHESTRATION_V2_ROLE: value,
   LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT: '1',
   LESSON_AUTHOR_ORCHESTRATION_V2_LANE_INDEX: '0',
+  // Conservative production canary. Raise only after the V2 guard/claim
+  // metrics remain clean under representative files.
+  LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY: '4',
+  LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY: '2',
 });
 
 module.exports = {

@@ -79,6 +79,37 @@ export interface WorkspaceApplyWrite {
   mapped_target: { block_id: string; parent_id: string; sort_order: number; before_hash: string } | null;
 }
 
+export interface WorkspaceApplySiblingOffset {
+  parent_node_id: string;
+  node_sort_order: number;
+  target_sort_order: number;
+}
+
+/**
+ * Once any child of a workspace parent has been materialized, its append
+ * offset is immutable for every sibling. Reuse that established offset when
+ * an author applies siblings out of presentation order (for example chapters
+ * 1, 3, 5, 6 and then chapter 2). Computing from the current last course
+ * block would otherwise create a second offset and the database guard would
+ * correctly reject the mapping.
+ */
+export function workspaceApplyEstablishedParentOffsets(entries: readonly WorkspaceApplySiblingOffset[]): Map<string, number> {
+  const offsets = new Map<string, number>();
+  for (const entry of entries) {
+    if (!id.safeParse(entry.parent_node_id).success
+      || !Number.isSafeInteger(entry.node_sort_order) || entry.node_sort_order < 0
+      || !Number.isSafeInteger(entry.target_sort_order) || entry.target_sort_order < entry.node_sort_order) {
+      fail('WORKSPACE_APPLY_TARGET_CHANGED');
+    }
+    const offset = entry.target_sort_order - entry.node_sort_order;
+    if (offsets.has(entry.parent_node_id) && offsets.get(entry.parent_node_id) !== offset) {
+      fail('WORKSPACE_APPLY_TARGET_CHANGED');
+    }
+    offsets.set(entry.parent_node_id, offset);
+  }
+  return offsets;
+}
+
 /** A mapping is reusable only when both immutable workspace content and the
  * actual course target still match the evidence loaded inside the Apply
  * transaction. Reusing it avoids rewriting already-applied ancestors and

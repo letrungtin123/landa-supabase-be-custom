@@ -8,6 +8,7 @@ import {
   getChannel,
 } from '../config/rabbitmq/index.js';
 import { createOrchestrationV2OutboxRepository } from '../modules/ai-chatbot/lesson-author-orchestration-v2-outbox.repository.js';
+import { assertOrchestrationV2ProductionProcessFence } from '../modules/ai-chatbot/lesson-author-orchestration-v2-process-fence.js';
 import {
   runOrchestrationV2DispatcherLoop,
   runOrchestrationV2WorkerRecoveryLoop,
@@ -49,6 +50,7 @@ async function waitForShutdown(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  assertOrchestrationV2ProductionProcessFence({ node_env: env.NODE_ENV });
   const config = readOrchestrationV2RuntimeConfig();
   if (!config.enabled || config.role === 'disabled') {
     console.log('[LessonAuthorOrchestrationV2] Disabled; no queue or database runtime was started.');

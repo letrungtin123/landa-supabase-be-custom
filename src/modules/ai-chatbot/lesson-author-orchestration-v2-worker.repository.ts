@@ -274,10 +274,12 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
       if (!UUID.test(leaseToken)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
       const claimed = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='running',
           attempt_count=attempt_count+1,dispatch_epoch=dispatch_epoch+1,lease_token=$3::uuid,
-          heartbeat_at=clock_timestamp(),lease_expires_at=clock_timestamp()+($4::integer*interval '1 second'),
-          deadline_at=clock_timestamp()+(execution_budget_ms*interval '1 millisecond'),
-          started_at=coalesce(started_at,clock_timestamp()),ai_reservation_id=$5::uuid,
+          heartbeat_at=claim_clock.claimed_at,
+          lease_expires_at=claim_clock.claimed_at+($4::integer*interval '1 second'),
+          deadline_at=claim_clock.claimed_at+(execution_budget_ms*interval '1 millisecond'),
+          started_at=coalesce(started_at,claim_clock.claimed_at),ai_reservation_id=$5::uuid,
           accounting_state=CASE WHEN $5::uuid IS NULL THEN 'not_required' ELSE 'reserved' END
+        FROM (SELECT clock_timestamp() AS claimed_at) claim_clock
         WHERE id=$1 AND run_id=$2 AND status='queued' AND dispatch_epoch=$6 AND attempt_count<max_attempts
         RETURNING *`, [envelope.task_id, envelope.run_id, leaseToken, limits.lease_seconds, reservationId, envelope.dispatch_epoch]);
       if (claimed.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');

@@ -31,9 +31,11 @@ export interface OrchestrationV2PlanningClients {
       source_authority: import('./lesson-author-orchestration-v2-rag-contract.logic.js').OrchestrationV2SourceAuthority;
     }>;
   skeleton(request: RagLessonAuthorCourseSkeletonV2Request,
-    execution: { timeoutMs: number; signal: AbortSignal }): Promise<OrchestrationV2CourseSkeletonResponse>;
+    execution: { timeoutMs: number; signal: AbortSignal;
+      beforeProviderDispatch: () => Promise<void> }): Promise<OrchestrationV2CourseSkeletonResponse>;
   chapter(request: RagLessonAuthorChapterShardV2Request,
-    execution: { timeoutMs: number; signal: AbortSignal }): Promise<OrchestrationV2ChapterShardResponse>;
+    execution: { timeoutMs: number; signal: AbortSignal;
+      beforeProviderDispatch: () => Promise<void> }): Promise<OrchestrationV2ChapterShardResponse>;
 }
 
 export class OrchestrationV2PlanningServiceError extends Error {
@@ -114,23 +116,41 @@ export async function executeOrchestrationV2PlanningTask(
   if (lease.kind === 'course_skeleton') {
     const scopes = await planning.loadSourceCatalog(lease);
     const sourceAuthority = await planning.loadSourceAuthority(lease);
-    await worker.markProviderDispatched(lease);
+    let providerDispatchMarked = false;
     const response = await clients.skeleton({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       source_snapshot_hash: lease.source_snapshot_hash, scope_catalog: scopes, source_authority: sourceAuthority,
       max_attempts: lease.provider_max_attempts as 1 | 2,
-    }, execution);
+    }, { ...execution, beforeProviderDispatch: async () => {
+      if (providerDispatchMarked) {
+        throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
+      }
+      await worker.markProviderDispatched(lease);
+      providerDispatchMarked = true;
+    } });
+    if (!providerDispatchMarked) {
+      throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
+    }
     await planning.completeSkeleton(lease, response, scopes, runtime.budgets, settleProvider);
     return 'course_skeleton';
   }
   if (lease.kind === 'chapter_blueprint') {
     const input = await planning.loadChapterInput(lease);
-    await worker.markProviderDispatched(lease);
+    let providerDispatchMarked = false;
     const response = await clients.chapter({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       skeleton: input.skeleton, shard_plan: input.shard_plan, source_facts: input.source_facts,
       max_attempts: lease.provider_max_attempts as 1 | 2,
-    }, execution);
+    }, { ...execution, beforeProviderDispatch: async () => {
+      if (providerDispatchMarked) {
+        throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
+      }
+      await worker.markProviderDispatched(lease);
+      providerDispatchMarked = true;
+    } });
+    if (!providerDispatchMarked) {
+      throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
+    }
     await planning.completeChapter(lease, response, settleProvider);
     return 'chapter_blueprint';
   }
