@@ -5,6 +5,8 @@ import type { OrchestrationV2ChapterReceipt } from './lesson-author-orchestratio
 import {
   finalizeOrchestrationV2Course,
   ORCHESTRATION_V2_COURSE_CONTRACT,
+  ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT,
+  type OrchestrationV2AssessmentObligationEvidence,
   type OrchestrationV2CourseFinalization,
   type OrchestrationV2FinalizationTask,
 } from './lesson-author-orchestration-v2-finalization.logic.js';
@@ -87,6 +89,37 @@ export function createOrchestrationV2FinalizationRepository(
         || inventoryPayload.manifest_hash !== row.manifest_hash) {
         fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
       }
+      const obligationResult = await tx.query(`SELECT planned_slot_key,plan_revision_hash,unit_path,
+          planned_component_index,learning_objective_refs,required_assessment_kind,relevant_scope_ids,
+          relevant_evidence_fact_ids,unresolved_reason,status,resolution_kind,resolution_evidence_hash
+        FROM lesson_author_workspace_v2_assessment_obligations
+        WHERE run_id=$1 AND workspace_id=$2 AND tenant_id=$3 AND course_id=$4
+        ORDER BY planned_slot_key FOR SHARE`,
+      [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id]);
+      const assessmentObligations: OrchestrationV2AssessmentObligationEvidence[] = obligationResult.rows.map(item => ({
+        planned_slot_key: String(item.planned_slot_key), plan_revision_hash: String(item.plan_revision_hash),
+        status: item.status as 'open' | 'resolved',
+        resolution_kind: item.resolution_kind === null ? null
+          : item.resolution_kind as 'valid_assessment' | 'approved_replan',
+        resolution_evidence_hash: item.resolution_evidence_hash === null ? null : String(item.resolution_evidence_hash),
+      }));
+      const obligationProjection = obligationResult.rows.map(item => ({
+        planned_slot_key: String(item.planned_slot_key), unit_path: String(item.unit_path),
+        planned_component_index: Number(item.planned_component_index),
+        learning_objective_refs: item.learning_objective_refs as string[],
+        required_assessment_kind: String(item.required_assessment_kind),
+        relevant_scope_ids: item.relevant_scope_ids as string[],
+        relevant_evidence_fact_ids: item.relevant_evidence_fact_ids as string[],
+        unresolved_reason: String(item.unresolved_reason), status: 'open' as const,
+      })).sort((left, right) => left.planned_slot_key.localeCompare(right.planned_slot_key));
+      const assemblyObligations = [...(assembly.assessment_obligations ?? [])]
+        .sort((left, right) => left.planned_slot_key.localeCompare(right.planned_slot_key));
+      if (obligationProjection.length !== (assembly.assessment_obligation_count ?? 0)
+        || orchestrationV2Hash(obligationProjection) !== orchestrationV2Hash(assemblyObligations)
+        || (assembly.assessment_obligation_hash !== undefined
+          && orchestrationV2Hash(assemblyObligations) !== assembly.assessment_obligation_hash)) {
+        fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
+      }
       const tasksResult = await tx.query(`SELECT id::text,ordinal,task_key,kind,chapter_key,node_id::text,
           contract_hash,input_context_hash,priority,max_attempts,input_tokens,embedding_tokens,max_output_tokens,
           provider_max_attempts,execution_budget_ms,status,result_hash,validation_contract
@@ -141,17 +174,18 @@ export function createOrchestrationV2FinalizationRepository(
       return finalizeOrchestrationV2Course({ source_snapshot_hash: lease.source_snapshot_hash,
         expected_manifest_hash: String(row.manifest_hash), admitted_fact_count: Number(row.admitted_fact_count),
         assembly_hash: assembly.assembly_hash, inventory_hash: String(inventoryPayload.inventory_hash), tasks,
-        chapter_receipts: receipts });
+        chapter_receipts: receipts, assessment_obligations: assessmentObligations });
     });
   }
 
   async function complete(lease: OrchestrationV2TaskLease,
     finalization: Readonly<OrchestrationV2CourseFinalization>): Promise<void> {
-    if (lease.kind !== 'finalize_course' || finalization.contract !== ORCHESTRATION_V2_COURSE_CONTRACT
+    if (lease.kind !== 'finalize_course'
+      || ![ORCHESTRATION_V2_COURSE_CONTRACT, ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT].includes(finalization.contract)
       || !HASH.test(finalization.course_artifact_hash)) fail('ORCHESTRATION_V2_FINALIZATION_STATE_INVALID');
-    await worker.succeed(lease, finalization.course_artifact_hash, ORCHESTRATION_V2_COURSE_CONTRACT, {}, {
+    await worker.succeed(lease, finalization.course_artifact_hash, finalization.contract, {}, {
       artifact_kind: 'course_receipt', artifact_hash: finalization.course_artifact_hash,
-      payload: { contract_version: 2, ...finalization }, validation_contract: ORCHESTRATION_V2_COURSE_CONTRACT,
+      payload: { contract_version: 2, ...finalization }, validation_contract: finalization.contract,
     }, async () => undefined, {
       beforeSuccess: async tx => {
         const run = await tx.query(`UPDATE lesson_author_workspace_v2_runs SET status='finalizing'
@@ -160,8 +194,39 @@ export function createOrchestrationV2FinalizationRepository(
         if (run.rows.length !== 1) fail('ORCHESTRATION_V2_FINALIZATION_WRITE_UNCONFIRMED');
       },
       afterSuccess: async tx => {
-        const completion = finalization.completion, receiptId = id();
+        const receiptId = id();
         if (!UUID.test(receiptId)) fail('ORCHESTRATION_V2_FINALIZATION_WRITE_UNCONFIRMED');
+        if (finalization.contract === ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT) {
+          const review = finalization.review;
+          const insertedReview = await tx.query(`INSERT INTO lesson_author_workspace_v2_review_receipts
+              (id,run_id,workspace_id,tenant_id,course_id,contract_version,manifest_hash,task_count,
+               admitted_fact_count,allocated_fact_count,covered_fact_count,duplicate_fact_count,
+               unresolved_fact_count,chapter_receipt_count,open_assessment_obligation_count,
+               assessment_obligation_set_hash,checks,receipt_hash)
+            VALUES($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,0,0,$11,$12,$13,$14::jsonb,$15)
+            RETURNING id::text`, [receiptId, lease.run_id, lease.workspace_id, lease.tenant_id,
+            lease.course_id, review.manifest_hash, review.task_count, review.admitted_fact_count,
+            review.allocated_fact_count, review.covered_fact_count, review.chapter_receipt_count,
+            review.open_assessment_obligation_count, review.assessment_obligation_set_hash,
+            JSON.stringify(review.checks), review.receipt_hash]);
+          const event = await tx.query(`INSERT INTO lesson_author_workspace_events
+              (workspace_id,tenant_id,course_id,event_kind,operation_id)
+            VALUES($1,$2,$3,'run_needs_action',$4) RETURNING sequence`,
+          [lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id]);
+          const run = await tx.query(`UPDATE lesson_author_workspace_v2_runs
+            SET status='needs_action',failure_code='ASSESSMENT_REVIEW_REQUIRED',finished_at=clock_timestamp()
+            WHERE id=$1 AND workspace_id=$2 AND tenant_id=$3 AND course_id=$4 AND status='finalizing'
+            RETURNING id::text`, [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id]);
+          const workspace = await tx.query(`UPDATE lesson_author_workspaces
+            SET status='needs_action',updated_at=clock_timestamp()
+            WHERE id=$1 AND tenant_id=$2 AND course_id=$3 AND status='drafting' AND blueprint_id IS NULL
+            RETURNING id::text`, [lease.workspace_id, lease.tenant_id, lease.course_id]);
+          if ([insertedReview, event, run, workspace].some(value => value.rows.length !== 1)) {
+            fail('ORCHESTRATION_V2_FINALIZATION_WRITE_UNCONFIRMED');
+          }
+          return;
+        }
+        const completion = finalization.completion;
         const inserted = await tx.query(`INSERT INTO lesson_author_workspace_v2_completion_receipts
             (id,run_id,workspace_id,tenant_id,course_id,contract_version,manifest_hash,task_count,
              admitted_fact_count,allocated_fact_count,covered_fact_count,duplicate_fact_count,

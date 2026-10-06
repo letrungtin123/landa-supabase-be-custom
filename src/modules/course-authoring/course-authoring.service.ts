@@ -33,6 +33,10 @@ import {
   stripLessonAuthorSourceRangeSuffix,
   type LessonAuthorIntentPlan,
 } from '../ai-chatbot/lesson-author-intent.logic.js';
+import {
+  beginCoursePublishCandidate,
+  finishCoursePublishCandidate,
+} from './course-publish-governance.repository.js';
 export {
   getLessonAuthorSortableItems,
   orderLessonAuthorComponents,
@@ -948,8 +952,23 @@ export async function renameBlock(blockId: string, displayName: string): Promise
   return updateBlock(blockId, { display_name: displayName });
 }
 
-export async function publishBlock(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
+export async function publishBlock(
+  blockId: string,
+  tenantId?: string | null,
+  governance?: { candidateId: string; actorId: string },
+): Promise<BlockInfo> {
   const block = await getBlockInfo(blockId, tenantId);
+  if (governance) {
+    if (!tenantId) throw new AppError('Tenant context is required', 403, 'COURSE_PUBLISH_FORBIDDEN');
+    const admission = await beginCoursePublishCandidate({
+      candidateId: governance.candidateId,
+      tenantId,
+      courseId: block.course_id,
+      targetBlockId: block.id,
+      actorId: governance.actorId,
+    });
+    if (admission.already_published) return block;
+  }
   const previousPublishedPaths = await collectPublishedStoragePathsForSubtree(blockId);
 
   const mediaQuizRows = await query<{ display_name: string; data: any }>(
@@ -1059,6 +1078,10 @@ export async function publishBlock(blockId: string, tenantId?: string | null): P
        )`,
     [blockId],
   );
+
+  if (governance) {
+    await finishCoursePublishCandidate(governance.candidateId, governance.actorId);
+  }
 
   // Propagate clean state upward: if no siblings/cousins remain dirty, clear ancestor flags
   await recalculateAncestorDraftFlags(blockId);

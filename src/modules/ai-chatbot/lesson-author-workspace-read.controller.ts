@@ -18,6 +18,7 @@ const ERRORS = {
   WORKSPACE_NODE_NOT_FOUND: [404, 'Không tìm thấy mục nội dung.', 'The content node was not found.'],
   WORKSPACE_REVISION_CONFLICT: [409, 'Nội dung đã thay đổi. Vui lòng tải lại mục này.', 'The content has changed. Please reload this node.'],
   WORKSPACE_EVENT_RESNAPSHOT_REQUIRED: [409, 'Cần tải lại trạng thái bản thảo.', 'Please reload the draft snapshot.'],
+  WORKSPACE_READ_CONTRACT_INVALID: [500, 'Dữ liệu bản thiết kế khoá học không hợp lệ.', 'The course design response is invalid.'],
   WORKSPACE_READ_UNAVAILABLE: [503, 'Chưa thể đọc bản thảo. Vui lòng thử lại sau.', 'The draft is temporarily unavailable. Please try again later.'],
 } as const;
 type ExternalCode = keyof typeof ERRORS;

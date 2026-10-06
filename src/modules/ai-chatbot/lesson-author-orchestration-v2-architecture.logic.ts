@@ -22,6 +22,18 @@ export interface OrchestrationV2ArchitectureChapter {
   lessons: OrchestrationV2LessonArchitecture[];
 }
 
+export interface OrchestrationV2ArchitectureAssessmentObligation {
+  planned_slot_key: string;
+  unit_path: string;
+  planned_component_index: number;
+  learning_objective_refs: string[];
+  required_assessment_kind: 'single_choice';
+  relevant_scope_ids: string[];
+  relevant_evidence_fact_ids: string[];
+  unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED';
+  status: 'open';
+}
+
 export interface OrchestrationV2ArchitectureAssembly {
   contract_version: 2;
   source_snapshot_hash: string;
@@ -35,6 +47,9 @@ export interface OrchestrationV2ArchitectureAssembly {
   lesson_count: number;
   unit_count: number;
   component_plan_count: number;
+  assessment_obligation_count?: number;
+  assessment_obligation_hash?: string;
+  assessment_obligations?: OrchestrationV2ArchitectureAssessmentObligation[];
   architecture: {
     locale: 'vi' | 'en';
     title: string;
@@ -86,6 +101,47 @@ export function readOrchestrationV2ArchitectureAssembly(value: unknown): Orchest
     'unit_count', 'component_plan_count'] as const) {
     const candidate = item[field];
     if (!Number.isSafeInteger(candidate) || Number(candidate) < 1) fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+  }
+  const obligationFields = [item.assessment_obligation_count, item.assessment_obligation_hash,
+    item.assessment_obligations];
+  const hasObligations = obligationFields.some(value => value !== undefined);
+  if (hasObligations) {
+    if (!Number.isSafeInteger(item.assessment_obligation_count) || Number(item.assessment_obligation_count) < 0
+      || Number(item.assessment_obligation_count) > MAX_COMPONENT_PLANS
+      || !HASH.test(String(item.assessment_obligation_hash)) || !Array.isArray(item.assessment_obligations)
+      || item.assessment_obligation_count !== item.assessment_obligations.length
+      || orchestrationV2Hash(item.assessment_obligations) !== item.assessment_obligation_hash) {
+      fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+    }
+    const obligations = item.assessment_obligations as unknown[];
+    const slotKeys = new Set<string>();
+    for (const valueObligation of obligations) {
+      const obligation = record(valueObligation);
+      const keys = obligation ? Object.keys(obligation).sort() : [];
+      const expectedKeys = ['learning_objective_refs', 'planned_component_index', 'planned_slot_key',
+        'relevant_evidence_fact_ids', 'relevant_scope_ids', 'required_assessment_kind', 'status',
+        'unit_path', 'unresolved_reason'].sort();
+      if (!obligation || keys.length !== expectedKeys.length
+        || keys.some((key, index) => key !== expectedKeys[index])
+        || typeof obligation.planned_slot_key !== 'string'
+        || !/^ao2_[a-f0-9]{32}$/.test(obligation.planned_slot_key)
+        || slotKeys.has(obligation.planned_slot_key)
+        || typeof obligation.unit_path !== 'string'
+        || !/^chapter_[1-9][0-9]*\.lesson_[1-9][0-9]*\.unit_[1-9][0-9]*$/.test(obligation.unit_path)
+        || !Number.isSafeInteger(obligation.planned_component_index)
+        || Number(obligation.planned_component_index) < 1 || Number(obligation.planned_component_index) > 3
+        || obligation.required_assessment_kind !== 'single_choice'
+        || obligation.unresolved_reason !== 'ASSESSMENT_SOURCE_CHECK_REQUIRED' || obligation.status !== 'open'
+        || !Array.isArray(obligation.learning_objective_refs) || !obligation.learning_objective_refs.length
+        || obligation.learning_objective_refs.some(ref => typeof ref !== 'string' || !/^lo_[1-9][0-9]*$/.test(ref))
+        || !Array.isArray(obligation.relevant_scope_ids) || !obligation.relevant_scope_ids.length
+        || obligation.relevant_scope_ids.some(scope => typeof scope !== 'string' || !scope.length || scope.length > 255)
+        || !Array.isArray(obligation.relevant_evidence_fact_ids) || !obligation.relevant_evidence_fact_ids.length
+        || obligation.relevant_evidence_fact_ids.some(fact => typeof fact !== 'string' || !fact.length || fact.length > 255)) {
+        fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+      }
+      slotKeys.add(String(obligation!.planned_slot_key));
+    }
   }
   const chapters = architecture.chapters as unknown[];
   if (item.duplicate_scope_count !== 0 || item.unresolved_scope_count !== 0
@@ -143,6 +199,7 @@ export function assembleOrchestrationV2Architecture(
   const shardHashes: string[] = [];
   const chapters: OrchestrationV2ArchitectureChapter[] = [];
   let lessonCount = 0, unitCount = 0, componentPlanCount = 0;
+  const assessmentObligations: OrchestrationV2ArchitectureAssessmentObligation[] = [];
   for (const expected of [...skeleton.chapters].sort((a, b) => a.order - b.order)) {
     const artifacts = [...(byChapter.get(expected.chapter_key) ?? [])]
       .sort((a, b) => a.shard.shard_index - b.shard.shard_index);
@@ -162,6 +219,26 @@ export function assembleOrchestrationV2Architecture(
     const unitScopes = lessons.flatMap(lesson => lesson.units.flatMap(unit => unit.source_scope_ids));
     if (unitScopes.length !== chapterScopes.length || new Set(unitScopes).size !== unitScopes.length
       || unitScopes.some(scope => !chapterScopes.includes(scope))) fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+    let chapterLessonOffset = 0;
+    for (const artifact of artifacts) {
+      for (const obligation of artifact.shard.assessment_obligations ?? []) {
+        const lesson = artifact.shard.lessons[obligation.lesson_index - 1];
+        const unit = lesson?.units[obligation.unit_index - 1];
+        if (!unit || obligation.relevant_scope_ids.some(scope => !unit.source_scope_ids.includes(scope))
+          || obligation.learning_objective_refs.some(ref => !unit.learning_objective_refs.includes(ref))) {
+          fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+        }
+        assessmentObligations.push({ planned_slot_key: obligation.planned_slot_key,
+          unit_path: `chapter_${chapters.length + 1}.lesson_${chapterLessonOffset + obligation.lesson_index}.unit_${obligation.unit_index}`,
+          planned_component_index: obligation.component_index,
+          learning_objective_refs: [...obligation.learning_objective_refs],
+          required_assessment_kind: obligation.required_assessment_kind,
+          relevant_scope_ids: [...obligation.relevant_scope_ids],
+          relevant_evidence_fact_ids: [...obligation.relevant_evidence_fact_ids],
+          unresolved_reason: obligation.unresolved_reason, status: obligation.status });
+      }
+      chapterLessonOffset += artifact.shard.lessons.length;
+    }
     allocatedScopes.push(...unitScopes);
     shardHashes.push(...artifacts.map(artifact => artifact.artifact_hash));
     lessonCount += lessons.length;
@@ -181,18 +258,24 @@ export function assembleOrchestrationV2Architecture(
   if (!Number.isSafeInteger(admittedFactCount) || admittedFactCount < 1 || admittedFactCount > 10_000_000) {
     fail('ORCHESTRATION_V2_ARCHITECTURE_TOO_LARGE');
   }
+  if (new Set(assessmentObligations.map(item => item.planned_slot_key)).size !== assessmentObligations.length) {
+    fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+  }
+  assessmentObligations.sort((left, right) => left.planned_slot_key.localeCompare(right.planned_slot_key));
   const architecture = {
     locale: skeleton.locale, title: skeleton.title, summary: skeleton.summary,
     target_audience: skeleton.target_audience, prerequisites: [...skeleton.prerequisites],
     learning_outcomes: [...skeleton.learning_outcomes], assessment_strategy: skeleton.assessment_strategy,
     assumptions: [...skeleton.assumptions], chapters,
   };
+  const assessmentObligationHash = orchestrationV2Hash(assessmentObligations);
   const base = { contract_version: 2 as const, source_snapshot_hash: skeleton.source_snapshot_hash,
     skeleton_hash: orchestrationV2Hash(skeleton), shard_hashes: shardHashes,
     admitted_fact_count: admittedFactCount, allocated_fact_count: admittedFactCount,
     duplicate_scope_count: 0 as const, unresolved_scope_count: 0 as const,
     chapter_count: chapters.length, lesson_count: lessonCount, unit_count: unitCount,
-    component_plan_count: componentPlanCount, architecture };
+    component_plan_count: componentPlanCount, assessment_obligation_count: assessmentObligations.length,
+    assessment_obligation_hash: assessmentObligationHash, assessment_obligations: assessmentObligations, architecture };
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_ASSEMBLY_BYTES) {
     fail('ORCHESTRATION_V2_ARCHITECTURE_TOO_LARGE');
   }

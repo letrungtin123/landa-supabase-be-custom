@@ -67,7 +67,8 @@ function lease(assemblyHash: string, sourceHash: string): OrchestrationV2TaskLea
     chapter_key: null, node_id: null, contract_hash: hash('contract-4'), input_context_hash: assemblyHash,
     source_snapshot_id: uuid(5), source_snapshot_hash: sourceHash, runtime_config_hash: hash('runtime'), model: 'test-model', locale: 'vi',
     max_output_tokens: 0, provider_max_attempts: 0, execution_budget_ms: 60_000,
-    lease_token: uuid(6), dispatch_epoch: 1, routing_shard: 7, ai_reservation_id: null };
+    lease_token: uuid(6), dispatch_epoch: 1, provider_replay_required: false,
+    routing_shard: 7, ai_reservation_id: null };
 }
 
 type Handler = (sql: string, params: unknown[]) => Array<Record<string, unknown>>;

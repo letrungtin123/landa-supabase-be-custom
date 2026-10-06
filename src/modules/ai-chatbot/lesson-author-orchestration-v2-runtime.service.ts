@@ -77,6 +77,7 @@ export function createOrchestrationV2WorkerRuntimeDependencies(
           embedding_model: runtime.settings.embeddingModel,
           embedding_dimensions: runtime.settings.embeddingDimensions,
           allowed_component_types: runtime.allowed_component_types,
+          unit_soft_deadline_ms: config.unit_soft_deadline_ms,
         }, normalizeLessonAuthorProposal, orchestrationV2QuotaAccounting.settleProvider,
         orchestrationV2QuotaAccounting.releaseUndispatched, signal);
       }

@@ -5,6 +5,7 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { prepareOrchestrationV2UnitGenerationContract, ORCHESTRATION_V2_UNIT_CONTRACT,
   type OrchestrationV2UnitGenerationContract, type OrchestrationV2UnitPublication } from './lesson-author-orchestration-v2-unit.logic.js';
+import type { OrchestrationV2AttemptTraceEvent } from './lesson-author-orchestration-v2-attempt.logic.js';
 import type {
   OrchestrationV2TaskLease,
   ReleaseUndispatched,
@@ -156,7 +157,8 @@ export function createOrchestrationV2UnitRepository(
 
   async function complete(lease: OrchestrationV2TaskLease, publication: Readonly<OrchestrationV2UnitPublication>,
     usage: unknown, settleProvider: SettleProvider, releaseUndispatched: ReleaseUndispatched,
-    usageSource: 'provider' | 'reserved_upper_bound' | 'deterministic_fallback'): Promise<void> {
+    usageSource: 'provider' | 'reserved_upper_bound' | 'deterministic_fallback',
+    attemptTrace: readonly OrchestrationV2AttemptTraceEvent[] = []): Promise<void> {
     if (lease.kind !== 'generate_unit' || !lease.node_id || !PATH.test(publication.unit_path)
       || publication.source_snapshot_hash !== lease.source_snapshot_hash
       || publication.validation_contract !== ORCHESTRATION_V2_UNIT_CONTRACT) {
@@ -164,7 +166,9 @@ export function createOrchestrationV2UnitRepository(
     }
     const artifactPayload = { contract_version: 2, unit_path: publication.unit_path,
       source_snapshot_hash: publication.source_snapshot_hash, contract_hash: publication.contract_hash,
-      nodes: publication.nodes, generated_unit: publication.generated_unit };
+      nodes: publication.nodes, generated_unit: publication.generated_unit,
+      content_origin: publication.content_origin, quality_state: publication.quality_state,
+      ...(publication.semantic_review ? { semantic_review: publication.semantic_review } : {}) };
     await worker.succeed(lease, publication.result_hash, ORCHESTRATION_V2_UNIT_CONTRACT, usage, {
       artifact_kind: 'unit_baseline', artifact_hash: publication.result_hash, payload: artifactPayload,
       validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
@@ -203,7 +207,7 @@ export function createOrchestrationV2UnitRepository(
       afterSuccess: async tx => queueChapterValidation(tx, lease),
     }, usageSource === 'deterministic_fallback'
       ? { mode: 'deterministic_fallback', releaseUndispatched }
-      : { mode: usageSource });
+      : { mode: usageSource }, attemptTrace);
   }
 
   async function queueChapterValidation(tx: GenerationJobSql, lease: OrchestrationV2TaskLease) {

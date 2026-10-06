@@ -24,6 +24,7 @@ const lease: OrchestrationV2TaskLease = {
   source_snapshot_id: uuid(7), source_snapshot_hash: orchestrationV2Hash('source'),
   runtime_config_hash: orchestrationV2Hash('runtime'), model: 'model', locale: 'vi', max_output_tokens: 65_536,
   provider_max_attempts: 2, execution_budget_ms: 600_000, lease_token: uuid(9), dispatch_epoch: 1,
+  provider_replay_required: false,
   routing_shard: 0, ai_reservation_id: uuid(8),
 };
 

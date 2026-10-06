@@ -8,6 +8,7 @@ import {
 } from './lesson-author-orchestration-v2.logic.js';
 
 export const ORCHESTRATION_V2_COURSE_CONTRACT = 'orchestration-course-finalization-v2';
+export const ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT = 'orchestration-course-review-required-v1';
 
 export interface OrchestrationV2FinalizationTask extends OrchestrationV2PersistedTask {
   status: 'running' | 'succeeded';
@@ -29,12 +30,48 @@ export interface OrchestrationV2CompletionReceiptV2 {
   receipt_hash: string;
 }
 
-export interface OrchestrationV2CourseFinalization {
+export interface OrchestrationV2AssessmentObligationEvidence {
+  planned_slot_key: string;
+  plan_revision_hash: string;
+  status: 'open' | 'resolved';
+  resolution_kind: 'valid_assessment' | 'approved_replan' | null;
+  resolution_evidence_hash: string | null;
+}
+
+export interface OrchestrationV2ReviewRequiredReceiptV1 {
+  contract: 'lesson-author-course-review-required-v1';
+  manifest_hash: string;
+  task_count: number;
+  admitted_fact_count: number;
+  allocated_fact_count: number;
+  covered_fact_count: number;
+  duplicate_fact_count: 0;
+  unresolved_fact_count: 0;
+  chapter_receipt_count: number;
+  open_assessment_obligation_count: number;
+  assessment_obligation_set_hash: string;
+  checks: { tasks: 'PASS'; allocation: 'PASS'; coverage: 'PASS'; duplicates: 'PASS';
+    chapters: 'PASS'; assessments: 'REVIEW_REQUIRED' };
+  receipt_hash: string;
+}
+
+export interface OrchestrationV2ReadyCourseFinalization {
   contract: typeof ORCHESTRATION_V2_COURSE_CONTRACT;
   completion: OrchestrationV2CompletionReceiptV2;
   chapter_receipt_hashes: string[];
   course_artifact_hash: string;
 }
+
+export interface OrchestrationV2ReviewCourseFinalization {
+  contract: typeof ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT;
+  review: OrchestrationV2ReviewRequiredReceiptV1;
+  chapter_receipt_hashes: string[];
+  course_artifact_hash: string;
+}
+
+export type OrchestrationV2CourseFinalization =
+  | OrchestrationV2ReadyCourseFinalization
+  | OrchestrationV2ReviewCourseFinalization;
 
 export class OrchestrationV2FinalizationError extends Error {
   constructor(readonly code:
@@ -53,7 +90,7 @@ const fail = (code: OrchestrationV2FinalizationError['code']): never => {
 };
 
 /** Seal final all-task/all-fact evidence without a provider call. */
-export function finalizeOrchestrationV2Course(input: {
+interface OrchestrationV2FinalizationInput {
   source_snapshot_hash: string;
   expected_manifest_hash: string;
   admitted_fact_count: number;
@@ -61,7 +98,18 @@ export function finalizeOrchestrationV2Course(input: {
   inventory_hash: string;
   tasks: readonly OrchestrationV2FinalizationTask[];
   chapter_receipts: readonly Readonly<OrchestrationV2ChapterReceipt>[];
-}): Readonly<OrchestrationV2CourseFinalization> {
+  assessment_obligations?: readonly Readonly<OrchestrationV2AssessmentObligationEvidence>[];
+}
+
+export function finalizeOrchestrationV2Course(
+  input: Omit<OrchestrationV2FinalizationInput, 'assessment_obligations'> & { assessment_obligations?: undefined },
+): Readonly<OrchestrationV2ReadyCourseFinalization>;
+export function finalizeOrchestrationV2Course(
+  input: OrchestrationV2FinalizationInput,
+): Readonly<OrchestrationV2CourseFinalization>;
+export function finalizeOrchestrationV2Course(
+  input: OrchestrationV2FinalizationInput,
+): Readonly<OrchestrationV2CourseFinalization> {
   if (!HASH.test(input.source_snapshot_hash) || !HASH.test(input.expected_manifest_hash)
     || !HASH.test(input.assembly_hash) || !HASH.test(input.inventory_hash)
     || !Number.isSafeInteger(input.admitted_fact_count) || input.admitted_fact_count < 1
@@ -110,6 +158,37 @@ export function finalizeOrchestrationV2Course(input: {
   }
   if (allocated !== input.admitted_fact_count || covered !== input.admitted_fact_count) {
     fail('ORCHESTRATION_V2_FINALIZATION_INCOMPLETE');
+  }
+  const obligations = [...(input.assessment_obligations ?? [])];
+  if (new Set(obligations.map(item => item.planned_slot_key)).size !== obligations.length
+    || obligations.some(item => !/^ao2_[a-f0-9]{32}$/.test(item.planned_slot_key)
+      || item.plan_revision_hash !== input.assembly_hash
+      || !['open', 'resolved'].includes(item.status)
+      || (item.status === 'open' && (item.resolution_kind !== null || item.resolution_evidence_hash !== null))
+      || (item.status === 'resolved' && (!item.resolution_kind
+        || !item.resolution_evidence_hash || !HASH.test(item.resolution_evidence_hash))))) {
+    fail('ORCHESTRATION_V2_FINALIZATION_INPUT_INVALID');
+  }
+  const openObligations = obligations.filter(item => item.status === 'open');
+  if (openObligations.length) {
+    const reviewBase = { contract: 'lesson-author-course-review-required-v1' as const,
+      manifest_hash: manifest.manifest_hash, task_count: manifest.tasks.length,
+      admitted_fact_count: input.admitted_fact_count, allocated_fact_count: allocated,
+      covered_fact_count: covered, duplicate_fact_count: 0 as const, unresolved_fact_count: 0 as const,
+      chapter_receipt_count: receiptHashes.length,
+      open_assessment_obligation_count: openObligations.length,
+      assessment_obligation_set_hash: orchestrationV2Hash(openObligations.map(item => ({
+        planned_slot_key: item.planned_slot_key, plan_revision_hash: item.plan_revision_hash,
+      }))),
+      checks: { tasks: 'PASS' as const, allocation: 'PASS' as const, coverage: 'PASS' as const,
+        duplicates: 'PASS' as const, chapters: 'PASS' as const, assessments: 'REVIEW_REQUIRED' as const } };
+    const review = { ...reviewBase, receipt_hash: orchestrationV2Hash(reviewBase) };
+    const artifactBase = { contract: ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT as typeof ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT,
+      review, chapter_receipt_hashes: receiptHashes };
+    if (Buffer.byteLength(JSON.stringify(artifactBase), 'utf8') > MAX_ARTIFACT_BYTES) {
+      fail('ORCHESTRATION_V2_FINALIZATION_TOO_LARGE');
+    }
+    return Object.freeze({ ...artifactBase, course_artifact_hash: orchestrationV2Hash(artifactBase) });
   }
   const completionBase = { contract: 'lesson-author-course-completion-v2' as const,
     manifest_hash: manifest.manifest_hash, task_count: manifest.tasks.length,

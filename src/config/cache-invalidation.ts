@@ -67,6 +67,14 @@ export async function invalidateTenantBadgeCaches(tenantId: string): Promise<voi
   await bumpCacheVersions([cacheVersions.tenantBadges(tenantId)]);
 }
 
+export async function invalidateTenantModuleCaches(tenantId: string): Promise<void> {
+  await bumpCacheVersions([cacheVersions.tenantModules(tenantId)]);
+}
+
+export async function invalidateTenantNewsCaches(tenantId: string): Promise<void> {
+  await bumpCacheVersions([cacheVersions.tenantNews(tenantId)]);
+}
+
 export async function invalidateTenantAiCaches(tenantId: string): Promise<void> {
   await bumpCacheVersions([cacheVersions.tenantAi(tenantId)]);
 }

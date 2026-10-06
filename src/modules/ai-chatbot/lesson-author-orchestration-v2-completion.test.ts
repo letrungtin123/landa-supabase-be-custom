@@ -18,7 +18,7 @@ import type { OrchestrationV2TaskLease } from './lesson-author-orchestration-v2-
 const id = (suffix: number) => `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`;
 const hash = (value: unknown) => orchestrationV2Hash(value);
 
-function chapterFixture() {
+function chapterFixture(qualityEnvelope?: { content_origin: string; quality_state: string }) {
   const runId = id(1), snapshotHash = hash('snapshot'), assemblyBase = {
     contract_version: 2 as const, source_snapshot_hash: snapshotHash, skeleton_hash: hash('skeleton'),
     shard_hashes: [hash('shard')], admitted_fact_count: 2, allocated_fact_count: 2,
@@ -43,7 +43,8 @@ function chapterFixture() {
     { path: `${unitPath}.component_1`, content: componentContent, content_hash: hash(componentContent) }];
   const generatedUnit = { title: 'Unit', source_fact_ids: ['fact-1', 'fact-2'], components: [{}] };
   const artifactBase = { validation_contract: 'orchestration-unit-baseline-v2', unit_path: unitPath,
-    source_snapshot_hash: snapshotHash, contract_hash: hash('unit-contract'), nodes, generated_unit: generatedUnit };
+    source_snapshot_hash: snapshotHash, contract_hash: hash('unit-contract'), nodes, generated_unit: generatedUnit,
+    ...(qualityEnvelope ?? {}) };
   const taskId = id(2), artifactHash = hash(artifactBase);
   const sourceFacts = [{ document_id: id(9), fact_key: 'fact-1', scope_key: 'scope-1', fact_text: 'One',
     fact_hash: hash('One'), source_ref: null, source_page: null, source_chunk: null, locator: {} },
@@ -54,7 +55,8 @@ function chapterFixture() {
     source_facts: sourceFacts, units: [{ task_id: taskId, task_key: 'content:chapter-1:unit:1',
       node_id: orchestrationV2DeterministicUuid(runId, `node:${unitPath}`), artifact_hash: artifactHash,
       payload: { contract_version: 2, unit_path: unitPath, source_snapshot_hash: snapshotHash,
-        contract_hash: artifactBase.contract_hash, nodes, generated_unit: generatedUnit } }],
+        contract_hash: artifactBase.contract_hash, nodes, generated_unit: generatedUnit,
+        ...(qualityEnvelope ?? {}) } }],
     baselines: nodes.map((node, index) => ({ canonical_path: node.path,
       kind: index === 0 ? 'unit' as const : 'component' as const, content_hash: node.content_hash,
       revision: 0, operation_id: taskId })) });
@@ -79,6 +81,21 @@ test('chapter validation rejects incomplete baseline evidence', () => {
     units: [{ task_id: fixture.taskId, task_key: 'content:chapter-1:unit:1',
       node_id: orchestrationV2DeterministicUuid(fixture.runId, 'node:chapter_1.lesson_1.unit_1'),
       artifact_hash: fixture.artifactHash, payload: {} }], baselines: [] }), /ORCHESTRATION_V2_CHAPTER/);
+});
+
+test('chapter validation uses the shared quality-state compatibility matrix', () => {
+  for (const quality of [
+    { content_origin: 'provider_validated', quality_state: 'validated' },
+    { content_origin: 'provider_validated', quality_state: 'review_required' },
+    { content_origin: 'structured_fallback', quality_state: 'validated' },
+    { content_origin: 'structured_fallback', quality_state: 'review_required' },
+    { content_origin: 'raw_source_fallback', quality_state: 'review_required' },
+  ]) assert.doesNotThrow(() => chapterFixture(quality), JSON.stringify(quality));
+
+  for (const quality of [
+    { content_origin: 'raw_source_fallback', quality_state: 'validated' },
+    { content_origin: 'structured_fallback', quality_state: 'unknown' },
+  ]) assert.throws(() => chapterFixture(quality), { code: 'ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID' });
 });
 
 function finalizationFixture(receipt: OrchestrationV2ChapterReceipt) {
@@ -147,6 +164,32 @@ test('course finalization requires every task and exact chapter/all-fact receipt
       chapter_receipt_hashes: result.chapter_receipt_hashes }));
 });
 
+test('course finalization preserves fact-complete draft but requires review while assessment obligation is open', () => {
+  const { receipt } = chapterFixture(), { tasks, manifest } = finalizationFixture(receipt);
+  const result = finalizeOrchestrationV2Course({ source_snapshot_hash: receipt.source_snapshot_hash,
+    expected_manifest_hash: manifest.manifest_hash, admitted_fact_count: 2,
+    assembly_hash: receipt.assembly_hash, inventory_hash: receipt.inventory_hash, tasks,
+    chapter_receipts: [receipt], assessment_obligations: [{ planned_slot_key: `ao2_${'a'.repeat(32)}`,
+      plan_revision_hash: receipt.assembly_hash, status: 'open', resolution_kind: null,
+      resolution_evidence_hash: null }] });
+  assert.equal(result.contract, 'orchestration-course-review-required-v1');
+  if (result.contract !== 'orchestration-course-review-required-v1') assert.fail('review outcome expected');
+  assert.equal(result.review.open_assessment_obligation_count, 1);
+  assert.deepEqual(result.review.checks, { tasks: 'PASS', allocation: 'PASS', coverage: 'PASS',
+    duplicates: 'PASS', chapters: 'PASS', assessments: 'REVIEW_REQUIRED' });
+});
+
+test('a resolved assessment obligation no longer blocks the ready completion contract', () => {
+  const { receipt } = chapterFixture(), { tasks, manifest } = finalizationFixture(receipt);
+  const result = finalizeOrchestrationV2Course({ source_snapshot_hash: receipt.source_snapshot_hash,
+    expected_manifest_hash: manifest.manifest_hash, admitted_fact_count: 2,
+    assembly_hash: receipt.assembly_hash, inventory_hash: receipt.inventory_hash, tasks,
+    chapter_receipts: [receipt], assessment_obligations: [{ planned_slot_key: `ao2_${'b'.repeat(32)}`,
+      plan_revision_hash: receipt.assembly_hash, status: 'resolved', resolution_kind: 'valid_assessment',
+      resolution_evidence_hash: hash('assessment-resolution') }] });
+  assert.equal(result.contract, 'orchestration-course-finalization-v2');
+});
+
 test('course finalization refuses a missing or unverified chapter receipt', () => {
   const { receipt } = chapterFixture(), { tasks, manifest } = finalizationFixture(receipt);
   assert.throws(() => finalizeOrchestrationV2Course({ source_snapshot_hash: receipt.source_snapshot_hash,
@@ -164,6 +207,7 @@ function lease(kind: 'validate_chapter' | 'finalize_course'): OrchestrationV2Tas
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: id(33),
     source_snapshot_hash: hash('snapshot'), runtime_config_hash: hash('runtime'), model: 'model', locale: 'vi', max_output_tokens: 0,
     provider_max_attempts: 0, execution_budget_ms: 1000, lease_token: id(34), dispatch_epoch: 1,
+    provider_replay_required: false,
     routing_shard: 2, ai_reservation_id: null };
 }
 
@@ -233,4 +277,35 @@ test('course completion composes task success, receipt, event and ready transiti
   assert.ok(queries[2]!.includes("'run_ready'"));
   assert.ok(queries[3]!.includes("status='ready'"));
   assert.ok(queries[4]!.includes("lesson_author_workspaces SET status='ready'"));
+});
+
+test('review-required completion commits a durable receipt and needs-action states without claiming ready', async () => {
+  const finalLease = lease('finalize_course'), receipt = chapterFixture().receipt;
+  const { tasks, manifest } = finalizationFixture(receipt);
+  const finalization = finalizeOrchestrationV2Course({ source_snapshot_hash: receipt.source_snapshot_hash,
+    expected_manifest_hash: manifest.manifest_hash, admitted_fact_count: 2,
+    assembly_hash: receipt.assembly_hash, inventory_hash: receipt.inventory_hash, tasks,
+    chapter_receipts: [receipt], assessment_obligations: [{ planned_slot_key: `ao2_${'c'.repeat(32)}`,
+      plan_revision_hash: receipt.assembly_hash, status: 'open', resolution_kind: null,
+      resolution_evidence_hash: null }] });
+  assert.equal(finalization.contract, 'orchestration-course-review-required-v1');
+  const queries: string[] = [];
+  const tx = { async query<T extends Record<string, unknown>>(sql: string) {
+    queries.push(sql); return { rows: [{ id: id(60), sequence: 1 }] as unknown as T[], rowCount: 1 };
+  } } as GenerationJobSql;
+  const db = { transaction: async <T>(work: (value: GenerationJobSql) => Promise<T>) => work(tx) } as GenerationJobDatabase;
+  let contract = '';
+  const worker = { succeed: async (...args: unknown[]) => {
+    contract = String(args[2]);
+    const hooks = args[6] as { beforeSuccess(tx: GenerationJobSql): Promise<void>;
+      afterSuccess(tx: GenerationJobSql): Promise<void> };
+    await hooks.beforeSuccess(tx); await hooks.afterSuccess(tx);
+  } };
+  await createOrchestrationV2FinalizationRepository(db, worker as never, () => id(60))
+    .complete(finalLease, finalization);
+  assert.equal(contract, 'orchestration-course-review-required-v1');
+  assert.ok(queries.some(sql => sql.includes('lesson_author_workspace_v2_review_receipts')));
+  assert.ok(queries.some(sql => sql.includes("'run_needs_action'")));
+  assert.ok(queries.some(sql => sql.includes("status='needs_action'")));
+  assert.ok(!queries.some(sql => sql.includes("'run_ready'")));
 });

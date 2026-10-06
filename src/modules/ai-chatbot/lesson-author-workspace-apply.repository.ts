@@ -207,8 +207,11 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
             run_id: text(w.v2_run_id), content_locale: workspaceLocale(w.content_locale), event_head: expectedWorkspaceRevision,
             source_snapshot_hash: w.source_snapshot_hash, runtime_config_hash: w.runtime_config_hash,
             architecture: v2Evidence!.architecture.payload, architecture_hash: text(v2Evidence!.architecture.artifact_hash),
-            inventory_hash: text((v2Evidence!.inventory.payload as Row)?.inventory_hash), nodes,
-            unit_artifacts: v2Evidence!.units, chapter_receipts: v2Evidence!.chapters, allowed, targets, request });
+             inventory_hash: text((v2Evidence!.inventory.payload as Row)?.inventory_hash), nodes,
+             unit_artifacts: v2Evidence!.units, chapter_receipts: v2Evidence!.chapters, allowed, targets, request });
+        const v2Compiled = isV2
+          ? compiled as ReturnType<typeof compileOrchestrationV2WorkspaceApply>
+          : null;
         // A retry with a fresh HTTP idempotency key is still a semantic replay
         // when the exact scope and effective revisions were already committed.
         // Return the durable receipt instead of colliding with its unique proof.
@@ -278,14 +281,34 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const receiptId = randomUUID();
         const afterHash = hash({ course_root_id: rootId, mapping_delta: delta });
         failureStage = 'persist_receipt';
-        await tx.query(`INSERT INTO lesson_author_workspace_apply_receipts(id,workspace_id,tenant_id,course_id,scope_node_id,actor_id,idempotency_key,request_hash,expected_workspace_revision,revision_set_hash,source_snapshot_hash,runtime_config_hash,target_before_hash,target_after_hash,validation_contract,revision_manifest,mapping_delta,checks)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'workspace-scoped-apply-1',$15::jsonb,$16::jsonb,$17::jsonb)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,target.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks)]);
+        let qualityReceiptId: string | null = null;
+        if (v2Compiled) {
+          qualityReceiptId = randomUUID();
+          const quality = v2Compiled.quality_receipt;
+          const qualityInserted = await tx.query(`INSERT INTO lesson_author_workspace_quality_receipts
+              (id,workspace_id,tenant_id,course_id,scope_node_id,revision_set_hash,subject_content_hash,
+               source_snapshot_hash,evidence_dependency_hash,canonicalization_version,evaluator_kind,evaluator_version,
+               origin_summary,checks,findings)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb)
+            RETURNING id`, [qualityReceiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,
+            v2Compiled.revision_set_hash,quality.subject_content_hash,w.source_snapshot_hash,
+            quality.evidence_dependency_hash,quality.canonicalization_version,quality.evaluator_kind,
+            quality.evaluator_version,JSON.stringify(quality.origin_summary),JSON.stringify(quality.checks),
+            JSON.stringify(quality.findings)]);
+          if (qualityInserted.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
+        }
+        await tx.query(`INSERT INTO lesson_author_workspace_apply_receipts(id,workspace_id,tenant_id,course_id,scope_node_id,actor_id,idempotency_key,request_hash,expected_workspace_revision,revision_set_hash,source_snapshot_hash,runtime_config_hash,target_before_hash,target_after_hash,quality_receipt_id,validation_contract,revision_manifest,mapping_delta,checks)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,target.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,qualityReceiptId,compiled.validation_contract,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks)]);
         failureStage = 'persist_mappings';
         for (const entry of delta) {
           failureStage = `persist_mapping:${String(entry.node_id)}`;
           await tx.query(`INSERT INTO lesson_author_workspace_apply_mappings(workspace_id,node_id,tenant_id,course_id,target_block_id,target_parent_id,target_block_type,target_sort_order,applied_revision,applied_content_hash,target_hash,receipt_id)
             SELECT $1,n.id,$2,$3,$4,b.parent_id,b.block_type,b.sort_order,$5,$6,$7,$8 FROM lesson_author_workspace_nodes n JOIN course_blocks b ON b.id=$4 AND b.course_id=$3 WHERE n.workspace_id=$1 AND n.id=$9
-            ON CONFLICT(workspace_id,node_id) DO UPDATE SET applied_revision=EXCLUDED.applied_revision,applied_content_hash=EXCLUDED.applied_content_hash,target_hash=EXCLUDED.target_hash,receipt_id=EXCLUDED.receipt_id`, [target.workspaceId,target.tenantId,target.courseId,entry.block_id,entry.revision,entry.content_hash,entry.after_hash,receiptId,entry.node_id]);
+            ON CONFLICT(workspace_id,node_id) DO UPDATE SET applied_revision=EXCLUDED.applied_revision,
+              applied_content_hash=EXCLUDED.applied_content_hash,target_hash=EXCLUDED.target_hash,
+              receipt_id=EXCLUDED.receipt_id,updated_at=clock_timestamp()`,
+          [target.workspaceId,target.tenantId,target.courseId,entry.block_id,entry.revision,
+            entry.content_hash,entry.after_hash,receiptId,entry.node_id]);
         }
         failureStage = 'persist_event';
         const event = await tx.query(`INSERT INTO lesson_author_workspace_events(workspace_id,tenant_id,course_id,event_kind,node_id,operation_id) VALUES($1,$2,$3,'scope_applied',$4,$5) RETURNING sequence`, [target.workspaceId,target.tenantId,target.courseId,target.nodeId,receiptId]);

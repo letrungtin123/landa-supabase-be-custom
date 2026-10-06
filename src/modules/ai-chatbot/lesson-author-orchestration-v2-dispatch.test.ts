@@ -72,9 +72,14 @@ test('claim uses tenant round-robin ranking, lane partition and skip-locked leas
   assert.deepEqual(await f.repo.claimNext(config), claim); f.done();
   const query = f.queries[0]!;
   assert.match(query.sql, /row_number\(\) OVER\(PARTITION BY tenant_id/);
-  assert.match(query.sql, /mod\(routing_shard,\$1::integer\)=\$2::integer/);
+  assert.match(query.sql, /mod\(pending\.routing_shard,\$1::integer\)=\$2::integer/);
   assert.match(query.sql, /FOR UPDATE OF o SKIP LOCKED LIMIT 1/);
   assert.match(query.sql, /status='publishing'/);
+  assert.match(query.sql, /pending\.attempt_count>=\$3::integer AND pending\.failure_code IS NULL/);
+  assert.match(query.sql, /task\.status='queued'/);
+  assert.match(query.sql, /task\.dispatch_epoch=pending\.dispatch_epoch/);
+  assert.match(query.sql, /run\.status IN \('planning','executing'\)/);
+  assert.match(query.sql, /CASE WHEN o\.attempt_count>=\$3::integer THEN 1 ELSE o\.attempt_count\+1 END/);
   assert.deepEqual(query.params.slice(0, 3), [16, 3, 5]);
   assert.deepEqual(f.events, ['BEGIN', 'COMMIT']);
 });
@@ -108,7 +113,7 @@ test('broker failure schedules durable retry and never marks published', async (
   assert.equal(result, 'retry_scheduled'); assert.deepEqual(events, ['claim', 'publish-failed', 'release']);
 });
 
-test('published CAS and recovery are lease/state fenced', async () => {
+test('published CAS and expired publishing recovery are lease/state fenced', async () => {
   const published = fixture([[{ locked: '' }], [{ id: claim.outbox_id }]]);
   await published.repo.markPublished(claim);
   assert.match(published.queries[0]!.sql, /pg_advisory_xact_lock/);
@@ -117,8 +122,11 @@ test('published CAS and recovery are lease/state fenced', async () => {
   assert.match(published.queries[1]!.sql, /lease_token=\$5::uuid AND lease_expires_at>clock_timestamp\(\)/);
   const recovered = fixture([[{ status: 'pending' }]]);
   assert.equal(await recovered.repo.recoverOne(config), 'pending');
-  assert.match(recovered.queries[0]!.sql, /status='published'/);
+  assert.match(recovered.queries[0]!.sql, /status='publishing' AND lease_expires_at<=clock_timestamp\(\)/);
+  assert.doesNotMatch(recovered.queries[0]!.sql, /status='published'/);
+  assert.doesNotMatch(recovered.queries[0]!.sql, /published_at/);
   assert.match(recovered.queries[0]!.sql, /FOR UPDATE SKIP LOCKED LIMIT 1/);
+  assert.deepEqual(recovered.queries[0]!.params, [16, 3, 5]);
 });
 
 test('dispatcher cycle is bounded, recovers first and stops on idle', async () => {

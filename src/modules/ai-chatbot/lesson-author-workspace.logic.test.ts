@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   WORKSPACE_CONTRACT_VERSION, WORKSPACE_CONTENT_MAX_BYTES, WorkspaceContractError,
   workspaceLocale, readWorkspaceContent, prepareWorkspaceEdit, prepareWorkspaceReset,
-  assertWorkspaceParent, assertWorkspaceApplyReady, workspaceEventCursor,
+  assertWorkspaceParent, assertWorkspaceApplyReady, assertWorkspaceDraftApplyReady, workspaceEventCursor,
   type WorkspaceNodeSnapshot, type WorkspaceApplyValidation, type WorkspaceContent,
 } from './lesson-author-workspace.logic.js';
 
@@ -120,6 +120,18 @@ test('Apply accepts four materializable hierarchy scopes and binds every revisio
       rejects('WORKSPACE_APPLY_VALIDATION_REQUIRED', () => assertWorkspaceApplyReady(input));
     }
   }
+});
+
+test('V2 draft Apply keeps deterministic gates strict without inventing semantic PASS', () => {
+  const base = ready();
+  const checks = { schema: 'PASS', security: 'PASS', evidence: 'PASS', pedagogy: 'NOT_RUN',
+    coverage: 'PASS', duplicates: 'PASS', dependencies: 'NOT_APPLICABLE', registry: 'PASS' } as const;
+  const validation = { ...base.validation, checks };
+  assert.doesNotThrow(() => assertWorkspaceDraftApplyReady({ ...base, kind: 'chapter', validation }));
+  rejects('WORKSPACE_APPLY_VALIDATION_REQUIRED', () => assertWorkspaceDraftApplyReady({ ...base, kind: 'chapter',
+    validation: { ...validation, checks: { ...checks, security: 'NOT_RUN' } } }));
+  rejects('WORKSPACE_APPLY_VALIDATION_REQUIRED', () => assertWorkspaceDraftApplyReady({ ...base, kind: 'chapter',
+    validation: { ...validation, checks: { ...checks, pedagogy: 'ERROR' } } }));
 });
 
 test('cursor replay is read-only; missing/expired/future sequence needs a fresh snapshot', () => {

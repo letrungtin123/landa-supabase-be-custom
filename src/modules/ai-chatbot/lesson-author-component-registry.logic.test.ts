@@ -377,7 +377,8 @@ test('HTML teaching links include primary diagram facts/objectives, not supporti
   assert.deepEqual(plans[0].learning_objective_refs, ['lo_1', 'lo_2']);
   assert.equal(plans[0].source_fact_ids?.length, 46);
   assert.deepEqual(plans[2].learning_block_ids, [blocks[1].id]);
-  assert.deepEqual(plans[2].source_fact_ids, diagramFacts);
+  assert.deepEqual(plans[2].source_fact_ids, []);
+  assert.deepEqual(plans[2].supporting_evidence_fact_ids, diagramFacts);
   assert.deepEqual(blocks, before);
 });
 

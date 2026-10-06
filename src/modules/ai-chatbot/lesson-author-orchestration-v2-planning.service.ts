@@ -45,6 +45,37 @@ export class OrchestrationV2PlanningServiceError extends Error {
   }
 }
 
+const TRANSIENT_TRANSACTION_CODES = new Set(['40P01', '40001']);
+
+function transactionCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+}
+
+async function waitForTransactionRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED');
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED')); };
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, delayMs);
+    timer.unref();
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Retry only a rolled-back PostgreSQL transaction boundary. Provider calls
+ * stay outside this helper, so a deadlock can never duplicate paid AI work. */
+async function withTransientTransactionRetry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!TRANSIENT_TRANSACTION_CODES.has(transactionCode(error) ?? '') || attempt >= 3) throw error;
+      await waitForTransactionRetry(attempt * 20, signal);
+    }
+  }
+}
+
 function common(
   lease: OrchestrationV2TaskLease,
   authority: Awaited<ReturnType<PlanningRepository['loadAuthority']>>,
@@ -87,7 +118,8 @@ export async function executeOrchestrationV2PlanningTask(
   if (lease.kind === 'validate_architecture') {
     const input = await planning.loadArchitectureInput(lease);
     const assembly = assembleOrchestrationV2Architecture(input.skeleton, input.scopes, input.shard_artifacts);
-    await planning.completeArchitecture(lease, assembly, runtime.budgets.inventory_publish_budget_ms);
+    await withTransientTransactionRetry(
+      () => planning.completeArchitecture(lease, assembly, runtime.budgets.inventory_publish_budget_ms), signal);
     return 'validate_architecture';
   }
   const authority = await planning.loadAuthority(lease);
@@ -131,7 +163,8 @@ export async function executeOrchestrationV2PlanningTask(
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
-    await planning.completeSkeleton(lease, response, scopes, runtime.budgets, settleProvider);
+    await withTransientTransactionRetry(
+      () => planning.completeSkeleton(lease, response, scopes, runtime.budgets, settleProvider), signal);
     return 'course_skeleton';
   }
   if (lease.kind === 'chapter_blueprint') {
@@ -151,7 +184,7 @@ export async function executeOrchestrationV2PlanningTask(
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
-    await planning.completeChapter(lease, response, settleProvider);
+    await withTransientTransactionRetry(() => planning.completeChapter(lease, response, settleProvider), signal);
     return 'chapter_blueprint';
   }
   throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_TASK_UNSUPPORTED');

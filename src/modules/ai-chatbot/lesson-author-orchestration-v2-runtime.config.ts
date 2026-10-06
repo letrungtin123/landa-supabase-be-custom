@@ -20,6 +20,7 @@ export interface OrchestrationV2RuntimeConfig {
   poll_interval_ms: number;
   dispatch_batch_size: number;
   recovery_batch_size: number;
+  unit_soft_deadline_ms: number;
   outbox: OrchestrationV2OutboxConfig;
   worker: OrchestrationV2WorkerLimits & { recovery_batch_size: number };
 }
@@ -53,6 +54,7 @@ export function readOrchestrationV2RuntimeConfig(): Readonly<OrchestrationV2Runt
     poll_interval_ms: env.LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS,
     dispatch_batch_size: env.LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE,
     recovery_batch_size: env.LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE,
+    unit_soft_deadline_ms: env.LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS,
     outbox,
     worker: Object.freeze({
       ...workerLimits,

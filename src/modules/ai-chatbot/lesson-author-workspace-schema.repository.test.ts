@@ -8,6 +8,7 @@ import {
   WORKSPACE_FOUNDATION_GUARDS,
   WORKSPACE_EXECUTION_GUARDS,
   WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES,
+  WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS,
 } from './lesson-author-workspace-schema.repository.js';
 import { ORCHESTRATION_V2_GUARDS, ORCHESTRATION_V2_TABLES } from './lesson-author-orchestration-v2-schema.repository.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
@@ -77,6 +78,27 @@ test('trigger count alone is insufficient: timing, function identity, deferred s
   }
   const f = fixture(); f.state.triggers.push({ ...f.state.triggers[0], name: 'unexpected_mutator' });
   await assert.rejects(f.run, /WORKSPACE_SCHEMA_TRIGGER_DRIFT/);
+});
+test('workspace verifier accepts only the complete exact CP5 publish evidence fence set', async () => {
+  const accepted = fixture();
+  accepted.state.triggers.push(...WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS.map(e => ({
+    ...e, function_schema: 'public', deferrable: false, enabled: 'O', old_table: null, new_table: null,
+  })));
+  await assert.doesNotReject(accepted.run);
+
+  const partial = fixture();
+  partial.state.triggers.push({
+    ...WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS[0], function_schema: 'public', deferrable: false,
+    enabled: 'O', old_table: null, new_table: null,
+  });
+  await assert.rejects(partial.run, /WORKSPACE_SCHEMA_TRIGGER_DRIFT/);
+
+  const drifted = fixture();
+  drifted.state.triggers.push(...WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS.map(e => ({
+    ...e, function_schema: 'public', deferrable: false, enabled: 'O', old_table: null, new_table: null,
+  })));
+  drifted.state.triggers.at(-1)!.fn = 'unexpected_publish_fence';
+  await assert.rejects(drifted.run, /WORKSPACE_SCHEMA_TRIGGER_DRIFT/);
 });
 test('the approved workspace event notification bridge is accepted only with its exact trigger contract', async () => {
   const accepted = fixture();

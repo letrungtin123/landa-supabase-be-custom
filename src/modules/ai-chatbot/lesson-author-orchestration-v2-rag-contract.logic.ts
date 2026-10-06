@@ -115,6 +115,19 @@ export interface OrchestrationV2LessonArchitecture {
   units: OrchestrationV2UnitArchitecture[];
 }
 
+export interface OrchestrationV2AssessmentObligation {
+  planned_slot_key: string;
+  lesson_index: number;
+  unit_index: number;
+  component_index: number;
+  learning_objective_refs: string[];
+  required_assessment_kind: 'single_choice';
+  relevant_scope_ids: string[];
+  relevant_evidence_fact_ids: string[];
+  unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED';
+  status: 'open';
+}
+
 export interface OrchestrationV2ChapterShard {
   contract_version: 2;
   source_snapshot_hash: string;
@@ -126,6 +139,7 @@ export interface OrchestrationV2ChapterShard {
   title: string;
   objective: string;
   lessons: OrchestrationV2LessonArchitecture[];
+  assessment_obligations?: OrchestrationV2AssessmentObligation[];
 }
 
 export interface OrchestrationV2SourceCursor {
@@ -156,12 +170,20 @@ export interface OrchestrationV2CourseSkeletonResponse {
   contract_version: 2;
   skeleton: OrchestrationV2CourseSkeleton;
   usage?: OrchestrationV2RagUsage;
+  usage_complete?: boolean;
+  usage_source?: 'provider' | 'reserved_upper_bound';
+  content_origin?: 'provider_validated' | 'structured_fallback';
+  quality_state?: 'validated' | 'review_required';
 }
 
 export interface OrchestrationV2ChapterShardResponse {
   contract_version: 2;
   shard: OrchestrationV2ChapterShard;
   usage?: OrchestrationV2RagUsage;
+  usage_complete?: boolean;
+  usage_source?: 'provider' | 'reserved_upper_bound';
+  content_origin?: 'provider_validated' | 'structured_fallback';
+  quality_state?: 'validated' | 'review_required';
 }
 
 export class OrchestrationV2RagContractError extends Error {
@@ -214,6 +236,31 @@ const usage = (value: unknown): OrchestrationV2RagUsage | undefined => {
   }
   return output;
 };
+
+function planningQualityEnvelope(value: Record<string, unknown>): Readonly<{
+  usage_complete: boolean;
+  usage_source: 'provider' | 'reserved_upper_bound';
+  content_origin: 'provider_validated' | 'structured_fallback';
+  quality_state: 'validated' | 'review_required';
+}> {
+  const present = ['usage_complete', 'usage_source', 'content_origin', 'quality_state']
+    .filter(key => value[key] !== undefined).length;
+  // Artifacts produced before the quality envelope rollout remain readable as
+  // provider-authored data. New responses must provide the complete envelope;
+  // partial metadata could under-settle provider accounting.
+  if (present === 0) return { usage_complete: true as const, usage_source: 'provider' as const,
+    content_origin: 'provider_validated' as const, quality_state: 'validated' as const };
+  if (present !== 4 || typeof value.usage_complete !== 'boolean'
+    || !['provider', 'reserved_upper_bound'].includes(String(value.usage_source))
+    || !['provider_validated', 'structured_fallback'].includes(String(value.content_origin))
+    || !['validated', 'review_required'].includes(String(value.quality_state))
+    || (value.usage_source === 'provider') !== value.usage_complete
+    || (value.content_origin === 'provider_validated') !== (value.quality_state === 'validated')) fail();
+  return { usage_complete: value.usage_complete as boolean,
+    usage_source: value.usage_source as 'provider' | 'reserved_upper_bound',
+    content_origin: value.content_origin as 'provider_validated' | 'structured_fallback',
+    quality_state: value.quality_state as 'validated' | 'review_required' };
+}
 
 function identifiers(value: unknown, maximum: number): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > maximum
@@ -314,6 +361,25 @@ function lessonArchitecture(value: unknown): OrchestrationV2LessonArchitecture {
     learning_activities: item.learning_activities as string[], assessment: item.assessment as string, units };
 }
 
+function assessmentObligation(value: unknown): OrchestrationV2AssessmentObligation {
+  const item = requireRecord(value);
+  if (!exactKeys(item, ['planned_slot_key', 'lesson_index', 'unit_index', 'component_index',
+    'learning_objective_refs', 'required_assessment_kind', 'relevant_scope_ids',
+    'relevant_evidence_fact_ids', 'unresolved_reason', 'status'])
+    || typeof item.planned_slot_key !== 'string' || !/^ao2_[a-f0-9]{32}$/.test(item.planned_slot_key)
+    || !integer(item.lesson_index, 1, 4_096) || !integer(item.unit_index, 1, 4_096)
+    || !integer(item.component_index, 1, 3) || item.required_assessment_kind !== 'single_choice'
+    || item.unresolved_reason !== 'ASSESSMENT_SOURCE_CHECK_REQUIRED' || item.status !== 'open') fail();
+  const objectiveRefs = identifiers(item.learning_objective_refs, 24);
+  if (objectiveRefs.some(reference => !OBJECTIVE_REF.test(reference))) fail();
+  return { planned_slot_key: item.planned_slot_key as string, lesson_index: item.lesson_index as number,
+    unit_index: item.unit_index as number, component_index: item.component_index as number,
+    learning_objective_refs: objectiveRefs, required_assessment_kind: 'single_choice',
+    relevant_scope_ids: identifiers(item.relevant_scope_ids, 4_096),
+    relevant_evidence_fact_ids: identifiers(item.relevant_evidence_fact_ids, 32_768),
+    unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED', status: 'open' };
+}
+
 function sourceScope(value: unknown): OrchestrationV2SourceScope {
   const item = requireRecord(value);
   if (!text(item.scope_key, 255) || !text(item.title, 500)
@@ -406,7 +472,8 @@ export function readOrchestrationV2CourseSkeletonResponse(
   if (safeItem.contract_version !== 2) fail();
   const skeleton = courseSkeleton(safeItem.skeleton);
   if (skeleton.source_snapshot_hash !== expectedSnapshotHash) fail(true);
-  return { contract_version: 2, skeleton, usage: usage(safeItem.usage) };
+  return { contract_version: 2, skeleton, usage: usage(safeItem.usage),
+    ...planningQualityEnvelope(safeItem) };
 }
 
 export function readOrchestrationV2ChapterShardResponse(
@@ -419,6 +486,9 @@ export function readOrchestrationV2ChapterShardResponse(
     || !Array.isArray(shard.source_scope_ids) || !Array.isArray(shard.lessons) || shard.lessons.length < 1
     || shard.lessons.length > 512) fail();
   const lessons = (shard.lessons as unknown[]).map(lessonArchitecture);
+  const rawObligations = shard.assessment_obligations === undefined ? [] : shard.assessment_obligations;
+  if (!Array.isArray(rawObligations) || rawObligations.length > 12_288) fail();
+  const obligations = (rawObligations as unknown[]).map(assessmentObligation);
   if (lessons.reduce((total, lesson) => total + lesson.units.length, 0) > 4_096) fail();
   if (!expectedChapter || shard.source_snapshot_hash !== skeleton.source_snapshot_hash
     || shard.chapter_key !== plan.chapter_key || shard.order !== plan.order || shard.shard_index !== plan.shard_index
@@ -429,6 +499,14 @@ export function readOrchestrationV2ChapterShardResponse(
   if (allocatedScopes.length !== new Set(allocatedScopes).size
     || allocatedScopes.length !== plan.source_scope_ids.length
     || allocatedScopes.some(scope => !plan.source_scope_ids.includes(scope))) fail(true);
-  return { contract_version: 2, shard: { ...(shard as unknown as OrchestrationV2ChapterShard), lessons },
-    usage: usage(item.usage) };
+  if (new Set(obligations.map(item => item.planned_slot_key)).size !== obligations.length
+    || obligations.some(item => {
+      const lesson = lessons[item.lesson_index - 1];
+      const unit = lesson?.units[item.unit_index - 1];
+      return !unit || item.learning_objective_refs.some(ref => !unit.learning_objective_refs.includes(ref))
+        || item.relevant_scope_ids.some(scope => !unit.source_scope_ids.includes(scope));
+    })) fail();
+  return { contract_version: 2, shard: { ...(shard as unknown as OrchestrationV2ChapterShard), lessons,
+    assessment_obligations: obligations },
+    usage: usage(item.usage), ...planningQualityEnvelope(item) };
 }

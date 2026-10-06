@@ -28,6 +28,14 @@ export interface OrchestrationV2DeliveryResult {
   error?: unknown;
 }
 
+function capacityJitterMs(envelope: Readonly<OrchestrationV2DispatchEnvelope>): number {
+  // Stable per-message jitter spreads a saturated batch without making tests
+  // or incident replay depend on process-local randomness.
+  let hash = 0;
+  for (const character of envelope.outbox_id) hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+  return hash % 5_000;
+}
+
 export interface OrchestrationV2WorkerRuntimeDependencies {
   repository: WorkerRepository;
   limits: OrchestrationV2WorkerLimits;
@@ -134,6 +142,26 @@ function runLeaseHeartbeat(
   };
 }
 
+async function wakeCapacitySafely(
+  deps: Pick<OrchestrationV2WorkerRuntimeDependencies, 'repository' | 'limits' | 'report'>,
+  source: 'task_completion' | 'recovery_sweep',
+): Promise<boolean> {
+  try {
+    const awakened = await deps.repository.wakeOneCapacityDeferred(deps.limits);
+    if (!awakened) return false;
+    reportSafely(deps.report, { event: 'worker_capacity_deferral_awakened', source,
+      outbox_id: awakened.outbox_id, run_id: awakened.run_id, task_id: awakened.task_id,
+      tenant_id: awakened.tenant_id, workspace_id: awakened.workspace_id, task_kind: awakened.task_kind });
+    return true;
+  } catch (error) {
+    // Capacity wake-up only removes idle delay. It is never allowed to change
+    // the authoritative success/failure decision of the task that freed a slot.
+    reportSafely(deps.report, { event: 'worker_capacity_wake_failed', source,
+      error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
 async function executeClaimed(
   lease: OrchestrationV2TaskLease,
   deps: OrchestrationV2WorkerRuntimeDependencies,
@@ -147,11 +175,12 @@ async function executeClaimed(
     lease.execution_budget_ms);
   deadline.unref();
   const stopHeartbeat = runLeaseHeartbeat(lease, deps.repository, deps.limits, controller, deps.report);
+  let disposition: 'claimed_succeeded' | 'claimed_failed';
   try {
     await deps.execute(lease, controller.signal);
     reportSafely(deps.report, { event: 'worker_task_succeeded', run_id: lease.run_id, task_id: lease.task_id,
       task_kind: lease.kind });
-    return 'claimed_succeeded';
+    disposition = 'claimed_succeeded';
   } catch (error) {
     const rejection = definitiveProviderRejection(error);
     if (rejection) {
@@ -188,12 +217,14 @@ async function executeClaimed(
       workspace_id: lease.workspace_id, task_id: lease.task_id, task_kind: lease.kind,
       chapter_key: lease.chapter_key, dispatch_epoch: lease.dispatch_epoch,
       failure_code: executionFailureCode(error), ...safeExecutionMetadata(error) });
-    return 'claimed_failed';
+    disposition = 'claimed_failed';
   } finally {
     clearTimeout(deadline);
     shutdownSignal?.removeEventListener('abort', abortFromShutdown);
     await stopHeartbeat();
   }
+  await wakeCapacitySafely(deps, 'task_completion');
+  return disposition;
 }
 
 /**
@@ -225,9 +256,31 @@ export async function handleOrchestrationV2Delivery(
   }
   if (claim.disposition !== 'claimed') {
     reportSafely(deps.report, { event: 'worker_delivery_resolved', outbox_id: envelope.outbox_id,
-      run_id: envelope.run_id, task_id: envelope.task_id, disposition: claim.disposition });
-    return Object.freeze({ settlement: claim.disposition === 'deferred' ? 'requeue' : 'ack',
-      disposition: claim.disposition, envelope });
+      run_id: envelope.run_id, task_id: envelope.task_id, disposition: claim.disposition,
+      ...(claim.disposition === 'deferred' ? { defer_reason: claim.reason } : {}) });
+    if (claim.disposition === 'deferred') {
+      if (claim.reason === 'publication_race') {
+        return Object.freeze({ settlement: 'requeue', disposition: 'deferred', envelope });
+      }
+      const jitterMs = capacityJitterMs(envelope);
+      try {
+        const deferred = await deps.repository.deferPublished(envelope, jitterMs);
+        if (!deferred) {
+          const error = new Error('ORCHESTRATION_V2_DEFER_UNCONFIRMED');
+          return Object.freeze({ settlement: 'requeue', disposition: 'claim_unconfirmed', envelope, error });
+        }
+        reportSafely(deps.report, { event: 'worker_delivery_deferred_durably', outbox_id: envelope.outbox_id,
+          run_id: envelope.run_id, task_id: envelope.task_id, delay_ms: deferred.delay_ms,
+          deferral_count: deferred.deferral_count, defer_reason: claim.reason });
+        return Object.freeze({ settlement: 'ack', disposition: 'deferred', envelope });
+      } catch (error) {
+        reportSafely(deps.report, { event: 'worker_delivery_defer_unconfirmed', outbox_id: envelope.outbox_id,
+          run_id: envelope.run_id, task_id: envelope.task_id,
+          error: error instanceof Error ? error.message : String(error) });
+        return Object.freeze({ settlement: 'requeue', disposition: 'claim_unconfirmed', envelope, error });
+      }
+    }
+    return Object.freeze({ settlement: 'ack', disposition: claim.disposition, envelope });
   }
   const disposition = await executeClaimed(claim.lease, deps, shutdownSignal);
   return Object.freeze({ settlement: 'ack', disposition, envelope });
@@ -236,19 +289,23 @@ export async function handleOrchestrationV2Delivery(
 /** One bounded recovery tick. No polling or sleeping occurs in this function. */
 export async function runOrchestrationV2WorkerRecoveryCycle(
   deps: Pick<OrchestrationV2WorkerRuntimeDependencies,
-    'repository' | 'releaseUndispatched' | 'holdUnknown'> & { reconcileUnknown?: ReconcileUnknown },
+    'repository' | 'limits' | 'releaseUndispatched' | 'holdUnknown' | 'report'>
+    & { reconcileUnknown?: ReconcileUnknown },
   batchSize: number,
-): Promise<Readonly<Record<'requeued' | 'failed' | 'outcome_unknown' | 'reconciled', number>>> {
+): Promise<Readonly<Record<'requeued' | 'failed' | 'outcome_unknown' | 'reconciled' | 'capacity_woken', number>>> {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 500) {
     throw new Error('ORCHESTRATION_V2_WORKER_RECOVERY_CONFIG_INVALID');
   }
-  const result = { requeued: 0, failed: 0, outcome_unknown: 0, reconciled: 0 };
+  const result = { requeued: 0, failed: 0, outcome_unknown: 0, reconciled: 0, capacity_woken: 0 };
   for (let index = 0; index < batchSize; index += 1) {
     const state = await deps.repository.recoverOne(
       deps.releaseUndispatched, deps.holdUnknown, deps.reconcileUnknown,
     );
     if (!state) break;
     result[state] += 1;
+  }
+  if (await wakeCapacitySafely(deps, 'recovery_sweep')) {
+    result.capacity_woken = 1;
   }
   return Object.freeze(result);
 }

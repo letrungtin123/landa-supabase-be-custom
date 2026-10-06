@@ -36,8 +36,17 @@ import {
   type CourseOutlineTransferOperation,
 } from './course-outline-transfer.service.js';
 import { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
+import { env } from '../../config/env.js';
+import {
+  CoursePublishGovernanceError,
+  getCoursePublishPolicyForBlock,
+  mapCoursePublishGovernanceError,
+} from './course-publish-governance.repository.js';
+import { ensureCoursePublishGovernanceSchema } from './course-publish-governance-schema.repository.js';
 
 export { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function componentAuditContext(block: {
   course_id: string;
@@ -665,7 +674,7 @@ export async function createBlock(req: Request, res: Response) {
 /** PATCH /api/course-authoring/blocks/:blockId */
 export async function updateBlock(req: Request, res: Response) {
   try {
-    const { display_name, data, metadata, publish, children } = req.body;
+    const { display_name, data, metadata, publish, children, candidate_id } = req.body;
 
     // Handle publish action
     if (publish === 'make_public') {
@@ -673,7 +682,25 @@ export async function updateBlock(req: Request, res: Response) {
       const result = await runAuditedTransaction(
         async () => {
           before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
-          return svc.publishBlock(req.params.blockId, req.user!.tenantId);
+          const tenantId = req.user!.tenantId;
+          if (env.COURSE_PUBLISH_GOVERNANCE_ENABLED) await ensureCoursePublishGovernanceSchema();
+          const enrolledPolicy = env.COURSE_PUBLISH_GOVERNANCE_ENABLED && tenantId
+            ? await getCoursePublishPolicyForBlock(req.params.blockId, tenantId)
+            : null;
+          if (enrolledPolicy) {
+            if (typeof candidate_id !== 'string' || !UUID.test(candidate_id)) {
+              throw new CoursePublishGovernanceError(
+                'COURSE_PUBLISH_CANDIDATE_REQUIRED',
+                409,
+                'Cần tạo hoặc chọn bản duyệt trước khi xuất bản.',
+              );
+            }
+            return svc.publishBlock(req.params.blockId, tenantId, {
+              candidateId: candidate_id,
+              actorId: req.user!.id,
+            });
+          }
+          return svc.publishBlock(req.params.blockId, tenantId);
         },
         (updated) => createTransactionalAuditEntry(
           req,
@@ -795,6 +822,11 @@ export async function updateBlock(req: Request, res: Response) {
     );
     sendSuccess(res, result);
   } catch (err: any) {
+    if (err instanceof CoursePublishGovernanceError || String(err?.message ?? '').includes('COURSE_PUBLISH_')) {
+      const mapped = mapCoursePublishGovernanceError(err);
+      res.status(mapped.statusCode).json({ success: false, code: mapped.code, message: mapped.message });
+      return;
+    }
     const statusCode = err instanceof AppError ? err.statusCode : 500;
     sendError(res, err?.message || 'Không thể cập nhật nội dung khóa học.', statusCode);
   }

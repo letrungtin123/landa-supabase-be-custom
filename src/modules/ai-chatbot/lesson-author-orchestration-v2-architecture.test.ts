@@ -37,6 +37,22 @@ test('assembles a deterministic complete architecture with exact fact allocation
   assert.equal(first.assembly_hash, second.assembly_hash);
 });
 
+test('assembles assessment obligations as separate stable authoring inventory', () => {
+  const firstShard = shard(0, 'scope-1');
+  firstShard.assessment_obligations = [{ planned_slot_key: `ao2_${'a'.repeat(32)}`,
+    lesson_index: 1, unit_index: 1, component_index: 2, learning_objective_refs: ['lo_1'],
+    required_assessment_kind: 'single_choice', relevant_scope_ids: ['scope-1'],
+    relevant_evidence_fact_ids: ['fact-1'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+    status: 'open' }];
+  const result = assembleOrchestrationV2Architecture(skeleton, scopes,
+    [{ artifact_hash: hash('shard-1'), shard: firstShard },
+      { artifact_hash: hash('shard-2'), shard: shard(1, 'scope-2') }]);
+  assert.equal(result.assessment_obligation_count, 1);
+  assert.equal(result.assessment_obligations?.[0]?.unit_path, 'chapter_1.lesson_1.unit_1');
+  assert.equal(result.assessment_obligation_hash, orchestrationV2Hash(result.assessment_obligations));
+  assert.equal(result.component_plan_count, 2);
+});
+
 test('rejects missing, duplicate, reordered, or out-of-scope allocations', () => {
   const good = [{ artifact_hash: hash('shard-1'), shard: shard(0, 'scope-1') },
     { artifact_hash: hash('shard-2'), shard: shard(1, 'scope-2') }];

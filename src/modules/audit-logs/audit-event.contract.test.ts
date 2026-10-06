@@ -9,6 +9,7 @@ test('tenant operations remain visible to authorized tenant roles', () => {
   assert.equal(getAuditEventViewerScope('course.component.updated'), 'tenant');
   assert.equal(getAuditEventViewerScope('group.team_member.added'), 'tenant');
   assert.equal(getAuditEventViewerScope('badge.rule.updated'), 'tenant');
+  assert.equal(getAuditEventViewerScope('news.archived'), 'tenant');
 });
 
 test('superadmin-only feature events fail closed for tenant viewers', () => {

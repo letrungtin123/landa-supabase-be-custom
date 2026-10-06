@@ -23,10 +23,13 @@ const KINDS = ['course', 'chapter', 'lesson', 'unit', 'component', 'media_brief'
 const CONTENT_STATES = ['planned', 'generating', 'content_ready', 'needs_action'] as const;
 const COMPONENT_TYPES = ['html', 'problem', 'la_faq', 'la_sortable', 'la_crossword', 'la_diagram'] as const;
 const MEDIA_TYPES = ['video', 'static_infographic'] as const;
+const CONTENT_ORIGINS = ['provider_validated', 'structured_fallback', 'raw_source_fallback'] as const;
+const QUALITY_STATES = ['validated', 'review_required'] as const;
+const ARCHITECTURE_PREVIEW_STATES = ['planned', 'generating', 'ready'] as const;
 const FAILURE_STAGES = ['source_snapshot', 'course_skeleton', 'chapter_blueprint', 'validate_architecture',
   'publish_inventory', 'generate_unit', 'validate_chapter', 'finalize_course'] as const;
 export const WORKSPACE_GRAPH_PAGE_SIZE = 100;
-const EVENTS = ['workspace_created', 'architecture_started', 'overview_ready', 'structure_ready',
+const EVENTS = ['workspace_created', 'architecture_started', 'architecture_progressed', 'overview_ready', 'structure_ready',
   'unit_started', 'unit_ready', 'node_revision_saved', 'node_reset', 'scope_apply_started',
   'scope_applied', 'run_needs_action', 'run_ready', 'run_failed', 'run_canceled'] as const;
 
@@ -86,6 +89,29 @@ function workspace(row: Record<string, unknown>) {
     updated_at: timestamp(row.updated_at),
   };
 }
+function architecturePreview(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const preview = record(value);
+  const chapters = Array.isArray(preview.chapters) ? preview.chapters.map(value => {
+    const chapter = record(value);
+    const order = integer(chapter.order);
+    const chapterKey = chapter.chapter_key;
+    const title = chapter.title;
+    if (typeof chapterKey !== 'string' || !/^[a-z0-9][a-z0-9_.:-]{0,159}$/.test(chapterKey)
+      || typeof title !== 'string' || !title.trim() || title.length > 500) invalid();
+    return { chapter_key: chapterKey, order, title,
+      state: enumeration(chapter.state, ARCHITECTURE_PREVIEW_STATES) };
+  }) : invalid();
+  const total = integer(preview.total_chapters), completed = integer(preview.completed_chapters);
+  if (typeof preview.run_id !== 'string' || !UUID.test(preview.run_id)
+    || typeof preview.course_title !== 'string' || !preview.course_title.trim() || preview.course_title.length > 500
+    || total < 1 || total > 512 || total !== chapters.length || completed > total
+    || completed !== chapters.filter(chapter => chapter.state === 'ready').length
+    || new Set(chapters.map(chapter => chapter.chapter_key)).size !== chapters.length
+    || chapters.some((chapter, index) => chapter.order !== index)) invalid();
+  return { run_id: preview.run_id, course_title: preview.course_title,
+    total_chapters: total, completed_chapters: completed, chapters };
+}
 
 /** Connection-free read boundary: no worker, write or provider on import.
  * canRead MUST reuse current course RBAC/editor access, on EVERY read. The
@@ -130,6 +156,15 @@ export function createWorkspaceReadRepository(deps: {
           EXISTS (SELECT 1 FROM lesson_author_workspace_events e WHERE e.workspace_id=w.id AND e.event_kind='overview_ready') AS overview_ready,
           EXISTS (SELECT 1 FROM lesson_author_workspace_events e WHERE e.workspace_id=w.id AND e.event_kind='structure_ready') AS structure_ready
           FROM owned w)
+        , quality_by_unit AS (
+          SELECT DISTINCT ON (a.workspace_id,a.payload->>'unit_path')
+            a.workspace_id,a.payload->>'unit_path' AS unit_path,
+            a.payload->>'content_origin' AS content_origin,a.payload->>'quality_state' AS quality_state
+          FROM lesson_author_workspace_v2_artifacts a JOIN owned w
+            ON w.id=a.workspace_id AND w.tenant_id=a.tenant_id AND w.course_id=a.course_id
+          WHERE a.artifact_kind='unit_baseline'
+          ORDER BY a.workspace_id,a.payload->>'unit_path',a.created_at DESC,a.id DESC
+        )
         SELECT w.*,
           (SELECT count(*) FROM lesson_author_workspace_nodes n WHERE n.workspace_id=w.id AND w.structure_ready
             AND (n.kind IN ('course','chapter','lesson') OR n.content_state='content_ready')) AS graph_node_count,
@@ -140,6 +175,7 @@ export function createWorkspaceReadRepository(deps: {
               CASE WHEN n.kind='media_brief' THEN n.protected_contract->>'media_type' END AS media_type,
               CASE WHEN n.current_revision IS NULL THEN n.protected_contract->>'display_title' ELSE r.content->>'title' END AS title,
               COALESCE(r.user_modified,false) AS user_modified,
+              quality.content_origin,quality.quality_state,
               EXISTS (SELECT 1 FROM lesson_author_workspace_apply_mappings m
                 WHERE m.workspace_id=n.workspace_id AND m.node_id=n.id
                   AND m.tenant_id=n.tenant_id AND m.course_id=n.course_id
@@ -147,6 +183,10 @@ export function createWorkspaceReadRepository(deps: {
                   AND m.applied_content_hash=r.content_hash) AS applied
             FROM lesson_author_workspace_nodes n LEFT JOIN lesson_author_workspace_revisions r
               ON r.workspace_id=n.workspace_id AND r.node_id=n.id AND r.revision=n.current_revision
+            LEFT JOIN quality_by_unit quality ON n.kind IN ('unit','component')
+              AND quality.workspace_id=n.workspace_id
+              AND quality.unit_path=CASE WHEN n.kind='component'
+                THEN regexp_replace(n.canonical_path,'\.component_[1-9][0-9]*$','') ELSE n.canonical_path END
             WHERE n.workspace_id=w.id AND n.tenant_id=w.tenant_id AND n.course_id=w.course_id AND w.structure_ready
               AND (n.kind IN ('course','chapter','lesson') OR n.content_state='content_ready')
               AND ($6::uuid IS NULL OR n.id>$6) AND ($7::bigint IS NULL OR w.event_head=$7)
@@ -173,6 +213,8 @@ export function createWorkspaceReadRepository(deps: {
         const mediaType = node.media_type === null ? null : enumeration(node.media_type, MEDIA_TYPES);
         const parentId = node.parent_id === null ? null : id(node.parent_id);
         const revision = node.current_revision === null ? null : integer(node.current_revision);
+        const contentOrigin = node.content_origin == null ? null : enumeration(node.content_origin, CONTENT_ORIGINS);
+        const qualityState = node.quality_state == null ? null : enumeration(node.quality_state, QUALITY_STATES);
         if ((kind === 'course') !== (parentId === null) || parentId === nodeId
           || (state === 'content_ready') !== (revision !== null)
           || typeof node.canonical_path !== 'string' || !/^[A-Za-z][A-Za-z0-9_.-]{0,239}$/.test(node.canonical_path)
@@ -181,11 +223,14 @@ export function createWorkspaceReadRepository(deps: {
           || (kind === 'component') !== (componentType !== null)
           || (kind === 'media_brief') !== (mediaType !== null)
           || (node.title !== null && (typeof node.title !== 'string' || !node.title.trim() || node.title.length > 500))
-          || (revision !== null && node.title === null)) invalid();
+          || (revision !== null && node.title === null)
+          || (contentOrigin === null) !== (qualityState === null)
+          || (contentOrigin !== null && !['unit', 'component'].includes(kind))) invalid();
         return { node_id: nodeId, parent_id: parentId, kind, canonical_path: node.canonical_path,
           sort_order: integer(node.sort_order), content_state: state, current_revision: revision,
           component_type: componentType, media_type: mediaType, title: node.title as string | null,
-          user_modified: node.user_modified, applied: node.applied };
+          user_modified: node.user_modified, applied: node.applied,
+          content_origin: contentOrigin, quality_state: qualityState };
       });
       const hasMore = parsed.length > WORKSPACE_GRAPH_PAGE_SIZE;
       const nodes = parsed.slice(0, WORKSPACE_GRAPH_PAGE_SIZE);
@@ -203,7 +248,8 @@ export function createWorkspaceReadRepository(deps: {
           (SELECT count(*) FROM lesson_author_workspace_nodes n WHERE n.workspace_id=w.id AND n.kind='unit') AS unit_count,
           (SELECT count(*) FROM lesson_author_workspace_nodes n WHERE n.workspace_id=w.id
             AND n.kind='unit' AND n.content_state='content_ready') AS ready_unit_count,
-          failure.failure_code,failure.failure_stage,failure.failure_chapter_key
+          failure.failure_code,failure.failure_stage,failure.failure_chapter_key,
+          preview.architecture_preview
         FROM owned w LEFT JOIN LATERAL (
           SELECT run.status::text AS run_status,coalesce(task.failure_code,run.failure_code) AS failure_code,
             task.kind::text AS failure_stage,task.chapter_key AS failure_chapter_key
@@ -220,7 +266,54 @@ export function createWorkspaceReadRepository(deps: {
           WHERE run.workspace_id=w.id AND run.tenant_id=w.tenant_id AND run.course_id=w.course_id
             AND run.status IN ('needs_action','failed','canceled')
           ORDER BY run.created_at DESC,run.id DESC LIMIT 1
-        ) failure ON true`);
+        ) failure ON true
+        LEFT JOIN LATERAL (
+          SELECT jsonb_build_object(
+            'run_id',current_run.id::text,
+            'course_title',current_run.payload->'skeleton'->>'title',
+            'total_chapters',count(*),
+            'completed_chapters',count(*) FILTER (WHERE progress.state='ready'),
+            'chapters',jsonb_agg(jsonb_build_object(
+              'chapter_key',chapter.value->>'chapter_key',
+              'order',(chapter.value->>'order')::integer,
+              'title',chapter.value->>'title',
+              'state',progress.state
+            ) ORDER BY (chapter.value->>'order')::integer)
+          ) AS architecture_preview
+          FROM (
+            SELECT run.id,skeleton.payload
+            FROM lesson_author_workspace_v2_runs run
+            LEFT JOIN LATERAL (
+              SELECT artifact.payload
+              FROM lesson_author_workspace_v2_artifacts artifact
+              WHERE artifact.run_id=run.id AND artifact.workspace_id=run.workspace_id
+                AND artifact.tenant_id=run.tenant_id AND artifact.course_id=run.course_id
+                AND artifact.artifact_kind='course_skeleton'
+              ORDER BY artifact.created_at DESC,artifact.id DESC LIMIT 1
+            ) skeleton ON true
+            WHERE run.workspace_id=w.id AND run.tenant_id=w.tenant_id AND run.course_id=w.course_id
+              AND NOT EXISTS (SELECT 1 FROM lesson_author_workspace_events event
+                WHERE event.workspace_id=w.id AND event.event_kind='structure_ready')
+            ORDER BY run.created_at DESC,run.id DESC LIMIT 1
+          ) current_run
+          CROSS JOIN LATERAL jsonb_array_elements(current_run.payload->'skeleton'->'chapters') chapter(value)
+          CROSS JOIN LATERAL (
+            SELECT CASE
+              WHEN EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
+                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
+                      AND task.chapter_key=chapter.value->>'chapter_key')
+                AND NOT EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
+                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
+                      AND task.chapter_key=chapter.value->>'chapter_key' AND task.status<>'succeeded') THEN 'ready'
+              WHEN EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
+                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
+                      AND task.chapter_key=chapter.value->>'chapter_key'
+                      AND task.status IN ('queued','running','succeeded')) THEN 'generating'
+              ELSE 'planned'
+            END AS state
+          ) progress
+          GROUP BY current_run.id,current_run.payload
+        ) preview ON true`);
       const total = integer(row.node_count), units = integer(row.unit_count), ready = integer(row.ready_unit_count);
       if (ready > units || units > total) invalid();
       const failureCode = row.failure_code === null || row.failure_code === undefined ? null
@@ -232,6 +325,7 @@ export function createWorkspaceReadRepository(deps: {
           ? row.failure_chapter_key : invalid();
       if (!failureCode && (failureStage || failureChapterKey) || !failureStage && failureChapterKey) invalid();
       return { ...workspace(row), node_count: total, unit_count: units, ready_unit_count: ready,
+        architecture_preview: architecturePreview(row.architecture_preview),
         failure_code: failureCode, failure_stage: failureStage, failure_chapter_key: failureChapterKey };
     },
 
@@ -279,11 +373,21 @@ export function createWorkspaceReadRepository(deps: {
           CASE WHEN n.kind='component' THEN n.protected_contract->>'component_type' END AS component_type,
           CASE WHEN n.kind='component' THEN n.protected_contract->'metadata'->'author_review' END AS author_review,
           CASE WHEN n.kind='media_brief' THEN n.protected_contract->>'media_type' END AS media_type,
-          r.content,r.content_hash,r.user_modified,r.validation_contract
+          r.content,r.content_hash,r.user_modified,r.validation_contract,
+          quality.content_origin,quality.quality_state
         FROM owned w LEFT JOIN lesson_author_workspace_nodes n ON n.workspace_id=w.id
           AND n.tenant_id=w.tenant_id AND n.course_id=w.course_id AND n.id=$6
         LEFT JOIN lesson_author_workspace_revisions r ON r.workspace_id=n.workspace_id
-          AND r.node_id=n.id AND r.tenant_id=n.tenant_id AND r.course_id=n.course_id AND r.revision=n.current_revision`, [nodeId]);
+          AND r.node_id=n.id AND r.tenant_id=n.tenant_id AND r.course_id=n.course_id AND r.revision=n.current_revision
+        LEFT JOIN LATERAL (
+          SELECT a.payload->>'content_origin' AS content_origin,a.payload->>'quality_state' AS quality_state
+          FROM lesson_author_workspace_v2_artifacts a
+          WHERE a.workspace_id=n.workspace_id AND a.tenant_id=n.tenant_id AND a.course_id=n.course_id
+            AND a.artifact_kind='unit_baseline'
+            AND a.payload->>'unit_path'=CASE WHEN n.kind='component'
+              THEN regexp_replace(n.canonical_path,'\.component_[1-9][0-9]*$','') ELSE n.canonical_path END
+          ORDER BY a.created_at DESC,a.id DESC LIMIT 1
+        ) quality ON n.kind IN ('unit','component')`, [nodeId]);
       if (row.node_id === null) throw new WorkspaceReadError('WORKSPACE_NODE_NOT_FOUND');
       const revision = row.current_revision === null ? null : integer(row.current_revision);
       if (revision !== expectedRevision) throw new WorkspaceContractError('WORKSPACE_REVISION_CONFLICT');
@@ -297,7 +401,11 @@ export function createWorkspaceReadRepository(deps: {
       } else if (row.content !== null || row.content_hash !== null) invalid();
       const componentType = row.component_type == null ? null : enumeration(row.component_type, COMPONENT_TYPES);
       const mediaType = row.media_type == null ? null : enumeration(row.media_type, MEDIA_TYPES);
+      const contentOrigin = row.content_origin == null ? null : enumeration(row.content_origin, CONTENT_ORIGINS);
+      const qualityState = row.quality_state == null ? null : enumeration(row.quality_state, QUALITY_STATES);
       if ((componentType && row.kind !== 'component') || (mediaType && row.kind !== 'media_brief')) invalid();
+      if ((contentOrigin === null) !== (qualityState === null)
+        || (contentOrigin !== null && !['unit', 'component'].includes(String(row.kind)))) invalid();
       type AuthorReview = { purpose: string | null; example_scenario: string | null;
         visual_asset: string | null; user_behavior_navigation: string | null };
       let authorReview: AuthorReview | null = null;
@@ -318,7 +426,7 @@ export function createWorkspaceReadRepository(deps: {
         kind: enumeration(row.kind, KINDS), content_state: state, current_revision: revision,
         content, component_type: componentType, media_type: mediaType, user_modified: revision !== null ? row.user_modified as boolean : false,
         validation_contract: revision !== null ? row.validation_contract as string : null,
-        author_review: authorReview };
+        author_review: authorReview, content_origin: contentOrigin, quality_state: qualityState };
     },
   };
 }

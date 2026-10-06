@@ -18,6 +18,8 @@ export interface OrchestrationV2UnitRuntime {
   embedding_model: string;
   embedding_dimensions: number;
   allowed_component_types: ReadonlySet<CourseComponentType>;
+  /** Optional only for direct unit tests and rolling callers; production config always supplies it. */
+  unit_soft_deadline_ms?: number;
 }
 
 export interface OrchestrationV2UnitClient {
@@ -106,7 +108,10 @@ export async function executeOrchestrationV2UnitTask(
 ): Promise<'generate_unit'> {
   if (!runtime.embedding_model.trim() || !Number.isSafeInteger(runtime.embedding_dimensions)
     || runtime.embedding_dimensions < 1 || runtime.embedding_dimensions > 4_096
-    || !runtime.allowed_component_types.size) {
+    || !runtime.allowed_component_types.size
+    || (runtime.unit_soft_deadline_ms !== undefined
+      && (!Number.isSafeInteger(runtime.unit_soft_deadline_ms)
+        || runtime.unit_soft_deadline_ms < 5_000 || runtime.unit_soft_deadline_ms > 120_000))) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
   const input = await atStage('unit_authority_load',
@@ -114,10 +119,10 @@ export async function executeOrchestrationV2UnitTask(
   if (input.contract.component_plan.some(plan => !runtime.allowed_component_types.has(plan.type))) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
-  // dispatch_epoch advances exactly once per durable claim. A replay after an
-  // uncertain paid call must never dispatch another paid call; it asks the
-  // Python service for the deterministic source-locked baseline instead.
-  const fallbackOnly = lease.dispatch_epoch >= 2;
+  // Only durable evidence of a previous provider dispatch can suppress a paid
+  // call. dispatch_epoch also advances for a pre-dispatch DB failure, so using
+  // the epoch here would incorrectly turn a safe retry into fallback content.
+  const fallbackOnly = lease.provider_replay_required;
   let providerDispatchMarked = fallbackOnly;
   const beforeProviderDispatch = fallbackOnly ? undefined : async () => {
     if (providerDispatchMarked) {
@@ -127,6 +132,11 @@ export async function executeOrchestrationV2UnitTask(
       () => withTransientTransactionRetry(() => worker.markProviderDispatched(lease), signal));
     providerDispatchMarked = true;
   };
+  const softDeadlineMs = runtime.unit_soft_deadline_ms ?? 45_000;
+  const workflowBudgetMs = Math.min(480_000, lease.execution_budget_ms, softDeadlineMs);
+  // Let Python cross its own deadline and serialize the validated fallback
+  // before the transport aborts. Never exceed the durable task budget.
+  const transportTimeoutMs = Math.min(lease.execution_budget_ms, workflowBudgetMs + 10_000);
   const response = await atStage('provider_request', () => client.generate({
     tenant_id: input.authority.tenant_id, kb_id: input.authority.kb_id,
     conversation_id: input.authority.conversation_id, target: 'lesson_author', model: lease.model,
@@ -137,9 +147,9 @@ export async function executeOrchestrationV2UnitTask(
     source_documents: input.authority.source_documents, course_context: null, locale: input.authority.locale,
     correlation_id: input.authority.correlation_id, contract_version: 2, unit_contract: input.contract,
     max_attempts: lease.provider_max_attempts as 1 | 2,
-    remaining_workflow_budget_ms: Math.min(480_000, lease.execution_budget_ms),
+    remaining_workflow_budget_ms: workflowBudgetMs,
     fallback_only: fallbackOnly,
-  }, { timeoutMs: lease.execution_budget_ms, signal, beforeProviderDispatch }));
+  }, { timeoutMs: transportTimeoutMs, signal, beforeProviderDispatch }));
   if (!providerDispatchMarked) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
@@ -156,6 +166,6 @@ export async function executeOrchestrationV2UnitTask(
   }
   await atStage('unit_publication', () => withTransientTransactionRetry(
     () => repository.complete(lease, publication, response.usage ?? {},
-      settleProvider, releaseUndispatched, response.usage_source), signal));
+      settleProvider, releaseUndispatched, response.usage_source, response.attempt_trace), signal));
   return 'generate_unit';
 }

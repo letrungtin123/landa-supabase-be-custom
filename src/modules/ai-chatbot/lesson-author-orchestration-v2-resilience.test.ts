@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import {
+  isOrchestrationV2StructuralPostgresError,
   isOrchestrationV2TransientPostgresError,
   runOrchestrationV2TransientSqlCycle,
   startOrchestrationV2RabbitConsumer,
@@ -57,6 +58,7 @@ function lease(index = 1, overrides: Partial<OrchestrationV2TaskLease> = {}): Or
     execution_budget_ms: 10_000,
     lease_token: uuid(800_000 + index),
     dispatch_epoch: 1,
+    provider_replay_required: false,
     ai_reservation_id: uuid(900_000 + index),
     routing_shard: index % 4_096,
     ...overrides,
@@ -71,6 +73,8 @@ function runtime(input: {
 }): OrchestrationV2WorkerRuntimeDependencies {
   const repository = {
     claimExact: input.claimExact,
+    deferPublished: async () => ({ delay_ms: 5_000, deferral_count: 1 }),
+    wakeOneCapacityDeferred: async () => null,
     renew: input.renew ?? (async () => true),
     recoverOne: async () => null,
   } as unknown as WorkerRepository;
@@ -109,9 +113,33 @@ test('telemetry failure remains non-authoritative for all delivery decisions', a
   assert.equal(executions, 1);
 });
 
+test('task completion wakes one capacity deferral and wake failure never rewrites task success', async () => {
+  const events: Record<string, unknown>[] = [];
+  const awakened = runtime({
+    claimExact: async () => ({ disposition: 'claimed', lease: lease() }),
+    report: event => { events.push(event); },
+  });
+  awakened.repository.wakeOneCapacityDeferred = async () => ({
+    outbox_id: uuid(1), run_id: uuid(2), task_id: uuid(3), tenant_id: uuid(4),
+    workspace_id: uuid(5), task_kind: 'generate_unit',
+  });
+  const completed = await handleOrchestrationV2Delivery(envelope(), awakened);
+  assert.equal(completed.disposition, 'claimed_succeeded');
+  assert.ok(events.some(event => event.event === 'worker_capacity_deferral_awakened'
+    && event.source === 'task_completion'));
+
+  const wakeFailure = runtime({ claimExact: async () => ({ disposition: 'claimed', lease: lease(2) }) });
+  wakeFailure.repository.wakeOneCapacityDeferred = async () => { throw new Error('wake unavailable'); };
+  const stillCompleted = await handleOrchestrationV2Delivery(envelope(2), wakeFailure);
+  assert.equal(stillCompleted.disposition, 'claimed_succeeded');
+  assert.equal(stillCompleted.settlement, 'ack');
+});
+
 test('runtime cycles retry bounded PostgreSQL contention but fail fast on schema errors', async () => {
   assert.equal(isOrchestrationV2TransientPostgresError(Object.assign(new Error('lock'), { code: '55P03' })), true);
   assert.equal(isOrchestrationV2TransientPostgresError(Object.assign(new Error('schema'), { code: '42702' })), false);
+  assert.equal(isOrchestrationV2StructuralPostgresError(Object.assign(new Error('schema'), { code: '42703' })), true);
+  assert.equal(isOrchestrationV2StructuralPostgresError(Object.assign(new Error('deadlock'), { code: '40P01' })), false);
   const reports: Record<string, unknown>[] = [];
   let attempts = 0;
   const result = await runOrchestrationV2TransientSqlCycle(async () => {
@@ -131,6 +159,42 @@ test('runtime cycles retry bounded PostgreSQL contention but fail fast on schema
     throw Object.assign(new Error('ambiguous column'), { code: '42702' });
   }, new AbortController().signal, () => undefined, 'worker_recovery', () => 0), { code: '42702' });
   assert.equal(schemaAttempts, 1);
+});
+
+test('consumer pauses and preserves the message after a deterministic claim schema failure', async () => {
+  let callback: ((message: ConsumeMessage | null) => void) | undefined;
+  let cancellations = 0;
+  let acknowledgements = 0;
+  let negativeAcknowledgements = 0;
+  const events: Record<string, unknown>[] = [];
+  const channel = {
+    prefetch: async () => undefined,
+    consume: async (_queue: string, onMessage: (message: ConsumeMessage | null) => void) => {
+      callback = onMessage;
+      return { consumerTag: 'consumer' };
+    },
+    ack: () => { acknowledgements += 1; },
+    nack: (_message: ConsumeMessage, _allUpTo: boolean, requeue: boolean) => {
+      assert.equal(requeue, true);
+      negativeAcknowledgements += 1;
+    },
+    cancel: async () => { cancellations += 1; },
+  } as unknown as ConfirmChannel;
+  const deps = runtime({
+    claimExact: async () => {
+      throw Object.assign(new Error('record new has no field model'), { code: '42703' });
+    },
+    report: event => { events.push(event); },
+  });
+  const consumer = await startOrchestrationV2RabbitConsumer(channel, 'queue', 8, 100, deps,
+    new AbortController().signal);
+  callback?.({ content: Buffer.from(envelope()) } as ConsumeMessage);
+  await consumer.stop();
+  assert.equal(acknowledgements, 0);
+  assert.equal(negativeAcknowledgements, 1);
+  assert.equal(cancellations, 1);
+  assert.ok(events.some(event => event.event === 'worker_claim_structural_pause'
+    && event.code === '42703' && event.recovery === 'consumer_paused_delivery_requeued'));
 });
 
 test('20k duplicate-delivery storm executes one paid task exactly once', async t => {
@@ -165,7 +229,9 @@ test('synthetic saturation never exceeds the provider concurrency ceiling', asyn
   const gate = new Promise<void>(resolve => { release = resolve; });
   const deps = runtime({
     claimExact: async raw => {
-      if (active >= limits.provider_concurrency_limit) return { disposition: 'deferred' };
+      if (active >= limits.provider_concurrency_limit) {
+        return { disposition: 'deferred', reason: 'provider_capacity' };
+      }
       active += 1;
       claimed += 1;
       maximumActive = Math.max(maximumActive, active);
@@ -190,7 +256,7 @@ test('synthetic saturation never exceeds the provider concurrency ceiling', asyn
   assert.equal(results.filter(result => result.disposition === 'deferred').length,
     deliveries - limits.provider_concurrency_limit);
   assert.ok(results.filter(result => result.disposition === 'deferred')
-    .every(result => result.settlement === 'requeue'));
+    .every(result => result.settlement === 'ack'));
   t.diagnostic(JSON.stringify({ profile: 'provider_saturation', deliveries,
     provider_limit: limits.provider_concurrency_limit, maximum_active: maximumActive, duration_ms: durationMs }));
 });

@@ -31,7 +31,7 @@ function fixture(initial: Record<string, unknown> | null) {
     failAuth: () => { authFailure = new Error('PRIVATE authorization details'); } };
 }
 const summary = () => ({ ...common, node_count: '25', unit_count: '5', ready_unit_count: '2',
-  failure_code: null, failure_stage: null, failure_chapter_key: null });
+  architecture_preview: null, failure_code: null, failure_stage: null, failure_chapter_key: null });
 const detail = () => ({ ...common, node_id: nodeId, parent_id: uuid(7), kind: 'component', content_state: 'content_ready',
   current_revision: '1', content, content_hash: generationSnapshotHash(content), user_modified: true, validation_contract: 'fixture-only-v1' });
 const event = (n: number) => ({ sequence: n, event_kind: 'unit_started', node_id: nodeId, node_revision: null,
@@ -50,6 +50,24 @@ test('detail exposes only typed presentation discriminants, never infers type fr
   f.row({ ...detail(), kind: 'media_brief', media_type: 'video' });
   assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).media_type, 'video');
   f.row(detail()); assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).component_type, null);
+});
+
+test('detail exposes bounded generation quality without leaking provider diagnostics', async () => {
+  const f = fixture({ ...detail(), component_type: 'html',
+    content_origin: 'structured_fallback', quality_state: 'review_required',
+    provider_error: 'PRIVATE provider failure' });
+  const view = await f.repo.detail(owner, workspaceId, nodeId, 1);
+  assert.equal(view.content_origin, 'structured_fallback');
+  assert.equal(view.quality_state, 'review_required');
+  assert.equal(JSON.stringify(view).includes('PRIVATE'), false);
+  for (const change of [
+    { content_origin: 'unknown', quality_state: 'review_required' },
+    { content_origin: 'structured_fallback', quality_state: null },
+    { kind: 'chapter', content_origin: 'structured_fallback', quality_state: 'review_required' },
+  ]) {
+    f.row({ ...detail(), component_type: change.kind === 'chapter' ? null : 'html', ...change });
+    await assert.rejects(f.repo.detail(owner, workspaceId, nodeId, 1), code('WORKSPACE_READ_CONTRACT_INVALID'));
+  }
 });
 
 test('component detail exposes bounded read-only author review metadata and rejects malformed fields', async () => {
@@ -73,6 +91,29 @@ test('read summary retains EN/VI/root correlation and exposes only metadata, not
   assert.equal('apply_ready' in vi, false); assert.equal('tenant_id' in vi, false);
   f.row({ ...summary(), content_locale: 'en' });
   assert.equal((await f.repo.status(owner, workspaceId)).content_locale, 'en');
+});
+
+test('active summary exposes only bounded validated architecture progress before structure commit', async () => {
+  const preview = { run_id: uuid(30), course_title: 'Thiết kế khóa học an toàn', total_chapters: 2,
+    completed_chapters: 1, chapters: [
+      { chapter_key: 'chapter-1', order: 0, title: 'Nhận diện', state: 'ready' },
+      { chapter_key: 'chapter-2', order: 1, title: 'Kiểm soát', state: 'generating' },
+    ] };
+  const f = fixture({ ...summary(), architecture_preview: preview, provider_payload: 'PRIVATE' });
+  const view = await f.repo.status(owner, workspaceId);
+  assert.deepEqual(view.architecture_preview, preview);
+  assert.equal(JSON.stringify(view).includes('PRIVATE'), false);
+  assert.match(f.calls[0]!.sql, /artifact_kind='course_skeleton'/);
+  assert.match(f.calls[0]!.sql, /event_kind='structure_ready'/);
+  for (const architecture_preview of [
+    { ...preview, completed_chapters: 2 },
+    { ...preview, chapters: [...preview.chapters, preview.chapters[1]] },
+    { ...preview, chapters: preview.chapters.map((chapter, index) => index ? { ...chapter, order: 3 } : chapter) },
+    { ...preview, chapters: preview.chapters.map((chapter, index) => index ? { ...chapter, state: 'private' } : chapter) },
+  ]) {
+    f.row({ ...summary(), architecture_preview });
+    await assert.rejects(f.repo.status(owner, workspaceId), code('WORKSPACE_READ_CONTRACT_INVALID'));
+  }
 });
 
 test('terminal summary exposes only bounded safe failure identity for a clear client state', async () => {
@@ -287,6 +328,27 @@ test('graph projections hide provenance/body; ready label comes from exact persi
   assert.equal(result.nodes[0].title, 'Author title'); assert.equal(result.nodes[0].user_modified, true);
   assert.equal(result.nodes[0].applied, true);
   assert.equal(result.nodes[0].current_revision, 2); assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
+});
+
+test('graph exposes typed provider/fallback quality for generated unit scope only', async () => {
+  const component = { ...graphNode(1), kind: 'component', content_state: 'content_ready', current_revision: '0',
+    component_type: 'html', title: 'Source review', parent_id: uuid(1000),
+    content_origin: 'structured_fallback', quality_state: 'review_required' };
+  const f = fixture({ ...common, overview_ready: true, structure_ready: true, cursor_exists: true,
+    graph_node_count: '1', nodes: [component] });
+  const view = await f.repo.graph(owner, workspaceId);
+  assert.equal(view.nodes[0].content_origin, 'structured_fallback');
+  assert.equal(view.nodes[0].quality_state, 'review_required');
+  assert.match(f.calls[0]!.sql, /lesson_author_workspace_v2_artifacts/);
+  for (const bad of [
+    { ...component, content_origin: 'unknown' },
+    { ...component, quality_state: null },
+    { ...graphNode(0), content_origin: 'provider_validated', quality_state: 'validated' },
+  ]) {
+    f.row({ ...common, overview_ready: true, structure_ready: true, cursor_exists: true,
+      graph_node_count: '1', nodes: [bad] });
+    await assert.rejects(f.repo.graph(owner, workspaceId), code('WORKSPACE_READ_CONTRACT_INVALID'));
+  }
 });
 
 test('graph exposes only bounded protected presentation discriminators', async () => {

@@ -6,6 +6,7 @@ import type {
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 
 export const ORCHESTRATION_V2_MAX_SHARD_SOURCE_CHARS = 400_000;
+export const ORCHESTRATION_V3_MAX_SHARD_SOURCE_CHARS = 60_000;
 
 export interface OrchestrationV2PlanningBudgets {
   skeleton: OrchestrationV2Budget;
@@ -91,15 +92,21 @@ export function planOrchestrationV2ChapterShards(
     || owned.some(scope => !byScope.has(scope))) fail('ORCHESTRATION_V2_PLANNING_INVALID');
   const chapterTasks: OrchestrationV2PlanningTaskSpec[] = [];
   for (const chapter of [...skeleton.chapters].sort((a, b) => a.order - b.order)) {
+    // Existing V2 workspaces keep their accepted 400k transport contract.
+    // Density-scoped V3 workspaces use smaller architecture calls so lesson
+    // design is bounded before the unit-content writer is dispatched.
+    const shardSourceChars = chapter.source_scope_ids.every(scopeId => scopeId.startsWith('scope3_'))
+      ? ORCHESTRATION_V3_MAX_SHARD_SOURCE_CHARS
+      : ORCHESTRATION_V2_MAX_SHARD_SOURCE_CHARS;
     const groups: OrchestrationV2SourceScope[][] = [];
     let current: OrchestrationV2SourceScope[] = [], chars = 0;
     for (const scopeId of chapter.source_scope_ids) {
       const scope = byScope.get(scopeId);
       if (scope === undefined) throw new OrchestrationV2PlanningError('ORCHESTRATION_V2_PLANNING_INVALID');
-      if (scope.content_chars > ORCHESTRATION_V2_MAX_SHARD_SOURCE_CHARS) {
+      if (scope.content_chars > shardSourceChars) {
         fail('ORCHESTRATION_V2_SCOPE_EXCEEDS_SHARD');
       }
-      if (current.length && chars + scope.content_chars > ORCHESTRATION_V2_MAX_SHARD_SOURCE_CHARS) {
+      if (current.length && chars + scope.content_chars > shardSourceChars) {
         groups.push(current); current = []; chars = 0;
       }
       current.push(scope); chars += scope.content_chars;

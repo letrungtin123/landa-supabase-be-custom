@@ -40,6 +40,20 @@ export const WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES = {
 } as const;
 type Trigger = { table: string; name: string; fn: string; type: number; deferred: boolean };
 const t = (table: string, name: string, fn: string, type: number, deferred = false): Trigger => ({ table, name, fn, type, deferred });
+
+/**
+ * CP5 publish-governance fences installed on workspace-owned evidence tables.
+ * They are additive to the workspace schema, but must be present as one exact
+ * reviewed set whenever any member is installed. Unknown/partial triggers still
+ * fail closed.
+ */
+export const WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS: ReadonlyArray<Trigger> = [
+  t('lesson_author_workspace_apply_receipts', 'trg_course_publish_evidence_mutation_fence',
+    'fence_course_publish_evidence_mutation', 31),
+  t('lesson_author_workspace_apply_mappings', 'trg_course_publish_evidence_mutation_fence',
+    'fence_course_publish_evidence_mutation', 31),
+];
+
 export function workspaceSchemaContract(execution: boolean) {
   const tables = ['lesson_author_workspaces', 'lesson_author_workspace_nodes', 'lesson_author_workspace_revisions', 'lesson_author_workspace_events'];
   const triggers: Trigger[] = [
@@ -127,9 +141,20 @@ export async function verifyWorkspaceSchema(db: GenerationJobSql, execution: boo
       JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace
       WHERE NOT t.tgisinternal AND ns.nspname='public' AND c.relname=ANY($1::text[])`, [expected.tables]);
     // Foundation-only inspection allows the additive execution triggers if already installed.
-    const known = workspaceSchemaContract(true).triggers;
+    const known = [...workspaceSchemaContract(true).triggers,
+      t('lesson_author_workspace_apply_receipts', 'trg_la_workspace_apply_quality_v2',
+        'guard_lesson_author_workspace_apply_quality_v2', 7),
+      t('lesson_author_workspace_apply_receipts', 'trg_la_workspace_apply_quality_commit',
+        'assert_lesson_author_workspace_quality_commit', 5, true),
+      ...WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS];
     if (triggers.rows.some(r => !known.some(e => e.table === r.table && e.name === r.name))) throw new WorkspaceSchemaError('WORKSPACE_SCHEMA_TRIGGER_DRIFT');
-    for (const e of expected.triggers) {
+    const installedPublishFences = WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS.filter(e =>
+      triggers.rows.some(r => r.table === e.table && r.name === e.name));
+    if (installedPublishFences.length !== 0
+      && installedPublishFences.length !== WORKSPACE_COURSE_PUBLISH_EVIDENCE_TRIGGERS.length) {
+      throw new WorkspaceSchemaError('WORKSPACE_SCHEMA_TRIGGER_DRIFT');
+    }
+    for (const e of [...expected.triggers, ...installedPublishFences]) {
       const matches = triggers.rows.filter(r => r.table === e.table && r.name === e.name), r = matches[0];
       const quota = e.name.startsWith('tenant_data_quota_direct_');
       if (matches.length !== 1 || r.fn !== e.fn || r.function_schema !== 'public' || r.type !== e.type || r.enabled !== 'O'

@@ -47,6 +47,15 @@ export function isOrchestrationV2TransientPostgresError(error: unknown): boolean
   return TRANSIENT_POSTGRES_CODES.has(code);
 }
 
+/** PostgreSQL class 42 errors are deterministic schema/access contract failures.
+ * Re-delivering the same Rabbit message cannot heal them, so the consumer must
+ * pause after safely requeueing the delivery instead of creating a hot loop. */
+export function isOrchestrationV2StructuralPostgresError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '') : '';
+  return /^42[0-9A-Z]{3}$/.test(code);
+}
+
 /** Retry only transaction-level PostgreSQL contention. Broker/task leases remain
  * authoritative, so retrying a cycle cannot create a new paid-work identity. */
 export async function runOrchestrationV2TransientSqlCycle<T>(
@@ -111,10 +120,18 @@ export async function startOrchestrationV2RabbitConsumer(
   await channel.prefetch(prefetch);
   let accepting = true;
   let stopPromise: Promise<void> | null = null;
+  let consumerTag: string | null = null;
+  let cancelPromise: Promise<void> | null = null;
+  let structuralPauseTriggered = false;
   const active = new Set<Promise<void>>();
   const settle = (msg: ConsumeMessage, settlement: 'ack' | 'requeue') => {
     if (settlement === 'ack') channel.ack(msg);
     else channel.nack(msg, false, true);
+  };
+  const cancelConsumer = (): Promise<void> => {
+    if (!consumerTag) return Promise.resolve();
+    if (!cancelPromise) cancelPromise = channel.cancel(consumerTag).then(() => undefined);
+    return cancelPromise;
   };
   const consume = await channel.consume(queue, msg => {
     if (!msg) return;
@@ -133,6 +150,27 @@ export async function startOrchestrationV2RabbitConsumer(
         settle(msg, 'requeue');
         return;
       }
+      if (result.settlement === 'requeue' && result.disposition === 'claim_unconfirmed'
+        && isOrchestrationV2StructuralPostgresError(result.error)) {
+        accepting = false;
+        if (!structuralPauseTriggered) {
+          structuralPauseTriggered = true;
+          const code = typeof result.error === 'object' && result.error !== null && 'code' in result.error
+            ? String((result.error as { code?: unknown }).code ?? '') : '';
+          reportSafely(deps.report, { event: 'worker_claim_structural_pause', code,
+            outbox_id: result.envelope?.outbox_id, run_id: result.envelope?.run_id,
+            task_id: result.envelope?.task_id, recovery: 'consumer_paused_delivery_requeued' });
+        }
+        try {
+          settle(msg, 'requeue');
+        } finally {
+          await cancelConsumer().catch(error => reportSafely(deps.report, {
+            event: 'worker_consumer_pause_failed',
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        return;
+      }
       if (result.settlement === 'requeue') await wait(requeueDelayMs, shutdownSignal);
       settle(msg, result.settlement);
     })()
@@ -146,6 +184,8 @@ export async function startOrchestrationV2RabbitConsumer(
       .finally(() => { active.delete(operation); });
     active.add(operation);
   }, { noAck: false });
+  consumerTag = consume.consumerTag;
+  if (!accepting) await cancelConsumer().catch(() => undefined);
 
   return {
     inFlight: () => active.size,
@@ -153,7 +193,7 @@ export async function startOrchestrationV2RabbitConsumer(
       if (stopPromise) return stopPromise;
       accepting = false;
       stopPromise = (async () => {
-        await channel.cancel(consume.consumerTag).catch(() => undefined);
+        await cancelConsumer().catch(() => undefined);
         await Promise.allSettled([...active]);
       })();
       return stopPromise;

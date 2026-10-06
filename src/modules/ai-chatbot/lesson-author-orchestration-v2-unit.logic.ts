@@ -1,14 +1,28 @@
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import type { LessonAuthorComponentPlan, LessonAuthorComponentProposal, LessonAuthorProposal } from '../course-authoring/course-authoring.service.js';
-import { validateLessonAuthorGeneratedUnitCoverage } from './lesson-author-content-contract.logic.js';
+import {
+  sanitizeLessonAuthorHtml,
+  validateLessonAuthorGeneratedUnitCoverage,
+  type LessonAuthorStructuredArtifactRequirement,
+} from './lesson-author-content-contract.logic.js';
 import { workspaceComponentContent } from './lesson-author-workspace-component.logic.js';
 import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { orchestrationV2ComponentPlanId } from './lesson-author-orchestration-v2-inventory.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import {
+  readOrchestrationV2AttemptTrace,
+  type OrchestrationV2AttemptTraceEvent,
+} from './lesson-author-orchestration-v2-attempt.logic.js';
+import {
+  readOrchestrationV2SemanticReviewSummary,
+  type OrchestrationV2SemanticReviewSummary,
+} from './lesson-author-semantic-review.logic.js';
 
 export const ORCHESTRATION_V2_UNIT_CONTRACT = 'orchestration-unit-baseline-v2';
+const UNIT_CONTENT_V3_DENSITY_POLICY = 'unit-content-v3-density-1';
 
 export interface OrchestrationV2UnitComponentPlan extends LessonAuthorComponentPlan {
   component_plan_id: string;
@@ -46,7 +60,11 @@ export interface OrchestrationV2UnitProviderResponse {
   unit: Record<string, unknown> & { components: unknown[] };
   usage_complete: boolean;
   usage_source: 'provider' | 'reserved_upper_bound' | 'deterministic_fallback';
+  content_origin: 'provider_validated' | 'structured_fallback';
+  quality_state: 'validated' | 'review_required';
   usage?: Record<string, number>;
+  attempt_trace: OrchestrationV2AttemptTraceEvent[];
+  semantic_review?: Readonly<OrchestrationV2SemanticReviewSummary>;
 }
 
 export interface OrchestrationV2UnitBaselineNode {
@@ -62,6 +80,9 @@ export interface OrchestrationV2UnitPublication {
   contract_hash: string;
   nodes: OrchestrationV2UnitBaselineNode[];
   generated_unit: Record<string, unknown> & { components: LessonAuthorComponentProposal[] };
+  content_origin: 'provider_validated' | 'structured_fallback';
+  quality_state: 'validated' | 'review_required';
+  semantic_review?: Readonly<OrchestrationV2SemanticReviewSummary>;
   result_hash: string;
 }
 
@@ -88,6 +109,46 @@ const record = (value: unknown): Record<string, unknown> | null => value && type
 const exactIds = (value: unknown, expected: readonly string[]) => Array.isArray(value)
   && value.length === expected.length && new Set(value).size === value.length
   && value.every(item => typeof item === 'string' && expected.includes(item));
+
+function sourceRequiredArtifacts(
+  facts: readonly OrchestrationV2SourceFact[],
+): LessonAuthorStructuredArtifactRequirement[] {
+  const artifacts: LessonAuthorStructuredArtifactRequirement[] = [];
+  const hasTable = facts.some(fact => Number(fact.locator?.table_count ?? 0) > 0
+    || (Array.isArray(fact.locator?.content_kinds) && fact.locator.content_kinds.includes('table')));
+  if (hasTable) artifacts.push({ type: 'table', minimum_items: 2 });
+  const texts = facts.map(fact => fact.fact_text.trim());
+  const orderedSteps = texts.filter(text => /^(?:step|bước)\s*\d+\s*[:.)-]/iu.test(text)).length;
+  if (orderedSteps >= 2) artifacts.push({ type: 'ordered_list', minimum_items: Math.min(orderedSteps, 10) });
+  const checklistItems = texts.filter(text => /^(?:☐|☑|\[\s*[x ]?\s*\])\s*\S/iu.test(text)).length;
+  if (checklistItems >= 2) artifacts.push({ type: 'checklist', minimum_items: Math.min(checklistItems, 20) });
+  for (const [type, pattern] of [
+    ['warning', /^(?:warning|caution|cảnh báo|lưu ý)\s*:/iu],
+    ['requirement', /^(?:requirement|yêu cầu|bắt buộc)\s*:/iu],
+    ['exception', /^(?:exception|ngoại lệ)\s*:/iu],
+  ] as const) {
+    if (texts.some(text => pattern.test(text))) artifacts.push({ type, minimum_items: 1 });
+  }
+  return artifacts;
+}
+
+function exceedsInstructionalOutputBudget(
+  contract: Readonly<OrchestrationV2UnitGenerationContract>,
+  components: readonly LessonAuthorComponentProposal[],
+): boolean {
+  if (!contract.source_facts.length || !contract.source_facts.every(fact =>
+    fact.locator?.instructional_density_policy_version === UNIT_CONTENT_V3_DENSITY_POLICY)) return false;
+  const sourceChars = contract.source_facts.reduce((sum, fact) => sum + fact.fact_text.length, 0);
+  const sourceWords = contract.source_facts.reduce((sum, fact) =>
+    sum + (fact.fact_text.match(/[\p{L}\p{N}]+/gu)?.length ?? 0), 0);
+  const maxVisibleChars = Math.min(18_000, Math.max(4_000, Math.ceil(sourceChars * 1.75)));
+  const maxWords = Math.min(2_400, Math.max(600, Math.ceil(sourceWords * 1.75)));
+  const html = sanitizeLessonAuthorHtml(components.find(component => component.type === 'html')?.data);
+  const visible = html.replace(/<[^>]+>/g, ' ').replace(/&(?:[a-z]+|#\d+|#x[a-f0-9]+);/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+  const words = visible.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
+  return visible.length > maxVisibleChars || words > maxWords;
+}
 
 function componentPurpose(type: OrchestrationV2UnitComponentPlan['type']): NonNullable<LessonAuthorComponentPlan['purpose']> {
   if (type === 'problem') return 'assess';
@@ -121,6 +182,9 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
     fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE');
   }
   const scopes = new Set(unit.source_scope_ids);
+  const v3Markers = facts.map(fact => fact.locator?.instructional_density_policy_version === UNIT_CONTENT_V3_DENSITY_POLICY);
+  if (v3Markers.some(Boolean) && !v3Markers.every(Boolean)) fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
+  const usesUnitContentV3 = v3Markers.length > 0 && v3Markers.every(Boolean);
   const factKeys = new Set<string>();
   const representedScopes = new Set<string>();
   for (const fact of facts) {
@@ -140,12 +204,15 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
     if (!sourceFactIds.length || [...planScopes].some(scope => !scopes.has(scope))) {
       fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
     }
+    const ownsCanonicalFacts = !usesUnitContentV3 || index === 0;
     return {
       component_plan_id: orchestrationV2ComponentPlanId(assembly.assembly_hash, componentPath),
       type: plan.type, title: plan.title, rationale: plan.rationale, purpose: componentPurpose(plan.type),
-      source_fact_ids: sourceFactIds, supporting_evidence_fact_ids: [],
+      source_fact_ids: ownsCanonicalFacts ? sourceFactIds : [],
+      supporting_evidence_fact_ids: ownsCanonicalFacts ? [] : sourceFactIds,
       learning_objective_refs: [...unit.learning_objective_refs], source_scope_ids: [...plan.source_scope_ids],
-      content_requirements: [], learning_block_ids: [], required_artifacts: [],
+      content_requirements: [], learning_block_ids: [],
+      required_artifacts: ownsCanonicalFacts && plan.type === 'html' ? sourceRequiredArtifacts(facts) : [],
     };
   });
   if (componentPlan[0]?.type !== 'html'
@@ -179,6 +246,24 @@ export function readOrchestrationV2UnitProviderResponse(
     fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
   }
   const responseItem = item as Record<string, unknown>;
+  const quality = orchestrationV2QualityPolicy(responseItem);
+  if (!quality.evidence_valid || quality.content_origin === 'raw_source_fallback') {
+    fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+  }
+  const contentOrigin = quality.has_envelope
+    ? quality.content_origin as OrchestrationV2UnitProviderResponse['content_origin']
+    : usageSource === 'provider' ? 'provider_validated' as const : 'structured_fallback' as const;
+  const qualityState = quality.has_envelope
+    ? quality.quality_state as OrchestrationV2UnitProviderResponse['quality_state']
+    : usageSource === 'provider' ? 'validated' as const : 'review_required' as const;
+  // A whole-unit fallback is a reviewable draft even when its source evidence
+  // is structurally valid. Only provider-accounted responses may use the
+  // validated lane; component-scoped fallback under provider accounting keeps
+  // its existing quality policy.
+  if (usageSource !== 'provider'
+    && (contentOrigin !== 'structured_fallback' || qualityState !== 'review_required')) {
+    fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+  }
   const unit = record(responseItem.unit);
   if (!unit || unit.title !== expected.unit_title || !Array.isArray(unit.components)
     || unit.components.length !== expected.component_plan.length
@@ -193,7 +278,8 @@ export function readOrchestrationV2UnitProviderResponse(
     if (!component || component.type !== expectedPlan.type || planId !== expectedPlan.component_plan_id
       || seen.has(String(planId)) || !exactIds(component.source_fact_ids ?? metadata?.source_fact_ids, expectedPlan.source_fact_ids)
       || !exactIds(component.covered_source_fact_ids ?? metadata?.covered_source_fact_ids, expectedPlan.source_fact_ids)
-      || !exactIds(component.supporting_evidence_fact_ids ?? metadata?.supporting_evidence_fact_ids, [])) {
+      || !exactIds(component.supporting_evidence_fact_ids ?? metadata?.supporting_evidence_fact_ids,
+        expectedPlan.supporting_evidence_fact_ids)) {
       fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
     }
     seen.add(String(planId));
@@ -207,10 +293,28 @@ export function readOrchestrationV2UnitProviderResponse(
     }
     if (candidate !== undefined) usage[key] = Number(candidate);
   }
+  let attemptTrace: OrchestrationV2AttemptTraceEvent[];
+  let semanticReview: Readonly<OrchestrationV2SemanticReviewSummary> | undefined;
+  try {
+    attemptTrace = readOrchestrationV2AttemptTrace(responseItem.attempt_trace);
+    if (responseItem.semantic_review !== undefined) {
+      semanticReview = readOrchestrationV2SemanticReviewSummary(responseItem.semantic_review);
+      const componentCount = responseComponents.length;
+      if (semanticReview.repair_component_indices.some(index => index >= componentCount)
+        || semanticReview.findings.some(finding => finding.scope === 'component'
+          && (finding.component_index === null || finding.component_index >= componentCount))) {
+        fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+      }
+    }
+  } catch {
+    return fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+  }
   return { contract_version: 2, source_snapshot_hash: expected.source_snapshot_hash,
     unit_path: expected.unit_path, unit: responseUnit as OrchestrationV2UnitProviderResponse['unit'],
     usage_complete: responseItem.usage_complete as boolean,
-    usage_source: usageSource as OrchestrationV2UnitProviderResponse['usage_source'], usage };
+    usage_source: usageSource as OrchestrationV2UnitProviderResponse['usage_source'],
+    content_origin: contentOrigin, quality_state: qualityState, usage, attempt_trace: attemptTrace,
+    ...(semanticReview ? { semantic_review: semanticReview } : {}) };
 }
 
 /** Normalize, validate and project revision-0 content. No persistence or Apply occurs here. */
@@ -261,7 +365,8 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     const rawMetadata = record(acceptedRaw.metadata);
     for (const [field, expected] of [
       ['source_fact_ids', plan.source_fact_ids], ['covered_source_fact_ids', plan.source_fact_ids],
-      ['supporting_evidence_fact_ids', []], ['learning_objective_refs', plan.learning_objective_refs],
+      ['supporting_evidence_fact_ids', plan.supporting_evidence_fact_ids],
+      ['learning_objective_refs', plan.learning_objective_refs],
     ] as const) {
       const claimed = acceptedRaw[field] ?? rawMetadata?.[field] ?? component.metadata?.[field];
       if (field !== 'learning_objective_refs' && !exactIds(claimed, expected)) fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
@@ -271,7 +376,8 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     }
     return { ...component, metadata: { ...component.metadata, component_plan_id: plan.component_plan_id,
       source_fact_ids: [...plan.source_fact_ids], covered_source_fact_ids: [...plan.source_fact_ids],
-      supporting_evidence_fact_ids: [], learning_objective_refs: [...plan.learning_objective_refs] } } as LessonAuthorComponentProposal;
+      supporting_evidence_fact_ids: [...plan.supporting_evidence_fact_ids],
+      learning_objective_refs: [...plan.learning_objective_refs] } } as LessonAuthorComponentProposal;
   });
   const coverage = validateLessonAuthorGeneratedUnitCoverage({ source_fact_ids: contract.unit_source_fact_ids,
     supporting_evidence_fact_ids: [],
@@ -281,8 +387,13 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     source_fact_ids: component.metadata?.source_fact_ids as string[] | undefined,
     covered_source_fact_ids: component.metadata?.covered_source_fact_ids as string[] | undefined,
     supporting_evidence_fact_ids: component.metadata?.supporting_evidence_fact_ids as string[] | undefined,
-  })));
+  })), {
+    exact_identifiers: contract.source_facts.flatMap(fact => [fact.fact_key, fact.source_ref ?? '']).filter(Boolean),
+  });
   if (coverage) fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
+  if (exceedsInstructionalOutputBudget(contract, components)) {
+    fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
+  }
   let componentContents: WorkspaceContent[];
   try { componentContents = components.map(component => workspaceComponentContent(component, allowed)); }
   catch { return fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID'); }
@@ -295,7 +406,8 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
   const base = { validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT as typeof ORCHESTRATION_V2_UNIT_CONTRACT,
     unit_path: contract.unit_path,
     source_snapshot_hash: contract.source_snapshot_hash, contract_hash: contract.contract_hash,
-    nodes, generated_unit: generatedUnit };
+    nodes, generated_unit: generatedUnit, content_origin: response.content_origin, quality_state: response.quality_state,
+    ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) };
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_PUBLICATION_BYTES) {
     fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE');
   }

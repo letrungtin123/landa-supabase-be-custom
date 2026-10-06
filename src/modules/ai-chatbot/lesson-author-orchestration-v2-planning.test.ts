@@ -41,7 +41,8 @@ function lease(kind: OrchestrationV2TaskLease['kind']): OrchestrationV2TaskLease
     source_snapshot_hash: hash('a'), runtime_config_hash: hash('runtime'), model: 'model',
     locale: 'vi', max_output_tokens: deterministic ? 0 : 32_000,
     provider_max_attempts: deterministic ? 0 : 2, execution_budget_ms: 300_000,
-    lease_token: uuid(6), dispatch_epoch: 1, routing_shard: 17, ai_reservation_id: deterministic ? null : uuid(7),
+    lease_token: uuid(6), dispatch_epoch: 1, provider_replay_required: false,
+    routing_shard: 17, ai_reservation_id: deterministic ? null : uuid(7),
   };
 }
 
@@ -65,6 +66,23 @@ test('planning rejects missing scope ownership and an indivisible scope over 400
   const oversizedKey = { ...skeleton, chapters: [{ ...skeleton.chapters[0]!, chapter_key: `chapter-${'x'.repeat(140)}` }] };
   assert.throws(() => planOrchestrationV2ChapterShards(oversizedKey, scopes, budgets, hash('c')),
     { code: 'ORCHESTRATION_V2_PLANNING_INVALID' });
+});
+
+test('density-scoped V3 chapters use bounded 60k architecture shards without changing legacy V2', () => {
+  const v3Scopes: OrchestrationV2SourceScope[] = [
+    { scope_key: 'scope3_one', title: 'One', source_ref: null, fact_count: 40, content_chars: 35_000 },
+    { scope_key: 'scope3_two', title: 'Two', source_ref: null, fact_count: 30, content_chars: 30_000 },
+  ];
+  const v3Skeleton = { ...skeleton, chapters: [{ ...skeleton.chapters[0]!,
+    source_scope_ids: v3Scopes.map(scope => scope.scope_key) }] };
+
+  const planned = planOrchestrationV2ChapterShards(v3Skeleton, v3Scopes, budgets, hash('c'));
+
+  assert.deepEqual(planned.chapter_tasks.map(task => task.shard_plan?.source_scope_ids),
+    [['scope3_one'], ['scope3_two']]);
+  assert.throws(() => planOrchestrationV2ChapterShards(v3Skeleton,
+    [{ ...v3Scopes[0]!, content_chars: 60_001 }, v3Scopes[1]!], budgets, hash('c')),
+  { code: 'ORCHESTRATION_V2_SCOPE_EXCEEDS_SHARD' });
 });
 
 test('skeleton task contract is stable and bound to the sealed source catalog', () => {
@@ -184,3 +202,39 @@ for (const kind of ['course_skeleton', 'chapter_blueprint'] as const) {
     assert.equal(f.events.some(event => event.startsWith('complete-')), false);
   });
 }
+
+test('transient chapter completion retries its DB boundary without replaying the provider', async () => {
+  const f = serviceFixture('chapter_blueprint');
+  const completeChapter = f.planning.completeChapter;
+  let completionAttempts = 0;
+  f.planning.completeChapter = async () => {
+    completionAttempts += 1;
+    if (completionAttempts < 3) {
+      throw Object.assign(new Error('safe completion retry'), { code: completionAttempts === 1 ? '40P01' : '40001' });
+    }
+    await completeChapter();
+  };
+
+  await executeOrchestrationV2PlanningTask(lease('chapter_blueprint'), f.planning as never,
+    f.worker as never, f.clients as never, { embedding_model: 'embedding', embedding_dimensions: 768, budgets },
+    async () => undefined, new AbortController().signal);
+
+  assert.equal(completionAttempts, 3);
+  assert.equal(f.events.filter(event => event === 'chapter-call').length, 1);
+  assert.equal(f.events.filter(event => event === 'dispatch-marker').length, 1);
+  assert.equal(f.events.filter(event => event === 'complete-chapter').length, 1);
+});
+
+test('non-transient chapter completion failure is not retried or hidden', async () => {
+  const f = serviceFixture('chapter_blueprint');
+  const failure = Object.assign(new Error('contract violation'), { code: '23514' });
+  let completionAttempts = 0;
+  f.planning.completeChapter = async () => { completionAttempts += 1; throw failure; };
+
+  await assert.rejects(() => executeOrchestrationV2PlanningTask(lease('chapter_blueprint'), f.planning as never,
+    f.worker as never, f.clients as never, { embedding_model: 'embedding', embedding_dimensions: 768, budgets },
+    async () => undefined, new AbortController().signal), error => error === failure);
+
+  assert.equal(completionAttempts, 1);
+  assert.equal(f.events.filter(event => event === 'chapter-call').length, 1);
+});

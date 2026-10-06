@@ -55,6 +55,10 @@ export interface LessonAuthorGeneratedComponentContract {
   data?: unknown;
 }
 
+export interface LessonAuthorLearnerContentPurityContext {
+  exact_identifiers?: readonly string[];
+}
+
 const SAFE_HTML_TAGS = new Set([
   'h2', 'h3', 'p', 'ul', 'ol', 'li', 'strong', 'blockquote',
   'table', 'thead', 'tbody', 'tr', 'th', 'td',
@@ -195,12 +199,13 @@ export function validateLessonAuthorContentContractUnit(
   }
 
   const knownFactIds = new Set(unitFactIds);
+  const knownEvidenceFactIds = new Set([...unitFactIds, ...supportingEvidenceFactIds]);
   const ownedFactIds = new Set<string>();
   for (const component of plan) {
     const sourceFactIds = uniqueFactIds(component.source_fact_ids);
     if (component.component_plan_id && !sourceFactIds.length) {
       const support = uniqueFactIds(component.supporting_evidence_fact_ids);
-      if (!support.length || support.some(id => !supportingEvidenceFactIds.includes(id))) return 'Assessment instance requires exact approved read-only evidence.';
+      if (!support.length || support.some(id => !knownEvidenceFactIds.has(id))) return 'Supporting component instance requires exact approved read-only evidence.';
       continue;
     }
     if (sourceFactIds.length === 0) {
@@ -252,6 +257,108 @@ function validateArtifactRequirement(
   return null;
 }
 
+function visibleHtmlText(value: string): string {
+  return value.replace(/<[^>]+>/g, ' ').replace(/&(?:[a-z]+|#\d+|#x[a-f0-9]+);/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function normalizedInstructionalText(value: string): string {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/** Learner-facing HTML quality gate shared by provider and deterministic fallback. */
+export function validateLessonAuthorHtmlInstructionalQuality(
+  html: string,
+  purityContext: LessonAuthorLearnerContentPurityContext = {},
+): string | null {
+  const visible = visibleHtmlText(html);
+  const folded = normalizedInstructionalText(visible);
+  for (const phrase of [
+    'ra soat y trong tai lieu nguon',
+    'theo dung thu tu xuat hien trong tai lieu nguon',
+    'duoc giu nguyen de nguoi dung ra soat theo nguon',
+    'review the source point',
+    'displayed order in the source',
+    'retained for source review',
+  ]) {
+    if (folded.includes(phrase)) return 'HTML contains internal source-review copy instead of learner instruction.';
+  }
+  if (/\b(?:theo|dua tren|trich tu)\s+(?:tai lieu|nguon|source|document)\b/iu.test(folded)
+    || /\b(?:trong|inside)\s+(?:tai lieu nguon|source document)\b/iu.test(folded)
+    || /\b(?:tai lieu|document|source)\s+(?:neu|mo ta|states?|describes?)\b/iu.test(folded)
+    || /\b(?:nguon|source|tai lieu nguon)\s*[:：]/iu.test(folded)) {
+    return 'HTML exposes source attribution in learner-facing content.';
+  }
+  if (/\b(?:trang|page|slide|chunk|doan nguon|muc nguon)\s*(?:so|number|no\.?|#)?\s*[:#-]?\s*\d{1,6}\b/iu.test(folded)) {
+    return 'HTML exposes a source locator in learner-facing content.';
+  }
+  if (/(?:^|\s)[^<>\n]{0,160}\.(?:pdf|pptx?|docx?|xlsx?|csv|txt|rtf)(?=$|\s|[),.;:])/iu.test(visible)) {
+    return 'HTML exposes a source filename in learner-facing content.';
+  }
+  if (/(?:^|\s)(?:p\d+[-_]f\d+|src[-_]\d+(?:[-_]f\d+)?|(?:component|block|fact|scope)[-_](?:[a-z0-9]+[-_]?){1,8})(?=$|\s|[),.;:])/iu.test(visible)) {
+    return 'HTML exposes an internal identifier in learner-facing content.';
+  }
+  for (const identifier of purityContext.exact_identifiers ?? []) {
+    const candidate = typeof identifier === 'string' ? identifier.trim() : '';
+    if (candidate.length < 3) continue;
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'iu').test(visible)) {
+      return 'HTML exposes an internal identifier in learner-facing content.';
+    }
+  }
+  if (/(.)\1{5,}/iu.test(visible)) return 'HTML contains repeated OCR noise.';
+  const segments = Array.from(html.matchAll(/<(?:p|li|th|td|blockquote)>\s*([^<]+?)\s*<\//giu))
+    .map(match => match[1].replace(/&(?:[a-z]+|#\d+|#x[a-f0-9]+);/gi, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  for (const segment of segments) {
+    if (/^(?:https?:\/\/|www\.)\S+$/iu.test(segment)
+      || /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/u.test(segment)
+      || /^(?:thank you|thanks|cảm ơn|xin cảm ơn)$/iu.test(segment)) {
+      return 'HTML contains non-instructional contact or presentation boilerplate.';
+    }
+  }
+  const meaningful = segments.map(normalizedInstructionalText).filter(value => value.length >= 12);
+  if (new Set(meaningful).size !== meaningful.length) return 'HTML repeats a learner-facing block.';
+  return null;
+}
+
+/** AI ID emits exactly one supported assessment shape: single-answer MCQ. */
+export function validateLessonAuthorSingleChoiceProblem(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return 'Problem XML must not be empty.';
+  if (!/<multiplechoiceresponse>/i.test(value) || !/<choicegroup\s+type="MultipleChoice">/i.test(value)) {
+    return 'AI Instructional Design problem must be single-answer multiple choice.';
+  }
+  if (/<(?:stringresponse|numericalresponse|optionresponse|checkboxgroup|choiceresponse)>/i.test(value)) {
+    return 'AI Instructional Design problem contains an unsupported response type.';
+  }
+  const labels = Array.from(value.matchAll(/<label>([\s\S]*?)<\/label>/gi));
+  if (labels.length !== 1 || visibleHtmlText(labels[0]?.[1] ?? '').length < 20) {
+    return 'Multiple-choice problem needs one complete question.';
+  }
+  const choices = Array.from(value.matchAll(/<choice\s+correct="(true|false)">([\s\S]*?)<\/choice>/gi));
+  if (choices.length < 3 || choices.length > 6) return 'Multiple-choice problem needs three to six choices.';
+  if (choices.filter(choice => choice[1].toLowerCase() === 'true').length !== 1) {
+    return 'Multiple-choice problem needs exactly one correct answer.';
+  }
+  const choiceTexts = choices.map(choice => visibleHtmlText(choice[2]));
+  const normalizedChoices = choiceTexts.map(normalizedInstructionalText);
+  if (choiceTexts.some(text => text.length < 8) || new Set(normalizedChoices).size !== normalizedChoices.length) {
+    return 'Multiple-choice problem choices must be complete and distinct.';
+  }
+  const correct = choiceTexts[choices.findIndex(choice => choice[1].toLowerCase() === 'true')] ?? '';
+  if (/^(?:https?:\/\/|www\.)\S+$/iu.test(correct)
+    || /^[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}$/u.test(correct)
+    || /^\+?\d[\d\s().-]{7,}\d$/u.test(correct)) {
+    return 'Multiple-choice correct answer is non-instructional source boilerplate.';
+  }
+  const solution = value.match(/<solution>[\s\S]*?<p>([\s\S]*?)<\/p>[\s\S]*?<\/solution>/i);
+  if (!solution || visibleHtmlText(solution[1]).length < 20) {
+    return 'Multiple-choice problem needs a source-grounded explanation.';
+  }
+  return null;
+}
+
 /** Removes unsupported tags and attributes before content can reach course_blocks. */
 export function sanitizeLessonAuthorHtml(value: unknown): string {
   const raw = typeof value === 'string' ? value : '';
@@ -276,8 +383,12 @@ export function validateLessonAuthorHtmlContract(
   if (!html.trim()) return 'HTML content must not be empty.';
   const stack: string[] = [];
   const tagPattern = /<\/?([a-z0-9]+)>/gi;
+  let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = tagPattern.exec(html)) !== null) {
+    if (stack.length === 0 && visibleHtmlText(html.slice(cursor, match.index))) {
+      return 'HTML contains learner text outside a supported semantic root element.';
+    }
     const tag = match[1].toLowerCase();
     if (!SAFE_HTML_TAGS.has(tag)) return `HTML contains unsupported tag: ${tag}.`;
     if (match[0].startsWith('</')) {
@@ -285,8 +396,10 @@ export function validateLessonAuthorHtmlContract(
     } else {
       stack.push(tag);
     }
+    cursor = tagPattern.lastIndex;
   }
   if (stack.length > 0) return `HTML has unclosed ${stack[stack.length - 1]} tag.`;
+  if (visibleHtmlText(html.slice(cursor))) return 'HTML contains learner text outside a supported semantic root element.';
   if (/<li>/.test(html) && !/<(?:ul|ol)>/i.test(html)) return 'HTML list items must be inside ul or ol.';
   if (/<(?:th|td)>/i.test(html) && !/<tr>/i.test(html)) return 'HTML table cells must be inside a table row.';
   if (/<tr>/i.test(html) && !/<table>/i.test(html)) return 'HTML table rows must be inside a table.';
@@ -300,11 +413,13 @@ export function validateLessonAuthorHtmlContract(
 export function validateLessonAuthorGeneratedUnitCoverage(
   unit: LessonAuthorContentContractUnit,
   components: readonly LessonAuthorGeneratedComponentContract[],
+  purityContext: LessonAuthorLearnerContentPurityContext = {},
 ): string | null {
   const plan = Array.isArray(unit.component_plan) ? unit.component_plan : [];
   if (components.length !== plan.length) return 'Generated component count does not match the approved Blueprint plan.';
   const unitFactIds = new Set(uniqueFactIds(unit.source_fact_ids));
   const unitSupportingEvidenceFactIds = new Set(uniqueFactIds(unit.supporting_evidence_fact_ids));
+  const allowedSupportingEvidenceFactIds = new Set([...unitFactIds, ...unitSupportingEvidenceFactIds]);
   const coveredFactIds = new Set<string>();
 
   for (const [index, component] of components.entries()) {
@@ -323,7 +438,7 @@ export function validateLessonAuthorGeneratedUnitCoverage(
       return `Generated component ${index + 1} does not match its approved supporting evidence.`;
     }
     const invalidSupportingEvidence = [...declaredSupportingEvidenceIds]
-      .filter(id => !unitSupportingEvidenceFactIds.has(id));
+      .filter(id => !allowedSupportingEvidenceFactIds.has(id));
     if (invalidSupportingEvidence.length > 0) {
       return `Generated component ${index + 1} references supporting evidence outside its unit.`;
     }
@@ -344,6 +459,12 @@ export function validateLessonAuthorGeneratedUnitCoverage(
       const html = sanitizeLessonAuthorHtml(component.html ?? component.data);
       const formattingFailure = validateLessonAuthorHtmlContract(html, expected.required_artifacts ?? []);
       if (formattingFailure) return `Generated HTML component ${index + 1}: ${formattingFailure}`;
+      const qualityFailure = validateLessonAuthorHtmlInstructionalQuality(html, purityContext);
+      if (qualityFailure) return `Generated HTML component ${index + 1}: ${qualityFailure}`;
+    }
+    if (component.type === 'problem' && component.data !== undefined) {
+      const problemFailure = validateLessonAuthorSingleChoiceProblem(component.data);
+      if (problemFailure) return `Generated problem component ${index + 1}: ${problemFailure}`;
     }
   }
   const missing = [...unitFactIds].filter(id => !coveredFactIds.has(id));

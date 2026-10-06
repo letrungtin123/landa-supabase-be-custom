@@ -34,7 +34,7 @@ function lease(kind: OrchestrationV2TaskLease['kind']): OrchestrationV2TaskLease
     source_snapshot_hash: hash('source'), runtime_config_hash: hash('runtime'),
     model: 'test-model', locale: 'vi', max_output_tokens: deterministic ? 0 : 32_000,
     provider_max_attempts: deterministic ? 0 : 2, execution_budget_ms: 300_000,
-    lease_token: uuid(6), dispatch_epoch: 1, routing_shard: 7,
+    lease_token: uuid(6), dispatch_epoch: 1, provider_replay_required: false, routing_shard: 7,
     ai_reservation_id: deterministic ? null : uuid(7),
   };
 }
@@ -146,6 +146,7 @@ test('skeleton completion fans out deterministic chapter shards and leaves valid
     if (sql.includes('INSERT INTO lesson_author_workspace_v2_dispatch_outbox')) {
       return (JSON.parse(String(params[0])) as Array<{ id: string }>).map(row => ({ id: row.id }));
     }
+    if (sql.includes("'architecture_progressed'")) return [{ sequence: 3 }];
     assert.fail(`unexpected SQL: ${sql}`);
   });
   const artifacts: Array<Record<string, unknown>> = [];
@@ -174,11 +175,12 @@ test('skeleton completion fans out deterministic chapter shards and leaves valid
   assert.equal(insertedTasks.filter(task => task.kind === 'validate_architecture').length, 1);
   assert.equal(f.queries.filter(query => query.sql.includes("SET status='queued'")).length, 1);
   assert.equal(f.queries.filter(query => query.sql.includes('lesson_author_workspace_v2_dispatch_outbox')).length, 1);
-  assert.equal(f.queries.length, 5, 'fan-out query count must remain constant as shard count grows');
+  assert.equal(f.queries.length, 6, 'fan-out query count must remain constant as shard count grows');
 });
 
 test('last chapter completion promotes architecture validation through one durable outbox', async () => {
   const f = database((sql) => {
+    if (sql.includes("'architecture_progressed'")) return [{ sequence: 4 }];
     if (sql.includes("task_key='architecture:validate'")) return [{ id: uuid(40) }];
     if (sql.includes('INSERT INTO lesson_author_workspace_v2_dispatch_outbox')) return [{ id: uuid(41) }];
     assert.fail(`unexpected SQL: ${sql}`);
@@ -195,8 +197,8 @@ test('last chapter completion promotes architecture validation through one durab
           title: 'Explanation', rationale: 'Core teaching', source_scope_ids: ['scope-1'] }], media_brief: null }] }],
   } }, async () => undefined);
   assert.equal(artifacts[0]?.artifact_kind, 'chapter_blueprint');
-  assert.equal(f.queries.length, 2);
-  assert.equal(f.queries[1]?.params[5], uuid(40));
+  assert.equal(f.queries.length, 3);
+  assert.equal(f.queries[2]?.params[5], uuid(40));
 });
 
 test('architecture input loads exactly one skeleton and the complete strict shard set', async () => {
@@ -217,8 +219,13 @@ test('architecture input loads exactly one skeleton and the complete strict shar
       learning_objectives: ['Apply'], learning_activities: ['Read'], assessment: 'Check', units: [{ title: 'Unit',
         purpose: 'Teach', learning_objective_refs: ['lo_1'], source_scope_ids: ['scope-1'], component_plan: [{
           type: 'html', title: 'Explanation', rationale: 'Core teaching', source_scope_ids: ['scope-1'],
-        }], media_brief: null }] }] };
+        }], media_brief: null }] }], assessment_obligations: [{ planned_slot_key: `ao2_${'a'.repeat(32)}`,
+          lesson_index: 1, unit_index: 1, component_index: 2, learning_objective_refs: ['lo_1'],
+          required_assessment_kind: 'single_choice' as const, relevant_scope_ids: ['scope-1'],
+          relevant_evidence_fact_ids: ['fact-1'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED' as const,
+          status: 'open' as const }] };
   const f = database((sql) => {
+    if (sql.includes('INSERT INTO lesson_author_workspace_v2_assessment_obligations')) return [{ id: uuid(49) }];
     if (sql.includes("a.artifact_kind IN ('course_skeleton','chapter_blueprint')")) return [
       { artifact_kind: 'course_skeleton',
         artifact_hash: orchestrationV2Hash({ contract_version: 2, skeleton, scopes: [scope], shard_plans: [plan] }),
@@ -253,10 +260,18 @@ test('architecture completion stores evidence and queues one deterministic inven
       learning_objectives: ['Apply'], learning_activities: ['Read'], assessment: 'Check', units: [{ title: 'Unit',
         purpose: 'Teach', learning_objective_refs: ['lo_1'], source_scope_ids: ['scope-1'], component_plan: [{
           type: 'html' as const, title: 'Explanation', rationale: 'Core teaching', source_scope_ids: ['scope-1'],
-        }], media_brief: null }] }] };
+        }], media_brief: null }] }], assessment_obligations: [{
+      planned_slot_key: `ao2_${'a'.repeat(32)}`, lesson_index: 1, unit_index: 1, component_index: 2,
+      learning_objective_refs: ['lo_1'], required_assessment_kind: 'single_choice' as const,
+      relevant_scope_ids: ['scope-1'], relevant_evidence_fact_ids: ['fact-1'],
+      unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED' as const, status: 'open' as const,
+    }] };
   const assembly = assembleOrchestrationV2Architecture(skeleton, scopes,
     [{ artifact_hash: hash('chapter-artifact'), shard }]);
   const f = database((sql) => {
+    if (sql.includes('INSERT INTO lesson_author_workspace_v2_assessment_obligations')) {
+      return [{ id: uuid(52) }];
+    }
     if (sql.includes('coalesce(max(ordinal)')) return [{ value: 4 }];
     if (sql.includes('INSERT INTO lesson_author_workspace_v2_tasks')) return [{ id: uuid(50) }];
     if (sql.includes('INSERT INTO lesson_author_workspace_v2_dependencies')) return [{ task_id: uuid(50) }];
@@ -273,5 +288,8 @@ test('architecture completion stores evidence and queues one deterministic inven
   assert.equal(taskInsert?.params[6], 'inventory:publish');
   assert.equal(taskInsert?.params[7], 'publish_inventory');
   assert.equal(taskInsert?.params[9], assembly.assembly_hash);
-  assert.equal(f.queries.length, 5);
+  const obligationInsert = f.queries.find(query => query.sql.includes(
+    'INSERT INTO lesson_author_workspace_v2_assessment_obligations'));
+  assert.equal(obligationInsert?.params[5], assembly.assembly_hash);
+  assert.equal(f.queries.length, 6);
 });

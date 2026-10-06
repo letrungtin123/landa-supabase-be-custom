@@ -1,4 +1,6 @@
 import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
+import { workspaceDraftQualityChecksAccepted, type QualityCheckStatus,
+  type WorkspaceDraftQualityChecks } from './lesson-author-quality-receipt.logic.js';
 
 /** Draft/revision contract only. Not a provider, payload validator or Apply API. */
 export const WORKSPACE_CONTRACT_VERSION = 1;
@@ -7,7 +9,7 @@ export const WORKSPACE_EVENT_PAGE_SIZE = 100;
 export type WorkspaceLocale = 'vi' | 'en';
 export type WorkspaceNodeKind = 'course' | 'chapter' | 'lesson' | 'unit' | 'component' | 'media_brief';
 export type WorkspaceContentState = 'planned' | 'generating' | 'content_ready' | 'needs_action';
-export type WorkspaceCheck = 'PASS' | 'FAIL' | 'NOT_RUN';
+export type WorkspaceCheck = QualityCheckStatus;
 export type WorkspaceErrorCode =
   | 'WORKSPACE_CONTRACT_INVALID' | 'WORKSPACE_LOCALE_INVALID'
   | 'WORKSPACE_REVISION_CONFLICT' | 'WORKSPACE_NODE_NOT_READY'
@@ -153,6 +155,14 @@ export interface WorkspaceApplyValidation {
   target_snapshot_hash: string;
   checks: Record<'schema' | 'evidence' | 'pedagogy' | 'coverage' | 'duplicates' | 'dependencies' | 'registry', WorkspaceCheck>;
 }
+
+export interface WorkspaceDraftApplyValidation {
+  scope_id: string;
+  revision_set_hash: string;
+  source_snapshot_hash: string;
+  target_snapshot_hash: string;
+  checks: WorkspaceDraftQualityChecks;
+}
 /** Server-only proof binding; API must never accept this proof from a browser. */
 export function assertWorkspaceApplyReady(input: {
   scope_id: string; kind: WorkspaceNodeKind; complete: boolean;
@@ -171,6 +181,24 @@ export function assertWorkspaceApplyReady(input: {
     .every(key => proof.checks?.[key as keyof WorkspaceApplyValidation['checks']] === 'PASS')) {
     fail('WORKSPACE_APPLY_VALIDATION_REQUIRED');
   }
+}
+
+/** V2 draft Apply gate. It preserves all deterministic safety/evidence fences
+ * while permitting semantic quality to remain explicitly unevaluated. */
+export function assertWorkspaceDraftApplyReady(input: {
+  scope_id: string; kind: WorkspaceNodeKind; complete: boolean;
+  revision_set_hash: string; source_snapshot_hash: string; target_snapshot_hash: string;
+  validation: WorkspaceDraftApplyValidation | null;
+}): void {
+  if (!['chapter', 'lesson', 'unit', 'component'].includes(input.kind)) fail('WORKSPACE_APPLY_SCOPE_INVALID');
+  const proof = input.validation;
+  const hash = /^[0-9a-f]{64}$/;
+  if (!input.complete || !proof || !input.scope_id || proof.scope_id !== input.scope_id
+    || !hash.test(input.revision_set_hash) || !hash.test(input.source_snapshot_hash) || !hash.test(input.target_snapshot_hash)
+    || proof.revision_set_hash !== input.revision_set_hash) fail('WORKSPACE_APPLY_VALIDATION_REQUIRED');
+  if (proof.source_snapshot_hash !== input.source_snapshot_hash) fail('WORKSPACE_SOURCE_CHANGED');
+  if (proof.target_snapshot_hash !== input.target_snapshot_hash) fail('WORKSPACE_APPLY_TARGET_CHANGED');
+  if (!workspaceDraftQualityChecksAccepted(proof.checks)) fail('WORKSPACE_APPLY_VALIDATION_REQUIRED');
 }
 
 /** Gap/expired cursor must re-snapshot, never manufacture missed node state. */

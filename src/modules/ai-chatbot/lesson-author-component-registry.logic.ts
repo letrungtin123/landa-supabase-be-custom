@@ -147,8 +147,8 @@ export const AI_COMPONENT_REGISTRY: Readonly<Record<CourseComponentType, AiCompo
     pedagogical_intents: ['knowledge_check', 'practice'], selection_priority: 2,
     best_for: ['A source-grounded knowledge check with a verifiable answer.'],
     avoid_when: ['No assessable claim or answer can be derived from source evidence.'],
-    constraints: { supported_subtypes: ['multiple_choice', 'multiple_select', 'dropdown', 'numerical', 'short_text'], media_forbidden: true },
-    schema: { data: 'Open edX problem XML', required: ['question', 'answer or choices'] },
+    constraints: { supported_subtypes: ['multiple_choice'], correct_answer_count: 1, media_forbidden: true },
+    schema: { data: 'Open edX single-answer multiple-choice XML', required: ['question', '3-6 choices', 'exactly one correct choice', 'explanation'] },
   },
   la_media_quiz: {
     type: 'la_media_quiz', generation_mode: 'AI_GENERATABLE_WITH_EXISTING_ASSET', ai_generatable: false, requires_existing_asset: true,
@@ -691,6 +691,18 @@ function planSemanticLearningBlocksInternal(input: ComponentPlannerInput): Plann
     if (capabilities) {
       plan.component_plan_id = componentPlanId(input.unit_path!, plan.type, plan.learning_block_ids ?? []);
       plan.learning_objective_refs = [...new Set(input.blocks.filter(b => plan.learning_block_ids?.includes(b.id)).flatMap(b => b.learning_objective_refs ?? []))];
+      if (plan.type !== 'html') {
+        // Instance-contract components are reinforcement or assessment, not a
+        // second canonical teacher. HTML already owns and teaches every unit
+        // fact. Preserve the interaction's exact grounding as read-only
+        // evidence so FAQ/quiz/diagram/sortable payloads cannot duplicate
+        // canonical ownership or satisfy teaching coverage by themselves.
+        plan.supporting_evidence_fact_ids = [...new Set([
+          ...(plan.supporting_evidence_fact_ids ?? []),
+          ...(plan.source_fact_ids ?? []),
+        ])];
+        plan.source_fact_ids = [];
+      }
     }
     if (!GENERATABLE_TYPES.has(plan.type)) throw new Error(`Registry selected unsupported AI component ${plan.type}.`);
     if (!isAllowed(plan.type, allowed)) {

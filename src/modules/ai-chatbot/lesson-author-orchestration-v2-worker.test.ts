@@ -27,7 +27,7 @@ function task(overrides: Record<string, unknown> = {}) {
     execution_budget_ms: 60_000, lease_token: null, dispatch_epoch: 0, ai_reservation_id: null,
     attempt_count: 0, max_attempts: 2, status: 'queued', run_status: 'planning', outbox_status: 'published',
     tenant_concurrency_limit: 16, workspace_concurrency_limit: 4, dispatch_started_at: null,
-    accounting_state: 'not_required', routing_shard: 19,
+    accounting_state: 'not_required', provider_replay_required: false, routing_shard: 19,
     ...overrides,
   };
 }
@@ -105,8 +105,11 @@ test('exact deterministic claim serializes limits and consumes delivery atomical
   if (result.disposition === 'claimed') {
     assert.equal(result.lease.kind, 'source_snapshot');
     assert.equal(result.lease.dispatch_epoch, 1);
+    assert.equal(result.lease.provider_replay_required, false);
     assert.equal(result.lease.ai_reservation_id, null);
   }
+  assert.match(f.queries[2]!.sql, /lesson_author_workspace_v2_attempt_events prior_attempt/);
+  assert.match(f.queries[2]!.sql, /prior_attempt\.provider_dispatched/);
   assert.match(f.queries[1]!.sql, /pg_advisory_xact_lock/);
   assert.match(f.queries[4]!.sql, /provider_running/);
   assert.match(f.queries[5]!.sql, /attempt_count=attempt_count\+1,dispatch_epoch=dispatch_epoch\+1/);
@@ -143,7 +146,7 @@ test('saturated claim is deferred without reservation, task mutation or delivery
     [{ global_running: 64, provider_running: 8, tenant_running: 16, workspace_running: 4 }],
   ]);
   const result = await f.repo.claimExact(envelope, limits, async () => assert.fail('must not reserve'));
-  assert.deepEqual(result, { disposition: 'deferred' });
+  assert.deepEqual(result, { disposition: 'deferred', reason: 'global_capacity' });
   assert.equal(f.queries.length, 5); f.done();
 });
 
@@ -153,8 +156,48 @@ test('broker delivery racing the published CAS is requeued instead of acknowledg
     [task({ outbox_status: 'publishing' })],
   ]);
   assert.deepEqual(await f.repo.claimExact(envelope, limits, async () => assert.fail('must not reserve')),
-    { disposition: 'deferred' });
+    { disposition: 'deferred', reason: 'publication_race' });
   assert.equal(f.queries.length, 3);
+  f.done();
+});
+
+test('capacity wake accelerates one fair sleeping deferral without bypassing claim authority', async () => {
+  const f = fixture([
+    [],
+    [{ outbox_id: uuid(1), run_id: uuid(2), task_id: uuid(3), tenant_id: uuid(5),
+      workspace_id: uuid(4), task_kind: 'generate_unit' }],
+  ]);
+  assert.deepEqual(await f.repo.wakeOneCapacityDeferred(limits), {
+    outbox_id: uuid(1), run_id: uuid(2), task_id: uuid(3), tenant_id: uuid(5),
+    workspace_id: uuid(4), task_kind: 'generate_unit',
+  });
+  assert.match(f.queries[0]!.sql, /la:v2:global/);
+  assert.match(f.queries[1]!.sql, /capacity_deferral_count>0/);
+  assert.match(f.queries[1]!.sql, /row_number\(\) OVER\(PARTITION BY outbox\.tenant_id/);
+  assert.match(f.queries[1]!.sql, /FOR UPDATE OF outbox SKIP LOCKED LIMIT 1/);
+  assert.match(f.queries[1]!.sql, /available_at=scheduler_clock\.now,updated_at=scheduler_clock\.now/);
+  assert.deepEqual(f.queries[1]!.params, [limits.global_concurrency_limit, limits.provider_concurrency_limit]);
+  f.done();
+});
+
+test('capacity wake is a no-op when no bounded slot is eligible', async () => {
+  const f = fixture([[], []]);
+  assert.equal(await f.repo.wakeOneCapacityDeferred(limits), null);
+  f.done();
+});
+
+test('capacity deferral returns a published delivery to durable pending state with a bounded delay', async () => {
+  const f = fixture([
+    [{ locked: true }], [{ delay_ms: 7_500, capacity_deferral_count: 3 }],
+  ]);
+  assert.deepEqual(await f.repo.deferPublished(envelope, 2_500), { delay_ms: 7_500, deferral_count: 3 });
+  assert.match(f.queries[0]!.sql, /pg_advisory_xact_lock/);
+  assert.match(f.queries[1]!.sql, /status='pending'/);
+  assert.match(f.queries[1]!.sql, /attempt_count=0/);
+  assert.match(f.queries[1]!.sql, /capacity_deferral_count=LEAST/);
+  assert.match(f.queries[1]!.sql, /1::bigint<<LEAST\(outbox\.capacity_deferral_count,5\)/);
+  assert.match(f.queries[1]!.sql, /task\.status='queued'/);
+  assert.equal(f.queries[1]!.params[5], 2_500);
   f.done();
 });
 
@@ -175,12 +218,14 @@ test('provider dispatch marker precedes artifact/accounting success in lease-fen
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6), source_snapshot_hash: hash('source'),
     runtime_config_hash: hash('runtime'),
     model: 'gemini-test', locale: 'vi' as const, max_output_tokens: 65_536, provider_max_attempts: 2,
-    execution_budget_ms: 60_000, lease_token: uuid(9), dispatch_epoch: 1, ai_reservation_id: uuid(10),
+    execution_budget_ms: 60_000, lease_token: uuid(9), dispatch_epoch: 1,
+    provider_replay_required: false, ai_reservation_id: uuid(10),
     routing_shard: 19,
   };
-  const marker = fixture([[{ id: lease.task_id }]]);
+  const marker = fixture([[], [{ id: lease.task_id }]]);
   await marker.repo.markProviderDispatched(lease);
-  assert.match(marker.queries[0]!.sql, /dispatch_started_at=clock_timestamp\(\)/); marker.done();
+  assert.match(marker.queries[0]!.sql, /la:v2:workspace/);
+  assert.match(marker.queries[1]!.sql, /dispatch_started_at=clock_timestamp\(\)/); marker.done();
 
   const resultHash = hash('artifact');
   const success = routedFixture(sql => {
@@ -189,6 +234,7 @@ test('provider dispatch marker precedes artifact/accounting success in lease-fen
       return [{ ...task(), dispatch_started_at: new Date(), accounting_state: 'reserved' }];
     }
     if (/INSERT INTO lesson_author_workspace_v2_artifacts/.test(sql)) return [{ id: uuid(11) }];
+    if (/INSERT INTO lesson_author_workspace_v2_attempt_events/.test(sql)) return [{ id: uuid(12) }];
     if (/SET status='succeeded'/.test(sql)) return [{ id: lease.task_id }];
   });
   const events: string[] = [];
@@ -198,18 +244,31 @@ test('provider dispatch marker precedes artifact/accounting success in lease-fen
   }, async (_tx, _lease, usage) => { events.push('settled'); assert.equal(usage.outputTokens, 4); }, {
     beforeSuccess: async () => {
       events.push('before-success');
-      assert.equal(success.queries.length, 3, 'workspace fence and artifact must exist before the pre-success hook');
+      assert.equal(success.queries.length, 4, 'workspace fence, artifact and attempt evidence must exist before success');
     },
     afterSuccess: async () => {
       events.push('after-success');
-      assert.equal(success.queries.length, 4, 'task must be succeeded before the post-success hook');
+      assert.equal(success.queries.length, 5, 'task must be succeeded before the post-success hook');
     },
-  });
+  }, { mode: 'provider' }, [{ sequence: 1, invocation_kind: 'writer', invocation_index: 1,
+    provider_attempt: 1, phase: 'provider_transport', outcome: 'succeeded',
+    event_code: 'provider_response_received', failure_stage: null, failure_code: null, failure_path: null,
+    provider_dispatched: true, usage_source: 'provider_reported',
+    observed_usage: { provider_input_tokens: 10, provider_output_tokens: 4, provider_total_tokens: 14 },
+    duration_ms: 25, diagnostics: { provider_http_status: 200 } }]);
   assert.deepEqual(events, ['settled', 'before-success', 'after-success']);
   assert.match(success.queries[0]!.sql, /pg_advisory_xact_lock/);
   assert.deepEqual(success.queries[0]!.params, [lease.workspace_id]);
   assert.match(success.queries[0]!.sql, /\$1::text/);
   assert.ok(success.queries.some(query => /INSERT INTO lesson_author_workspace_v2_artifacts/.test(query.sql)));
+  const attemptInsert = success.queries.find(query => /INSERT INTO lesson_author_workspace_v2_attempt_events/.test(query.sql));
+  assert.ok(attemptInsert);
+  assert.match(attemptInsert.sql, /jsonb_to_recordset\(\$13::jsonb\)/);
+  const placeholders = [...attemptInsert.sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
+  assert.equal(Math.max(...placeholders), attemptInsert.params.length,
+    'attempt telemetry SQL placeholder count must match its bound parameter count');
+  assert.equal(JSON.parse(String(attemptInsert.params[12])).length, 1);
+  assert.doesNotMatch(JSON.stringify(attemptInsert.params), /prompt|source_text|model_output/);
   assert.ok(success.queries.some(query => /accounting_state=CASE WHEN \$7::boolean AND \$8::text<>'deterministic_fallback'/.test(query.sql)));
 });
 
@@ -220,7 +279,8 @@ test('deterministic fallback releases undispatched quota and cannot settle a pai
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(7),
     source_snapshot_hash: hash('source'), runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const,
     max_output_tokens: 65_536, provider_max_attempts: 2, execution_budget_ms: 60_000,
-    lease_token: uuid(9), dispatch_epoch: 2, ai_reservation_id: uuid(10), routing_shard: 19,
+    lease_token: uuid(9), dispatch_epoch: 2, provider_replay_required: true,
+    ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const fallback = routedFixture(sql => {
     if (/pg_advisory_xact_lock/.test(sql)) return [];
@@ -250,7 +310,8 @@ test('definitive provider rejection releases accounting and stops the run immedi
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6),
     source_snapshot_hash: hash('source'), runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const,
     max_output_tokens: 65_536, provider_max_attempts: 1, execution_budget_ms: 60_000,
-    lease_token: uuid(9), dispatch_epoch: 1, ai_reservation_id: uuid(10), routing_shard: 19,
+    lease_token: uuid(9), dispatch_epoch: 1, provider_replay_required: false,
+    ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const locked = task({ id: lease.task_id, run_id: lease.run_id, workspace_id: lease.workspace_id,
     tenant_id: lease.tenant_id, course_id: lease.course_id, kind: lease.kind,
@@ -285,6 +346,7 @@ test('claimed pre-dispatch failure releases reservation and retries immediately 
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6), source_snapshot_hash: hash('source'),
     runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const, max_output_tokens: 65_536,
     provider_max_attempts: 2, execution_budget_ms: 60_000, lease_token: uuid(9), dispatch_epoch: 1,
+    provider_replay_required: false,
     ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const locked = task({ id: lease.task_id, run_id: lease.run_id, workspace_id: lease.workspace_id,
@@ -317,6 +379,7 @@ test('claimed exhausted pre-dispatch failure preserves the real code and stops t
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6), source_snapshot_hash: hash('source'),
     runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const, max_output_tokens: 65_536,
     provider_max_attempts: 2, execution_budget_ms: 60_000, lease_token: uuid(9), dispatch_epoch: 2,
+    provider_replay_required: false,
     ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const locked = task({ id: lease.task_id, run_id: lease.run_id, workspace_id: lease.workspace_id,
@@ -353,6 +416,7 @@ test('claimed post-dispatch failure reconciles and creates its only retry in the
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6), source_snapshot_hash: hash('source'),
     runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const, max_output_tokens: 65_536,
     provider_max_attempts: 2, execution_budget_ms: 60_000, lease_token: uuid(9), dispatch_epoch: 1,
+    provider_replay_required: false,
     ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const locked = task({ id: lease.task_id, run_id: lease.run_id, workspace_id: lease.workspace_id,
@@ -477,7 +541,8 @@ test('one rejected unit cancels only descendants while sibling shards continue',
     contract_hash: hash('contract'), input_context_hash: hash('input'), source_snapshot_id: uuid(6),
     source_snapshot_hash: hash('source'), runtime_config_hash: hash('runtime'), model: 'gemini-test', locale: 'vi' as const,
     max_output_tokens: 65_536, provider_max_attempts: 2, execution_budget_ms: 60_000,
-    lease_token: uuid(9), dispatch_epoch: 1, ai_reservation_id: uuid(10), routing_shard: 19,
+    lease_token: uuid(9), dispatch_epoch: 1, provider_replay_required: false,
+    ai_reservation_id: uuid(10), routing_shard: 19,
   };
   const locked = task({ id: lease.task_id, kind: lease.kind, task_key: lease.task_key, chapter_key: lease.chapter_key,
     node_id: lease.node_id, status: 'running', lease_token: lease.lease_token, dispatch_started_at: new Date(),

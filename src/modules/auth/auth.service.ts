@@ -218,15 +218,17 @@ export async function login(username: string, password: string, clientApp?: 'adm
   // Lấy permissions
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
 
-  // Lấy tenant modules (những module tenant được bật)
-  const tenantModules = await resolveTenantModules(user.tenant_id);
-
   // Superuser/superadmin: lấy danh sách tenants được quản lý
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
+  // Superadmin has no tenant in the JWT. Its UI context defaults to the first
+  // managed tenant, so module entitlements must use that same tenant instead
+  // of returning every globally-active module.
+  const tenantModules = await resolveTenantModules(tenantContextId);
   const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+    tenantContextId,
   );
 
   // learner_plus: lấy danh sách org groups mà user thuộc về
@@ -382,20 +384,19 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode, sessionId],
   );
 
-  // Lấy permissions + tenant modules mới
+  // Lấy permissions + tenant context mới
   const permissions = await resolvePermissions(row.user_id, row.role, row.tenant_id);
-  const tenantModules = await resolveTenantModules(row.tenant_id);
   const managedTenants = (row.role === 'superuser' || row.role === 'superadmin')
     ? await resolveManagedTenants(row.user_id, row.tenant_id, row.role)
     : [];
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    resolveRoleLabelTenantId(
-      row.role,
-      row.tenant_id,
-      managedTenants,
-      selectedTenantId,
-    ),
+  const tenantContextId = resolveRoleLabelTenantId(
+    row.role,
+    row.tenant_id,
+    managedTenants,
+    selectedTenantId,
   );
+  const tenantModules = await resolveTenantModules(tenantContextId);
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(tenantContextId);
   const memberGroups = row.role === 'learner_plus'
     ? await resolveMemberGroups(row.user_id)
     : [];
@@ -500,12 +501,13 @@ export async function issueSessionForUserId(
   }
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const tenantModules = await resolveTenantModules(user.tenant_id);
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
+  const tenantModules = await resolveTenantModules(tenantContextId);
   const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+    tenantContextId,
   );
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
@@ -554,18 +556,17 @@ export async function getMe(userId: string, selectedTenantId?: string | null) {
 
   const user = result.rows[0];
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const tenantModules = await resolveTenantModules(user.tenant_id);
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    resolveRoleLabelTenantId(
-      user.role,
-      user.tenant_id,
-      managedTenants,
-      selectedTenantId,
-    ),
+  const tenantContextId = resolveRoleLabelTenantId(
+    user.role,
+    user.tenant_id,
+    managedTenants,
+    selectedTenantId,
   );
+  const tenantModules = await resolveTenantModules(tenantContextId);
+  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(tenantContextId);
   const memberGroups = user.role === 'learner_plus'
     ? await resolveMemberGroups(user.id)
     : [];
@@ -847,12 +848,13 @@ export async function exchangeOTT(token: string) {
   );
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const tenantModules = await resolveTenantModules(user.tenant_id);
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
     : [];
+  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
+  const tenantModules = await resolveTenantModules(tenantContextId);
   const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants),
+    tenantContextId,
   );
 
   return {

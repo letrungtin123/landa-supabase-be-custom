@@ -137,7 +137,7 @@ test('DB errors and malformed stored content return safe external error while pr
   assert.equal(f.output.status, 503); assert.equal(f.logs[0].internal_failure_code, 'WORKSPACE_READ_UNAVAILABLE');
   assert.equal(JSON.stringify([f.output.body, f.logs]).includes('SECRET'), false);
   const bad = fixture(); bad.row({ ...row, content_hash: 'bad' }); bad.request.query = { expected_revision: '0' }; await bad.run('detail');
-  assert.equal(bad.output.status, 503); assert.equal(bad.output.body.code, 'WORKSPACE_READ_UNAVAILABLE');
+  assert.equal(bad.output.status, 500); assert.equal(bad.output.body.code, 'WORKSPACE_READ_CONTRACT_INVALID');
   assert.equal(bad.logs[0].internal_failure_code, 'WORKSPACE_READ_CONTRACT_INVALID');
   assert.equal(JSON.stringify(bad.logs).includes(content.title), false);
   // No guessed root correlation when authorized repository read did not return one.

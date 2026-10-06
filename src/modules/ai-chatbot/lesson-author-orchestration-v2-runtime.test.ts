@@ -31,7 +31,8 @@ const lease: OrchestrationV2TaskLease = {
   source_snapshot_id: uuid(6), source_snapshot_hash: orchestrationV2Hash('source'),
   runtime_config_hash: orchestrationV2Hash('runtime'), model: 'gemini-test', locale: 'vi',
   max_output_tokens: 0, provider_max_attempts: 0, execution_budget_ms: 60_000,
-  lease_token: uuid(7), dispatch_epoch: 1, routing_shard: 4, ai_reservation_id: null,
+  lease_token: uuid(7), dispatch_epoch: 1, provider_replay_required: false,
+  routing_shard: 4, ai_reservation_id: null,
 };
 
 type Worker = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -40,6 +41,8 @@ function deps(claim: Worker['claimExact'], execute: OrchestrationV2WorkerRuntime
   const events: Record<string, unknown>[] = [];
   const repository = {
     claimExact: claim,
+    deferPublished: async () => ({ delay_ms: 5_000, deferral_count: 1 }),
+    wakeOneCapacityDeferred: async () => null,
     renew: async () => true,
     recoverClaimFailure: async () => 'requeued' as const,
     recoverOne: async () => null,
@@ -70,6 +73,22 @@ test('broker parser rejects extra fields and exact runtime hash is stable', () =
   assert.equal(ORCHESTRATION_V2_EXECUTION_POLICY.planning.chapter.max_provider_attempts, 2);
 });
 
+test('capacity saturation is durably deferred with database-authoritative backoff telemetry', async () => {
+  const runtime = deps(async () => ({ disposition: 'deferred', reason: 'provider_capacity' }), async () => undefined);
+  let observedJitter = -1;
+  runtime.value.repository.deferPublished = async (_envelope, jitterMs) => {
+    observedJitter = jitterMs;
+    return { delay_ms: 40_777, deferral_count: 4 };
+  };
+  const result = await handleOrchestrationV2Delivery(raw, runtime.value);
+  assert.equal(result.settlement, 'ack');
+  assert.equal(result.disposition, 'deferred');
+  assert.equal(Number.isSafeInteger(observedJitter) && observedJitter >= 0 && observedJitter <= 4_999, true);
+  const event = runtime.events.find(item => item.event === 'worker_delivery_deferred_durably');
+  assert.equal(event?.delay_ms, 40_777);
+  assert.equal(event?.deferral_count, 4);
+});
+
 test('V2 resolves only the legacy Lesson Author model to Gemini 3.8', () => {
   assert.equal(resolveOrchestrationV2LessonAuthorModel('gemini-3.5-flash'), 'gemini-3.8-flash');
   assert.equal(resolveOrchestrationV2LessonAuthorModel('models/gemini-3.5-flash'), 'gemini-3.8-flash');
@@ -93,8 +112,15 @@ test('definitive provider rejection is finalized immediately instead of waiting 
 });
 
 test('delivery ACK matrix is DB-authoritative and never broker-retries post-claim execution', async () => {
-  const deferred = deps(async () => ({ disposition: 'deferred' }), async () => assert.fail('must not execute'));
+  const deferred = deps(async () => ({ disposition: 'deferred', reason: 'provider_capacity' }),
+    async () => assert.fail('must not execute'));
   assert.deepEqual(await handleOrchestrationV2Delivery(raw, deferred.value),
+    { settlement: 'ack', disposition: 'deferred', envelope });
+
+  const publicationRace = deps(async () => ({ disposition: 'deferred', reason: 'publication_race' }),
+    async () => assert.fail('must not execute'));
+  publicationRace.value.repository.deferPublished = async () => assert.fail('publication race is not capacity');
+  assert.deepEqual(await handleOrchestrationV2Delivery(raw, publicationRace.value),
     { settlement: 'requeue', disposition: 'deferred', envelope });
 
   const uncertain = deps(async () => { throw new Error('db unavailable'); }, async () => assert.fail('must not execute'));
@@ -151,12 +177,15 @@ test('worker failure telemetry exposes only bounded stage and PostgreSQL diagnos
 test('worker recovery cycle is bounded and counts durable outcomes', async () => {
   const states: Array<'requeued' | 'outcome_unknown' | 'failed' | 'reconciled' | null> =
     ['requeued', 'outcome_unknown', 'failed', 'reconciled', null];
-  const repository = { recoverOne: async () => states.shift() ?? null } as unknown as Worker;
-  const result = await runOrchestrationV2WorkerRecoveryCycle({ repository,
-    releaseUndispatched: async () => undefined, holdUnknown: async () => undefined }, 10);
-  assert.deepEqual(result, { requeued: 1, failed: 1, outcome_unknown: 1, reconciled: 1 });
-  await assert.rejects(() => runOrchestrationV2WorkerRecoveryCycle({ repository,
-    releaseUndispatched: async () => undefined, holdUnknown: async () => undefined }, 0),
+  const repository = { recoverOne: async () => states.shift() ?? null,
+    wakeOneCapacityDeferred: async () => null } as unknown as Worker;
+  const recoveryDeps = { repository,
+    limits: { global_concurrency_limit: 8, provider_concurrency_limit: 2, lease_seconds: 30 },
+    releaseUndispatched: async () => undefined, holdUnknown: async () => undefined,
+    report: () => undefined };
+  const result = await runOrchestrationV2WorkerRecoveryCycle(recoveryDeps, 10);
+  assert.deepEqual(result, { requeued: 1, failed: 1, outcome_unknown: 1, reconciled: 1, capacity_woken: 0 });
+  await assert.rejects(() => runOrchestrationV2WorkerRecoveryCycle(recoveryDeps, 0),
   /ORCHESTRATION_V2_WORKER_RECOVERY_CONFIG_INVALID/);
 });
 

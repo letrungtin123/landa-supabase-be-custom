@@ -11,6 +11,7 @@ import {
   invalidatePublicDomainCachesForDomains,
   invalidateTenantAiCaches,
   invalidateTenantBadgeCaches,
+  invalidateTenantModuleCaches,
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -180,12 +181,12 @@ export async function createTenant(
       ],
     );
 
-    // Tenant management và badge management cần được superadmin cấp riêng.
+    // Tenant management, badge management và news cần được superadmin cấp riêng.
     await client.query(
       `INSERT INTO tenant_modules (tenant_id, module_id, is_enabled)
        SELECT $1, id, true
        FROM modules
-       WHERE code NOT IN ('tenant_management', 'badge_management') AND is_active = true`,
+       WHERE code NOT IN ('tenant_management', 'badge_management', 'news') AND is_active = true`,
       [tenant.id],
     );
 
@@ -360,6 +361,7 @@ export async function updateTenantModules(
   await Promise.all([
     invalidateTenantBadgeCaches(tenantId),
     invalidateTenantAiCaches(tenantId),
+    invalidateTenantModuleCaches(tenantId),
   ]);
 }
 

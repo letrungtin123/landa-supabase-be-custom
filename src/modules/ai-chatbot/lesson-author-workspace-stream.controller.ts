@@ -5,11 +5,11 @@ import type { GenerationJobSql } from './lesson-author-generation-job.repository
 import { createWorkspaceReadRepository, WorkspaceReadError } from './lesson-author-workspace-read.repository.js';
 import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import type { WorkspaceCommitHint } from './lesson-author-workspace-stream.service.js';
+import { env } from '../../config/env.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const HEARTBEAT_MS = 20_000;
-const AUTH_LEASE_MS = 30_000;
 type Locale = 'vi' | 'en';
 
 export interface WorkspaceStreamDiagnostic {
@@ -110,7 +110,7 @@ export function createWorkspaceStreamHandler(deps: {
       // The listener was installed before the status read. It now appends only
       // scalar committed hints; the browser replays the durable ledger.
       heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, HEARTBEAT_MS);
-      lease = setTimeout(() => { if (!res.writableEnded) message(res, 'auth_expiring', { delivery_contract_version: 1, workspace_id: workspaceId }); close(); }, AUTH_LEASE_MS);
+      lease = setTimeout(() => { if (!res.writableEnded) message(res, 'auth_expiring', { delivery_contract_version: 1, workspace_id: workspaceId }); close(); }, env.LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS);
       heartbeat.unref(); lease.unref();
       req.on('close', () => close());
       summary('workspace_stream_opened');

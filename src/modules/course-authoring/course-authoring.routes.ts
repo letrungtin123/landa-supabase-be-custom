@@ -13,6 +13,7 @@ import { checkPermission } from '../../middleware/authorize.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { sendError } from '../../utils/response.js';
 import * as ctrl from './course-authoring.controller.js';
+import * as publishGovernance from './course-publish-governance.controller.js';
 
 const router = Router();
 const courseAssetTempDir = path.join(process.cwd(), 'tmp', 'course-assets');
@@ -128,6 +129,17 @@ router.post('/courses', checkPermission('courses', 'can_edit'), ctrl.createCours
 // Outline
 router.get('/outline/:courseId', checkPermission('courses', 'can_view'), ctrl.getOutline);
 router.get('/component-permissions', checkPermission('courses', 'can_view'), ctrl.getComponentPermissions);
+
+// CP5 publish governance with the additive CP6 reviewer/publisher UX. The
+// entire surface remains default-off until disposable-database acceptance.
+router.get('/publish-governance/courses/:courseId', checkPermission('courses', 'can_view'), publishGovernance.getState);
+router.get('/publish-governance/courses/:courseId/reviewer-options', checkPermission('courses', 'can_edit'), publishGovernance.listReviewerOptions);
+router.put('/publish-governance/courses/:courseId/policy', checkPermission('courses', 'can_edit'), publishGovernance.setPolicy);
+router.post('/publish-governance/courses/:courseId/reviewer-assignments', checkPermission('courses', 'can_edit'), publishGovernance.assignReviewer);
+router.delete('/publish-governance/reviewer-assignments/:assignmentId', checkPermission('courses', 'can_edit'), publishGovernance.revokeReviewer);
+router.post('/publish-governance/courses/:courseId/candidates', checkPermission('courses', 'can_edit'), publishGovernance.createCandidate);
+router.get('/publish-governance/candidates/:candidateId/eligibility', checkPermission('courses', 'can_view'), publishGovernance.getCandidateEligibility);
+router.post('/publish-governance/candidates/:candidateId/approve', checkPermission('courses', 'can_view'), publishGovernance.approveCandidate);
 
 // Cross-course outline operations are intentionally separate from normal
 // component CRUD. The controller applies the superuser/superadmin-only gate.

@@ -29,6 +29,9 @@ const role = value => ({
   // metrics remain clean under representative files.
   LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY: '4',
   LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY: '2',
+  // Provider work gets one bounded chance; Python returns a validated
+  // source-backed baseline at this soft deadline instead of timing out blank.
+  LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS: '45000',
 });
 
 module.exports = {

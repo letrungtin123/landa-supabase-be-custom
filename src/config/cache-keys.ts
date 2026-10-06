@@ -15,6 +15,7 @@ export const CACHE_TTL = {
   library: 120,
   courseModal: 600,
   badges: 600,
+  news: 120,
   emailTemplates: 300,
   aiConfig: 300,
   aiCourseOutline: 300,
@@ -47,6 +48,10 @@ export const cacheVersions = {
     ['tenant', tenantId, 'course-categories'] as const,
   tenantBadges: (tenantId: string) =>
     ['tenant', tenantId, 'badges'] as const,
+  tenantModules: (tenantId: string) =>
+    ['tenant', tenantId, 'modules'] as const,
+  tenantNews: (tenantId: string) =>
+    ['tenant', tenantId, 'news'] as const,
   emailTemplates: () =>
     ['system', 'email-templates'] as const,
   tenantEmailTemplates: (tenantId: string) =>

@@ -3874,13 +3874,13 @@ function readScalarString(value: unknown, fallback: string, maxLength: number): 
   return (raw || fallback).slice(0, maxLength);
 }
 
-function sanitizeGeneratedHtml(value: unknown): string {
+function sanitizeGeneratedHtml(value: unknown, minimumPlainTextChars = MIN_UNIT_HTML_TEXT_CHARS): string {
   const html = sanitizeLessonAuthorHtml(value);
   const formattingFailure = validateLessonAuthorHtmlContract(html);
   if (formattingFailure) throw new Error(`Unit HTML is invalid: ${formattingFailure}`);
   const plainText = stripHtml(html);
-  if (plainText.length < MIN_UNIT_HTML_TEXT_CHARS) {
-    throw new Error(`Unit content is too thin. Minimum ${MIN_UNIT_HTML_TEXT_CHARS} plain-text chars required.`);
+  if (plainText.length < minimumPlainTextChars) {
+    throw new Error(`Unit content is too thin. Minimum ${minimumPlainTextChars} plain-text chars required.`);
   }
   if (html.length > MAX_UNIT_HTML_CHARS) {
     throw new Error(`Unit content is too large. Maximum ${MAX_UNIT_HTML_CHARS} HTML chars allowed.`);
@@ -4784,6 +4784,7 @@ function normalizeLessonAuthorComponent(componentValue: unknown, fallbackTitle: 
       title: normalizeComponentTitle(component.title, fallbackTitle),
       data: sanitizeGeneratedHtml(
         deterministicHtml ?? component.html ?? component.data ?? component.content,
+        component.source_locked_fallback === true ? 1 : MIN_UNIT_HTML_TEXT_CHARS,
       ),
       ...(deterministicHtml ? { metadata: { html_renderer: 'semantic_deterministic' } } : {}),
     });
@@ -5251,9 +5252,12 @@ function applySemanticLearningBlockPlanner(
         });
         if (blueprint.component_capabilities) {
           for (const plan of planned) {
-            plan.supporting_evidence_fact_ids = resolveV5SupportingEvidenceFactIds(blueprint, {
-              learning_blocks: blocks.filter(block => plan.learning_block_ids?.includes(block.id)),
-            });
+            plan.supporting_evidence_fact_ids = [...new Set([
+              ...(plan.supporting_evidence_fact_ids ?? []),
+              ...resolveV5SupportingEvidenceFactIds(blueprint, {
+                learning_blocks: blocks.filter(block => plan.learning_block_ids?.includes(block.id)),
+              }),
+            ])];
           }
         }
         return {

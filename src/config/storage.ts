@@ -475,7 +475,7 @@ export function buildFileName(originalName: string): string {
  */
 export function buildStoragePath(
   tenantId: string,
-  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'branding' | 'kb-documents' | 'kb-files' | 'kb-faqs' | 'kb-articles' | 'prompt-mascots' | 'assignments',
+  category: 'avatars' | 'courses' | 'library' | 'help-docs' | 'news' | 'branding' | 'kb-documents' | 'kb-files' | 'kb-faqs' | 'kb-articles' | 'prompt-mascots' | 'assignments',
   fileName: string,
   subFolder?: string,
 ): string {

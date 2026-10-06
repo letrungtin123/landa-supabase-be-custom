@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { orchestrationV2DeterministicUuid } from './lesson-author-orchestration-v2-inventory.logic.js';
 import type {
   OrchestrationV2ArchitectureAssembly,
   OrchestrationV2ChapterShardArtifact,
@@ -268,7 +269,9 @@ export function createOrchestrationV2PlanningRepository(
     const skeletonHash = orchestrationV2Hash(response.skeleton);
     const plan = planOrchestrationV2ChapterShards(response.skeleton, scopes, budgets, skeletonHash);
     const payload = { contract_version: 2, skeleton: response.skeleton, scopes,
-      shard_plans: plan.chapter_tasks.map(task => task.shard_plan) };
+      shard_plans: plan.chapter_tasks.map(task => task.shard_plan),
+      content_origin: response.content_origin ?? 'provider_validated',
+      quality_state: response.quality_state ?? 'validated' };
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'course-skeleton-v2', response.usage ?? {}, {
       artifact_kind: 'course_skeleton', artifact_hash: artifactHash, payload, validation_contract: 'course-skeleton-v2',
@@ -326,8 +329,13 @@ export function createOrchestrationV2PlanningRepository(
           || queued.rows.length !== taskIds.length || outbox.rows.length !== outboxRows.length) {
           fail('ORCHESTRATION_V2_PLANNING_WRITE_UNCONFIRMED');
         }
+        const event = await tx.query(`INSERT INTO lesson_author_workspace_events
+            (workspace_id,tenant_id,course_id,event_kind,operation_id)
+          VALUES($1,$2,$3,'architecture_progressed',$4) RETURNING sequence`,
+        [lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id]);
+        if (event.rows.length !== 1) fail('ORCHESTRATION_V2_PLANNING_WRITE_UNCONFIRMED');
       },
-    });
+    }, { mode: response.usage_source === 'reserved_upper_bound' ? 'reserved_upper_bound' : 'provider' });
   }
 
   async function loadChapterInput(lease: OrchestrationV2TaskLease): Promise<OrchestrationV2ChapterExecutionInput> {
@@ -372,13 +380,20 @@ export function createOrchestrationV2PlanningRepository(
   ): Promise<void> {
     if (lease.kind !== 'chapter_blueprint' || response.shard.source_snapshot_hash !== lease.source_snapshot_hash
       || response.shard.chapter_key !== lease.chapter_key) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
-    const payload = { contract_version: 2, shard: response.shard };
+    const payload = { contract_version: 2, shard: response.shard,
+      content_origin: response.content_origin ?? 'provider_validated',
+      quality_state: response.quality_state ?? 'validated' };
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'chapter-blueprint-shard-v2', response.usage ?? {}, {
       artifact_kind: 'chapter_blueprint', artifact_hash: artifactHash, payload,
       validation_contract: 'chapter-blueprint-shard-v2',
     }, settleProvider, {
       afterSuccess: async tx => {
+        const event = await tx.query(`INSERT INTO lesson_author_workspace_events
+            (workspace_id,tenant_id,course_id,event_kind,operation_id)
+          VALUES($1,$2,$3,'architecture_progressed',$4) RETURNING sequence`,
+        [lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id]);
+        if (event.rows.length !== 1) fail('ORCHESTRATION_V2_PLANNING_WRITE_UNCONFIRMED');
         const ready = await tx.query(`UPDATE lesson_author_workspace_v2_tasks candidate SET status='queued'
           WHERE candidate.run_id=$1 AND candidate.task_key='architecture:validate' AND candidate.status='blocked'
             AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_dependencies d
@@ -393,7 +408,7 @@ export function createOrchestrationV2PlanningRepository(
         [id(), lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id, ready.rows[0].id, lease.routing_shard]);
         if (outbox.rows.length !== 1) fail('ORCHESTRATION_V2_PLANNING_WRITE_UNCONFIRMED');
       },
-    });
+    }, { mode: response.usage_source === 'reserved_upper_bound' ? 'reserved_upper_bound' : 'provider' });
   }
 
   async function loadArchitectureInput(
@@ -465,7 +480,13 @@ export function createOrchestrationV2PlanningRepository(
         admitted_fact_count: assembly.admitted_fact_count, allocated_fact_count: assembly.allocated_fact_count,
         duplicate_scope_count: assembly.duplicate_scope_count, unresolved_scope_count: assembly.unresolved_scope_count,
         chapter_count: assembly.chapter_count, lesson_count: assembly.lesson_count, unit_count: assembly.unit_count,
-        component_plan_count: assembly.component_plan_count, architecture: assembly.architecture,
+        component_plan_count: assembly.component_plan_count,
+        ...(assembly.assessment_obligation_count === undefined ? {} : {
+          assessment_obligation_count: assembly.assessment_obligation_count,
+          assessment_obligation_hash: assembly.assessment_obligation_hash,
+          assessment_obligations: assembly.assessment_obligations,
+        }),
+        architecture: assembly.architecture,
       })) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
     const inventory = buildOrchestrationV2InventoryTask(assembly.assembly_hash, inventoryPublishBudgetMs);
     await worker.succeed(lease, assembly.assembly_hash, 'architecture-validation-v2', {}, {
@@ -473,6 +494,36 @@ export function createOrchestrationV2PlanningRepository(
       payload: assembly as unknown as Record<string, unknown>, validation_contract: 'architecture-validation-v2',
     }, async () => undefined, {
       afterSuccess: async tx => {
+        const obligations = assembly.assessment_obligations ?? [];
+        if (obligations.length) {
+          const rows = obligations.map(obligation => ({
+            id: orchestrationV2DeterministicUuid(lease.run_id,
+              `assessment-obligation:${obligation.planned_slot_key}`),
+            planned_slot_key: obligation.planned_slot_key,
+            unit_path: obligation.unit_path,
+            planned_component_index: obligation.planned_component_index,
+            learning_objective_refs: obligation.learning_objective_refs,
+            required_assessment_kind: obligation.required_assessment_kind,
+            relevant_scope_ids: obligation.relevant_scope_ids,
+            relevant_evidence_fact_ids: obligation.relevant_evidence_fact_ids,
+            unresolved_reason: obligation.unresolved_reason,
+          }));
+          const persisted = await tx.query(`INSERT INTO lesson_author_workspace_v2_assessment_obligations
+              (id,run_id,workspace_id,tenant_id,course_id,plan_revision_hash,planned_slot_key,unit_path,
+               planned_component_index,learning_objective_refs,required_assessment_kind,relevant_scope_ids,
+               relevant_evidence_fact_ids,unresolved_reason,status)
+            SELECT x.id::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,x.planned_slot_key,x.unit_path,
+              x.planned_component_index,x.learning_objective_refs,x.required_assessment_kind,
+              x.relevant_scope_ids,x.relevant_evidence_fact_ids,x.unresolved_reason,'open'
+            FROM jsonb_to_recordset($1::jsonb) AS x(id text,planned_slot_key text,unit_path text,
+              planned_component_index integer,learning_objective_refs text[],required_assessment_kind text,
+              relevant_scope_ids text[],relevant_evidence_fact_ids text[],unresolved_reason text)
+            RETURNING id`, [JSON.stringify(rows), lease.run_id, lease.workspace_id, lease.tenant_id,
+            lease.course_id, assembly.assembly_hash]);
+          if (persisted.rows.length !== rows.length) {
+            fail('ORCHESTRATION_V2_PLANNING_WRITE_UNCONFIRMED');
+          }
+        }
         const ordinal = await tx.query(`SELECT coalesce(max(ordinal),-1)::integer AS value
           FROM lesson_author_workspace_v2_tasks WHERE run_id=$1`, [lease.run_id]);
         const previousOrdinal = Number(ordinal.rows[0]?.value);

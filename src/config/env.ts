@@ -183,6 +183,11 @@ export const env = {
   // generation/edit/Apply behavior and requires the manual SQL notification
   // trigger to have been installed before production enablement.
   LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED', false),
+  // Re-authenticate long-lived metadata streams periodically without forcing
+  // every open modal to reconnect twice per minute at production scale.
+  LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS: optionalBoundedInt(
+    'LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS', 300_000, 60_000, 900_000,
+  ),
   // Save/Reset only. Requires reads too; never enables admission, workers or Apply.
   LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false),
   LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED', false),
@@ -190,6 +195,9 @@ export const env = {
   // installed workspace execution schema; this flag is intentionally separate
   // so a worker rollout can never publish course blocks by accident.
   LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED', false),
+  // CP5 candidate/approval APIs and application-side publish handshake. The
+  // reviewed SQL fence remains authoritative for every enrolled course.
+  COURSE_PUBLISH_GOVERNANCE_ENABLED: optionalBoolean('COURSE_PUBLISH_GOVERNANCE_ENABLED', false),
   // Enables durable self-built-RAG Blueprint admission and its bounded worker.
   LESSON_AUTHOR_GENERATION_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_ENABLED', false),
   LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED: optionalBoolean('LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED', false),
@@ -221,6 +229,9 @@ export const env = {
   LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS', 1_000, 100, 300_000),
   LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY', 64, 1, 4_096),
   LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY', 8, 1, 4_096),
+  LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS: optionalBoundedInt(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS', 45_000, 5_000, 120_000,
+  ),
   LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS', 30, 5, 45),
   LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE', 25, 1, 500),
   AI_RAG_INDEX_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_INDEX_REQUEST_TIMEOUT_MS', 900_000, 10_000, 3_600_000),

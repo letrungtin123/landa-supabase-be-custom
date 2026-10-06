@@ -60,18 +60,35 @@ export function createOrchestrationV2OutboxRepository(db: GenerationJobDatabase,
     return db.transaction(async tx => {
       const leaseToken = id();
       if (!UUID.test(leaseToken)) fail('ORCHESTRATION_V2_OUTBOX_CONFIG_INVALID');
-      const result = await tx.query(`WITH ranked AS (
+      const result = await tx.query(`WITH eligible AS (
+          SELECT pending.id,pending.tenant_id,pending.available_at,pending.created_at
+          FROM lesson_author_workspace_v2_dispatch_outbox pending
+          WHERE pending.status='pending' AND pending.available_at<=clock_timestamp()
+            AND mod(pending.routing_shard,$1::integer)=$2::integer
+            AND (pending.attempt_count<$3::integer OR (
+              pending.attempt_count>=$3::integer AND pending.failure_code IS NULL
+              AND EXISTS (
+                SELECT 1 FROM lesson_author_workspace_v2_tasks task
+                JOIN lesson_author_workspace_v2_runs run ON run.id=task.run_id
+                WHERE task.id=pending.task_id AND task.run_id=pending.run_id
+                  AND task.workspace_id=pending.workspace_id AND task.tenant_id=pending.tenant_id
+                  AND task.course_id=pending.course_id AND task.status='queued'
+                  AND task.dispatch_epoch=pending.dispatch_epoch
+                  AND run.workspace_id=pending.workspace_id AND run.tenant_id=pending.tenant_id
+                  AND run.course_id=pending.course_id AND run.status IN ('planning','executing')
+              )
+            ))
+        ), ranked AS (
           SELECT id,available_at,created_at,
             row_number() OVER(PARTITION BY tenant_id ORDER BY available_at,created_at,id) AS tenant_rank
-          FROM lesson_author_workspace_v2_dispatch_outbox
-          WHERE status='pending' AND available_at<=clock_timestamp()
-            AND mod(routing_shard,$1::integer)=$2::integer AND attempt_count<$3::integer
+          FROM eligible
         ), candidate AS (
           SELECT o.id FROM lesson_author_workspace_v2_dispatch_outbox o JOIN ranked r ON r.id=o.id
           ORDER BY r.tenant_rank,r.available_at,r.created_at,r.id
           FOR UPDATE OF o SKIP LOCKED LIMIT 1
         ) UPDATE lesson_author_workspace_v2_dispatch_outbox o
-        SET status='publishing',attempt_count=o.attempt_count+1,lease_token=$4::uuid,
+        SET status='publishing',attempt_count=CASE WHEN o.attempt_count>=$3::integer THEN 1 ELSE o.attempt_count+1 END,
+          lease_token=$4::uuid,
           lease_expires_at=clock_timestamp()+($5::integer*interval '1 second'),failure_code=NULL,updated_at=clock_timestamp()
         FROM candidate c WHERE o.id=c.id AND o.status='pending'
         RETURNING o.id::text AS outbox_id,o.run_id::text,o.task_id::text,o.dispatch_epoch,o.routing_shard,
@@ -127,19 +144,17 @@ export function createOrchestrationV2OutboxRepository(db: GenerationJobDatabase,
     return db.transaction(async tx => {
       const result = await tx.query(`WITH candidate AS (
           SELECT id,status,attempt_count FROM lesson_author_workspace_v2_dispatch_outbox
-          WHERE ((status='publishing' AND lease_expires_at<=clock_timestamp())
-            OR (status='published' AND consumed_at IS NULL
-              AND published_at<=clock_timestamp()-($1::integer*interval '1 second')))
-            AND mod(routing_shard,$2::integer)=$3::integer
+          WHERE status='publishing' AND lease_expires_at<=clock_timestamp()
+            AND mod(routing_shard,$1::integer)=$2::integer
           ORDER BY updated_at,id FOR UPDATE SKIP LOCKED LIMIT 1
         ) UPDATE lesson_author_workspace_v2_dispatch_outbox o SET
-          status=CASE WHEN c.attempt_count>=$4::integer THEN 'dead' ELSE 'pending' END,
-          available_at=CASE WHEN c.attempt_count>=$4::integer THEN o.available_at ELSE clock_timestamp() END,
+          status=CASE WHEN c.attempt_count>=$3::integer THEN 'dead' ELSE 'pending' END,
+          available_at=CASE WHEN c.attempt_count>=$3::integer THEN o.available_at ELSE clock_timestamp() END,
           lease_token=NULL,lease_expires_at=NULL,
-          failure_code=CASE WHEN c.attempt_count>=$4::integer THEN 'BROKER_DELIVERY_EXHAUSTED' ELSE NULL END,
+          failure_code=CASE WHEN c.attempt_count>=$3::integer THEN 'BROKER_DELIVERY_EXHAUSTED' ELSE NULL END,
           updated_at=clock_timestamp()
         FROM candidate c WHERE o.id=c.id RETURNING o.status`,
-      [config.published_recovery_seconds, config.lane_count, config.lane_index, config.max_attempts]);
+      [config.lane_count, config.lane_index, config.max_attempts]);
       if (!result.rows.length) return null;
       return result.rows[0].status === 'dead' ? 'dead' : 'pending';
     });

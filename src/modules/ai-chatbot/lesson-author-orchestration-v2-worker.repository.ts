@@ -3,6 +3,10 @@ import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-ge
 import type { OrchestrationV2DispatchEnvelope } from './lesson-author-orchestration-v2-dispatch.logic.js';
 import type { OrchestrationV2TaskKind } from './lesson-author-orchestration-v2.logic.js';
 import {
+  readOrchestrationV2AttemptTrace,
+  type OrchestrationV2AttemptTraceEvent,
+} from './lesson-author-orchestration-v2-attempt.logic.js';
+import {
   assertOrchestrationV2WorkerLimits,
   isOrchestrationV2ProviderTask,
   orchestrationV2ObservedUsage,
@@ -31,13 +35,34 @@ export interface OrchestrationV2TaskLease {
   execution_budget_ms: number;
   lease_token: string;
   dispatch_epoch: number;
+  /** Durable evidence that an earlier claim crossed the provider boundary.
+   * A retry epoch alone is not sufficient: DB failures can happen before any
+   * paid call and must remain eligible for the first provider dispatch. */
+  provider_replay_required: boolean;
   routing_shard: number;
   ai_reservation_id: string | null;
 }
 
 export type OrchestrationV2ClaimResult =
   | { disposition: 'claimed'; lease: OrchestrationV2TaskLease }
-  | { disposition: 'duplicate' | 'deferred' | 'stale' };
+  | { disposition: 'duplicate' | 'stale' }
+  | { disposition: 'deferred'; reason: OrchestrationV2DeferralReason };
+
+export type OrchestrationV2DeferralReason =
+  | 'publication_race'
+  | 'global_capacity'
+  | 'provider_capacity'
+  | 'tenant_capacity'
+  | 'workspace_capacity';
+
+export interface OrchestrationV2CapacityWake {
+  outbox_id: string;
+  run_id: string;
+  task_id: string;
+  tenant_id: string;
+  workspace_id: string;
+  task_kind: OrchestrationV2TaskKind;
+}
 
 export interface OrchestrationV2ArtifactCommit {
   artifact_kind: 'source_catalog' | 'course_skeleton' | 'chapter_blueprint' | 'architecture_validation'
@@ -186,6 +211,7 @@ function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {
     max_output_tokens: Number(row.max_output_tokens), provider_max_attempts: Number(row.provider_max_attempts),
     execution_budget_ms: Number(row.execution_budget_ms), lease_token: String(row.lease_token),
     dispatch_epoch: Number(row.dispatch_epoch),
+    provider_replay_required: row.provider_replay_required === true,
     routing_shard: Number(row.routing_shard),
     ai_reservation_id: row.ai_reservation_id === null ? null : String(row.ai_reservation_id),
   };
@@ -193,6 +219,7 @@ function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {
     .every(value => UUID.test(value)) || !HASH.test(lease.contract_hash) || !HASH.test(lease.source_snapshot_hash)
     || !HASH.test(lease.runtime_config_hash)
     || (lease.input_context_hash !== null && !HASH.test(lease.input_context_hash))
+    || typeof row.provider_replay_required !== 'boolean'
     || !Number.isSafeInteger(lease.routing_shard) || lease.routing_shard < 0 || lease.routing_shard > 4_095
     || !lease.course_id || !lease.task_key || !lease.model) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
   return Object.freeze(lease);
@@ -222,7 +249,10 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         pg_advisory_xact_lock(hashtextextended('la:v2:workspace:'||$2,0))`, [tenantId, workspaceId]);
       const locked = await tx.query(`SELECT t.*,r.source_snapshot_id::text,s.source_snapshot_hash,r.runtime_config_hash,r.model,
           w.content_locale AS locale,r.status AS run_status,r.tenant_concurrency_limit,r.workspace_concurrency_limit,
-          o.status AS outbox_status,o.routing_shard
+          o.status AS outbox_status,o.routing_shard,
+          EXISTS(SELECT 1 FROM lesson_author_workspace_v2_attempt_events prior_attempt
+            WHERE prior_attempt.task_id=t.id AND prior_attempt.run_id=t.run_id
+              AND prior_attempt.provider_dispatched) AS provider_replay_required
         FROM lesson_author_workspace_v2_dispatch_outbox o
         JOIN lesson_author_workspace_v2_tasks t ON t.id=o.task_id AND t.run_id=o.run_id
         JOIN lesson_author_workspace_v2_runs r ON r.id=t.run_id AND r.workspace_id=t.workspace_id
@@ -238,7 +268,9 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
       // dispatcher is still committing the published CAS. Requeue instead of
       // acknowledging that valid delivery as stale; the durable task identity
       // still prevents duplicate paid work.
-      if (task.outbox_status === 'publishing') return { disposition: 'deferred' };
+      if (task.outbox_status === 'publishing') {
+        return { disposition: 'deferred', reason: 'publication_race' };
+      }
       if (task.outbox_status !== 'published') return { disposition: 'stale' };
       if (task.status === 'running' || terminal.has(String(task.status))) {
         const consumed = await tx.query(`UPDATE lesson_author_workspace_v2_dispatch_outbox
@@ -262,12 +294,16 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         FROM lesson_author_workspace_v2_tasks WHERE status='running'`, [tenantId, workspaceId]);
       const counts = running.rows[0] ?? {};
       const provider = isOrchestrationV2ProviderTask(String(task.kind) as OrchestrationV2TaskKind);
-      if (Number(counts.global_running) >= limits.global_concurrency_limit
-        || (provider && Number(counts.provider_running) >= limits.provider_concurrency_limit)
-        || Number(counts.tenant_running) >= Number(task.tenant_concurrency_limit)
-        || Number(counts.workspace_running) >= Number(task.workspace_concurrency_limit)) {
-        return { disposition: 'deferred' };
+      let capacityReason: OrchestrationV2DeferralReason | null = null;
+      if (Number(counts.global_running) >= limits.global_concurrency_limit) capacityReason = 'global_capacity';
+      else if (provider && Number(counts.provider_running) >= limits.provider_concurrency_limit) {
+        capacityReason = 'provider_capacity';
+      } else if (Number(counts.tenant_running) >= Number(task.tenant_concurrency_limit)) {
+        capacityReason = 'tenant_capacity';
+      } else if (Number(counts.workspace_running) >= Number(task.workspace_concurrency_limit)) {
+        capacityReason = 'workspace_capacity';
       }
+      if (capacityReason) return { disposition: 'deferred', reason: capacityReason };
       const reservationId = provider ? await reserveProvider(tx, task) : null;
       if (provider && !UUID.test(String(reservationId))) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
       const leaseToken = id();
@@ -291,6 +327,162 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
     });
   }
 
+  /** Return a capacity-limited published delivery to the durable outbox before
+   * acknowledging RabbitMQ. The dispatcher will publish it again only after
+   * available_at, eliminating broker-level nack/requeue hot loops. */
+  async function deferPublished(
+    envelope: OrchestrationV2DispatchEnvelope,
+    jitterMs: number,
+  ): Promise<Readonly<{ delay_ms: number; deferral_count: number }> | null> {
+    if (!Number.isSafeInteger(jitterMs) || jitterMs < 0 || jitterMs > 4_999) {
+      fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+    }
+    return db.transaction(async tx => {
+      // Preserve the existing quota-lock-before-row-lock order until the
+      // zero-delta quota trigger hotfix is installed everywhere.
+      const quotaLock = await tx.query(`SELECT pg_advisory_xact_lock(
+          hashtextextended(tenant_id::text,20260907)) AS locked
+        FROM lesson_author_workspace_v2_dispatch_outbox
+        WHERE id=$1 AND run_id=$2 AND task_id=$3 AND dispatch_epoch=$4 AND routing_shard=$5`,
+      [envelope.outbox_id, envelope.run_id, envelope.task_id, envelope.dispatch_epoch, envelope.routing_shard]);
+      if (quotaLock.rows.length !== 1) return null;
+      const deferred = await tx.query(`WITH authority AS (
+          SELECT outbox.id,LEAST(120000::bigint,
+            5000::bigint*(1::bigint<<LEAST(outbox.capacity_deferral_count,5))+$6::bigint) AS delay_ms
+          FROM lesson_author_workspace_v2_dispatch_outbox outbox
+          JOIN lesson_author_workspace_v2_tasks task
+            ON task.id=outbox.task_id AND task.run_id=outbox.run_id
+          JOIN lesson_author_workspace_v2_runs run
+            ON run.id=outbox.run_id AND run.workspace_id=outbox.workspace_id
+            AND run.tenant_id=outbox.tenant_id AND run.course_id=outbox.course_id
+          WHERE outbox.id=$1 AND outbox.run_id=$2 AND outbox.task_id=$3
+            AND outbox.dispatch_epoch=$4 AND outbox.routing_shard=$5 AND outbox.status='published'
+            AND task.status='queued' AND task.dispatch_epoch=outbox.dispatch_epoch
+            AND run.status IN ('planning','executing')
+          FOR UPDATE OF outbox
+        ),deferred AS (
+          UPDATE lesson_author_workspace_v2_dispatch_outbox outbox SET
+            status='pending',available_at=clock_timestamp()+(authority.delay_ms*interval '1 millisecond'),
+            attempt_count=0,capacity_deferral_count=LEAST(outbox.capacity_deferral_count+1,1000000),
+            failure_code=NULL,updated_at=clock_timestamp()
+          FROM authority WHERE outbox.id=authority.id
+          RETURNING authority.delay_ms,outbox.capacity_deferral_count
+        ) SELECT delay_ms,capacity_deferral_count FROM deferred`,
+      [envelope.outbox_id, envelope.run_id, envelope.task_id, envelope.dispatch_epoch,
+        envelope.routing_shard, jitterMs]);
+      if (deferred.rows.length === 0) return null;
+      if (deferred.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
+      const delayMs = Number(deferred.rows[0]?.delay_ms);
+      const deferralCount = Number(deferred.rows[0]?.capacity_deferral_count);
+      if (!Number.isSafeInteger(delayMs) || delayMs < 5_000 || delayMs > 120_000
+        || !Number.isSafeInteger(deferralCount) || deferralCount < 1 || deferralCount > 1_000_000) {
+        fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
+      }
+      return Object.freeze({ delay_ms: delayMs, deferral_count: deferralCount });
+    });
+  }
+
+  /** Accelerate one sleeping capacity deferral only when an admission slot is
+   * actually available. The short global advisory lock serializes this check
+   * with claimExact, while claimExact remains the final paid-work authority. */
+  async function wakeOneCapacityDeferred(
+    limitsInput: OrchestrationV2WorkerLimits,
+  ): Promise<Readonly<OrchestrationV2CapacityWake> | null> {
+    const limits = assertOrchestrationV2WorkerLimits(limitsInput);
+    return db.transaction(async tx => {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended('la:v2:global',0))`);
+      const awakened = await tx.query(`WITH scheduler_clock AS (
+          SELECT clock_timestamp() AS now
+        ),running AS (
+          SELECT count(*)::integer AS global_running,
+            count(*) FILTER(WHERE kind IN ${providerKinds})::integer AS provider_running
+          FROM lesson_author_workspace_v2_tasks WHERE status='running'
+        ),admitted_waiter_rows AS (
+          SELECT outbox.tenant_id,outbox.workspace_id,task.kind
+          FROM lesson_author_workspace_v2_dispatch_outbox outbox
+          JOIN lesson_author_workspace_v2_tasks task
+            ON task.id=outbox.task_id AND task.run_id=outbox.run_id
+            AND task.workspace_id=outbox.workspace_id AND task.tenant_id=outbox.tenant_id
+            AND task.course_id=outbox.course_id
+          JOIN lesson_author_workspace_v2_runs run
+            ON run.id=outbox.run_id AND run.workspace_id=outbox.workspace_id
+            AND run.tenant_id=outbox.tenant_id AND run.course_id=outbox.course_id
+          CROSS JOIN scheduler_clock
+          WHERE outbox.capacity_deferral_count>0
+            AND outbox.status IN ('pending','publishing','published')
+            AND outbox.available_at<=scheduler_clock.now
+            AND task.status='queued' AND task.dispatch_epoch=outbox.dispatch_epoch
+            AND run.status IN ('planning','executing')
+        ),admitted_waiters AS (
+          SELECT count(*)::integer AS global_waiting,
+            count(*) FILTER(WHERE kind IN ${providerKinds})::integer AS provider_waiting
+          FROM admitted_waiter_rows
+        ),eligible AS (
+          SELECT outbox.id,outbox.run_id,outbox.task_id,outbox.tenant_id,outbox.workspace_id,
+            outbox.available_at,outbox.created_at,task.kind,
+            row_number() OVER(PARTITION BY outbox.tenant_id
+              ORDER BY outbox.available_at,outbox.created_at,outbox.id) AS tenant_rank
+          FROM lesson_author_workspace_v2_dispatch_outbox outbox
+          JOIN lesson_author_workspace_v2_tasks task
+            ON task.id=outbox.task_id AND task.run_id=outbox.run_id
+            AND task.workspace_id=outbox.workspace_id AND task.tenant_id=outbox.tenant_id
+            AND task.course_id=outbox.course_id
+          JOIN lesson_author_workspace_v2_runs run
+            ON run.id=outbox.run_id AND run.workspace_id=outbox.workspace_id
+            AND run.tenant_id=outbox.tenant_id AND run.course_id=outbox.course_id
+          CROSS JOIN scheduler_clock CROSS JOIN running CROSS JOIN admitted_waiters
+          WHERE outbox.status='pending' AND outbox.capacity_deferral_count>0
+            AND outbox.available_at>scheduler_clock.now
+            AND task.status='queued' AND task.dispatch_epoch=outbox.dispatch_epoch
+            AND run.status IN ('planning','executing')
+            AND running.global_running+admitted_waiters.global_waiting<$1::integer
+            AND (task.kind NOT IN ${providerKinds}
+              OR running.provider_running+admitted_waiters.provider_waiting<$2::integer)
+            AND (SELECT count(*) FROM lesson_author_workspace_v2_tasks tenant_task
+              WHERE tenant_task.status='running' AND tenant_task.tenant_id=outbox.tenant_id)
+              +(SELECT count(*) FROM admitted_waiter_rows tenant_waiter
+                WHERE tenant_waiter.tenant_id=outbox.tenant_id)
+              <run.tenant_concurrency_limit
+            AND (SELECT count(*) FROM lesson_author_workspace_v2_tasks workspace_task
+              WHERE workspace_task.status='running' AND workspace_task.workspace_id=outbox.workspace_id)
+              +(SELECT count(*) FROM admitted_waiter_rows workspace_waiter
+                WHERE workspace_waiter.workspace_id=outbox.workspace_id)
+              <run.workspace_concurrency_limit
+        ),candidate AS (
+          SELECT outbox.id FROM lesson_author_workspace_v2_dispatch_outbox outbox
+          JOIN eligible ON eligible.id=outbox.id
+          ORDER BY eligible.tenant_rank,eligible.available_at,eligible.created_at,eligible.id
+          FOR UPDATE OF outbox SKIP LOCKED LIMIT 1
+        ),updated AS (
+          UPDATE lesson_author_workspace_v2_dispatch_outbox outbox
+          SET available_at=scheduler_clock.now,updated_at=scheduler_clock.now
+          FROM candidate,scheduler_clock
+          WHERE outbox.id=candidate.id AND outbox.status='pending'
+            AND outbox.capacity_deferral_count>0 AND outbox.available_at>scheduler_clock.now
+          RETURNING outbox.id::text AS outbox_id,outbox.run_id::text,outbox.task_id::text,
+            outbox.tenant_id::text,outbox.workspace_id::text
+        ) SELECT updated.*,task.kind AS task_kind FROM updated
+          JOIN lesson_author_workspace_v2_tasks task
+            ON task.id=updated.task_id::uuid AND task.run_id=updated.run_id::uuid`,
+      [limits.global_concurrency_limit, limits.provider_concurrency_limit]);
+      if (awakened.rows.length === 0) return null;
+      if (awakened.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
+      const row = awakened.rows[0] ?? {};
+      const result: OrchestrationV2CapacityWake = {
+        outbox_id: String(row.outbox_id), run_id: String(row.run_id), task_id: String(row.task_id),
+        tenant_id: String(row.tenant_id), workspace_id: String(row.workspace_id),
+        task_kind: String(row.task_kind) as OrchestrationV2TaskKind,
+      };
+      if (![result.outbox_id, result.run_id, result.task_id, result.tenant_id, result.workspace_id]
+        .every(value => UUID.test(value))
+        || !['source_snapshot', 'course_skeleton', 'chapter_blueprint', 'validate_architecture',
+          'publish_inventory', 'generate_unit', 'validate_chapter', 'finalize_course'].includes(result.task_kind)) {
+        fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
+      }
+      return Object.freeze(result);
+    });
+  }
+
   async function renew(lease: OrchestrationV2TaskLease, leaseSeconds: number): Promise<boolean> {
     assertOrchestrationV2WorkerLimits({ global_concurrency_limit: 1, provider_concurrency_limit: 1, lease_seconds: leaseSeconds });
     return db.transaction(async tx => {
@@ -306,6 +498,7 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
   async function markProviderDispatched(lease: OrchestrationV2TaskLease): Promise<void> {
     if (!isOrchestrationV2ProviderTask(lease.kind) || !lease.ai_reservation_id) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
     await db.transaction(async tx => {
+      await lockWorkspaceLifecycle(tx, lease.tenant_id, lease.workspace_id);
       const result = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET dispatch_started_at=clock_timestamp()
         WHERE id=$1 AND run_id=$2 AND status='running' AND lease_token=$3::uuid
           AND lease_expires_at>clock_timestamp() AND deadline_at>clock_timestamp()
@@ -324,6 +517,7 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
     settleProvider: SettleProvider,
     hooks: OrchestrationV2SuccessHooks = {},
     providerCompletion: OrchestrationV2ProviderCompletion = { mode: 'provider' },
+    attemptTrace: readonly OrchestrationV2AttemptTraceEvent[] = [],
   ): Promise<void> {
     if (!HASH.test(resultHash) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(validationContract)) {
       fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
@@ -357,6 +551,42 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id,
           artifact.artifact_kind, artifact.artifact_hash, JSON.stringify(artifact.payload), artifact.validation_contract]);
         if (inserted.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
+      }
+      if (attemptTrace.length) {
+        let acceptedTrace: OrchestrationV2AttemptTraceEvent[];
+        try { acceptedTrace = readOrchestrationV2AttemptTrace(attemptTrace); }
+        catch { return fail('ORCHESTRATION_V2_TASK_STATE_INVALID'); }
+        const eventRows = acceptedTrace.map((event, index) => {
+          if (event.sequence !== index + 1 || event.sequence > 64) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+          return {
+            id: randomUUID(), event_key: `provider:${lease.dispatch_epoch}:${event.sequence}`,
+            sequence: event.sequence, invocation_kind: event.invocation_kind,
+            invocation_index: event.invocation_index, provider_attempt: event.provider_attempt,
+            phase: event.phase, outcome: event.outcome, event_code: event.event_code,
+            failure_stage: event.failure_stage, failure_code: event.failure_code, failure_path: event.failure_path,
+            provider_dispatched: event.provider_dispatched, usage_source: event.usage_source,
+            observed_usage: event.observed_usage, duration_ms: event.duration_ms,
+            diagnostics: event.diagnostics,
+          };
+        });
+        const insertedEvents = await tx.query(`INSERT INTO lesson_author_workspace_v2_attempt_events
+            (id,run_id,workspace_id,tenant_id,course_id,task_id,event_key,dispatch_epoch,durable_attempt,
+             invocation_kind,invocation_index,provider_attempt,phase,outcome,event_code,failure_stage,failure_code,failure_path,
+             provider_dispatched,usage_source,observed_usage,duration_ms,model,runtime_config_hash,
+             task_contract_hash,validation_contract,candidate_hash,final_artifact_hash,replay,cache_hit,diagnostics)
+          SELECT x.id::uuid,$1::uuid,$2::uuid,$3::uuid,$4,$5::uuid,x.event_key,$6::integer,$7::integer,
+             x.invocation_kind,x.invocation_index,x.provider_attempt,x.phase,x.outcome,x.event_code,
+             x.failure_stage,x.failure_code,x.failure_path,x.provider_dispatched,x.usage_source,x.observed_usage,x.duration_ms,
+             $8,$9,$10,$11,NULL,$12::text,($6::integer>1),false,x.diagnostics
+          FROM jsonb_to_recordset($13::jsonb) AS x(
+             id text,event_key text,sequence integer,invocation_kind text,invocation_index integer,
+             provider_attempt integer,phase text,outcome text,event_code text,failure_stage text,failure_code text,failure_path text,
+             provider_dispatched boolean,usage_source text,observed_usage jsonb,duration_ms integer,diagnostics jsonb)
+          RETURNING id`, [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id,
+          lease.dispatch_epoch, task.attempt_count, lease.model, lease.runtime_config_hash, lease.contract_hash,
+          validationContract, resultHash,
+          JSON.stringify(eventRows)]);
+        if (insertedEvents.rows.length !== eventRows.length) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
       }
       await hooks.beforeSuccess?.(tx, task);
       const completed = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='succeeded',
@@ -676,5 +906,6 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
     });
   }
 
-  return { claimExact, renew, markProviderDispatched, succeed, failProviderRejected, recoverClaimFailure, recoverOne };
+  return { claimExact, deferPublished, wakeOneCapacityDeferred, renew, markProviderDispatched, succeed, failProviderRejected,
+    recoverClaimFailure, recoverOne };
 }

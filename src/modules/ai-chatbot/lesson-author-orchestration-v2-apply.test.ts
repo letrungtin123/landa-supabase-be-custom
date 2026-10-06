@@ -72,7 +72,8 @@ function fixture() {
   });
   const unitPayload = { contract_version: 2, unit_path: publication.unit_path,
     source_snapshot_hash: publication.source_snapshot_hash, contract_hash: publication.contract_hash,
-    nodes: publication.nodes, generated_unit: publication.generated_unit };
+    nodes: publication.nodes, generated_unit: publication.generated_unit,
+    content_origin: publication.content_origin, quality_state: publication.quality_state };
   const unitArtifact = { task_id: taskId, task_key: 'content:chapter-1:unit:1',
     node_id: identity.unit_bindings[0]!.unit_node_id, chapter_key: 'chapter-1',
     artifact_hash: publication.result_hash, payload: unitPayload };
@@ -110,12 +111,48 @@ function replaceCurrent(input: ReturnType<typeof fixture>['input'], path: string
   return node;
 }
 
+function resealUnitArtifact(input: ReturnType<typeof fixture>['input']) {
+  const artifact = input.unit_artifacts[0]!;
+  const payload = artifact.payload as Record<string, unknown>;
+  const hasQualityEnvelope = payload.content_origin !== undefined || payload.quality_state !== undefined;
+  artifact.artifact_hash = hash({ validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
+    unit_path: payload.unit_path, source_snapshot_hash: payload.source_snapshot_hash,
+    contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit,
+    ...(hasQualityEnvelope ? { content_origin: payload.content_origin, quality_state: payload.quality_state } : {}) });
+  const chapter = input.chapter_receipts[0]!;
+  const receipt = chapter.payload as Record<string, any>;
+  receipt.unit_artifact_hashes = [artifact.artifact_hash];
+  const { contract_version: _version, receipt_hash: _oldHash, ...receiptBase } = receipt;
+  receipt.receipt_hash = hash(receiptBase);
+  chapter.artifact_hash = receipt.receipt_hash;
+}
+
 test('V2 Apply compiles a validated chapter into exact draft hierarchy writes', () => {
   const { input, publication } = fixture();
   const result = compileOrchestrationV2WorkspaceApply(input);
   assert.deepEqual(result.writes.map(write => write.block_type), ['chapter', 'sequential', 'vertical', 'html']);
   assert.equal(result.writes[3]!.component?.data, publication.generated_unit.components[0]!.data);
   assert.equal(result.acceptance.checks.coverage, 'PASS');
+  assert.equal(result.acceptance.checks.pedagogy, 'NOT_RUN');
+  assert.equal(result.acceptance.checks.dependencies, 'NOT_APPLICABLE');
+  assert.equal(result.validation_contract, 'workspace-scoped-apply-2');
+  assert.equal(result.quality_receipt.origin_summary.counts.provider, 1);
+  assert.equal(result.quality_receipt.origin_summary.legacy_quality_status, 'NOT_RUN');
+});
+
+test('V2 Apply admits structured source fallback for review but never raw diagnostic fallback', () => {
+  const structured = fixture();
+  Object.assign(structured.input.unit_artifacts[0]!.payload, {
+    content_origin: 'structured_fallback', quality_state: 'review_required',
+  });
+  resealUnitArtifact(structured.input);
+  assert.doesNotThrow(() => compileOrchestrationV2WorkspaceApply(structured.input));
+
+  const raw = fixture();
+  Object.assign(raw.input.unit_artifacts[0]!.payload, {
+    content_origin: 'raw_source_fallback', quality_state: 'review_required',
+  });
+  assert.throws(() => compileOrchestrationV2WorkspaceApply(raw.input), { code: 'WORKSPACE_APPLY_VALIDATION_FAILED' });
 });
 
 test('V2 section, lesson and component scopes keep exact hierarchy boundaries', () => {
@@ -201,6 +238,8 @@ test('V2 Apply accepts an artifact-bound historical baseline after sanitizer rul
   component.current = { content: legacy, content_hash: legacyHash };
 
   const artifact = input.unit_artifacts[0]!;
+  delete (artifact.payload as Record<string, unknown>).content_origin;
+  delete (artifact.payload as Record<string, unknown>).quality_state;
   const payload = artifact.payload as { unit_path: string; source_snapshot_hash: string; contract_hash: string;
     nodes: Array<{ path: string; content: unknown; content_hash: string }>; generated_unit: unknown };
   const artifactNode = payload.nodes.find(node => node.path === component.canonical_path)!;
@@ -208,7 +247,12 @@ test('V2 Apply accepts an artifact-bound historical baseline after sanitizer rul
   artifactNode.content_hash = legacyHash;
   artifact.artifact_hash = hash({ validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
     unit_path: payload.unit_path, source_snapshot_hash: payload.source_snapshot_hash,
-    contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit });
+    contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit,
+    ...(('content_origin' in (artifact.payload as Record<string, unknown>)
+      || 'quality_state' in (artifact.payload as Record<string, unknown>)) ? {
+      content_origin: (artifact.payload as Record<string, unknown>).content_origin,
+      quality_state: (artifact.payload as Record<string, unknown>).quality_state,
+    } : {}) });
 
   const chapter = input.chapter_receipts[0]!;
   const receipt = chapter.payload as Record<string, any>;
@@ -243,6 +287,10 @@ test('production Apply repository routes blueprint-null V2 workspaces through va
   assert.match(source, /artifact_kind='unit_baseline'/);
   assert.match(source, /artifact_kind='chapter_receipt'/);
   assert.match(source, /compileOrchestrationV2WorkspaceApply\(/);
+  assert.match(source, /INSERT INTO lesson_author_workspace_quality_receipts/);
+  assert.match(source, /quality_receipt_id,validation_contract/);
+  assert.match(source, /compiled\.validation_contract/);
+  assert.doesNotMatch(source, /workspace-scoped-apply-1[^\n]*JSON\.stringify\(compiled\.acceptance\.checks\)/);
   assert.match(source, /ORDER BY n\.canonical_path FOR UPDATE OF n/);
   assert.doesNotMatch(source, /FOR UPDATE OF n,b,r/);
   assert.match(source, /JOIN lesson_author_workspace_nodes mapped_node ON mapped_node\.workspace_id=m\.workspace_id AND mapped_node\.id=m\.node_id/);

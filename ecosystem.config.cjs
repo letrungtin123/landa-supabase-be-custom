@@ -10,22 +10,26 @@ module.exports = {
         EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
         LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS: "300000",
         LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "true",
+        COURSE_PUBLISH_GOVERNANCE_ENABLED: "true",
         LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY: "4",
-        LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "1"
+        LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "2"
       },
       env_production: {
         NODE_ENV: "production",
         EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
         LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
+        LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS: "300000",
         LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "true",
+        COURSE_PUBLISH_GOVERNANCE_ENABLED: "true",
         LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY: "4",
-        LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "1"
+        LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "2"
       }
     },
     {
@@ -78,6 +82,21 @@ module.exports = {
       env_production: {
         NODE_ENV: "production",
         COURSE_OUTLINE_TRANSFER_WORKER_ENABLED: "true"
+      }
+    },
+    {
+      name: "landa-news-assets-cleanup-worker",
+      cwd: __dirname,
+      script: "./dist/workers/news-assets-cleanup.worker.js",
+      interpreter: "node",
+      autorestart: true,
+      min_uptime: 30000,
+      exp_backoff_restart_delay: 5000,
+      env: {
+        NODE_ENV: "production"
+      },
+      env_production: {
+        NODE_ENV: "production"
       }
     }
   ]

@@ -5,14 +5,18 @@ import { readOrchestrationV2ArchitectureAssembly,
 import { prepareOrchestrationV2InventoryIdentity } from './lesson-author-orchestration-v2-inventory.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { ORCHESTRATION_V2_CHAPTER_CONTRACT } from './lesson-author-orchestration-v2-chapter.logic.js';
+import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
+import { orchestrationV2OriginSummary, workspaceDraftQualityChecks } from './lesson-author-quality-receipt.logic.js';
 import { ORCHESTRATION_V2_UNIT_CONTRACT } from './lesson-author-orchestration-v2-unit.logic.js';
 import { editWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
 import { workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed } from './lesson-author-workspace-storyboard.logic.js';
-import { assertWorkspaceApplyReady, readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
+import { assertWorkspaceDraftApplyReady, readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
 
-export const ORCHESTRATION_V2_APPLY_CONTRACT = 'workspace-orchestration-v2-scoped-apply-1';
+export const ORCHESTRATION_V2_APPLY_CONTRACT = 'workspace-scoped-apply-2';
+export const ORCHESTRATION_V2_QUALITY_CANONICALIZATION = 'workspace-quality-subject-1';
+export const ORCHESTRATION_V2_QUALITY_EVALUATOR = 'workspace-v2-draft-compiler-1';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_NODES = 32_768;
@@ -196,9 +200,20 @@ function compile(input: OrchestrationV2ApplyInput) {
     }
     const payload = record(acceptedArtifact.payload), generated = record(payload?.generated_unit);
     const artifactNodes = Array.isArray(payload?.nodes) ? payload!.nodes as unknown[] : [];
+    const quality = orchestrationV2QualityPolicy(payload ?? {});
+    // A raw-source fallback remains reviewable in the workspace but is not a
+    // validated course payload. Applying it would silently convert diagnostic
+    // source text into learner content.
+    if (!quality.course_applicable) {
+      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
+    }
     const artifactBase = { validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
       unit_path: payload?.unit_path, source_snapshot_hash: payload?.source_snapshot_hash,
-      contract_hash: payload?.contract_hash, nodes: payload?.nodes, generated_unit: payload?.generated_unit };
+      contract_hash: payload?.contract_hash, nodes: payload?.nodes, generated_unit: payload?.generated_unit,
+      ...(quality.has_envelope ? {
+        content_origin: payload?.content_origin,
+        quality_state: payload?.quality_state,
+      } : {}) };
     const generatedComponents = Array.isArray(generated?.components) ? generated!.components : [];
     const architectureUnit = binding.unit as OrchestrationV2ArchitectureAssembly['architecture']['chapters'][number]['lessons'][number]['units'][number];
     if (!payload || payload.contract_version !== 2 || payload.unit_path !== binding.unit_path
@@ -307,17 +322,42 @@ function compile(input: OrchestrationV2ApplyInput) {
         sort_order: mapping.target_sort_order, before_hash: mapping.target_hash } : null };
   });
   const revisionSetHash = orchestrationV2Hash(revisionManifest);
-  const checks = { schema: 'PASS', security: 'PASS', evidence: 'PASS', pedagogy: 'PASS', coverage: 'PASS',
-    duplicates: 'PASS', dependencies: 'PASS', registry: 'PASS' } as const;
+  const capabilityHash = orchestrationV2Hash([...input.allowed].sort());
+  const subjectContentHash = orchestrationV2Hash({
+    canonicalization_version: ORCHESTRATION_V2_QUALITY_CANONICALIZATION,
+    scope_node_id: selectedScope.node_id,
+    scope_path: selectedScope.canonical_path,
+    nodes: writeNodes.map(node => ({ node_id: node.node_id, parent_id: node.parent_id, kind: node.kind,
+      canonical_path: node.canonical_path, sort_order: node.sort_order, revision: node.current_revision,
+      content_hash: node.current!.content_hash, block_type: blockType(node) })),
+  });
+  const evidenceDependencyHash = orchestrationV2Hash({ source_snapshot_hash: input.source_snapshot_hash,
+    architecture_hash: input.architecture_hash, inventory_hash: input.inventory_hash,
+    capability_hash: capabilityHash });
+  const checks = workspaceDraftQualityChecks();
   const acceptance = { scope_id: selectedScope.node_id, revision_set_hash: revisionSetHash,
     source_snapshot_hash: input.source_snapshot_hash, target_snapshot_hash: targetSnapshotHash, checks };
-  assertWorkspaceApplyReady({ ...acceptance, kind: selectedScope.kind, complete: true, validation: acceptance });
+  assertWorkspaceDraftApplyReady({ ...acceptance, kind: selectedScope.kind, complete: true, validation: acceptance });
+  const quality_receipt = {
+    canonicalization_version: ORCHESTRATION_V2_QUALITY_CANONICALIZATION,
+    evaluator_kind: 'deterministic' as const,
+    evaluator_version: ORCHESTRATION_V2_QUALITY_EVALUATOR,
+    subject_content_hash: subjectContentHash,
+    evidence_dependency_hash: evidenceDependencyHash,
+    origin_summary: orchestrationV2OriginSummary(input.unit_artifacts.map(artifact => record(artifact.payload)?.content_origin),
+      input.nodes.filter(node => (node.current_revision ?? 0) > 0).length),
+    checks,
+    findings: [
+      { check: 'pedagogy', status: 'NOT_RUN', reason_code: 'SEMANTIC_EVALUATOR_NOT_RUN' },
+      { check: 'dependencies', status: 'NOT_APPLICABLE', reason_code: 'NO_EXPLICIT_V2_DEPENDENCY_CONTRACT' },
+    ] as const,
+  };
   const result = { validation_contract: ORCHESTRATION_V2_APPLY_CONTRACT, workspace_id: input.workspace_id,
     content_locale: input.content_locale, scope_node_id: selectedScope.node_id, scope_path: selectedScope.canonical_path,
     expected_workspace_revision: input.event_head, runtime_config_hash: input.runtime_config_hash,
     architecture_hash: input.architecture_hash, inventory_hash: input.inventory_hash,
-    capability_hash: orchestrationV2Hash([...input.allowed].sort()), revision_manifest: revisionManifest,
+    capability_hash: capabilityHash, revision_manifest: revisionManifest,
     revision_set_hash: revisionSetHash, required_applied_dependencies: required.map(node => node.node_id).sort(),
-    acceptance, writes };
+    acceptance, quality_receipt, writes };
   return structuredClone({ ...result, compilation_hash: orchestrationV2Hash(result) });
 }
