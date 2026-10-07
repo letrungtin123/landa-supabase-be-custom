@@ -23,7 +23,7 @@ function typedData(type: string, n: number): unknown {
   if (type === 'la_crossword') return { words: ['READ', 'CHECK', 'ACT'].map((answer, row) => ({ id: row + 1, answer, clue: `Term ${row + 1}`, hint: '', row, col: 0, direction: 'across' })), keyword_coordinates: [{ row: 0, col: 0 }] };
   return { start_diagram_id: 'main', diagrams: [{ id: 'main', name: 'Process', nodes: [
     { id: 'a', type: 'customShape', position: { x: 0, y: 0 }, data: { label: 'Read' } },
-    { id: 'b', type: 'customShape', position: { x: 200, y: 0 }, data: { label: 'Check' } },
+    { id: 'b', type: 'customShape', position: { x: 320, y: 0 }, data: { label: 'Check' } },
   ], edges: [{ id: 'ab', source: 'a', target: 'b', label: 'then' }] }] };
 }
 function refresh(input: WorkspaceApplyCompileInput) {

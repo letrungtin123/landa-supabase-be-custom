@@ -222,7 +222,7 @@ export function workspaceComponentContent(original: LessonAuthorComponentProposa
  * re-applied here: Course Outline owns the authoring contract, while immutable
  * type/capability/provenance and typed payload/reference checks remain closed.
  */
-function workspaceAuthorComponentContent(original: LessonAuthorComponentProposal,
+export function workspaceAuthorComponentContent(original: LessonAuthorComponentProposal,
   allowed: ReadonlySet<CourseComponentType>): WorkspaceContent {
   try {
     if (!allowed.has(original.type)) fail('WORKSPACE_COMPONENT_CAPABILITY_DENIED');
@@ -235,7 +235,7 @@ function workspaceAuthorComponentContent(original: LessonAuthorComponentProposal
 export function editWorkspaceComponent(original: LessonAuthorComponentProposal, input: unknown,
   allowed: ReadonlySet<CourseComponentType>): LessonAuthorComponentProposal {
   try {
-    const baseline = workspaceComponentContent(original, allowed);
+    const baseline = workspaceAuthorComponentContent(original, allowed);
     const received = readWorkspaceContent(input);
     const content = { ...received, data: validatePayload(original.type, received.data) as WorkspaceJson };
     if (structure(original.type, baseline.data) !== null
@@ -347,7 +347,6 @@ export function hydrateWorkspaceComponent(bindingInput: unknown, baselineInput: 
     // canonical course component written by Apply.
     delete courseMetadata.author_review;
     const component = compile({ type: binding.component_type, title: baseline.title, data: {}, metadata: courseMetadata }, baseline);
-    assertAiGeneratedComponentValid(component, allowed);
     return component;
   } catch (error) { if (error instanceof WorkspaceComponentError) throw error; return fail('WORKSPACE_COMPONENT_BINDING_INVALID'); }
 }
@@ -401,7 +400,7 @@ function validateWorkspaceChapter(input: {
         source_fact_ids: c.metadata?.source_fact_ids as string[] | undefined,
         supporting_evidence_fact_ids: c.metadata?.supporting_evidence_fact_ids as string[] | undefined,
         covered_source_fact_ids: c.metadata?.covered_source_fact_ids as string[] | undefined,
-      })));
+      })), {}, { enforceGeneratedContentQuality: false });
       if (coverage) findings.push({ code: 'WORKSPACE_COMPONENT_COVERAGE_INVALID', path });
     }
   }

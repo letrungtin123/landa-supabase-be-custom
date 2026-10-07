@@ -20,7 +20,7 @@ const wrapped=(type:LessonAuthorComponentProposal['type'],key:string,data:unknow
 function components():LessonAuthorComponentProposal[]{return[
   {type:'html',title:'Observation',data:html,metadata},
   ...(['multiple_choice','multiple_select','dropdown'] as const).map(kind=>({type:'problem' as const,title:'Check',metadata,
-    data:encodeWorkspaceProblem({kind,question:'Which statement is an observation?',explanation:'An observation states the visible condition.',choices:[{text:'A cable is damaged.',correct:true},{text:'The cause is confirmed.',correct:false}]})})),
+    data:encodeWorkspaceProblem({kind,question:'Which statement is an observation?',explanation:'An observation states the visible condition.',choices:[{text:'A cable is damaged.',correct:true},{text:'The cause is confirmed.',correct:false},{text:'The repair is approved.',correct:false}]})})),
   {type:'problem',title:'Count',metadata,data:encodeWorkspaceProblem({kind:'numerical',question:'How many approved steps?',answers:['3'],tolerance:'0',explanation:'There are three.'})},
   {type:'problem',title:'Term',metadata,data:encodeWorkspaceProblem({kind:'short_text',question:'Name the record.',answers:['Observation','Record'],case_sensitive:false,explanation:'Record what can be observed.'})},
   wrapped('la_faq','faq_data',{items:[{id:1,question:'Why record observations?',answer:'To distinguish what is visible from interpretation.'},{id:2,question:'What if the cause is unclear?',answer:'Escalate uncertainty.'}]}),
@@ -28,15 +28,17 @@ function components():LessonAuthorComponentProposal[]{return[
   wrapped('la_crossword','crossword_data',{words:['OBSERVE','RECORD','ESCALATE'].map((answer,row)=>({id:row+1,answer,clue:`Synthetic term ${row+1}`,hint:'',row,col:0,direction:'across'})),keyword_coordinates:[]}),
   wrapped('la_diagram','diagram_data',{start_diagram_id:'main',diagrams:[{id:'main',name:'Observation process',nodes:[
     {id:'n1',type:'customShape',position:{x:0,y:0},data:{label:'Observe',shape:'rounded'}},
-    {id:'n2',type:'customShape',position:{x:200,y:0},data:{label:'Record',shape:'rectangle'}}],edges:[{id:'e1',source:'n1',target:'n2',label:'then'}]}]}),
+    {id:'n2',type:'customShape',position:{x:320,y:0},data:{label:'Record',shape:'rectangle'}}],edges:[{id:'e1',source:'n1',target:'n2',label:'then'}]}]}),
 ];}
-test('all six CMS adapters and five problem types satisfy actual Python strict wire payload contract, no provider',()=>{
+test('all six CMS adapters satisfy the strict Python wire contract and non-single-choice problems stay rejected, no provider',()=>{
   const originals=components(),before=structuredClone(originals),wire=originals.map(c=>workspaceComponentValidationWire(c,allowed));
   const root=fileURLToPath(new URL('../../../../landa-ai-rag/',import.meta.url));
   const python=resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python');
   const code=`import json,sys\nfrom app.main import staged_component_payload_code\nprint(json.dumps([staged_component_payload_code(c) for c in json.load(sys.stdin)]))`;
   const result=spawnSync(python,['-X','utf8','-B','-c',code],{cwd:root,input:JSON.stringify(wire),encoding:'utf8',timeout:20000,maxBuffer:1000000});
-  assert.equal(result.status,0,result.error?.message??result.stderr);assert.deepEqual(JSON.parse(result.stdout),wire.map(()=>null));
+  assert.equal(result.status,0,result.error?.message??result.stderr);assert.deepEqual(JSON.parse(result.stdout),[
+    null,null,'PROBLEM_SINGLE_CHOICE_REQUIRED','PROBLEM_SINGLE_CHOICE_REQUIRED','PROBLEM_SINGLE_CHOICE_REQUIRED','PROBLEM_SINGLE_CHOICE_REQUIRED',null,null,null,null,
+  ]);
   assert.deepEqual(originals,before);assert.equal((wire.at(-1) as any).edges[0].source,0);
   for(const c of wire)assert.deepEqual(c.source_fact_ids,['fact_1']);
 });

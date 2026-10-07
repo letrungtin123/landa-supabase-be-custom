@@ -119,18 +119,14 @@ test('all five metadata kinds load scoped Blueprint on the same tx and return ho
     assert.ok(f.queries.every(q => q.sql.startsWith('SELECT')));
   }
 });
-test('all five V2 metadata kinds authenticate the accepted architecture/inventory and support Save → Reset', async () => {
+test('all five V2 metadata kinds authenticate for review but repository Save and Reset remain component-only', async () => {
   for (const kind of Object.keys(paths) as WorkspaceStoryboardKind[]) {
     const f = fixture(kind, 'vi', 'v2');
-    let saved;
-    try { saved = await f.repo.save(f.target, { expected_revision: 0, changes: { title: `V2 ${kind}` } }); }
-    catch (error) { throw new Error(`V2 ${kind}: ${error instanceof Error ? error.message : String(error)}`); }
-    assert.equal(saved.revision, 1); assert.equal(saved.user_modified, true);
-    const reset = await f.repo.reset({ ...f.target, operationId: uuid(81) }, 1);
-    assert.equal(reset.revision, 2); assert.equal(reset.user_modified, false);
-    assert.deepEqual(f.revisions[0].content, f.revisions[2].content);
-    assert.equal(f.queries.some(q => q.sql.startsWith('SELECT CASE WHEN octet_length')), false);
-    assert.equal(f.queries.filter(q => q.sql.startsWith('SELECT r.id::text AS run_id')).length, 2);
+    const receipt = await f.accept();
+    assert.equal(receipt.validation_contract, kind === 'media_brief' ? WORKSPACE_MEDIA_EDIT : WORKSPACE_AGGREGATE_EDIT);
+    await assert.rejects(f.repo.save(f.target, { expected_revision: 0, changes: { title: `V2 ${kind}` } }), code('WORKSPACE_EDIT_STATE_INVALID'));
+    await assert.rejects(f.repo.reset({ ...f.target, operationId: uuid(81) }, 0), code('WORKSPACE_EDIT_STATE_INVALID'));
+    assert.equal(f.revisions.length, 1); assert.equal(f.events.length, 0);
   }
 });
 test('V2 metadata Save fails closed on missing/tampered architecture or inventory identity', async () => {
@@ -148,22 +144,18 @@ test('V2 metadata Save fails closed on missing/tampered architecture or inventor
   ];
   for (const change of cases) {
     const f = fixture('chapter', 'vi', 'v2'); change(f);
-    await assert.rejects(f.repo.save(f.target, { expected_revision: 0, changes: { title: 'Must not persist' } }),
-      code('WORKSPACE_CONTRACT_INVALID'));
-    assert.equal(f.revisions.length, 1); assert.equal(f.events.length, 0); assert.equal(f.state.rollbacks, 1);
+    await assert.rejects(f.accept({ title: 'Must not persist' }), code('WORKSPACE_CONTRACT_INVALID'));
+    assert.equal(f.revisions.length, 1); assert.equal(f.events.length, 0);
   }
 });
-test('Save → exact replay → Reset appends revisions and events with actual metadata acceptance in VI/EN', async () => {
+test('metadata acceptance remains deterministic in VI/EN while Save and Reset append nothing', async () => {
   for (const locale of ['vi', 'en'] as const) for (const kind of Object.keys(paths) as WorkspaceStoryboardKind[]) {
     const f = fixture(kind, locale);
-    const r = await f.repo.save(target, { expected_revision: 0, changes: { title: 'Tác giả / Author' } });
-    assert.equal(r.revision, 1); assert.equal(r.user_modified, true);
-    const replay = await f.repo.save(target, { expected_revision: 0, changes: { title: 'Tác giả / Author' } });
-    assert.equal(replay.replayed, true); assert.equal(f.revisions.length, 2); assert.equal(f.logs.length, 1);
-    const reset = await f.repo.reset({ ...target, operationId: uuid(88) }, 1);
-    assert.equal(reset.revision, 2); assert.equal(reset.user_modified, false); assert.equal(f.events.length, 2);
-    assert.deepEqual(f.revisions[0].content, f.revisions[2].content);
-    assert.ok(f.queries.filter(q => !q.sql.startsWith('SELECT')).every(q => q.sql.startsWith('INSERT INTO lesson_author_workspace_revisions')));
+    const receipt = await f.accept({ title: 'Tác giả / Author' });
+    assert.ok([WORKSPACE_AGGREGATE_EDIT, WORKSPACE_MEDIA_EDIT].includes(receipt.validation_contract as any));
+    await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { title: 'Tác giả / Author' } }), code('WORKSPACE_EDIT_STATE_INVALID'));
+    await assert.rejects(f.repo.reset({ ...target, operationId: uuid(88) }, 0), code('WORKSPACE_EDIT_STATE_INVALID'));
+    assert.equal(f.revisions.length, 1); assert.equal(f.events.length, 0);
   }
 });
 test('wrong kind/parent/order/path and missing Blueprint reject at the binding boundary', async () => {
@@ -199,26 +191,26 @@ test('candidate hash/revision forgery and component kind reject before scope que
 });
 test('invalid content produces typed payload-stage diagnostics and no revision/event', async () => {
   const f = fixture('media_brief');
-  await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { data: { content_points: [], context_description: 'Empty points' } } }), code('WORKSPACE_CONTENT_INVALID'));
+  await assert.rejects(f.accept({ data: { content_points: [], context_description: 'Empty points' } }), code('WORKSPACE_CONTENT_INVALID'));
   assert.equal(f.logs[0].failure_stage, 'workspace_storyboard_payload'); assert.equal(f.logs[0].internal_failure_code, 'WORKSPACE_CONTENT_INVALID');
-  assert.equal(f.events.length, 0); assert.equal(f.revisions.length, 1); assert.equal(f.state.rollbacks, 1);
+  assert.equal(f.events.length, 0); assert.equal(f.revisions.length, 1);
 });
 test('objective-slot removal cannot change protected local objective identity through metadata Save', async () => {
   const f = fixture('lesson');
-  await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { data: { ...(f.seed.baseline.data as object), learning_objectives: [] } } }), code('WORKSPACE_NODE_FIELD_PROTECTED'));
+  await assert.rejects(f.accept({ data: { ...(f.seed.baseline.data as object), learning_objectives: [] } }), code('WORKSPACE_NODE_FIELD_PROTECTED'));
   assert.equal(f.revisions.length, 1);
 });
-test('permission and source freshness still fence Save/Reset around the metadata validator', async () => {
+test('permission denial precedes the component-only state gate and metadata source drift cannot reopen writes', async () => {
   const f = fixture(); f.state.authorized = false;
   await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { title: 'No' } }), code('WORKSPACE_EDIT_FORBIDDEN'));
   assert.equal(f.logs.length, 0);
   const g = fixture(); g.state.source = 'b'.repeat(64);
-  await assert.rejects(g.repo.reset(target, 0), code('WORKSPACE_SOURCE_CHANGED'));
+  await assert.rejects(g.repo.reset(target, 0), code('WORKSPACE_EDIT_STATE_INVALID'));
   assert.equal(g.revisions.length, 1); assert.equal(g.logs.length, 0);
 });
 test('DB errors preserve a safe unavailable code and never expose SQL/private error text', async () => {
   const f = fixture(); f.state.sqlError = true;
-  await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { title: 'Title' } }), code('WORKSPACE_EDIT_UNAVAILABLE'));
+  await assert.rejects(f.accept({ title: 'Title' }), code('WORKSPACE_EDIT_UNAVAILABLE'));
   assert.equal(f.logs[0].internal_failure_code, 'WORKSPACE_EDIT_UNAVAILABLE');
   assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE|Synthetic|Author title|src_1|scope_1/);
 });

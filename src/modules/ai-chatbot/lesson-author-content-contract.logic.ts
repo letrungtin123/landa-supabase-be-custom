@@ -414,6 +414,7 @@ export function validateLessonAuthorGeneratedUnitCoverage(
   unit: LessonAuthorContentContractUnit,
   components: readonly LessonAuthorGeneratedComponentContract[],
   purityContext: LessonAuthorLearnerContentPurityContext = {},
+  options: { enforceGeneratedContentQuality?: boolean } = {},
 ): string | null {
   const plan = Array.isArray(unit.component_plan) ? unit.component_plan : [];
   if (components.length !== plan.length) return 'Generated component count does not match the approved Blueprint plan.';
@@ -459,10 +460,13 @@ export function validateLessonAuthorGeneratedUnitCoverage(
       const html = sanitizeLessonAuthorHtml(component.html ?? component.data);
       const formattingFailure = validateLessonAuthorHtmlContract(html, expected.required_artifacts ?? []);
       if (formattingFailure) return `Generated HTML component ${index + 1}: ${formattingFailure}`;
-      const qualityFailure = validateLessonAuthorHtmlInstructionalQuality(html, purityContext);
-      if (qualityFailure) return `Generated HTML component ${index + 1}: ${qualityFailure}`;
+      if (options.enforceGeneratedContentQuality !== false) {
+        const qualityFailure = validateLessonAuthorHtmlInstructionalQuality(html, purityContext);
+        if (qualityFailure) return `Generated HTML component ${index + 1}: ${qualityFailure}`;
+      }
     }
-    if (component.type === 'problem' && component.data !== undefined) {
+    if (component.type === 'problem' && component.data !== undefined
+      && options.enforceGeneratedContentQuality !== false) {
       const problemFailure = validateLessonAuthorSingleChoiceProblem(component.data);
       if (problemFailure) return `Generated problem component ${index + 1}: ${problemFailure}`;
     }

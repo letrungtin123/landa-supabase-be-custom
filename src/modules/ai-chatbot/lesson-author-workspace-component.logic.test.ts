@@ -23,7 +23,7 @@ function fixtures(): LessonAuthorComponentProposal[] {
     wrapped('la_crossword', 'crossword_data', { words: ['READ', 'CHECK', 'ACT'].map((answer, row) => ({ id: row + 1, answer, clue: `Term ${row + 1}`, hint: '', row, col: 0, direction: 'across' })), keyword_coordinates: [{ row: 0, col: 0 }] }),
     wrapped('la_diagram', 'diagram_data', { start_diagram_id: 'main', diagrams: [{ id: 'main', name: 'Process', nodes: [
       { id: 'a', type: 'customShape', position: { x: 0, y: 0 }, data: { label: 'Read' } },
-      { id: 'b', type: 'customShape', position: { x: 200, y: 0 }, data: { label: 'Check' } },
+      { id: 'b', type: 'customShape', position: { x: 320, y: 0 }, data: { label: 'Check' } },
     ], edges: [{ id: 'ab', source: 'a', target: 'b', label: 'then' }] }] }),
   ];
 }
@@ -141,6 +141,22 @@ test('Course Outline-shaped author edits save for every supported component with
     const edited = editWorkspaceComponent(original, content, allowed);
     assert.equal(edited.title, original.title);
   }
+});
+test('legacy typed component can be edited and rehydrated without re-running the current AI generation gate', () => {
+  const original = fixtures()[5];
+  const legacyDiagram = original.metadata!.diagram_data as any;
+  legacyDiagram.diagrams[0].nodes[1].position.x = 200;
+  (original.data as any).diagram_data = JSON.stringify(legacyDiagram);
+  const content = { title: original.title, purpose: null, data: structuredClone(legacyDiagram), implementation_notes: null };
+
+  assert.throws(() => workspaceComponentStorage(original, allowed), code('WORKSPACE_COMPONENT_PAYLOAD_INVALID'));
+  const edited = editWorkspaceComponent(original, { ...content, title: 'Edited legacy diagram' }, allowed);
+  assert.equal(edited.title, 'Edited legacy diagram');
+
+  const binding = workspaceComponentPlanBinding({ type: 'la_diagram', title: original.title,
+    component_plan_id: 'component_1', source_fact_ids: ['fact_1'], supporting_evidence_fact_ids: [],
+    learning_objective_refs: ['lo_1'] });
+  assert.equal(hydrateWorkspaceComponent(binding, content, allowed).type, 'la_diagram');
 });
 test('interactive text cannot smuggle executable markup through JSON', () => {
   for (const [index, mutate] of [

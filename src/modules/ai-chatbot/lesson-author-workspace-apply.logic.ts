@@ -6,7 +6,7 @@ import { generationSnapshotHash as hash } from './lesson-author-generation-job.l
 import { readWorkspaceContent, assertWorkspaceApplyReady, type WorkspaceContent, type WorkspaceNodeKind } from './lesson-author-workspace.logic.js';
 import { buildWorkspaceInventory } from './lesson-author-workspace-inventory.logic.js';
 import { workspaceStoryboardSeed, editWorkspaceStoryboard } from './lesson-author-workspace-storyboard.logic.js';
-import { hydrateWorkspaceComponent, editWorkspaceComponent, workspaceComponentContent, validateWorkspaceComponentChapter } from './lesson-author-workspace-component.logic.js';
+import { hydrateWorkspaceComponent, editWorkspaceComponent, workspaceAuthorComponentContent, validateWorkspaceComponentChapter } from './lesson-author-workspace-component.logic.js';
 import { detectLessonAuthorGeneratedContentDuplicates } from './lesson-author-pedagogical-validator.logic.js';
 
 export const WORKSPACE_SCOPED_APPLY_CONTRACT = 'workspace-scoped-apply-1';
@@ -268,7 +268,7 @@ function compile(input: WorkspaceApplyCompileInput) {
           // Stored hashes remain untouched; only the typed comparison is
           // canonicalized through the same trusted adapter used for Apply.
           const hydrated = hydrateWorkspaceComponent(node.protected_contract, baseline.get(node.node_id), input.allowed);
-          if (raw.type !== _plan.type || !same(workspaceComponentContent(raw, input.allowed), workspaceComponentContent(hydrated, input.allowed))) fail('WORKSPACE_APPLY_BINDING_INVALID', componentPath);
+          if (raw.type !== _plan.type || !same(workspaceAuthorComponentContent(raw, input.allowed), workspaceAuthorComponentContent(hydrated, input.allowed))) fail('WORKSPACE_APPLY_BINDING_INVALID', componentPath);
           const protectedMetadata = node.protected_contract.metadata as Record<string, unknown>;
           if (raw.metadata?.component_plan_id !== protectedMetadata.component_plan_id) fail('WORKSPACE_APPLY_BINDING_INVALID', componentPath);
           // Publication compares provenance as sets. Genuine coverage has
