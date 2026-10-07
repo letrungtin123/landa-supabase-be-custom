@@ -75,7 +75,7 @@ test('Python compiler/allocation → Node plan → staged Python generation → 
   });
   const { normalizeLessonAuthorBlueprint, blueprintDraftArchitecture, normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('./chat.service.js');
   const ragDir = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = process.platform === 'win32' ? resolve(ragDir, '.venv/Scripts/python.exe') : resolve(ragDir, '.venv/bin/python');
+  const python = process.platform === 'win32' ? resolve(ragDir, '.venv-dev/Scripts/python.exe') : resolve(ragDir, '.venv-dev/bin/python');
   function pythonBoundary(payload: unknown) {
     const result = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_component_instance_contract'], {
       cwd: ragDir, input: JSON.stringify(payload), encoding: 'utf8', timeout: 20_000, maxBuffer: 4_000_000,
@@ -245,7 +245,7 @@ test('real Python Blueprint endpoint depth repair → Node acceptance → chapte
   });
   const { normalizeLessonAuthorBlueprint, blueprintDraftArchitecture, normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('./chat.service.js');
   const cwd = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(cwd, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolve(cwd, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
   const response = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_v5_repair_contract_integration', '--node-fixture'], {
     cwd, encoding: 'utf8', timeout: 20_000, maxBuffer: 4_000_000,
   });
@@ -578,7 +578,7 @@ test('ordered semantic HTML retains heading/table/list adjacency with Python acc
     { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'bullets', items: Array(21).fill('x') }] }] },
   ];
   const ragDir = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(ragDir, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolve(ragDir, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
   const result = spawnSync(python, ['-X', 'utf8', '-B', '-c',
     'import json,sys; from app.main import semantic_learning_visible_text; print(json.dumps([semantic_learning_visible_text(v)[1] is None for v in json.load(sys.stdin)]))'],
     { cwd: ragDir, input: JSON.stringify(cases), encoding: 'utf8' });

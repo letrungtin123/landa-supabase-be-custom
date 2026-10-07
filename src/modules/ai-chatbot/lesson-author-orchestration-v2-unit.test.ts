@@ -22,6 +22,13 @@ import type { OrchestrationV2TaskLease } from './lesson-author-orchestration-v2-
 
 const hash = (value: string) => orchestrationV2Hash(value);
 
+function resolveAiRagDevPython(root: string): string {
+  return resolve(
+    root,
+    process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python',
+  );
+}
+
 function fixture() {
   const source = hash('unit-source');
   const skeleton = { contract_version: 2 as const, source_snapshot_hash: source, locale: 'vi' as const,
@@ -97,7 +104,7 @@ test('CP3B sends table and visual relations through the real Python writer adapt
   const contract = prepareOrchestrationV2UnitGenerationContract({ assembly,
     unit_path: 'chapter_1.lesson_1.unit_1', source_facts: evidenceFacts });
   const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolveAiRagDevPython(root);
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.cp3b_writer_evidence_bridge'], {
     cwd: root, input: JSON.stringify({ unit_contract: contract, locale: 'vi' }),
     encoding: 'utf8', timeout: 20_000, maxBuffer: 8_000_000,
@@ -370,7 +377,7 @@ test('Python deterministic fallback for every component type passes the producti
   });
   const { normalizeLessonAuthorProposal } = await import('./chat.service.js');
   const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolveAiRagDevPython(root);
   const base = fixture().contract;
   const evidenceTexts = [
     'Bước 1: Kiểm tra điều kiện an toàn trước khi bắt đầu công việc.',
@@ -442,7 +449,7 @@ test('density-v3 Python fallback preserves supporting-only interaction evidence 
   });
   const { normalizeLessonAuthorProposal } = await import('./chat.service.js');
   const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolveAiRagDevPython(root);
   const { assembly: baseAssembly, sourceFacts: baseFacts } = fixture();
   const assembly = structuredClone(baseAssembly);
   assembly.architecture.chapters[0]!.lessons[0]!.units[0]!.component_plan.push({
@@ -500,7 +507,7 @@ test('CP2A frozen reviewer candidates survive Python schema/binding and the prod
   });
   const { normalizeLessonAuthorProposal } = await import('./chat.service.js');
   const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolveAiRagDevPython(root);
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.cp2a_boundary_replay_bridge'], {
     cwd: root, input: '{}', encoding: 'utf8', timeout: 20_000, maxBuffer: 8_000_000,
   });

@@ -23,7 +23,7 @@ test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node a
   });
   const { normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('./chat.service.js');
   const root = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolve(root, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_multi_component_repair_slots', '--node-fixture'],
     { cwd: root, encoding: 'utf8', timeout: 20000, maxBuffer: 4000000 });
   assert.equal(out.status, 0, out.error?.message ?? out.stderr);
@@ -58,7 +58,7 @@ test('offline Node→Python unit contract→timeout→explicit resume→Python w
   });
   const {normalizeLessonAuthorProposal,lockProposalToBlueprintChapter}=await import('./chat.service.js');
   const root=fileURLToPath(new URL('../../../../landa-ai-rag/',import.meta.url));
-  const python=resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python');
+  const python=resolve(root,process.platform==='win32'?'.venv-dev/Scripts/python.exe':'.venv-dev/bin/python');
   const call=(input:unknown)=>{
     const out=spawnSync(python,['-X','utf8','-B','-m','tests.chapter_checkpoint_bridge'],{
       cwd:root,input:JSON.stringify(input),encoding:'utf8',timeout:20000,maxBuffer:4000000});
@@ -148,7 +148,7 @@ test(`offline ${action}→scoped repair→Python full validation→Node acceptan
   });
   const {normalizeLessonAuthorProposal,lockProposalToBlueprintChapter}=await import('./chat.service.js');
   const root=fileURLToPath(new URL('../../../../landa-ai-rag/',import.meta.url));
-  const python=resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python');
+  const python=resolve(root,process.platform==='win32'?'.venv-dev/Scripts/python.exe':'.venv-dev/bin/python');
   const out=spawnSync(python,['-X','utf8','-B','-m','tests.chapter_checkpoint_bridge'],{
     cwd:root,input:JSON.stringify({action}),encoding:'utf8',timeout:20000,maxBuffer:4000000});
   assert.equal(out.status,0,out.error?.message ?? out.stderr);

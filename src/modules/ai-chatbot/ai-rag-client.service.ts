@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { readSafeBlueprintFailure } from './lesson-author-capabilities.logic.js';
 import https from 'node:https';
 import { env } from '../../config/env.js';
@@ -330,8 +331,13 @@ function requireRagServiceUrl(): string {
   if (!baseUrl) {
     throw new AppError('Dịch vụ AI RAG chưa được cấu hình trên máy chủ.', 503, 'AI_RAG_SERVICE_NOT_CONFIGURED');
   }
-  if (env.isProduction && !getRagServiceToken()) {
-    throw new AppError('Dịch vụ AI RAG thiếu token nội bộ trên máy chủ.', 503, 'AI_RAG_SERVICE_TOKEN_NOT_CONFIGURED');
+  const hmacConfigured = Boolean(env.AI_RAG_SERVICE_HMAC_KEY_ID && env.AI_RAG_SERVICE_HMAC_SECRET);
+  const hmacPartiallyConfigured = Boolean(env.AI_RAG_SERVICE_HMAC_KEY_ID || env.AI_RAG_SERVICE_HMAC_SECRET);
+  if (hmacPartiallyConfigured && !hmacConfigured) {
+    throw new AppError('Cấu hình chữ ký dịch vụ AI RAG chưa đầy đủ.', 503, 'AI_RAG_SERVICE_HMAC_NOT_CONFIGURED');
+  }
+  if (env.isProduction && !getRagServiceToken() && !hmacConfigured) {
+    throw new AppError('Dịch vụ AI RAG thiếu xác thực nội bộ trên máy chủ.', 503, 'AI_RAG_SERVICE_AUTH_NOT_CONFIGURED');
   }
   return baseUrl;
 }
@@ -348,12 +354,36 @@ interface PreparedRagRequest {
   requestBody: string;
   url: URL;
   transport: typeof http | typeof https;
+  correlationId?: string;
 }
 
 function prepareRagRequest(path: string, body: Record<string, unknown>): PreparedRagRequest {
   const requestBody = JSON.stringify(body);
   const url = new URL(`${requireRagServiceUrl()}${path}`);
-  return { requestBody, url, transport: url.protocol === 'https:' ? https : http };
+  const correlationId = typeof body.correlation_id === 'string' && body.correlation_id.trim()
+    ? body.correlation_id.trim()
+    : undefined;
+  return { requestBody, url, transport: url.protocol === 'https:' ? https : http, correlationId };
+}
+
+export function buildRagHmacHeaders(input: {
+  keyId: string;
+  secret: string;
+  timestamp: string;
+  method: string;
+  path: string;
+  requestBody: string;
+  requestId: string;
+}): Record<string, string> {
+  if (!input.keyId || !input.secret) return {};
+  const bodyHash = createHash('sha256').update(input.requestBody, 'utf8').digest('hex');
+  const canonical = `${input.timestamp}\n${input.method.toUpperCase()}\n${input.path}\n${bodyHash}`;
+  return {
+    'X-Landa-Key-Id': input.keyId,
+    'X-Landa-Timestamp': input.timestamp,
+    'X-Landa-Signature': createHmac('sha256', input.secret).update(canonical, 'utf8').digest('hex'),
+    'X-Landa-Request-Id': input.requestId,
+  };
 }
 
 async function requestRagJson(
@@ -362,6 +392,15 @@ async function requestRagJson(
   signal?: AbortSignal,
 ): Promise<{ statusCode: number; payload: unknown }> {
   const { requestBody, url, transport } = prepared;
+  const hmacHeaders = buildRagHmacHeaders({
+    keyId: env.AI_RAG_SERVICE_HMAC_KEY_ID,
+    secret: env.AI_RAG_SERVICE_HMAC_SECRET,
+    timestamp: Math.floor(Date.now() / 1_000).toString(),
+    method: 'POST',
+    path: url.pathname,
+    requestBody,
+    requestId: randomUUID(),
+  });
 
   return new Promise((resolve, reject) => {
     const req = transport.request(url, {
@@ -370,6 +409,8 @@ async function requestRagJson(
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(requestBody).toString(),
         ...(getRagServiceToken() ? { 'X-Landa-AI-Service-Token': getRagServiceToken() } : {}),
+        ...hmacHeaders,
+        ...(prepared.correlationId ? { 'X-Correlation-Id': prepared.correlationId } : {}),
       },
       timeout: timeoutMs,
       ...(signal ? { signal } : {}),
@@ -419,9 +460,21 @@ async function postRagJson<T>(
         : typeof detail === 'string'
           ? detail.trim()
           : '';
-      const code = readSafeRagErrorCode(detailRecord?.code) ?? 'AI_RAG_SERVICE_ERROR';
+      const fallbackCode = response.statusCode === 413
+        ? 'REQUEST_TOO_LARGE'
+        : response.statusCode === 503
+          ? 'SERVICE_BUSY'
+          : 'AI_RAG_SERVICE_ERROR';
+      const code = readSafeRagErrorCode(detailRecord?.code) ?? fallbackCode;
+      const safeMessage = code === 'REQUEST_TOO_LARGE'
+        ? 'Dữ liệu gửi sang dịch vụ AI vượt giới hạn cho phép.'
+        : code === 'DOCUMENT_LIMIT_EXCEEDED'
+          ? 'Tài liệu vượt giới hạn xử lý an toàn. Vui lòng giảm dung lượng hoặc độ dài tài liệu.'
+          : code === 'SERVICE_BUSY'
+            ? 'Dịch vụ AI đang bận. Vui lòng thử lại sau.'
+            : message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.';
       throw new RagServiceError(
-        message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.',
+        safeMessage,
         response.statusCode >= 500 ? 503 : response.statusCode,
         code,
         readSafeUsage(detailRecord?.usage),

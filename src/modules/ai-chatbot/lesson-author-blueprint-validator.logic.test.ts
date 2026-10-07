@@ -97,7 +97,7 @@ function mixedObjectiveFixture(locale: 'en' | 'vi' = 'en') {
 
 function pythonCoherenceCodes(candidate: BlueprintArchitecture): string[] {
   const cwd = fileURLToPath(new URL('../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(cwd, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+  const python = resolve(cwd, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
   const response = spawnSync(python, ['-X', 'utf8', '-B', '-c',
     'import json,sys; from app.main import validate_v5_instructional_coherence; r=validate_v5_instructional_coherence(json.load(sys.stdin)); print(json.dumps([i["code"] for i in r.errors]))'],
   { cwd, input: JSON.stringify(candidate), encoding: 'utf8', timeout: 20_000 });

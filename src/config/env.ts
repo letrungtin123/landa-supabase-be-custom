@@ -174,6 +174,8 @@ export const env = {
   AI_SECRET_ENCRYPTION_KEY: process.env.AI_SECRET_ENCRYPTION_KEY?.trim() || '',
   AI_RAG_SERVICE_URL: process.env.AI_RAG_SERVICE_URL?.trim() || '',
   AI_RAG_SERVICE_TOKEN: process.env.AI_RAG_SERVICE_TOKEN?.trim() || '',
+  AI_RAG_SERVICE_HMAC_KEY_ID: process.env.AI_RAG_SERVICE_HMAC_KEY_ID?.trim() || '',
+  AI_RAG_SERVICE_HMAC_SECRET: process.env.AI_RAG_SERVICE_HMAC_SECRET?.trim() || '',
   AI_RAG_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_REQUEST_TIMEOUT_MS', 600_000, 1_000, 900_000),
   // Read-only durable-job API. Does not enable enqueue or start any worker.
   LESSON_AUTHOR_GENERATION_STATUS_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_STATUS_ENABLED', false),
