@@ -26,6 +26,7 @@ function fixture() {
   let rows: Row[] = [{ revision: 0, parent_revision: null, origin: 'ai_baseline', actor_id: null, operation_id: uuid(99),
     content: structuredClone(baseline), content_hash: generationSnapshotHash(baseline), user_modified: false, validation_contract: 'fixture' }];
   let pointer = 0, sequence = 1, state = 'drafting', permission = true, source = sourceHash, applied = false;
+  let nodeKind = 'component';
   let corruptReceipt = false, missing = false, invalidProof: Partial<WorkspaceEditAcceptance> | null = null, validationError = false;
   let insertError: unknown = null;
   let revokeDuringValidation = false, driftDuringValidation = false;
@@ -41,7 +42,7 @@ function fixture() {
       else if (text.includes('FROM lesson_author_session_deletion_jobs')) result = [];
       else if (text.includes('FROM lesson_author_workspaces w')) result = [{ id: target.workspaceId, status: state,
         contract_version: 1, content_locale: locale, correlation_id: uuid(8), source_snapshot_hash: sourceHash }];
-      else if (text.includes('FROM lesson_author_workspace_nodes WHERE')) result = [{ id: target.nodeId, kind: 'component',
+      else if (text.includes('FROM lesson_author_workspace_nodes WHERE')) result = [{ id: target.nodeId, kind: nodeKind,
         content_state: 'content_ready', current_revision: pointer, protected_contract: contract, contract_hash: generationSnapshotHash(contract) }];
       else if (text.startsWith('SELECT revision,parent_revision')) result = rows.filter(r => r.revision === 0 || r.revision === pointer || r.operation_id === params[5]);
       else if (text.startsWith('SELECT content,content_hash')) result = rows.filter(r => r.revision === params[4]);
@@ -85,8 +86,19 @@ function fixture() {
     apply: () => { applied = true; },
     revokeDuringValidation: () => { revokeDuringValidation = true; }, driftDuringValidation: () => { driftDuringValidation = true; },
     locale: (value: 'vi' | 'en') => { locale = value; },
+    nodeKind: (value: string) => { nodeKind = value; },
     insertError: (value: unknown) => { insertError = value; } };
 }
+
+test('only a completed component can be edited; hierarchy and media remain review-only', async () => {
+  for (const kind of ['course', 'chapter', 'lesson', 'unit', 'media_brief']) {
+    const f = fixture(); f.nodeKind(kind);
+    await assert.rejects(f.repo.save(target, { expected_revision: 0, changes: { title: 'Không được sửa' } }),
+      expectedCode('WORKSPACE_EDIT_STATE_INVALID'));
+    assert.equal(f.stages.includes('validate'), false);
+    assert.equal(f.rows().length, 1);
+  }
+});
 
 test('Save validates before append; baseline/provenance untouched, pointer/event committed atomically in mock', async () => {
   const f = fixture(); const result = await f.repo.save(target, { expected_revision: 0, changes: { title: 'Author title' } });

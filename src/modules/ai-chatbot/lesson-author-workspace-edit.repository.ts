@@ -134,6 +134,11 @@ export function createWorkspaceEditRepository(deps: {
         if (!n || nodes.rows.length !== 1) fail('WORKSPACE_EDIT_NOT_FOUND');
         if (!KINDS.includes(String(n.kind)) || !n.protected_contract || typeof n.protected_contract !== 'object' || Array.isArray(n.protected_contract)
           || generationSnapshotHash(n.protected_contract) !== n.contract_hash) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
+        // The live workspace may expose hierarchy/media metadata for review and
+        // scope Apply, but author editing is intentionally limited to generated
+        // interactive components. This server gate mirrors the UI and prevents
+        // a hand-crafted request from editing course/chapter/lesson/unit nodes.
+        if (n.kind !== 'component') fail('WORKSPACE_EDIT_STATE_INVALID');
         if (n.content_state !== 'content_ready' || n.current_revision === null) throw new WorkspaceContractError('WORKSPACE_NODE_NOT_READY');
         const revision = integer(n.current_revision);
         const revisions = await tx.query(`SELECT revision,parent_revision,origin,actor_id,operation_id,content,content_hash,user_modified,validation_contract

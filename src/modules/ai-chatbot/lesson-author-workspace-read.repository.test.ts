@@ -94,22 +94,20 @@ test('read summary retains EN/VI/root correlation and exposes only metadata, not
 });
 
 test('active summary exposes only bounded validated architecture progress before structure commit', async () => {
-  const preview = { run_id: uuid(30), course_title: 'Thiết kế khóa học an toàn', total_chapters: 2,
-    completed_chapters: 1, chapters: [
-      { chapter_key: 'chapter-1', order: 0, title: 'Nhận diện', state: 'ready' },
-      { chapter_key: 'chapter-2', order: 1, title: 'Kiểm soát', state: 'generating' },
-    ] };
-  const f = fixture({ ...summary(), architecture_preview: preview, provider_payload: 'PRIVATE' });
+  const previewInput = { run_id: uuid(30), course_title: 'Thiết kế khóa học an toàn',
+    skeleton_artifact: null, chapter_tasks: [], unit_tasks: [] };
+  const f = fixture({ ...summary(), architecture_preview: previewInput, provider_payload: 'PRIVATE' });
   const view = await f.repo.status(owner, workspaceId);
-  assert.deepEqual(view.architecture_preview, preview);
+  assert.equal(view.architecture_preview?.course_title, previewInput.course_title);
+  assert.equal(view.architecture_preview?.total_chapters, 0);
+  assert.deepEqual(view.architecture_preview?.nodes.map(node => [node.kind, node.state]), [['course', 'generating']]);
   assert.equal(JSON.stringify(view).includes('PRIVATE'), false);
   assert.match(f.calls[0]!.sql, /artifact_kind='course_skeleton'/);
-  assert.match(f.calls[0]!.sql, /event_kind='structure_ready'/);
+  assert.match(f.calls[0]!.sql, /artifact_kind='chapter_blueprint'/);
+  assert.match(f.calls[0]!.sql, /task\.kind='generate_unit'/);
   for (const architecture_preview of [
-    { ...preview, completed_chapters: 2 },
-    { ...preview, chapters: [...preview.chapters, preview.chapters[1]] },
-    { ...preview, chapters: preview.chapters.map((chapter, index) => index ? { ...chapter, order: 3 } : chapter) },
-    { ...preview, chapters: preview.chapters.map((chapter, index) => index ? { ...chapter, state: 'private' } : chapter) },
+    { ...previewInput, run_id: 'private' },
+    { ...previewInput, course_title: '' },
   ]) {
     f.row({ ...summary(), architecture_preview });
     await assert.rejects(f.repo.status(owner, workspaceId), code('WORKSPACE_READ_CONTRACT_INVALID'));

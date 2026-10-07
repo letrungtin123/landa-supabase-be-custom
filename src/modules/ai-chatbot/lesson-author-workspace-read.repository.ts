@@ -4,6 +4,7 @@ import {
   readWorkspaceContent, workspaceEventCursor, workspaceLocale,
   WORKSPACE_CONTRACT_VERSION, WORKSPACE_EVENT_PAGE_SIZE, WorkspaceContractError,
 } from './lesson-author-workspace.logic.js';
+import { buildWorkspaceArchitecturePreview } from './lesson-author-workspace-preview.logic.js';
 
 export interface WorkspaceReadOwner {
   tenantId: string;
@@ -25,7 +26,6 @@ const COMPONENT_TYPES = ['html', 'problem', 'la_faq', 'la_sortable', 'la_crosswo
 const MEDIA_TYPES = ['video', 'static_infographic'] as const;
 const CONTENT_ORIGINS = ['provider_validated', 'structured_fallback', 'raw_source_fallback'] as const;
 const QUALITY_STATES = ['validated', 'review_required'] as const;
-const ARCHITECTURE_PREVIEW_STATES = ['planned', 'generating', 'ready'] as const;
 const FAILURE_STAGES = ['source_snapshot', 'course_skeleton', 'chapter_blueprint', 'validate_architecture',
   'publish_inventory', 'generate_unit', 'validate_chapter', 'finalize_course'] as const;
 export const WORKSPACE_GRAPH_PAGE_SIZE = 100;
@@ -37,7 +37,7 @@ const EVENTS = ['workspace_created', 'architecture_started', 'architecture_progr
 // same PostgreSQL statement snapshot, without locking a running worker.
 const OWNED = `WITH owned AS (
   SELECT w.id,w.tenant_id,w.course_id,w.conversation_id,w.correlation_id,w.contract_version,
-    w.content_locale,w.status,w.event_head,w.updated_at
+    w.content_locale,w.status,w.event_head,w.updated_at,course.display_name AS course_display_name
   FROM lesson_author_workspaces w
   JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
     AND c.user_id=w.requested_by AND c.course_id=w.course_id AND c.bot_id=w.bot_id
@@ -91,26 +91,8 @@ function workspace(row: Record<string, unknown>) {
 }
 function architecturePreview(value: unknown) {
   if (value === null || value === undefined) return null;
-  const preview = record(value);
-  const chapters = Array.isArray(preview.chapters) ? preview.chapters.map(value => {
-    const chapter = record(value);
-    const order = integer(chapter.order);
-    const chapterKey = chapter.chapter_key;
-    const title = chapter.title;
-    if (typeof chapterKey !== 'string' || !/^[a-z0-9][a-z0-9_.:-]{0,159}$/.test(chapterKey)
-      || typeof title !== 'string' || !title.trim() || title.length > 500) invalid();
-    return { chapter_key: chapterKey, order, title,
-      state: enumeration(chapter.state, ARCHITECTURE_PREVIEW_STATES) };
-  }) : invalid();
-  const total = integer(preview.total_chapters), completed = integer(preview.completed_chapters);
-  if (typeof preview.run_id !== 'string' || !UUID.test(preview.run_id)
-    || typeof preview.course_title !== 'string' || !preview.course_title.trim() || preview.course_title.length > 500
-    || total < 1 || total > 512 || total !== chapters.length || completed > total
-    || completed !== chapters.filter(chapter => chapter.state === 'ready').length
-    || new Set(chapters.map(chapter => chapter.chapter_key)).size !== chapters.length
-    || chapters.some((chapter, index) => chapter.order !== index)) invalid();
-  return { run_id: preview.run_id, course_title: preview.course_title,
-    total_chapters: total, completed_chapters: completed, chapters };
+  try { return buildWorkspaceArchitecturePreview(value); }
+  catch { return invalid(); }
 }
 
 /** Connection-free read boundary: no worker, write or provider on import.
@@ -270,18 +252,31 @@ export function createWorkspaceReadRepository(deps: {
         LEFT JOIN LATERAL (
           SELECT jsonb_build_object(
             'run_id',current_run.id::text,
-            'course_title',current_run.payload->'skeleton'->>'title',
-            'total_chapters',count(*),
-            'completed_chapters',count(*) FILTER (WHERE progress.state='ready'),
-            'chapters',jsonb_agg(jsonb_build_object(
-              'chapter_key',chapter.value->>'chapter_key',
-              'order',(chapter.value->>'order')::integer,
-              'title',chapter.value->>'title',
-              'state',progress.state
-            ) ORDER BY (chapter.value->>'order')::integer)
+            'course_title',coalesce(current_run.skeleton_payload->'skeleton'->>'title',w.course_display_name),
+            'skeleton_artifact',current_run.skeleton_payload,
+            'chapter_tasks',coalesce((SELECT jsonb_agg(jsonb_build_object(
+              'task_id',task.id::text,'task_key',task.task_key,'chapter_key',task.chapter_key,
+              'status',task.status,'artifact_payload',artifact.payload
+            ) ORDER BY task.ordinal,task.id)
+              FROM lesson_author_workspace_v2_tasks task
+              LEFT JOIN LATERAL (
+                SELECT candidate.payload FROM lesson_author_workspace_v2_artifacts candidate
+                WHERE candidate.run_id=task.run_id AND candidate.task_id=task.id
+                  AND candidate.workspace_id=task.workspace_id AND candidate.tenant_id=task.tenant_id
+                  AND candidate.course_id=task.course_id AND candidate.artifact_kind='chapter_blueprint'
+                ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
+              ) artifact ON true
+              WHERE task.run_id=current_run.id AND task.workspace_id=w.id AND task.tenant_id=w.tenant_id
+                AND task.course_id=w.course_id AND task.kind='chapter_blueprint'),'[]'::jsonb),
+            'unit_tasks',coalesce((SELECT jsonb_agg(jsonb_build_object(
+              'node_id',task.node_id::text,'status',task.status
+            ) ORDER BY task.ordinal,task.id)
+              FROM lesson_author_workspace_v2_tasks task
+              WHERE task.run_id=current_run.id AND task.workspace_id=w.id AND task.tenant_id=w.tenant_id
+                AND task.course_id=w.course_id AND task.kind='generate_unit' AND task.node_id IS NOT NULL),'[]'::jsonb)
           ) AS architecture_preview
           FROM (
-            SELECT run.id,skeleton.payload
+            SELECT run.id,skeleton.payload AS skeleton_payload
             FROM lesson_author_workspace_v2_runs run
             LEFT JOIN LATERAL (
               SELECT artifact.payload
@@ -292,27 +287,8 @@ export function createWorkspaceReadRepository(deps: {
               ORDER BY artifact.created_at DESC,artifact.id DESC LIMIT 1
             ) skeleton ON true
             WHERE run.workspace_id=w.id AND run.tenant_id=w.tenant_id AND run.course_id=w.course_id
-              AND NOT EXISTS (SELECT 1 FROM lesson_author_workspace_events event
-                WHERE event.workspace_id=w.id AND event.event_kind='structure_ready')
             ORDER BY run.created_at DESC,run.id DESC LIMIT 1
           ) current_run
-          CROSS JOIN LATERAL jsonb_array_elements(current_run.payload->'skeleton'->'chapters') chapter(value)
-          CROSS JOIN LATERAL (
-            SELECT CASE
-              WHEN EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
-                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
-                      AND task.chapter_key=chapter.value->>'chapter_key')
-                AND NOT EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
-                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
-                      AND task.chapter_key=chapter.value->>'chapter_key' AND task.status<>'succeeded') THEN 'ready'
-              WHEN EXISTS (SELECT 1 FROM lesson_author_workspace_v2_tasks task
-                    WHERE task.run_id=current_run.id AND task.kind='chapter_blueprint'
-                      AND task.chapter_key=chapter.value->>'chapter_key'
-                      AND task.status IN ('queued','running','succeeded')) THEN 'generating'
-              ELSE 'planned'
-            END AS state
-          ) progress
-          GROUP BY current_run.id,current_run.payload
         ) preview ON true`);
       const total = integer(row.node_count), units = integer(row.unit_count), ready = integer(row.ready_unit_count);
       if (ready > units || units > total) invalid();
