@@ -14,6 +14,10 @@ import {
   validateLessonAuthorHtmlContract,
 } from './lesson-author-content-contract.logic.js';
 import {
+  normalizeDiagramDisplayText,
+  validateGeneratedDiagramGeometry,
+} from './lesson-author-diagram-layout.logic.js';
+import {
   COURSE_COMPONENT_TYPES,
   isCourseComponentType,
   type CourseComponentType,
@@ -583,7 +587,7 @@ export function planSemanticLearningBlocks(input: ComponentPlannerInput): Planne
           const permitted = isAllowed(candidateType, input.allowed_component_types);
           const reason = failureCode ?? (!permitted ? 'TENANT_CAPABILITY_FALLBACK'
             : candidate.type && selected?.type === 'html' ? 'OPTIONAL_TREATMENT_HTML_FALLBACK'
-              : !selected ? 'LEGACY_NOT_REPRESENTED' : candidate.reason_code);
+              : !selected ? 'OPTIONAL_TREATMENT_CAPACITY_OMITTED' : candidate.reason_code);
           return { block_index, intent: INTENTS.includes(block.intent) ? block.intent : 'unknown',
             role: block.intent === 'knowledge_check' || block.importance === 'core' || block.importance === 'critical' || block.metadata?.required === true ? 'required' : 'optional',
             candidate_type: candidateType, selected_type: selected?.type ?? null,
@@ -602,9 +606,6 @@ function planSemanticLearningBlocksInternal(input: ComponentPlannerInput): Plann
   const capabilities = readComponentCapabilities(input.component_capabilities);
   if (capabilities && !input.unit_path) throw new Error('COMPONENT_PLAN_UNIT_ADDRESS_REQUIRED');
   if (capabilities && (input.blocks.some(b => !b.id) || new Set(input.blocks.map(b => b.id)).size !== input.blocks.length)) throw new Error('COMPONENT_PLAN_BLOCK_ADDRESS_AMBIGUOUS');
-  if (!isAllowed('html', allowed)) {
-    throw new Error('Tenant has disabled html, so Lesson Author cannot safely render the required explanatory content.');
-  }
   const sourceFactIds = Array.from(new Set(input.unit_source_fact_ids));
   const explanatoryBlocks: SemanticLearningBlock[] = [];
   const assessmentCandidates: Array<{ block: SemanticLearningBlock; candidate: Candidate }> = [];
@@ -632,82 +633,95 @@ function planSemanticLearningBlocksInternal(input: ComponentPlannerInput): Plann
     else instructionalCandidates.push({ block, candidate });
   }
 
-  // All source facts remain owned by explanatory HTML. This avoids dropping a
-  // warning/procedure when an optional interaction is also selected.
-  // If HTML owns a primary block's facts it must also teach that block's
-  // objectives, even when a diagram/sortable provides an additional treatment.
-  // A supporting check does not become teaching merely by sharing evidence.
-  const unitFacts = new Set(sourceFactIds);
-  const teachingBlocks = input.blocks.filter(block => block.intent !== 'knowledge_check'
-    && (explanatoryBlocks.includes(block) || block.source_fact_ids.some(id => unitFacts.has(id))));
-  const htmlBlocks = teachingBlocks.length > 0 ? teachingBlocks : explanatoryBlocks.length > 0 ? explanatoryBlocks : input.blocks;
-  const htmlPlan = makePlan('html', htmlBlocks, htmlBlocks.some(block => block.intent === 'warning')
-    ? 'WARNING_EXPLANATION'
-    : htmlBlocks.some(block => block.intent === 'procedure')
-      ? 'PROCEDURE_EXPLANATION'
-      : tenantCapabilityFallback
-        ? 'TENANT_CAPABILITY_FALLBACK'
-        : 'EXPLANATION_DEFAULT');
-  htmlPlan.source_fact_ids = sourceFactIds;
-
-  const plans: PlannedLearningComponent[] = [htmlPlan];
-  // Assessment is mandatory when the approved semantic plan contains a
-  // knowledge check. It must not consume the one optional treatment slot:
-  // an evidence-backed diagram/sortable/crossword may still be instructionally
-  // necessary. Legacy plans remain bounded to three; profile2 allows four.
-  const chosenAssessment = assessmentCandidates[0];
-  if (capabilities) {
-    if (assessmentCandidates.length && !capabilities.assessment_enabled) throw new ComponentCapabilityError('ASSESSMENT_TENANT_CAPABILITY_GAP', input.unit_path);
-    if (assessmentCandidates.length > capabilities.max_assessments_per_unit) throw new ComponentCapabilityError('ASSESSMENT_PLAN_DOWNSTREAM_CAPABILITY_GAP', input.unit_path);
-    for (const assessment of assessmentCandidates) plans.push(makePlan('problem', [assessment.block], assessment.candidate.reason_code));
-  } else if (chosenAssessment) {
-    plans.push(makePlan('problem', [chosenAssessment.block], chosenAssessment.candidate.reason_code));
+  const isRequired = (block: SemanticLearningBlock) => block.importance === 'core'
+    || block.importance === 'critical' || block.importance === 'assessment' || block.metadata?.required === true;
+  const maxComponents = capabilities?.max_components_per_unit ?? 4;
+  if (capabilities && assessmentCandidates.length && !capabilities.assessment_enabled) {
+    throw new ComponentCapabilityError('ASSESSMENT_TENANT_CAPABILITY_GAP', input.unit_path);
   }
-  const optionalCandidates = [...instructionalCandidates, ...faqCandidates].sort((left, right) => {
-    const isRequired = (b: SemanticLearningBlock) => b.importance === 'core' || b.importance === 'critical' || b.metadata?.required === true;
-    if (capabilities && isRequired(left.block) !== isRequired(right.block)) return isRequired(left.block) ? -1 : 1;
-    const leftPriority = AI_COMPONENT_REGISTRY[left.candidate.type!].selection_priority;
-    const rightPriority = AI_COMPONENT_REGISTRY[right.candidate.type!].selection_priority;
-    return leftPriority - rightPriority;
-  });
-  const optionalLimit = capabilities ? capabilities.max_components_per_unit - plans.length : chosenAssessment ? 1 : 2;
-  if (capabilities && optionalCandidates.some((item, index) => index >= optionalLimit && (item.block.importance === 'core' || item.block.importance === 'critical' || item.block.metadata?.required === true))) {
+  if (capabilities && assessmentCandidates.length > capabilities.max_assessments_per_unit) {
+    throw new ComponentCapabilityError('ASSESSMENT_PLAN_DOWNSTREAM_CAPABILITY_GAP', input.unit_path);
+  }
+
+  let plans: PlannedLearningComponent[] = [];
+  if (explanatoryBlocks.length > 0 || tenantCapabilityFallback) {
+    if (!isAllowed('html', allowed)) {
+      throw new Error('Tenant has disabled html, so Lesson Author cannot render required explanatory content.');
+    }
+    const htmlBlocks = explanatoryBlocks.length > 0 ? explanatoryBlocks : input.blocks;
+    plans.push(makePlan('html', htmlBlocks, htmlBlocks.some(block => block.intent === 'warning')
+      ? 'WARNING_EXPLANATION'
+      : htmlBlocks.some(block => block.intent === 'procedure')
+        ? 'PROCEDURE_EXPLANATION'
+        : tenantCapabilityFallback ? 'TENANT_CAPABILITY_FALLBACK' : 'EXPLANATION_DEFAULT'));
+  }
+
+  const candidates = [...instructionalCandidates, ...assessmentCandidates, ...faqCandidates]
+    .sort((left, right) => {
+      if (isRequired(left.block) !== isRequired(right.block)) return isRequired(left.block) ? -1 : 1;
+      const phase = (type: LessonAuthorComponentType | null) => type === 'la_faq' ? 3 : type === 'problem' ? 2 : 1;
+      return phase(left.candidate.type) - phase(right.candidate.type)
+        || AI_COMPONENT_REGISTRY[left.candidate.type!].selection_priority
+          - AI_COMPONENT_REGISTRY[right.candidate.type!].selection_priority;
+    });
+  const availableSlots = Math.max(0, maxComponents - plans.length);
+  const requiredOverflow = candidates.slice(availableSlots).some(candidate => isRequired(candidate.block));
+  if (capabilities && requiredOverflow) {
     throw new ComponentCapabilityError('MANDATORY_COMPONENT_CAPACITY_EXCEEDED', input.unit_path);
   }
-  for (const chosen of optionalCandidates.slice(0, optionalLimit)) {
-    plans.push(makePlan(chosen.candidate.type!, [chosen.block], chosen.candidate.reason_code));
+  for (const selected of candidates.slice(0, availableSlots)) {
+    plans.push(makePlan(selected.candidate.type!, [selected.block], selected.candidate.reason_code));
   }
-  if (capabilities) {
-    // Optional representation can fall back to explanation, never disappear.
-    const omitted = optionalCandidates.slice(optionalLimit).map(item => item.block);
-    if (omitted.length) {
-      const fallback = makePlan('html', [...new Map([...htmlBlocks, ...omitted].map(block => [block.id, block])).values()], 'EXPLANATION_DEFAULT');
-      fallback.reason_code = 'OPTIONAL_TREATMENT_HTML_FALLBACK';
-      plans[0] = { ...fallback, source_fact_ids: sourceFactIds };
-    }
+
+  // Blocks that require explanatory rendering, lack safe interaction evidence,
+  // or hit a tenant capability fallback were already collected into the HTML
+  // plan above.  A specialized candidate omitted only because the bounded
+  // component budget is full must not be silently rewritten as generic HTML:
+  // that would change the instructional treatment and often duplicate facts.
+  const representedFactsBeforeOwnership = new Set(plans.flatMap(plan => plan.source_fact_ids ?? []));
+  const omittedWithUniqueEvidence = candidates.slice(availableSlots).some(({ block }) =>
+    block.source_fact_ids.some(factId => !representedFactsBeforeOwnership.has(factId)));
+  if (omittedWithUniqueEvidence) {
+    throw new ComponentCapabilityError('MANDATORY_COMPONENT_CAPACITY_EXCEEDED', input.unit_path);
   }
+
+  const phaseOrder: Record<LessonAuthorComponentType, number> = {
+    html: 0, la_diagram: 1, la_sortable: 2, la_crossword: 3, problem: 4, la_faq: 5,
+  };
+  plans.sort((left, right) => phaseOrder[left.type] - phaseOrder[right.type]);
+
+  // Canonical facts belong to the unit and are assigned exactly once to the
+  // earliest selected treatment that uses them. Later treatments retain the
+  // same facts as read-only evidence instead of duplicating ownership.
+  const ownedFacts = new Set<string>();
+  for (const plan of plans) {
+    const candidatesForPlan = [...new Set(plan.source_fact_ids ?? [])];
+    plan.source_fact_ids = candidatesForPlan.filter(factId => !ownedFacts.has(factId));
+    plan.source_fact_ids.forEach(factId => ownedFacts.add(factId));
+    plan.supporting_evidence_fact_ids = candidatesForPlan.filter(factId => ownedFacts.has(factId)
+      && !plan.source_fact_ids?.includes(factId));
+  }
+  const unownedFacts = sourceFactIds.filter(factId => !ownedFacts.has(factId));
+  if (capabilities && unownedFacts.length > 0) {
+    throw new ComponentCapabilityError('MANDATORY_COMPONENT_CAPACITY_EXCEEDED', input.unit_path);
+  }
+  const finalOwner = plans.find(plan => plan.type === 'html') ?? plans[0];
+  if (!finalOwner) throw new Error('Component planner produced no usable treatment.');
+  finalOwner.source_fact_ids = [...new Set([...(finalOwner.source_fact_ids ?? []), ...unownedFacts])];
 
   for (const plan of plans) {
     if (capabilities) {
       plan.component_plan_id = componentPlanId(input.unit_path!, plan.type, plan.learning_block_ids ?? []);
       plan.learning_objective_refs = [...new Set(input.blocks.filter(b => plan.learning_block_ids?.includes(b.id)).flatMap(b => b.learning_objective_refs ?? []))];
-      if (plan.type !== 'html') {
-        // Instance-contract components are reinforcement or assessment, not a
-        // second canonical teacher. HTML already owns and teaches every unit
-        // fact. Preserve the interaction's exact grounding as read-only
-        // evidence so FAQ/quiz/diagram/sortable payloads cannot duplicate
-        // canonical ownership or satisfy teaching coverage by themselves.
-        plan.supporting_evidence_fact_ids = [...new Set([
-          ...(plan.supporting_evidence_fact_ids ?? []),
-          ...(plan.source_fact_ids ?? []),
-        ])];
-        plan.source_fact_ids = [];
-      }
     }
     if (!GENERATABLE_TYPES.has(plan.type)) throw new Error(`Registry selected unsupported AI component ${plan.type}.`);
     if (!isAllowed(plan.type, allowed)) {
       throw new Error(`Tenant does not permit Lesson Author component ${plan.type}.`);
     }
+  }
+  if (plans.some((plan, index) => plan.type === 'html' && index !== 0)
+    || plans.some((plan, index) => plan.type === 'la_faq' && index !== plans.length - 1)) {
+    throw new Error('Component planner ordering invariant failed.');
   }
   if (capabilities) assertComponentInstancePlan(plans);
   return plans;
@@ -980,6 +994,17 @@ export function assertAiGeneratedComponentValid(
   const diagram = normalizeDiagramData(asRecord(component.metadata).diagram_data ?? component.data);
   if (!diagram || diagram.diagrams.length === 0 || diagram.diagrams.some(item => item.nodes.length < 2)) {
     throw new Error('Diagram component requires at least two normalized nodes.');
+  }
+  for (const item of diagram.diagrams) {
+    const invalidText = item.nodes.some(node => {
+      const data = asRecord(node.data);
+      return (typeof data.label === 'string' && normalizeDiagramDisplayText(data.label, 140) !== data.label)
+        || (typeof data.tooltip === 'string' && normalizeDiagramDisplayText(data.tooltip, 500) !== data.tooltip);
+    }) || item.edges.some(edge => typeof edge.label === 'string'
+      && normalizeDiagramDisplayText(edge.label, 120) !== edge.label);
+    if (invalidText) throw new Error('Diagram contains escaped newline or control tokens in learner-facing text.');
+    const geometryFailure = validateGeneratedDiagramGeometry(item.nodes);
+    if (geometryFailure) throw new Error(geometryFailure);
   }
 }
 

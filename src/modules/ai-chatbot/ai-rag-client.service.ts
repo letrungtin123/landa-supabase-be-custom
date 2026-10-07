@@ -495,6 +495,20 @@ function orchestrationV2ExecutionTimeout(execution: { timeoutMs: number; signal:
   return Math.min(env.AI_RAG_REQUEST_TIMEOUT_MS, execution.timeoutMs);
 }
 
+export function resolveOrchestrationV2UnitRequestBudgets(
+  remainingWorkflowBudgetMs: number,
+  transportTimeoutMs: number,
+): Readonly<{ remainingWorkflowBudgetMs: number; transportTimeoutMs: number }> {
+  if (!Number.isSafeInteger(remainingWorkflowBudgetMs) || remainingWorkflowBudgetMs <= 0
+    || !Number.isSafeInteger(transportTimeoutMs) || transportTimeoutMs <= 0) {
+    throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  }
+  return Object.freeze({
+    remainingWorkflowBudgetMs: Math.min(remainingWorkflowBudgetMs, transportTimeoutMs),
+    transportTimeoutMs,
+  });
+}
+
 /** Internal V2 source authority boundary. It performs retrieval only and never calls the generation model. */
 export async function createRagLessonAuthorSourceSnapshotV2(
   request: RagLessonAuthorSourceSnapshotV2Request,
@@ -599,9 +613,11 @@ export async function generateRagLessonAuthorUnitV2(
   execution: { timeoutMs: number; signal: AbortSignal;
     beforeProviderDispatch?: () => Promise<void> },
 ): Promise<OrchestrationV2UnitProviderResponse> {
-  const timeoutMs = orchestrationV2ExecutionTimeout(execution);
-  const remaining = Math.min(timeoutMs, request.remaining_workflow_budget_ms);
-  if (remaining <= 0) throw new AppError('Orchestration execution deadline expired.', 504, 'AI_RAG_SERVICE_TIMEOUT');
+  const transportTimeoutMs = orchestrationV2ExecutionTimeout(execution);
+  const budgets = resolveOrchestrationV2UnitRequestBudgets(
+    request.remaining_workflow_budget_ms,
+    transportTimeoutMs,
+  );
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   if (!request.fallback_only) {
     if (!execution.beforeProviderDispatch) {
@@ -609,8 +625,9 @@ export async function generateRagLessonAuthorUnitV2(
     }
   }
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/unit', {
-    ...request, remaining_workflow_budget_ms: remaining, api_key: apiKey,
-  }, remaining, execution.signal, request.fallback_only ? undefined : execution.beforeProviderDispatch);
+    ...request, remaining_workflow_budget_ms: budgets.remainingWorkflowBudgetMs, api_key: apiKey,
+  }, budgets.transportTimeoutMs, execution.signal,
+  request.fallback_only ? undefined : execution.beforeProviderDispatch);
   return readOrchestrationV2UnitProviderResponse(response, request.unit_contract);
 }
 

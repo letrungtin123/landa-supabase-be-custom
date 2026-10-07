@@ -325,18 +325,22 @@ function unitArchitecture(value: unknown): OrchestrationV2UnitArchitecture {
   const item = requireRecord(value);
   if (!exactKeys(item, ['title', 'purpose', 'learning_objective_refs', 'source_scope_ids', 'component_plan', 'media_brief'])
     || !text(item.title, 180) || !text(item.purpose, 500)
-    || !Array.isArray(item.component_plan) || item.component_plan.length < 1 || item.component_plan.length > 3) fail();
+    || !Array.isArray(item.component_plan) || item.component_plan.length < 1 || item.component_plan.length > 4) fail();
   const sourceScopeIds = identifiers(item.source_scope_ids, 4_096);
   const learningObjectiveRefs = identifiers(item.learning_objective_refs, 24);
   if (learningObjectiveRefs.some(reference => !OBJECTIVE_REF.test(reference))) fail();
   const componentPlan = (item.component_plan as unknown[]).map(architectureComponent);
   const types = componentPlan.map(component => component.type);
-  if (types[0] !== 'html' || new Set(types).size !== types.length
-    || (types.includes('la_faq') && types.at(-1) !== 'la_faq')) fail();
+  const htmlIndex = types.indexOf('html');
+  const faqIndex = types.indexOf('la_faq');
+  if (new Set(types).size !== types.length
+    || (htmlIndex >= 0 && htmlIndex !== 0)
+    || (faqIndex >= 0 && faqIndex !== types.length - 1)) fail();
   const allowed = new Set(sourceScopeIds);
+  const representedScopes = new Set(componentPlan.flatMap(component => component.source_scope_ids));
   if (componentPlan.some(component => component.source_scope_ids.some(scope => !allowed.has(scope)))
-    || componentPlan[0]!.source_scope_ids.length !== sourceScopeIds.length
-    || componentPlan[0]!.source_scope_ids.some(scope => !allowed.has(scope))) fail();
+    || representedScopes.size !== allowed.size
+    || [...allowed].some(scope => !representedScopes.has(scope))) fail();
   return { title: item.title as string, purpose: item.purpose as string, learning_objective_refs: learningObjectiveRefs,
     source_scope_ids: sourceScopeIds, component_plan: componentPlan, media_brief: architectureMediaBrief(item.media_brief) };
 }
@@ -396,6 +400,14 @@ function sourceFact(value: unknown): OrchestrationV2SourceFact {
     || (item.source_page !== null && item.source_page !== undefined && !integer(item.source_page, 1, Number.MAX_SAFE_INTEGER))
     || (item.source_chunk !== null && item.source_chunk !== undefined && !integer(item.source_chunk, 0, Number.MAX_SAFE_INTEGER))
     || !record(item.locator)) fail();
+  const locator = item.locator as Record<string, unknown>;
+  const evidenceStatus = locator.source_evidence_status;
+  const evidenceRevision = locator.source_evidence_revision;
+  if (evidenceStatus !== undefined && evidenceStatus !== null) {
+    if (!['ready', 'legacy_review_required'].includes(String(evidenceStatus))) fail();
+    if (evidenceStatus === 'ready' && (typeof evidenceRevision !== 'string' || !HASH.test(evidenceRevision))) fail();
+    if (evidenceStatus === 'legacy_review_required' && evidenceRevision != null) fail();
+  }
   return item as unknown as OrchestrationV2SourceFact;
 }
 

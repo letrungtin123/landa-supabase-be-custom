@@ -10,14 +10,14 @@ import { prepareOrchestrationV2InventoryIdentity } from './lesson-author-orchest
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { acceptOrchestrationV2GeneratedUnit, prepareOrchestrationV2UnitGenerationContract,
-  readOrchestrationV2UnitProviderResponse, ORCHESTRATION_V2_UNIT_CONTRACT } from './lesson-author-orchestration-v2-unit.logic.js';
+  readOrchestrationV2UnitProviderResponse, orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import { workspaceApplyTargetHash, type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
 const hash = (value: unknown) => orchestrationV2Hash(value);
 const allowed = new Set<CourseComponentType>(['html']);
 
-function fixture() {
+function fixture(withSemanticReview = false) {
   const source = hash('v2-apply-source');
   const skeleton = { contract_version: 2 as const, source_snapshot_hash: source, locale: 'vi' as const,
     title: 'Course', summary: 'Summary', target_audience: 'Leaders', prerequisites: [],
@@ -53,7 +53,12 @@ function fixture() {
         learning_objective_refs: [...plan.learning_objective_refs],
       },
     }] }, usage_complete: true as const, usage_source: 'provider' as const, usage: {} };
-  const response = readOrchestrationV2UnitProviderResponse(wire, contract);
+  const semanticReview = { contract_version: 'semantic-review-v1', config_hash: 'a'.repeat(64), status: 'passed',
+    quality_state: 'validated', finding_counts: { critical: 0, major: 0, minor: 0 }, findings: [],
+    repair_attempted: false, repair_applied: false, repair_component_indices: [], failure_code: null };
+  const response = readOrchestrationV2UnitProviderResponse(withSemanticReview
+    ? { ...wire, semantic_review: semanticReview }
+    : wire, contract);
   const publication = acceptOrchestrationV2GeneratedUnit({ contract, response,
     normalizeProposal: raw => ({ summary: '', chapters: (raw as { chapters: LessonAuthorProposal['chapters'] }).chapters }),
     allowed });
@@ -73,7 +78,8 @@ function fixture() {
   const unitPayload = { contract_version: 2, unit_path: publication.unit_path,
     source_snapshot_hash: publication.source_snapshot_hash, contract_hash: publication.contract_hash,
     nodes: publication.nodes, generated_unit: publication.generated_unit,
-    content_origin: publication.content_origin, quality_state: publication.quality_state };
+    content_origin: publication.content_origin, quality_state: publication.quality_state,
+    ...(publication.semantic_review ? { semantic_review: publication.semantic_review } : {}) };
   const unitArtifact = { task_id: taskId, task_key: 'content:chapter-1:unit:1',
     node_id: identity.unit_bindings[0]!.unit_node_id, chapter_key: 'chapter-1',
     artifact_hash: publication.result_hash, payload: unitPayload };
@@ -114,11 +120,7 @@ function replaceCurrent(input: ReturnType<typeof fixture>['input'], path: string
 function resealUnitArtifact(input: ReturnType<typeof fixture>['input']) {
   const artifact = input.unit_artifacts[0]!;
   const payload = artifact.payload as Record<string, unknown>;
-  const hasQualityEnvelope = payload.content_origin !== undefined || payload.quality_state !== undefined;
-  artifact.artifact_hash = hash({ validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
-    unit_path: payload.unit_path, source_snapshot_hash: payload.source_snapshot_hash,
-    contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit,
-    ...(hasQualityEnvelope ? { content_origin: payload.content_origin, quality_state: payload.quality_state } : {}) });
+  artifact.artifact_hash = orchestrationV2UnitArtifactHash(payload);
   const chapter = input.chapter_receipts[0]!;
   const receipt = chapter.payload as Record<string, any>;
   receipt.unit_artifact_hashes = [artifact.artifact_hash];
@@ -138,6 +140,12 @@ test('V2 Apply compiles a validated chapter into exact draft hierarchy writes', 
   assert.equal(result.validation_contract, 'workspace-scoped-apply-2');
   assert.equal(result.quality_receipt.origin_summary.counts.provider, 1);
   assert.equal(result.quality_receipt.origin_summary.legacy_quality_status, 'NOT_RUN');
+});
+
+test('semantic review is covered by the shared unit artifact hash through chapter receipt and Apply', () => {
+  const { input, publication } = fixture(true);
+  assert.equal(publication.semantic_review?.status, 'passed');
+  assert.doesNotThrow(() => compileOrchestrationV2WorkspaceApply(input));
 });
 
 test('V2 Apply admits structured source fallback for review but never raw diagnostic fallback', () => {
@@ -245,14 +253,7 @@ test('V2 Apply accepts an artifact-bound historical baseline after sanitizer rul
   const artifactNode = payload.nodes.find(node => node.path === component.canonical_path)!;
   artifactNode.content = legacy;
   artifactNode.content_hash = legacyHash;
-  artifact.artifact_hash = hash({ validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
-    unit_path: payload.unit_path, source_snapshot_hash: payload.source_snapshot_hash,
-    contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit,
-    ...(('content_origin' in (artifact.payload as Record<string, unknown>)
-      || 'quality_state' in (artifact.payload as Record<string, unknown>)) ? {
-      content_origin: (artifact.payload as Record<string, unknown>).content_origin,
-      quality_state: (artifact.payload as Record<string, unknown>).quality_state,
-    } : {}) });
+  artifact.artifact_hash = orchestrationV2UnitArtifactHash(artifact.payload as Record<string, unknown>);
 
   const chapter = input.chapter_receipts[0]!;
   const receipt = chapter.payload as Record<string, any>;

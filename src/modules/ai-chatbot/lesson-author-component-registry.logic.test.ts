@@ -36,9 +36,9 @@ test('profile two preserves distinct assessment instances without losing a requi
     component_capabilities: { version: 2, max_components_per_unit: 4, max_assessments_per_unit: 3, assessment_enabled: true },
     unit_path: 'chapter_1.lesson_1.unit_1',
   });
-  assert.deepEqual(planned.map(p => p.type), ['html', 'problem', 'problem', 'la_diagram']);
+  assert.deepEqual(planned.map(p => p.type), ['html', 'la_diagram', 'problem', 'problem']);
   assert.equal(new Set(planned.map(p => p.component_plan_id)).size, 4);
-  assert.deepEqual(planned.slice(1, 3).map(p => p.learning_block_ids), [['check_1'], ['check_2']]);
+  assert.deepEqual(planned.filter(p => p.type === 'problem').map(p => p.learning_block_ids), [['check_1'], ['check_2']]);
 });
 
 test('profile two refuses capacity overflow, tenant-disabled assessment and ambiguous block identity', () => {
@@ -48,7 +48,8 @@ test('profile two refuses capacity overflow, tenant-disabled assessment and ambi
   assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: [block('knowledge_check')], allowed_component_types: new Set(['html']) }), /TENANT_CAPABILITY_GAP/);
   assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: [block('relationship_visualization', { relationship_evidence: true })], allowed_component_types: new Set(['html']) }), /MANDATORY_COMPONENT_CAPACITY_EXCEEDED/);
   assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: [block('knowledge_check'), block('knowledge_check')] }), /AMBIGUOUS/);
-  assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: [1, 2, 3].map(n => ({ ...block('knowledge_check'), id: `check_${n}` })).concat([block('relationship_visualization', { relationship_evidence: true, relationship_count: 2 })]) }), /MANDATORY_COMPONENT_CAPACITY_EXCEEDED/);
+  assert.deepEqual(planSemanticLearningBlocks({ ...input, blocks: [1, 2, 3].map(n => ({ ...block('knowledge_check'), id: `check_${n}` })).concat([block('relationship_visualization', { relationship_evidence: true, relationship_count: 2 })]) }).map(plan => plan.type),
+    ['la_diagram', 'problem', 'problem', 'problem']);
 });
 
 test('capability diagnostics exclude arbitrary content and gap message never claims repair ran', () => {
@@ -338,9 +339,13 @@ test('selection diagnostics retain insufficient evidence, tenant and capacity re
   assert.equal(events.at(-1)!.decisions[0].reason_code, 'TENANT_CAPABILITY_FALLBACK');
   assert.equal(events.at(-1)!.decisions[0].tenant_permitted, false);
   const checks = [1, 2, 3].map(n => ({ ...block('knowledge_check'), id: `check_${n}` }));
-  planSemanticLearningBlocks({ ...input, blocks: [...checks, optionalFaq] });
-  assert.equal(events.at(-1)!.decisions.at(-1)!.reason_code, 'OPTIONAL_TREATMENT_HTML_FALLBACK');
-  assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: [...checks, block('faq', { anticipated_questions: true })] }), /MANDATORY_COMPONENT_CAPACITY_EXCEEDED/);
+  const optionalDiagram = { ...block('relationship_visualization', { relationship_evidence: true }),
+    id: 'optional_diagram', importance: 'supporting' as const };
+  planSemanticLearningBlocks({ ...input, blocks: [...checks, optionalDiagram, optionalFaq] });
+  assert.equal(events.at(-1)!.decisions.at(-1)!.reason_code, 'OPTIONAL_TREATMENT_CAPACITY_OMITTED');
+  assert.throws(() => planSemanticLearningBlocks({ ...input,
+    blocks: [...checks, block('relationship_visualization', { relationship_evidence: true }),
+      block('faq', { anticipated_questions: true })] }), /MANDATORY_COMPONENT_CAPACITY_EXCEEDED/);
   assert.equal(events.at(-1)!.status, 'FAIL');
   assert.equal(events.at(-1)!.failure_code, 'MANDATORY_COMPONENT_CAPACITY_EXCEEDED');
   assert.throws(() => planSemanticLearningBlocks({ ...input, blocks: checks, allowed_component_types: new Set(['html']) }), /TENANT_CAPABILITY_GAP/);
@@ -358,7 +363,7 @@ function planFor(blocks: SemanticLearningBlock[], allowed = allAllowed) {
   });
 }
 
-test('HTML teaching links include primary diagram facts/objectives, not supporting quiz or FAQ', () => {
+test('unit teaching treatments own source facts exactly once in pedagogical order', () => {
   const firstFacts = Array.from({ length: 32 }, (_, i) => `first-${i}`);
   const diagramFacts = Array.from({ length: 14 }, (_, i) => `diagram-${i}`);
   const blocks: SemanticLearningBlock[] = [
@@ -372,13 +377,14 @@ test('HTML teaching links include primary diagram facts/objectives, not supporti
   const plans = planSemanticLearningBlocks({ blocks, unit_source_fact_ids: [...firstFacts, ...diagramFacts],
     unit_path: 'chapter_3.lesson_1.unit_1', allowed_component_types: allAllowed,
     component_capabilities: createComponentCapabilities(allAllowed) });
-  assert.deepEqual(plans.map(p => p.type), ['html', 'problem', 'la_diagram', 'la_faq']);
-  assert.deepEqual(plans[0].learning_block_ids, [blocks[0].id, blocks[1].id]);
-  assert.deepEqual(plans[0].learning_objective_refs, ['lo_1', 'lo_2']);
-  assert.equal(plans[0].source_fact_ids?.length, 46);
-  assert.deepEqual(plans[2].learning_block_ids, [blocks[1].id]);
-  assert.deepEqual(plans[2].source_fact_ids, []);
-  assert.deepEqual(plans[2].supporting_evidence_fact_ids, diagramFacts);
+  assert.deepEqual(plans.map(p => p.type), ['html', 'la_diagram', 'problem', 'la_faq']);
+  assert.deepEqual(plans[0].learning_block_ids, [blocks[0].id]);
+  assert.deepEqual(plans[0].learning_objective_refs, ['lo_1']);
+  assert.deepEqual(plans[0].source_fact_ids, firstFacts);
+  assert.deepEqual(plans[1].learning_block_ids, [blocks[1].id]);
+  assert.deepEqual(plans[1].learning_objective_refs, ['lo_2']);
+  assert.deepEqual(plans[1].source_fact_ids, diagramFacts);
+  assert.deepEqual(plans[1].supporting_evidence_fact_ids, []);
   assert.deepEqual(blocks, before);
 });
 
@@ -394,14 +400,14 @@ test('registry classifies every editor component exactly once', () => {
 
 test('planner maps knowledge check to problem with a stable reason code', () => {
   const planned = planFor([block('knowledge_check')]);
-  assert.deepEqual(planned.map(item => item.type), ['html', 'problem']);
-  assert.equal(planned[1]?.reason_code, 'ASSESS_OBJECTIVE');
+  assert.deepEqual(planned.map(item => item.type), ['problem']);
+  assert.equal(planned[0]?.reason_code, 'ASSESS_OBJECTIVE');
 });
 
 test('planner maps anticipated FAQ to FAQ and does not use FAQ as generic text', () => {
   const valid = planFor([block('faq', { anticipated_questions: true, question_count: 2 })]);
-  assert.deepEqual(valid.map(item => item.type), ['html', 'la_faq']);
-  assert.equal(valid[1]?.reason_code, 'FAQ_ANTICIPATED_QUESTIONS');
+  assert.deepEqual(valid.map(item => item.type), ['la_faq']);
+  assert.equal(valid[0]?.reason_code, 'FAQ_ANTICIPATED_QUESTIONS');
 
   const generic = planFor([block('faq')]);
   assert.deepEqual(generic.map(item => item.type), ['html']);
@@ -409,8 +415,8 @@ test('planner maps anticipated FAQ to FAQ and does not use FAQ as generic text',
 
 test('planner maps evidence-backed relationship visualization to diagram only', () => {
   const planned = planFor([block('relationship_visualization', { relationship_evidence: true, nodes: ['A', 'B'] })]);
-  assert.deepEqual(planned.map(item => item.type), ['html', 'la_diagram']);
-  assert.equal(planned[1]?.reason_code, 'RELATIONSHIP_VISUALIZATION');
+  assert.deepEqual(planned.map(item => item.type), ['la_diagram']);
+  assert.equal(planned[0]?.reason_code, 'RELATIONSHIP_VISUALIZATION');
 });
 
 test('mandatory assessment does not suppress one evidence-backed instructional treatment', () => {
@@ -419,7 +425,7 @@ test('mandatory assessment does not suppress one evidence-backed instructional t
     block('relationship_visualization', { relationship_evidence: true, relationship_count: 2 }),
     block('knowledge_check'),
   ]);
-  assert.deepEqual(diagramAndCheck.map(item => item.type), ['html', 'problem', 'la_diagram']);
+  assert.deepEqual(diagramAndCheck.map(item => item.type), ['html', 'la_diagram', 'problem']);
 
   const sortableAndCheck = planFor([
     block('practice', {
@@ -429,23 +435,23 @@ test('mandatory assessment does not suppress one evidence-backed instructional t
     }),
     block('knowledge_check'),
   ]);
-  assert.deepEqual(sortableAndCheck.map(item => item.type), ['html', 'problem', 'la_sortable']);
-  assert.equal(sortableAndCheck.length, 3);
+  assert.deepEqual(sortableAndCheck.map(item => item.type), ['la_sortable', 'problem']);
+  assert.equal(sortableAndCheck.length, 2);
 });
 
-test('optional treatments remain bounded and pedagogical priority beats variety', () => {
+test('component set remains bounded and follows teach, practice, assess, clarify order', () => {
   const planned = planFor([
     block('relationship_visualization', { relationship_evidence: true, relationship_count: 2 }),
     block('practice', { requires_ordering_practice: true, ordered_sequence: true, sequence_item_count: 3 }),
     block('faq', { anticipated_questions: true, question_count: 2 }),
     block('knowledge_check'),
   ]);
-  assert.deepEqual(planned.map(item => item.type), ['html', 'problem', 'la_diagram']);
+  assert.deepEqual(planned.map(item => item.type), ['la_diagram', 'la_sortable', 'problem', 'la_faq']);
 });
 
 test('planner maps terminology reinforcement to crossword only with adequate definitions', () => {
   const planned = planFor([block('terminology_reinforcement', { terminology_count: 3, definitions_supported: true })]);
-  assert.deepEqual(planned.map(item => item.type), ['html', 'la_crossword']);
+  assert.deepEqual(planned.map(item => item.type), ['la_crossword']);
 
   const insufficient = planFor([block('terminology_reinforcement', { terminology_count: 2, definitions_supported: true })]);
   assert.deepEqual(insufficient.map(item => item.type), ['html']);
@@ -458,8 +464,8 @@ test('a procedure remains explanatory while ordering practice selects sortable',
     ordered_sequence: true,
     sequence_item_count: 3,
   })]);
-  assert.deepEqual(orderedPractice.map(item => item.type), ['html', 'la_sortable']);
-  assert.equal(orderedPractice[1]?.reason_code, 'ORDERING_PRACTICE');
+  assert.deepEqual(orderedPractice.map(item => item.type), ['la_sortable']);
+  assert.equal(orderedPractice[0]?.reason_code, 'ORDERING_PRACTICE');
 });
 
 test('manual scenario and media reference never cause an AI asset/component fabrication', () => {
@@ -622,7 +628,7 @@ function diagramComponent(): LessonAuthorComponentProposal {
       id: 'main', name: 'Quan hệ',
       nodes: [
         { id: 'a', type: 'customShape', position: { x: 0, y: 0 }, data: { label: 'A' } },
-        { id: 'b', type: 'customShape', position: { x: 240, y: 0 }, data: { label: 'B' } },
+        { id: 'b', type: 'customShape', position: { x: 320, y: 0 }, data: { label: 'B' } },
       ],
       edges: [{ id: 'edge', source: 'a', target: 'b' }],
     }],

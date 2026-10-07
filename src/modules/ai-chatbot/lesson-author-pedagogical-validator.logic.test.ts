@@ -33,6 +33,17 @@ function problem(facts = ['fact-1']) {
   };
 }
 
+function diagram(facts = ['fact-1', 'fact-2']) {
+  const diagramData = { diagrams: [{ id: 'main', nodes: [
+    { id: 'n1', data: { label: 'Nhận diện mối nguy trong khu vực làm việc' } },
+    { id: 'n2', data: { label: 'Đánh giá khả năng và mức độ hậu quả' } },
+    { id: 'n3', data: { label: 'Lựa chọn biện pháp kiểm soát phù hợp' } },
+  ], edges: [{ source: 'n1', target: 'n2' }, { source: 'n2', target: 'n3' }] }], start_diagram_id: 'main' };
+  return { type: 'la_diagram' as const, title: 'Quan hệ kiểm soát',
+    data: { diagram_data: JSON.stringify(diagramData) },
+    metadata: { source_fact_ids: facts, covered_source_fact_ids: facts, diagram_data: diagramData } };
+}
+
 function proposal(units: Array<Record<string, unknown>>): LessonAuthorProposal {
   return {
     summary: 'Đề xuất chờ duyệt.',
@@ -99,6 +110,30 @@ test('instance assessments use approved supporting evidence without claiming own
   assert.notEqual(validateLessonAuthorPedagogicalQuality({ proposal: actual, blueprint_chapter: expected }).status, 'FAIL');
   Object.assign(components[2]!.metadata, { supporting_evidence_fact_ids: ['alien'] });
   assert.ok(validateLessonAuthorPedagogicalQuality({ proposal: actual, blueprint_chapter: expected }).findings.some(f => f.code === 'ASSESSMENT_NOT_ALIGNED'));
+});
+
+test('interaction-led unit can teach an objective before a grounded assessment without forced HTML', () => {
+  const expected = blueprint();
+  const plannedUnit = expected.lessons[0]!.units[0]!;
+  plannedUnit.component_plan = [
+    { type: 'la_diagram', component_plan_id: 'cp2_' + 'd'.repeat(32), source_fact_ids: ['fact-1', 'fact-2'],
+      supporting_evidence_fact_ids: [], learning_objective_refs: ['lo_1'], reason_code: 'RELATIONSHIP_VISUALIZATION' },
+    { type: 'problem', component_plan_id: 'cp2_' + 'e'.repeat(32), source_fact_ids: [],
+      supporting_evidence_fact_ids: ['fact-1'], learning_objective_refs: ['lo_1'], reason_code: 'ASSESS_OBJECTIVE' },
+  ];
+  const teaching = diagram();
+  const check = problem([]);
+  Object.assign(teaching.metadata, { component_plan_id: plannedUnit.component_plan[0]!.component_plan_id,
+    supporting_evidence_fact_ids: [] });
+  Object.assign(check.metadata, { component_plan_id: plannedUnit.component_plan[1]!.component_plan_id,
+    supporting_evidence_fact_ids: ['fact-1'] });
+  const report = validateLessonAuthorPedagogicalQuality({
+    proposal: proposal([unit([teaching, check])]), blueprint_chapter: expected,
+  });
+  assert.equal(report.status, 'PASS');
+  assert.equal(report.scores.objective_coverage, 1);
+  assert.equal(report.scores.assessment_alignment, 1);
+  assert.equal(report.scores.instructional_depth, 1);
 });
 
 test('pedagogical validator detects missing source coverage and an unaligned assessment', () => {

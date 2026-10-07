@@ -10,7 +10,8 @@ import { uploadFile, buildStoragePath, buildFileName, deleteFile } from '../../c
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { getRedisClient } from '../../config/redis.js';
 import { AppError } from '../../middleware/error-handler.js';
-import type { CreateKbInput, UpdateKbInput, CreateArticleInput, UpdateArticleInput } from './kb.validator.js';
+import { normalizeKbDocumentDisplayName,
+  type CreateKbInput, type UpdateKbInput, type CreateArticleInput, type UpdateArticleInput } from './kb.validator.js';
 import * as XLSX from 'xlsx';
 import fs from 'fs/promises';
 import path from 'path';
@@ -1846,14 +1847,15 @@ export async function stageDocumentSource(
   file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
 ): Promise<StagedKbSource> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'tai tai lieu moi');
-  const ext = file.originalname.substring(file.originalname.lastIndexOf('.')).toLowerCase();
+  const displayName = normalizeKbDocumentDisplayName(file.originalname);
+  const ext = displayName.substring(displayName.lastIndexOf('.')).toLowerCase();
   return stageKbSource(
     tenantId,
     'kb-files',
-    file.originalname,
+    displayName,
     file.mimetype,
     file.buffer,
-    { name: file.originalname, size: file.size, extension: ext, mime_type: file.mimetype },
+    { name: displayName, size: file.size, extension: ext, mime_type: file.mimetype },
     'file',
     extractLocalSourceContent(ext, file.buffer),
   );
@@ -1865,6 +1867,7 @@ export async function stageFaqSource(
   file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
 ): Promise<StagedKbSource> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'tai FAQ');
+  const displayName = normalizeKbDocumentDisplayName(file.originalname);
   const workbook = XLSX.read(file.buffer, { type: 'buffer' });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) throw new Error('File xlsx không có sheet nào');
@@ -1880,11 +1883,11 @@ export async function stageFaqSource(
   return stageKbSource(
     tenantId,
     'kb-faqs',
-    file.originalname,
+    displayName,
     file.mimetype,
     file.buffer,
     {
-      name: file.originalname,
+      name: displayName,
       size: file.size,
       extension: '.xlsx',
       mime_type: file.mimetype,

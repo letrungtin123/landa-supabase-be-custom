@@ -23,6 +23,7 @@ import {
 
 export const ORCHESTRATION_V2_UNIT_CONTRACT = 'orchestration-unit-baseline-v2';
 const UNIT_CONTENT_V3_DENSITY_POLICY = 'unit-content-v3-density-1';
+export const UNIT_CONTENT_V4_ALIGNMENT_POLICY = 'unit-content-v4-alignment-1';
 
 export interface OrchestrationV2UnitComponentPlan extends LessonAuthorComponentPlan {
   component_plan_id: string;
@@ -36,6 +37,7 @@ export interface OrchestrationV2UnitComponentPlan extends LessonAuthorComponentP
 
 export interface OrchestrationV2UnitGenerationContract {
   contract_version: 2;
+  unit_content_policy_version?: typeof UNIT_CONTENT_V4_ALIGNMENT_POLICY;
   source_snapshot_hash: string;
   assembly_hash: string;
   chapter_key: string;
@@ -86,6 +88,29 @@ export interface OrchestrationV2UnitPublication {
   result_hash: string;
 }
 
+/** Canonical unit artifact envelope shared by publication, chapter validation and Apply. */
+export function orchestrationV2UnitArtifactBase(
+  payload: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  return {
+    validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
+    unit_path: payload.unit_path,
+    source_snapshot_hash: payload.source_snapshot_hash,
+    contract_hash: payload.contract_hash,
+    nodes: payload.nodes,
+    generated_unit: payload.generated_unit,
+    ...(payload.content_origin !== undefined ? { content_origin: payload.content_origin } : {}),
+    ...(payload.quality_state !== undefined ? { quality_state: payload.quality_state } : {}),
+    ...(payload.semantic_review !== undefined ? { semantic_review: payload.semantic_review } : {}),
+  };
+}
+
+export function orchestrationV2UnitArtifactHash(
+  payload: Readonly<Record<string, unknown>>,
+): string {
+  return orchestrationV2Hash(orchestrationV2UnitArtifactBase(payload));
+}
+
 export class OrchestrationV2UnitError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_UNIT_CONTRACT_INVALID'
@@ -114,10 +139,13 @@ function sourceRequiredArtifacts(
   facts: readonly OrchestrationV2SourceFact[],
 ): LessonAuthorStructuredArtifactRequirement[] {
   const artifacts: LessonAuthorStructuredArtifactRequirement[] = [];
-  const hasTable = facts.some(fact => Number(fact.locator?.table_count ?? 0) > 0
-    || (Array.isArray(fact.locator?.content_kinds) && fact.locator.content_kinds.includes('table')));
-  if (hasTable) artifacts.push({ type: 'table', minimum_items: 2 });
   const texts = facts.map(fact => fact.fact_text.trim());
+  // Locator metadata is chunk-level in legacy and mixed-version snapshots. It
+  // can say "table" even when this density lane owns prose only. A mandatory
+  // learner artifact must be reproducible from the immutable canonical facts,
+  // not inferred from adjacent chunk content.
+  const tableRows = texts.filter(text => /^Row\s+\d+\s*:\s*.+\|.+$/iu.test(text)).length;
+  if (tableRows >= 2) artifacts.push({ type: 'table', minimum_items: 2 });
   const orderedSteps = texts.filter(text => /^(?:step|bước)\s*\d+\s*[:.)-]/iu.test(text)).length;
   if (orderedSteps >= 2) artifacts.push({ type: 'ordered_list', minimum_items: Math.min(orderedSteps, 10) });
   const checklistItems = texts.filter(text => /^(?:☐|☑|\[\s*[x ]?\s*\])\s*\S/iu.test(text)).length;
@@ -184,7 +212,6 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
   const scopes = new Set(unit.source_scope_ids);
   const v3Markers = facts.map(fact => fact.locator?.instructional_density_policy_version === UNIT_CONTENT_V3_DENSITY_POLICY);
   if (v3Markers.some(Boolean) && !v3Markers.every(Boolean)) fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
-  const usesUnitContentV3 = v3Markers.length > 0 && v3Markers.every(Boolean);
   const factKeys = new Set<string>();
   const representedScopes = new Set<string>();
   for (const fact of facts) {
@@ -197,6 +224,7 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
   if (representedScopes.size !== scopes.size || [...scopes].some(scope => !representedScopes.has(scope))) {
     fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
   }
+  const ownedFactIds = new Set<string>();
   const componentPlan: OrchestrationV2UnitComponentPlan[] = unit.component_plan.map((plan, index) => {
     const componentPath = `${unitPath}.component_${index + 1}`;
     const planScopes = new Set(plan.source_scope_ids);
@@ -204,23 +232,28 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
     if (!sourceFactIds.length || [...planScopes].some(scope => !scopes.has(scope))) {
       fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
     }
-    const ownsCanonicalFacts = !usesUnitContentV3 || index === 0;
+    const canonicalFactIds = sourceFactIds.filter(factId => !ownedFactIds.has(factId));
+    canonicalFactIds.forEach(factId => ownedFactIds.add(factId));
+    const supportingFactIds = sourceFactIds.filter(factId => !canonicalFactIds.includes(factId));
     return {
       component_plan_id: orchestrationV2ComponentPlanId(assembly.assembly_hash, componentPath),
       type: plan.type, title: plan.title, rationale: plan.rationale, purpose: componentPurpose(plan.type),
-      source_fact_ids: ownsCanonicalFacts ? sourceFactIds : [],
-      supporting_evidence_fact_ids: ownsCanonicalFacts ? [] : sourceFactIds,
+      source_fact_ids: canonicalFactIds,
+      supporting_evidence_fact_ids: supportingFactIds,
       learning_objective_refs: [...unit.learning_objective_refs], source_scope_ids: [...plan.source_scope_ids],
       content_requirements: [], learning_block_ids: [],
-      required_artifacts: ownsCanonicalFacts && plan.type === 'html' ? sourceRequiredArtifacts(facts) : [],
+      required_artifacts: canonicalFactIds.length > 0 && plan.type === 'html' ? sourceRequiredArtifacts(facts) : [],
     };
   });
-  if (componentPlan[0]?.type !== 'html'
-    || !exactIds(componentPlan[0].source_fact_ids, facts.map(fact => fact.fact_key))) {
+  const types = componentPlan.map(plan => plan.type);
+  if ((types.includes('html') && types[0] !== 'html')
+    || (types.includes('la_faq') && types.at(-1) !== 'la_faq')
+    || !exactIds([...ownedFactIds], facts.map(fact => fact.fact_key))) {
     fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
   }
   const base = {
-    contract_version: 2 as const, source_snapshot_hash: assembly.source_snapshot_hash,
+    contract_version: 2 as const, unit_content_policy_version: UNIT_CONTENT_V4_ALIGNMENT_POLICY as typeof UNIT_CONTENT_V4_ALIGNMENT_POLICY,
+    source_snapshot_hash: assembly.source_snapshot_hash,
     assembly_hash: assembly.assembly_hash, chapter_key: chapter.chapter_key, unit_path: unitPath,
     chapter_title: chapter.title, lesson_title: lesson.title,
     lesson_learning_objectives: [...lesson.learning_objectives], unit_title: unit.title,
@@ -403,13 +436,14 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     path: `${contract.unit_path}.component_${index + 1}`, content,
   }))].map(node => ({ ...node, content_hash: orchestrationV2Hash(node.content) }));
   const generatedUnit = { ...response.unit, components };
-  const base = { validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT as typeof ORCHESTRATION_V2_UNIT_CONTRACT,
+  const base = orchestrationV2UnitArtifactBase({
     unit_path: contract.unit_path,
     source_snapshot_hash: contract.source_snapshot_hash, contract_hash: contract.contract_hash,
     nodes, generated_unit: generatedUnit, content_origin: response.content_origin, quality_state: response.quality_state,
-    ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) };
+    ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) });
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_PUBLICATION_BYTES) {
     fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE');
   }
-  return Object.freeze({ ...base, result_hash: orchestrationV2Hash(base) });
+  return Object.freeze({ ...base, result_hash: orchestrationV2UnitArtifactHash(base) }) as
+    Readonly<OrchestrationV2UnitPublication>;
 }

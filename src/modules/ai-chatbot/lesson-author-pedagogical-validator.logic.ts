@@ -90,6 +90,7 @@ type ComponentLocation = ProposalUnitLocation & {
 
 const EXPLANATORY_COMPONENTS = new Set(['html', 'la_faq']);
 const PRACTICE_OR_CHECK_COMPONENTS = new Set(['problem', 'la_sortable', 'la_crossword']);
+const INSTRUCTIONAL_COMPONENTS = new Set(['html', 'la_diagram', 'la_sortable', 'la_crossword']);
 const ACTION_OBJECTIVE = /\b(?:apply|analyse|analyze|evaluate|perform|demonstrate|use|áp\s+dụng|phân\s+tích|đánh\s+giá|thực\s+hiện|vận\s+dụng)\b/i;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -285,6 +286,14 @@ function unitExpectedFacts(unit: LessonAuthorPedagogicalBlueprintUnit | undefine
   return readServerOwnedSourceFactIds(unit?.source_fact_ids);
 }
 
+function isSubstantiveInstructionalTreatment(item: ComponentLocation): boolean {
+  if (!INSTRUCTIONAL_COMPONENTS.has(item.component.type)) return false;
+  const wordCount = tokens(item.text).length;
+  if (item.component.type === 'html') return wordCount >= 12;
+  if (item.component.type === 'la_diagram') return wordCount >= 4;
+  return wordCount >= 6;
+}
+
 function assessmentHasTeaching(components: ComponentLocation[], lesson: LessonAuthorPedagogicalBlueprintLesson): boolean {
   const instances = lesson.units.flatMap((unit, unitIndex) => (unit.component_plan ?? []).map(plan => ({ plan, unitIndex })));
   if (instances.some(item => item.plan.component_plan_id)) {
@@ -309,9 +318,9 @@ function assessmentHasTeaching(components: ComponentLocation[], lesson: LessonAu
       if (!refs.length || !evidence.size) return false;
       for (const ref of refs) {
         const taught = components.some(item => {
-          if (item.component.type !== 'html' || tokens(item.text).length < 12
+          if (!isSubstantiveInstructionalTreatment(item)
             || item.unitIndex > unitIndex || (item.unitIndex === unitIndex && item.componentIndex >= check.componentIndex)) return false;
-          const teachingPlan = instances.find(p => p.unitIndex === item.unitIndex && p.plan.type === 'html'
+          const teachingPlan = instances.find(p => p.unitIndex === item.unitIndex && p.plan.type === item.component.type
             && p.plan.component_plan_id === asRecord(item.component.metadata).component_plan_id)?.plan;
           if (!teachingPlan || !localObjectiveRefs(teachingPlan.learning_objective_refs).includes(ref)) return false;
           // A supporting-only teaching unit can read existing primary evidence,
@@ -328,7 +337,7 @@ function assessmentHasTeaching(components: ComponentLocation[], lesson: LessonAu
     return localObjectiveRefs(lesson.assessment_objective_refs).every(ref => coveredObjectives.has(ref));
   }
   const explainedFacts = new Set(components
-    .filter(item => item.component.type === 'html')
+    .filter(isSubstantiveInstructionalTreatment)
     .flatMap(item => item.sourceFactIds));
   return components.some(item => item.component.type === 'problem'
     && item.sourceFactIds.some(factId => explainedFacts.has(factId)));
@@ -469,7 +478,8 @@ function validatePedagogy(input: {
           return;
         }
         objectiveTotal += 1;
-        const teaching = mappedUnitIndexes.some(unitIndex => lessonComponents.some(item => item.unitIndex === unitIndex && item.component.type === 'html' && tokens(item.text).length >= 12));
+        const teaching = mappedUnitIndexes.some(unitIndex => lessonComponents.some(item =>
+          item.unitIndex === unitIndex && isSubstantiveInstructionalTreatment(item)));
         if (teaching) objectiveCovered += 1;
         else findings.push(finding('OBJECTIVE_NOT_TAUGHT', mappedUnitIndexes.length === 1 ? `${lessonPath}.unit_${mappedUnitIndexes[0]! + 1}` : lessonPath, 'An approved learning objective has no substantive explanatory treatment.', {
           objective_ids: [ref],
@@ -527,8 +537,12 @@ function validatePedagogy(input: {
           const explanatoryWords = actualComponents
             .filter(item => item.component.type === 'html')
             .reduce((total, item) => total + tokens(item.text).length, 0);
+          const structuredTreatmentWords = actualComponents
+            .filter(item => item.component.type !== 'html' && isSubstantiveInstructionalTreatment(item))
+            .reduce((total, item) => total + tokens(item.text).length, 0);
           const blockCount = expectedBlocksFor(expectedUnit).length;
-          if (explanatoryWords >= 45 || (blockCount <= 1 && explanatoryWords >= 28)) depthCovered += 1;
+          if (explanatoryWords >= 45 || (blockCount <= 1 && explanatoryWords >= 28)
+            || structuredTreatmentWords >= 12) depthCovered += 1;
           else findings.push(finding('INSUFFICIENT_INSTRUCTIONAL_DEPTH', unitPath, 'A complex unit has too little explanatory treatment for its approved concepts/facts/objectives.', {
             learning_block_ids: expectedBlocksFor(expectedUnit).map(block => block.id),
             source_fact_ids: expectedFacts,
@@ -574,10 +588,10 @@ function validatePedagogy(input: {
     // Legacy/File Search compatibility: do not pretend we know objectives or
     // source-map scope. Still detect obviously thin local HTML components.
     for (const unit of proposalUnits(proposal)) {
-      const htmlWords = (unit.unit.components ?? [])
-        .filter(component => component.type === 'html')
+      const instructionalWords = (unit.unit.components ?? [])
+        .filter(component => INSTRUCTIONAL_COMPONENTS.has(component.type))
         .reduce((total, component) => total + tokens(componentLearnerText(component)).length, 0);
-      if ((unit.unit.source_fact_ids?.length ?? 0) >= 3 && htmlWords < 24) {
+      if ((unit.unit.source_fact_ids?.length ?? 0) >= 3 && instructionalWords < 24) {
         findings.push(finding('INSUFFICIENT_INSTRUCTIONAL_DEPTH', unit.path, 'A source-dense unit has only a very short explanatory treatment.'));
       }
     }

@@ -35,6 +35,33 @@ test('accepts a bounded source page and rejects byte or revision drift', () => {
     { code: 'ORCHESTRATION_V2_RAG_IDENTITY_MISMATCH' });
 });
 
+test('validates explicit structured-evidence status without rejecting legacy wire responses', () => {
+  const ready = snapshot();
+  const readyLocator = ready.facts[0]!.locator as Record<string, unknown>;
+  readyLocator.source_evidence_status = 'ready';
+  readyLocator.source_evidence_revision = 'e'.repeat(64);
+  assert.equal(
+    readOrchestrationV2SourceSnapshotPageResponse(ready, hash).facts[0]?.locator.source_evidence_status,
+    'ready',
+  );
+
+  const legacy = snapshot();
+  const legacyLocator = legacy.facts[0]!.locator as Record<string, unknown>;
+  legacyLocator.source_evidence_status = 'legacy_review_required';
+  assert.equal(
+    readOrchestrationV2SourceSnapshotPageResponse(legacy, hash).facts[0]?.locator.source_evidence_status,
+    'legacy_review_required',
+  );
+
+  const inconsistent = snapshot();
+  const inconsistentLocator = inconsistent.facts[0]!.locator as Record<string, unknown>;
+  inconsistentLocator.source_evidence_status = 'ready';
+  assert.throws(
+    () => readOrchestrationV2SourceSnapshotPageResponse(inconsistent, hash),
+    { code: 'ORCHESTRATION_V2_RAG_RESPONSE_INVALID' },
+  );
+});
+
 test('binds skeleton response to the expected immutable source hash', () => {
   assert.equal(readOrchestrationV2CourseSkeletonResponse({ contract_version: 2, skeleton }, hash).skeleton.title, 'Khóa học');
   assert.throws(() => readOrchestrationV2CourseSkeletonResponse({ contract_version: 2, skeleton }, 'b'.repeat(64)),
@@ -76,5 +103,64 @@ test('requires an explicit valid media brief and preserves its production brief 
   const emptyPoints = structuredClone(response);
   emptyPoints.shard.lessons[0]!.units[0]!.media_brief!.content_points = [];
   assert.throws(() => readOrchestrationV2ChapterShardResponse(emptyPoints, skeleton, plan),
+    { code: 'ORCHESTRATION_V2_RAG_RESPONSE_INVALID' });
+});
+
+test('unit plan permits interaction-led teaching while enforcing HTML-first and FAQ-last', () => {
+  const base = { type: 'la_diagram', title: 'Quan hệ', rationale: 'Trực quan hóa quan hệ',
+    source_scope_ids: ['scope-1'] };
+  const response = { contract_version: 2, shard: { contract_version: 2, source_snapshot_hash: hash,
+    chapter_key: 'chapter-1', order: 0, shard_index: 0, shard_count: 1, source_scope_ids: ['scope-1'],
+    title: 'Chương 1', objective: 'Mục tiêu', lessons: [{ title: 'Bài 1', objective: 'Hiểu nội dung',
+      learning_objectives: ['Áp dụng'], learning_activities: ['Đọc'], assessment: 'Kiểm tra', units: [{
+        title: 'Nội dung', purpose: 'Thực hành', learning_objective_refs: ['lo_1'],
+        source_scope_ids: ['scope-1'], component_plan: [
+          base,
+          { ...base, type: 'problem', title: 'Kiểm tra' },
+          { ...base, type: 'la_faq', title: 'Câu hỏi thường gặp' },
+        ], media_brief: null,
+      }] }] } };
+  assert.deepEqual(readOrchestrationV2ChapterShardResponse(response, skeleton, plan)
+    .shard.lessons[0]!.units[0]!.component_plan.map(component => component.type),
+  ['la_diagram', 'problem', 'la_faq']);
+
+  const htmlLate = structuredClone(response);
+  htmlLate.shard.lessons[0]!.units[0]!.component_plan = [base,
+    { ...base, type: 'html', title: 'Giải thích' }];
+  assert.throws(() => readOrchestrationV2ChapterShardResponse(htmlLate, skeleton, plan),
+    { code: 'ORCHESTRATION_V2_RAG_RESPONSE_INVALID' });
+
+  const faqEarly = structuredClone(response);
+  faqEarly.shard.lessons[0]!.units[0]!.component_plan = [
+    { ...base, type: 'la_faq', title: 'Câu hỏi thường gặp' },
+    { ...base, type: 'problem', title: 'Kiểm tra' },
+  ];
+  assert.throws(() => readOrchestrationV2ChapterShardResponse(faqEarly, skeleton, plan),
+    { code: 'ORCHESTRATION_V2_RAG_RESPONSE_INVALID' });
+});
+
+test('assessment obligations admit slot three and reject slot four', () => {
+  const component = { type: 'html', title: 'Giải thích', rationale: 'Nội dung chính',
+    source_scope_ids: ['scope-1'] };
+  const response = { contract_version: 2, shard: { contract_version: 2, source_snapshot_hash: hash,
+    chapter_key: 'chapter-1', order: 0, shard_index: 0, shard_count: 1, source_scope_ids: ['scope-1'],
+    title: 'Chương 1', objective: 'Mục tiêu', lessons: [{ title: 'Bài 1', objective: 'Hiểu nội dung',
+      learning_objectives: ['Áp dụng'], learning_activities: ['Đọc'], assessment: 'Kiểm tra', units: [{
+        title: 'Nội dung', purpose: 'Giải thích', learning_objective_refs: ['lo_1'],
+        source_scope_ids: ['scope-1'], component_plan: [component,
+          { ...component, type: 'la_diagram', title: 'Sơ đồ' },
+          { ...component, type: 'problem', title: 'Kiểm tra' }], media_brief: null,
+      }] }], assessment_obligations: [{ planned_slot_key: `ao2_${'b'.repeat(32)}`,
+        lesson_index: 1, unit_index: 1, component_index: 3, learning_objective_refs: ['lo_1'],
+        required_assessment_kind: 'single_choice', relevant_scope_ids: ['scope-1'],
+        relevant_evidence_fact_ids: ['fact-1'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED', status: 'open' }] } };
+  assert.equal(readOrchestrationV2ChapterShardResponse(response, skeleton, plan)
+    .shard.assessment_obligations?.[0]?.component_index, 3);
+
+  const slotFour = structuredClone(response);
+  slotFour.shard.lessons[0]!.units[0]!.component_plan.splice(2, 0,
+    { ...component, type: 'la_sortable', title: 'Sắp xếp' });
+  slotFour.shard.assessment_obligations[0]!.component_index = 4;
+  assert.throws(() => readOrchestrationV2ChapterShardResponse(slotFour, skeleton, plan),
     { code: 'ORCHESTRATION_V2_RAG_RESPONSE_INVALID' });
 });

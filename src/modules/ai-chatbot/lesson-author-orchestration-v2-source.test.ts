@@ -5,7 +5,8 @@ import { createSourceSnapshotRepositoryV2, SourceSnapshotRepositoryV2Error } fro
 import { normalizeSourceFactPageV2, sourceFactPageDigestV2, SourceFactV2Error } from './lesson-author-orchestration-v2-source.logic.js';
 
 const id = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
-const candidates = [{ document_id: id(1), fact_key: 'fact-1', scope_key: 'scope-1', fact_text: 'Nội dung nguồn.', source_page: 1 }];
+const candidates = [{ document_id: id(1), fact_key: 'fact-1', scope_key: 'scope-1', fact_text: 'Nội dung nguồn.', source_page: 1,
+  locator: { source_evidence_status: 'ready', source_evidence_revision: 'a'.repeat(64) } }];
 const target = { snapshotId: id(2), workspaceId: id(3), tenantId: id(4), courseId: 'course-v1:test+1+2026' };
 
 function db(responses: Array<Array<Record<string, unknown>>>): GenerationJobSql {
@@ -16,6 +17,8 @@ test('normalizes a bounded contiguous page and hashes exact UTF-8 fact text', ()
   const rows = normalizeSourceFactPageV2(5, candidates);
   assert.equal(rows[0].ordinal, 5);
   assert.match(rows[0].fact_hash, /^[0-9a-f]{64}$/);
+  assert.equal(rows[0].locator.source_evidence_status, 'ready');
+  assert.equal(rows[0].locator.source_evidence_revision, 'a'.repeat(64));
   assert.equal(sourceFactPageDigestV2(rows), sourceFactPageDigestV2(normalizeSourceFactPageV2(5, candidates)));
   assert.throws(() => normalizeSourceFactPageV2(-1, candidates), SourceFactV2Error);
   assert.throws(() => normalizeSourceFactPageV2(0, [...candidates, { ...candidates[0] }]),

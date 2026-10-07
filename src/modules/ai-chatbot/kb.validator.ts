@@ -22,6 +22,15 @@ export const MAX_KB_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 export const ALLOWED_FAQ_EXTENSIONS = ['.xlsx', '.xls'];
 export const MAX_FAQ_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+/** Keep the user-facing name as metadata, never as a filesystem path. */
+export function normalizeKbDocumentDisplayName(value: string): string {
+  const withoutControls = value.normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const withoutDrive = withoutControls.replace(/^[a-z]:/i, '');
+  const segments = withoutDrive.replace(/\\/g, '/').split('/').filter(Boolean);
+  const leaf = (segments.at(-1) ?? '').replace(/^\.+$/, '').trim();
+  return (leaf || 'document').slice(0, 255);
+}
+
 /** Article schema */
 export const createArticleSchema = z.object({
   title: z.string().min(1, 'Tiêu đề không được để trống').max(500),

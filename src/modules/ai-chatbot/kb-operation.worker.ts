@@ -20,7 +20,9 @@ import {
   completeKbOperation,
   claimDueKbOperations,
   failKbOperation,
+  kbOperationIndexEngine,
   renewKbOperationLease,
+  shouldMarkKbDocumentErrorOnTerminalFailure,
   type KbOperationJob,
 } from './kb-operation.service.js';
 import {
@@ -257,10 +259,13 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
     lockClient = await getClient();
     await lockClient.query(`SELECT ${lockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
     await assertLease(job);
-    if (job.operation === 'document_upload' || job.operation === 'document_reupload') {
+    if (job.operation === 'document_upload'
+        || job.operation === 'document_reupload'
+        || job.operation === 'document_reindex') {
       const settings = await getTenantAiRuntimeSettings(job.tenant_id);
       await getGoogleAiStudioApiKey(job.tenant_id);
-      if (settings.activeEngine === 'self_built_rag') {
+      const targetEngine = kbOperationIndexEngine(job.operation, settings.activeEngine);
+      if (targetEngine === 'self_built_rag') {
         await uploadDocumentToRag(job);
       } else {
         await uploadDocumentToGemini(job);
@@ -277,7 +282,8 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
     }
   } catch (error) {
     const outcome = await failKbOperation(job, error).catch(() => ({ terminal: false, updated: false }));
-    if (outcome.terminal && outcome.updated && job.document_id) {
+    if (outcome.terminal && outcome.updated && job.document_id
+        && shouldMarkKbDocumentErrorOnTerminalFailure(job.operation)) {
       const message = job.operation === 'document_delete'
         ? `Không thể hoàn tất việc xoá tài liệu: ${errorMessage(error)}`
         : errorMessage(error);

@@ -324,7 +324,9 @@ test('density-v3 acceptance rejects handbook-sized HTML while legacy contracts r
 
 test('density-v3 contract preserves source table structure as a required HTML artifact', () => {
   const { assembly, sourceFacts, responseWire } = fixture();
-  const tableFacts = sourceFacts.map(fact => ({ ...fact, locator: {
+  const tableFacts = sourceFacts.map((fact, index) => ({ ...fact,
+    fact_text: `Row ${index + 1}: Column ${index + 1} | Value ${index + 1}`,
+    locator: {
     ...fact.locator, instructional_density_policy_version: 'unit-content-v3-density-1',
     content_kinds: ['table'], table_count: 1,
   } }));
@@ -342,6 +344,19 @@ test('density-v3 contract preserves source table structure as a required HTML ar
   preserved.unit.components[0]!.data = '<table><tbody><tr><th>Hazard</th><td>Control</td></tr><tr><th>Heat</th><td>Guard</td></tr></tbody></table>';
   assert.doesNotThrow(() => acceptOrchestrationV2GeneratedUnit({ contract,
     response: readOrchestrationV2UnitProviderResponse(preserved, contract), normalizeProposal, allowed }));
+});
+
+test('chunk table metadata alone does not require an unreconstructable HTML table', () => {
+  const { assembly, sourceFacts } = fixture();
+  const proseFacts = sourceFacts.map(fact => ({ ...fact, locator: {
+    ...fact.locator, instructional_density_policy_version: 'unit-content-v3-density-1',
+    content_kinds: ['table', 'text'], table_count: 1,
+  } }));
+
+  const contract = prepareOrchestrationV2UnitGenerationContract({ assembly,
+    unit_path: 'chapter_1.lesson_1.unit_1', source_facts: proseFacts });
+
+  assert.deepEqual(contract.component_plan[0]!.required_artifacts, []);
 });
 
 test('Python deterministic fallback for every component type passes the production Node normalizer', async t => {
@@ -378,12 +393,13 @@ test('Python deterministic fallback for every component type passes the producti
     ...base.source_facts[0]!, fact_key: evidenceIds[index]!, fact_text,
   }));
   const variants: OrchestrationV2UnitComponentPlan['type'][][] = [
-    ['html', 'problem', 'la_faq', 'la_diagram'], ['html', 'la_sortable', 'la_crossword'],
+    ['html', 'la_diagram', 'problem', 'la_faq'], ['html', 'la_sortable', 'la_crossword'],
   ];
   for (const types of variants) {
     const componentPlan = types.map((type, index) => ({ ...base.component_plan[0]!, type,
       component_plan_id: `cp2_${String(index + 1).padStart(32, '0')}`,
-      source_fact_ids: [...evidenceIds],
+      source_fact_ids: index === 0 ? [...evidenceIds] : [],
+      supporting_evidence_fact_ids: index === 0 ? [] : [...evidenceIds],
       title: `${type} fallback`, purpose: type === 'problem' ? 'assess' as const
         : type === 'la_sortable' ? 'sequence' as const : type === 'la_diagram' ? 'relationship' as const
           : type === 'la_crossword' ? 'terminology' as const : type === 'la_faq' ? 'clarify' as const : 'explain' as const }));

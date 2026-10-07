@@ -4,7 +4,7 @@ import { orchestrationV2DeterministicUuid } from './lesson-author-orchestration-
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
-import { ORCHESTRATION_V2_UNIT_CONTRACT } from './lesson-author-orchestration-v2-unit.logic.js';
+import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 
 export const ORCHESTRATION_V2_CHAPTER_CONTRACT = 'orchestration-chapter-receipt-v2';
 
@@ -122,16 +122,9 @@ export function validateOrchestrationV2Chapter(input: {
       .map(fact => fact.fact_key);
     const quality = orchestrationV2QualityPolicy(payload);
     if (!quality.evidence_valid) fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
-    const artifactBase = { validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
-      unit_path: payload.unit_path, source_snapshot_hash: payload.source_snapshot_hash,
-      contract_hash: payload.contract_hash, nodes: payload.nodes, generated_unit: payload.generated_unit,
-      ...(quality.has_envelope ? {
-        content_origin: payload.content_origin,
-        quality_state: payload.quality_state,
-      } : {}) };
     if (payload.contract_version !== 2 || payload.unit_path !== expected.path
       || payload.source_snapshot_hash !== assembly.source_snapshot_hash || !HASH.test(String(payload.contract_hash))
-      || orchestrationV2Hash(artifactBase) !== evidence.artifact_hash || !generated
+      || orchestrationV2UnitArtifactHash(payload) !== evidence.artifact_hash || !generated
       || !exact(generated.source_fact_ids, expectedFacts)
       || nodes.length !== expected.unit.component_plan.length + 1 || nodes.some(item => !item)) {
       fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');

@@ -7,7 +7,7 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { ORCHESTRATION_V2_CHAPTER_CONTRACT } from './lesson-author-orchestration-v2-chapter.logic.js';
 import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
 import { orchestrationV2OriginSummary, workspaceDraftQualityChecks } from './lesson-author-quality-receipt.logic.js';
-import { ORCHESTRATION_V2_UNIT_CONTRACT } from './lesson-author-orchestration-v2-unit.logic.js';
+import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import { editWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
 import { workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
@@ -207,17 +207,11 @@ function compile(input: OrchestrationV2ApplyInput) {
     if (!quality.course_applicable) {
       fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
     }
-    const artifactBase = { validation_contract: ORCHESTRATION_V2_UNIT_CONTRACT,
-      unit_path: payload?.unit_path, source_snapshot_hash: payload?.source_snapshot_hash,
-      contract_hash: payload?.contract_hash, nodes: payload?.nodes, generated_unit: payload?.generated_unit,
-      ...(quality.has_envelope ? {
-        content_origin: payload?.content_origin,
-        quality_state: payload?.quality_state,
-      } : {}) };
     const generatedComponents = Array.isArray(generated?.components) ? generated!.components : [];
     const architectureUnit = binding.unit as OrchestrationV2ArchitectureAssembly['architecture']['chapters'][number]['lessons'][number]['units'][number];
     if (!payload || payload.contract_version !== 2 || payload.unit_path !== binding.unit_path
-      || payload.source_snapshot_hash !== input.source_snapshot_hash || orchestrationV2Hash(artifactBase) !== acceptedArtifact.artifact_hash
+      || payload.source_snapshot_hash !== input.source_snapshot_hash
+      || orchestrationV2UnitArtifactHash(payload) !== acceptedArtifact.artifact_hash
       || artifactNodes.length !== architectureUnit.component_plan.length + 1
       || generatedComponents.length !== architectureUnit.component_plan.length) {
       fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);

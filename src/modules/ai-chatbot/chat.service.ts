@@ -123,6 +123,10 @@ import {
   type ComponentPlannerDiagnostic,
 } from './lesson-author-component-registry.logic.js';
 import { assertLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
+import {
+  layoutGeneratedDiagramNodes,
+  normalizeDiagramDisplayText,
+} from './lesson-author-diagram-layout.logic.js';
 import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts } from './lesson-author-blueprint-acceptance.logic.js';
 import {
   normalizeLessonAuthorSourceMap,
@@ -4451,7 +4455,7 @@ function chooseDiagramNodeIcon(label: string, index: number): string {
 }
 
 function formatDiagramNodeLabel(label: string, index: number): string {
-  const cleanLabel = label.replace(/\s+/g, ' ').trim();
+  const cleanLabel = normalizeDiagramDisplayText(label, 120);
   if (!cleanLabel || labelAlreadyHasIcon(cleanLabel)) return cleanLabel.slice(0, 120);
   return `${chooseDiagramNodeIcon(cleanLabel, index)} ${cleanLabel}`.slice(0, 140);
 }
@@ -4478,7 +4482,7 @@ function getDiagramEdgeHandles(
 
 function generatedDiagramEdgeLabel(edge: Record<string, unknown>): string {
   const value = edge.label ?? (asRecord(edge.data).label);
-  return typeof value === 'string' ? value.trim().toLocaleLowerCase() : '';
+  return normalizeDiagramDisplayText(value, 120).toLocaleLowerCase();
 }
 
 function removeRedundantGeneratedEdges<T extends { source: string; target: string }>(edges: T[]): T[] {
@@ -4531,99 +4535,6 @@ function limitGeneratedEdges<T extends { source: string; target: string }>(
   return selected;
 }
 
-function layoutDiagramNodes<T extends { id: string; position: { x: number; y: number } }>(
-  nodes: T[],
-  edges: Array<{ source: string; target: string }>,
-): T[] {
-  if (nodes.length === 0) return nodes;
-
-  const xSpacing = 260;
-  const ySpacing = 150;
-  const left = 80;
-  const top = 70;
-
-  if (edges.length > 0) {
-    const incoming = new Map(nodes.map(node => [node.id, 0]));
-    const incomingNodes = new Map<string, string[]>();
-    const outgoing = new Map<string, string[]>();
-    for (const edge of edges) {
-      outgoing.set(edge.source, [...(outgoing.get(edge.source) ?? []), edge.target]);
-      incoming.set(edge.target, (incoming.get(edge.target) ?? 0) + 1);
-      incomingNodes.set(edge.target, [...(incomingNodes.get(edge.target) ?? []), edge.source]);
-    }
-
-    const roots = nodes.filter(node => (incoming.get(node.id) ?? 0) === 0);
-    const queue = roots.length > 0 ? roots.map(node => node.id) : [nodes[0].id];
-    const levelById = new Map<string, number>();
-    queue.forEach(id => levelById.set(id, 0));
-
-    for (let index = 0; index < queue.length; index += 1) {
-      const id = queue[index];
-      const nextLevel = (levelById.get(id) ?? 0) + 1;
-      for (const target of outgoing.get(id) ?? []) {
-        if ((levelById.get(target) ?? Number.POSITIVE_INFINITY) > nextLevel) {
-          levelById.set(target, nextLevel);
-          queue.push(target);
-        }
-      }
-    }
-
-    nodes.forEach((node, index) => {
-      if (!levelById.has(node.id)) levelById.set(node.id, Math.floor(index / 3));
-    });
-
-    const rows = new Map<number, T[]>();
-    nodes.forEach((node) => {
-      const level = levelById.get(node.id) ?? 0;
-      rows.set(level, [...(rows.get(level) ?? []), node]);
-    });
-    const widestRow = Math.max(...Array.from(rows.values()).map(row => row.length));
-    const canvasWidth = Math.max(1, widestRow - 1) * xSpacing;
-    const originalOrder = new Map(nodes.map((node, index) => [node.id, index]));
-    const rowOrder = new Map<string, number>();
-
-    for (const [level, row] of Array.from(rows.entries()).sort(([left], [right]) => left - right)) {
-      if (level > 0) {
-        row.sort((leftNode, rightNode) => {
-          const score = (node: T) => {
-            const parentOrders = (incomingNodes.get(node.id) ?? [])
-              .map(parentId => rowOrder.get(parentId))
-              .filter((order): order is number => typeof order === 'number');
-            return parentOrders.length > 0
-              ? parentOrders.reduce((total, order) => total + order, 0) / parentOrders.length
-              : Number.POSITIVE_INFINITY;
-          };
-          return score(leftNode) - score(rightNode)
-            || (originalOrder.get(leftNode.id) ?? 0) - (originalOrder.get(rightNode.id) ?? 0);
-        });
-      }
-      const rowWidth = Math.max(1, row.length - 1) * xSpacing;
-      const rowOffset = (canvasWidth - rowWidth) / 2;
-      row.forEach((node, index) => {
-        rowOrder.set(node.id, index);
-        node.position = {
-          x: left + rowOffset + index * xSpacing,
-          y: top + level * ySpacing,
-        };
-      });
-    }
-    return nodes;
-  }
-
-  const cols = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(nodes.length))));
-  nodes.forEach((node, index) => {
-    const row = Math.floor(index / cols);
-    const col = index % cols;
-    const rowCount = Math.min(cols, nodes.length - row * cols);
-    const rowOffset = ((cols - rowCount) * xSpacing) / 2;
-    node.position = {
-      x: left + rowOffset + col * xSpacing,
-      y: top + row * ySpacing,
-    };
-  });
-  return nodes;
-}
-
 function resolveDiagramNodeRef(value: unknown, nodes: Array<{ id: string; label: string }>): string | null {
   if (typeof value === 'number' && Number.isInteger(value)) {
     // The authoring prompt uses zero-based indexes. Keep one-based indexes as
@@ -4649,9 +4560,9 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
   const nodes = rawNodes
     .map((nodeValue, index) => {
       const node = asRecord(nodeValue);
-      const label = typeof nodeValue === 'string'
+      const label = normalizeDiagramDisplayText(typeof nodeValue === 'string'
         ? readString(nodeValue, '', 120)
-        : readString(node.label ?? node.title ?? node.name, '', 120);
+        : readString(node.label ?? node.title ?? node.name, '', 120), 120);
       if (!label) return null;
 
       const id = `node_${index + 1}`;
@@ -4666,7 +4577,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
           shape: normalizeDiagramShape(node.shape ?? (index === 0 ? 'ellipse' : 'rounded')),
           bgColor,
           textColor: readString(node.textColor ?? node.text_color, normalizeDiagramTextColor(index), 24),
-          tooltip: readString(node.tooltip ?? node.description ?? node.summary, label, 500),
+          tooltip: normalizeDiagramDisplayText(readString(node.tooltip ?? node.description ?? node.summary, label, 500), 500),
           target_diagram_id: '',
         },
       };
@@ -4698,7 +4609,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
         sourceHandle: 'right' as const,
         targetHandle: 'left' as const,
         type: 'deletable',
-        label: readString(edge.label, '', 120) || undefined,
+        label: normalizeDiagramDisplayText(readString(edge.label, '', 120), 120) || undefined,
         style: { stroke: '#64748B', strokeWidth: 2 },
         markerEnd: { type: 'arrowclosed', color: '#64748B' },
       };
@@ -4722,7 +4633,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
       style: { stroke: '#64748B', strokeWidth: 2 },
       markerEnd: { type: 'arrowclosed', color: '#64748B' },
     }));
-  const positionedNodes = layoutDiagramNodes(nodes, initialEdges);
+  const positionedNodes = layoutGeneratedDiagramNodes(nodes, initialEdges);
   const nodeById = new Map(positionedNodes.map(node => [node.id, node]));
   const edges = initialEdges.map(edge => {
     const source = nodeById.get(edge.source);
@@ -4748,7 +4659,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
   const diagramData = {
     diagrams: [{
       id: diagramId,
-      name: readString(component.name ?? component.title, 'Main Diagram', 120),
+      name: normalizeDiagramDisplayText(readString(component.name ?? component.title, 'Main Diagram', 120), 120),
       nodes: positionedNodes,
       edges,
     }],

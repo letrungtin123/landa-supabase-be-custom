@@ -9,10 +9,12 @@ import { randomUUID } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
+import type { AiEngine } from './ai-engine.types.js';
 
 export type KbOperationType =
   | 'document_upload'
   | 'document_reupload'
+  | 'document_reindex'
   | 'document_delete'
   | 'knowledgebase_delete';
 
@@ -43,6 +45,16 @@ interface EnqueueKbOperationInput {
   targetDocumentId?: string | null;
   operation: KbOperationType;
   payload?: Record<string, unknown>;
+}
+
+export function kbOperationIndexEngine(operation: KbOperationType, activeEngine: AiEngine): AiEngine {
+  return operation === 'document_reindex' ? 'self_built_rag' : activeEngine;
+}
+
+export function shouldMarkKbDocumentErrorOnTerminalFailure(operation: KbOperationType): boolean {
+  // A zero-downtime reindex keeps the previously learned active index usable.
+  // Its maintenance job may fail, but the Knowledge Base document did not.
+  return operation !== 'document_reindex' && operation !== 'document_delete';
 }
 
 function operationLockKey(input: EnqueueKbOperationInput, targetDocumentId: string | null): string {
