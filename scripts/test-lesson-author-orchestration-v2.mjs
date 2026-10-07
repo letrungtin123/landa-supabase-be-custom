@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const testDirectory = path.join(root, 'src', 'modules', 'ai-chatbot');
 const tests = (await readdir(testDirectory))
-  .filter(name => name.startsWith('lesson-author-orchestration-v2') && name.endsWith('.test.ts'))
+  .filter(name => (name.startsWith('lesson-author-orchestration-v2') || name.startsWith('lesson-author-idm'))
+    && name.endsWith('.test.ts'))
   .sort()
   .map(name => path.join(testDirectory, name));
 

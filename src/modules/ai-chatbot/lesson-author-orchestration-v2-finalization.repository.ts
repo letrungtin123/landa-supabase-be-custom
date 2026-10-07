@@ -12,6 +12,8 @@ import {
 } from './lesson-author-orchestration-v2-finalization.logic.js';
 import { orchestrationV2Hash, type OrchestrationV2TaskKind } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2TaskLease, createOrchestrationV2WorkerRepository } from './lesson-author-orchestration-v2-worker.repository.js';
+import { IDM_DISPOSITIONS } from './lesson-author-idm.contract.js';
+import { loadIdmRunScopeView } from './lesson-author-idm-scope-view.repository.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 
@@ -171,10 +173,24 @@ export function createOrchestrationV2FinalizationRepository(
         const { contract_version: _version, ...receipt } = payload;
         return receipt as unknown as OrchestrationV2ChapterReceipt;
       });
+      if (assembly.idm === undefined) {
+        return finalizeOrchestrationV2Course({ source_snapshot_hash: lease.source_snapshot_hash,
+          expected_manifest_hash: String(row.manifest_hash), admitted_fact_count: Number(row.admitted_fact_count),
+          assembly_hash: assembly.assembly_hash, inventory_hash: String(inventoryPayload.inventory_hash), tasks,
+          chapter_receipts: receipts, assessment_obligations: assessmentObligations });
+      }
+      // IDM (spec §8.5): every snapshot fact has exactly one disposition in the design
+      // (re-verified through the scope view) and the assembly carries the same counts.
+      const view = await loadIdmRunScopeView(tx, lease, assembly.idm.design_hash);
+      if (view.design.dispositions.length !== Number(row.admitted_fact_count)
+        || IDM_DISPOSITIONS.some(name => view.dispositionCounts[name] !== assembly.idm!.disposition_counts[name])) {
+        fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
+      }
       return finalizeOrchestrationV2Course({ source_snapshot_hash: lease.source_snapshot_hash,
         expected_manifest_hash: String(row.manifest_hash), admitted_fact_count: Number(row.admitted_fact_count),
         assembly_hash: assembly.assembly_hash, inventory_hash: String(inventoryPayload.inventory_hash), tasks,
-        chapter_receipts: receipts, assessment_obligations: assessmentObligations });
+        chapter_receipts: receipts, assessment_obligations: assessmentObligations,
+        idm_accounting: { ...view.dispositionCounts } });
     });
   }
 

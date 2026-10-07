@@ -24,7 +24,7 @@ import { createWorkspaceApplyRepository } from './lesson-author-workspace-apply.
 import { createWorkspaceAcceptance } from './lesson-author-workspace-storyboard.repository.js';
 import { createOrchestrationV2AdmissionRepository } from './lesson-author-orchestration-v2-admission.repository.js';
 import { createOrchestrationV2AdmissionService } from './lesson-author-orchestration-v2-admission.service.js';
-import { loadOrchestrationV2AdmissionRuntime } from './lesson-author-orchestration-v2-execution.config.js';
+import { loadOrchestrationV2AdmissionRuntime, orchestrationV2IdmAdmissionWarning } from './lesson-author-orchestration-v2-execution.config.js';
 import { verifyOrchestrationV2Schema } from './lesson-author-orchestration-v2-schema.repository.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
 import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
@@ -246,6 +246,12 @@ router.get('/chat/lesson-author/source-documents/:documentId/stream', allowRunti
   },
 }));
 router.get('/chat/lesson-author/conversations/:conversationId/chapter-checkpoint', checkPermission('courses','can_edit'), chatCtrl.getChapterCheckpoint);
+const orchestrationV2IdmPolicy = {
+  enabled: env.LESSON_AUTHOR_IDM_PIPELINE_ENABLED,
+  tenant_allowlist: env.LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST,
+};
+const orchestrationV2IdmWarning = orchestrationV2IdmAdmissionWarning(orchestrationV2IdmPolicy);
+if (orchestrationV2IdmWarning) console.warn(orchestrationV2IdmWarning);
 const orchestrationV2Admit = createOrchestrationV2AdmissionService({
   config: {
     tenant_concurrency_limit: env.LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY,
@@ -253,7 +259,8 @@ const orchestrationV2Admit = createOrchestrationV2AdmissionService({
     routing_shard_count: 4_096,
   },
   verifySchema: () => verifyOrchestrationV2Schema({ query }),
-  loadRuntime: loadOrchestrationV2AdmissionRuntime,
+  // IDM rollout is decided only here, at admission; workers derive the pipeline from the stored runtime hash.
+  loadRuntime: tenantId => loadOrchestrationV2AdmissionRuntime(tenantId, orchestrationV2IdmPolicy),
   createRepository: user => {
     const authority = createWorkspaceAuthority(user);
     return createOrchestrationV2AdmissionRepository({

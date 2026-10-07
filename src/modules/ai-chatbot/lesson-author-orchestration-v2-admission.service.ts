@@ -6,6 +6,7 @@ import type {
 } from './lesson-author-orchestration-v2-admission.repository.js';
 import {
   ORCHESTRATION_V2_EXECUTION_POLICY,
+  ORCHESTRATION_V2_IDM_EXECUTION_POLICY,
   type OrchestrationV2ExecutionRuntime,
 } from './lesson-author-orchestration-v2-execution.config.js';
 
@@ -69,7 +70,10 @@ export function createOrchestrationV2AdmissionService(deps: Dependencies) {
     return repository.admit(target, {
       runtime_config_hash: runtime.runtime_config_hash,
       model: runtime.settings.lessonAuthorModel,
-      source_snapshot_budget_ms: ORCHESTRATION_V2_EXECUTION_POLICY.source_snapshot_budget_ms,
+      // The runtime hash selects the pipeline (legacy or IDM); the matching policy owns the source budget.
+      source_snapshot_budget_ms: runtime.pipeline === 'idm-1'
+        ? ORCHESTRATION_V2_IDM_EXECUTION_POLICY.source_snapshot_budget_ms
+        : ORCHESTRATION_V2_EXECUTION_POLICY.source_snapshot_budget_ms,
       tenant_concurrency_limit: config.tenant_concurrency_limit,
       workspace_concurrency_limit: config.workspace_concurrency_limit,
       routing_shard_count: config.routing_shard_count,

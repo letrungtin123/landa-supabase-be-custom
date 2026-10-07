@@ -20,6 +20,15 @@ import {
   readOrchestrationV2SemanticReviewSummary,
   type OrchestrationV2SemanticReviewSummary,
 } from './lesson-author-semantic-review.logic.js';
+import {
+  IdmError,
+  readIdmUnitQuality,
+  type IdmCourseDesignV1,
+  type IdmUnitBriefV1,
+  type IdmUnitQualityV1,
+} from './lesson-author-idm.contract.js';
+import { idmAuthorNote } from './lesson-author-idm-architecture.logic.js';
+import { buildIdmUnitBrief, exceedsIdmOutputBudget } from './lesson-author-idm-unit.logic.js';
 
 export const ORCHESTRATION_V2_UNIT_CONTRACT = 'orchestration-unit-baseline-v2';
 const UNIT_CONTENT_V3_DENSITY_POLICY = 'unit-content-v3-density-1';
@@ -52,6 +61,8 @@ export interface OrchestrationV2UnitGenerationContract {
   unit_source_fact_ids: string[];
   component_plan: OrchestrationV2UnitComponentPlan[];
   source_facts: OrchestrationV2SourceFact[];
+  /** IDM runs only (spec §8.3). Part of the contract hash; legacy contracts never carry the key. */
+  idm_unit_brief?: IdmUnitBriefV1;
   contract_hash: string;
 }
 
@@ -124,6 +135,7 @@ export class OrchestrationV2UnitError extends Error {
 }
 
 const HASH = /^[0-9a-f]{64}$/;
+const IDM_UNIT_NOTE_MAX_CHARS = 8_000;
 const PATH = /^chapter_([1-9][0-9]*)\.lesson_([1-9][0-9]*)\.unit_([1-9][0-9]*)$/;
 const MAX_FACTS = 32_768;
 const MAX_CONTEXT_CHARS = 400_000;
@@ -192,12 +204,17 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
   assembly: Readonly<OrchestrationV2ArchitectureAssembly>;
   unit_path: string;
   source_facts: readonly OrchestrationV2SourceFact[];
+  /** IDM runs only: the course design and every fact of the unit's lesson (for the brief context). */
+  idm?: { design: IdmCourseDesignV1; lesson_facts: readonly OrchestrationV2SourceFact[] };
 }): Readonly<OrchestrationV2UnitGenerationContract> {
   const { assembly, unit_path: unitPath } = input;
   const match = PATH.exec(unitPath);
   if (!assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)) {
     fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
   }
+  // IDM units are written from treatment/detail level (spec §8.3), never forced source artifacts.
+  const idm = assembly.idm !== undefined;
+  if (idm !== (input.idm !== undefined)) fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
   if (!match) fail('ORCHESTRATION_V2_UNIT_CONTRACT_INVALID');
   const pathMatch = match as RegExpExecArray;
   const chapter = assembly.architecture.chapters[Number(pathMatch[1]) - 1];
@@ -242,7 +259,7 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
       supporting_evidence_fact_ids: supportingFactIds,
       learning_objective_refs: [...unit.learning_objective_refs], source_scope_ids: [...plan.source_scope_ids],
       content_requirements: [], learning_block_ids: [],
-      required_artifacts: canonicalFactIds.length > 0 && plan.type === 'html' ? sourceRequiredArtifacts(facts) : [],
+      required_artifacts: !idm && canonicalFactIds.length > 0 && plan.type === 'html' ? sourceRequiredArtifacts(facts) : [],
     };
   });
   const types = componentPlan.map(plan => plan.type);
@@ -260,6 +277,10 @@ export function prepareOrchestrationV2UnitGenerationContract(input: {
     unit_purpose: unit.purpose, unit_learning_objective_refs: [...unit.learning_objective_refs],
     unit_source_scope_ids: [...unit.source_scope_ids], unit_source_fact_ids: facts.map(fact => fact.fact_key),
     component_plan: componentPlan, source_facts: facts,
+    ...(input.idm === undefined ? {} : { idm_unit_brief: buildIdmUnitBrief({ assembly, design: input.idm.design,
+      chapter_index: Number(pathMatch[1]) - 1, lesson_index: Number(pathMatch[2]) - 1,
+      unit_index: Number(pathMatch[3]) - 1, component_plans: componentPlan,
+      unit_fact_keys: facts.map(fact => fact.fact_key), lesson_facts: input.idm.lesson_facts }) }),
   };
   return Object.freeze({ ...base, contract_hash: orchestrationV2Hash(base) });
 }
@@ -424,14 +445,26 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     exact_identifiers: contract.source_facts.flatMap(fact => [fact.fact_key, fact.source_ref ?? '']).filter(Boolean),
   });
   if (coverage) fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
-  if (exceedsInstructionalOutputBudget(contract, components)) {
+  // A null brief (Python's dump of a legacy contract) is legacy.
+  const brief = contract.idm_unit_brief ?? undefined;
+  let quality: IdmUnitQualityV1 | null = null;
+  if (brief !== undefined) {
+    try { quality = readIdmUnitQuality(response.unit.idm_quality); }
+    catch { throw new IdmError('IDM_UNIT_QUALITY_INVALID'); }
+  }
+  // Legacy keeps the 1.75× source rule. IDM uses its segment budget, measured
+  // like Python on each provider html component, and only on authored content:
+  // Python validates source-locked fallback slots without it.
+  if (brief === undefined ? exceedsInstructionalOutputBudget(contract, components)
+    : response.content_origin === 'provider_validated' && exceedsIdmOutputBudget(brief, contract.component_plan
+      .filter(plan => plan.type === 'html').map(plan => rawById.get(plan.component_plan_id)!))) {
     fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
   }
   let componentContents: WorkspaceContent[];
   try { componentContents = components.map(component => workspaceComponentContent(component, allowed)); }
   catch { return fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID'); }
   const unitContent = readWorkspaceContent({ title: contract.unit_title, purpose: contract.unit_purpose,
-    data: {}, implementation_notes: null });
+    data: {}, implementation_notes: quality === null ? null : idmAuthorNote([quality.author_note], IDM_UNIT_NOTE_MAX_CHARS) });
   const nodes = [{ path: contract.unit_path, content: unitContent }, ...componentContents.map((content, index) => ({
     path: `${contract.unit_path}.component_${index + 1}`, content,
   }))].map(node => ({ ...node, content_hash: orchestrationV2Hash(node.content) }));

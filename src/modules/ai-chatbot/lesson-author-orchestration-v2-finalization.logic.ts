@@ -55,10 +55,21 @@ export interface OrchestrationV2ReviewRequiredReceiptV1 {
   receipt_hash: string;
 }
 
+/** IDM runs only (spec §8.5): fact counts per disposition, JSON payload only (no column). */
+export interface OrchestrationV2IdmAccounting {
+  course: number;
+  reference_job_aid: number;
+  nice_to_know: number;
+  remove: number;
+  hold: number;
+  noise: number;
+}
+
 export interface OrchestrationV2ReadyCourseFinalization {
   contract: typeof ORCHESTRATION_V2_COURSE_CONTRACT;
   completion: OrchestrationV2CompletionReceiptV2;
   chapter_receipt_hashes: string[];
+  idm_accounting?: OrchestrationV2IdmAccounting;
   course_artifact_hash: string;
 }
 
@@ -66,6 +77,7 @@ export interface OrchestrationV2ReviewCourseFinalization {
   contract: typeof ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT;
   review: OrchestrationV2ReviewRequiredReceiptV1;
   chapter_receipt_hashes: string[];
+  idm_accounting?: OrchestrationV2IdmAccounting;
   course_artifact_hash: string;
 }
 
@@ -99,6 +111,8 @@ interface OrchestrationV2FinalizationInput {
   tasks: readonly OrchestrationV2FinalizationTask[];
   chapter_receipts: readonly Readonly<OrchestrationV2ChapterReceipt>[];
   assessment_obligations?: readonly Readonly<OrchestrationV2AssessmentObligationEvidence>[];
+  /** IDM runs only: chapter receipts cover course + reference facts; the rest are accounted for by disposition. */
+  idm_accounting?: Readonly<OrchestrationV2IdmAccounting>;
 }
 
 export function finalizeOrchestrationV2Course(
@@ -156,9 +170,22 @@ export function finalizeOrchestrationV2Course(
     }
     receiptHashes.push(acceptedReceipt.receipt_hash);
   }
+  const accounting = input.idm_accounting;
+  if (accounting !== undefined) {
+    const counts = Object.values(accounting);
+    const excluded = accounting.nice_to_know + accounting.remove + accounting.hold + accounting.noise;
+    if (Object.keys(accounting).length !== 6 || counts.some(count => !Number.isSafeInteger(count) || count < 0)
+      || allocated !== accounting.course + accounting.reference_job_aid) {
+      fail('ORCHESTRATION_V2_FINALIZATION_INCOMPLETE');
+    }
+    allocated += excluded; covered += excluded;
+  }
   if (allocated !== input.admitted_fact_count || covered !== input.admitted_fact_count) {
     fail('ORCHESTRATION_V2_FINALIZATION_INCOMPLETE');
   }
+  const idmAccounting = accounting === undefined ? {} : { idm_accounting: { course: accounting.course,
+    reference_job_aid: accounting.reference_job_aid, nice_to_know: accounting.nice_to_know,
+    remove: accounting.remove, hold: accounting.hold, noise: accounting.noise } };
   const obligations = [...(input.assessment_obligations ?? [])];
   if (new Set(obligations.map(item => item.planned_slot_key)).size !== obligations.length
     || obligations.some(item => !/^ao2_[a-f0-9]{32}$/.test(item.planned_slot_key)
@@ -184,7 +211,7 @@ export function finalizeOrchestrationV2Course(
         duplicates: 'PASS' as const, chapters: 'PASS' as const, assessments: 'REVIEW_REQUIRED' as const } };
     const review = { ...reviewBase, receipt_hash: orchestrationV2Hash(reviewBase) };
     const artifactBase = { contract: ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT as typeof ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT,
-      review, chapter_receipt_hashes: receiptHashes };
+      review, chapter_receipt_hashes: receiptHashes, ...idmAccounting };
     if (Buffer.byteLength(JSON.stringify(artifactBase), 'utf8') > MAX_ARTIFACT_BYTES) {
       fail('ORCHESTRATION_V2_FINALIZATION_TOO_LARGE');
     }
@@ -199,7 +226,7 @@ export function finalizeOrchestrationV2Course(
       chapters: 'PASS' as const } };
   const completion = { ...completionBase, receipt_hash: orchestrationV2Hash(completionBase) };
   const artifactBase = { contract: ORCHESTRATION_V2_COURSE_CONTRACT as typeof ORCHESTRATION_V2_COURSE_CONTRACT, completion,
-    chapter_receipt_hashes: receiptHashes };
+    chapter_receipt_hashes: receiptHashes, ...idmAccounting };
   if (Buffer.byteLength(JSON.stringify(artifactBase), 'utf8') > MAX_ARTIFACT_BYTES) {
     fail('ORCHESTRATION_V2_FINALIZATION_TOO_LARGE');
   }

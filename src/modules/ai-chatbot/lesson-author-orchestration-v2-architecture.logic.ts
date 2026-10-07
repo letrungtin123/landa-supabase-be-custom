@@ -6,6 +6,7 @@ import type {
   OrchestrationV2LessonArchitecture,
   OrchestrationV2SourceScope,
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import { readIdmAssemblyExtension, type IdmAssemblyExtensionV1 } from './lesson-author-idm.contract.js';
 
 export interface OrchestrationV2ChapterShardArtifact {
   artifact_hash: string;
@@ -61,6 +62,8 @@ export interface OrchestrationV2ArchitectureAssembly {
     assumptions: string[];
     chapters: OrchestrationV2ArchitectureChapter[];
   };
+  /** IDM runs only (spec §12.3); legacy assemblies never carry the key. */
+  idm?: IdmAssemblyExtensionV1;
   assembly_hash: string;
 }
 
@@ -149,9 +152,26 @@ export function readOrchestrationV2ArchitectureAssembly(value: unknown): Orchest
     || item.chapter_count !== chapters.length || bytes(value) > MAX_ASSEMBLY_BYTES) {
     fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
   }
+  if (item.idm !== undefined) readIdmArchitectureExtension(item, chapters);
   const { assembly_hash: claimed, ...base } = item;
   if (orchestrationV2Hash(base) !== claimed) fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
   return item as unknown as OrchestrationV2ArchitectureAssembly;
+}
+
+function readIdmArchitectureExtension(item: Record<string, unknown>, chapters: unknown[]): void {
+  try {
+    const keys = chapters.map(chapter => String(record(chapter)?.chapter_key ?? ''));
+    const idm = readIdmAssemblyExtension(item.idm, keys);
+    const counts = idm.disposition_counts;
+    if (item.admitted_fact_count !== counts.course + counts.reference_job_aid
+      || chapters.some((chapter, index) => {
+        const lessons = record(chapter)?.lessons;
+        return !Array.isArray(lessons)
+          || lessons.length !== idm.chapters[keys[index]!]!.reduce((sum, shard) => sum + shard.lessons.length, 0);
+      })) fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+  } catch {
+    fail('ORCHESTRATION_V2_ARCHITECTURE_INVALID');
+  }
 }
 
 /**

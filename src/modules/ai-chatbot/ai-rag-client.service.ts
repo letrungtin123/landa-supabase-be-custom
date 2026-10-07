@@ -21,6 +21,8 @@ import {
   type OrchestrationV2SourceSnapshotPageResponse,
   type OrchestrationV2SourceScope,
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import { boundIdmRemainingBudgetMs, type IdmCourseSkeletonRequestV1,
+  type IdmModuleContextV1 } from './lesson-author-idm.contract.js';
 import { readOrchestrationV2UnitProviderResponse,
   type OrchestrationV2UnitGenerationContract,
   type OrchestrationV2UnitProviderResponse } from './lesson-author-orchestration-v2-unit.logic.js';
@@ -239,6 +241,8 @@ export interface RagLessonAuthorCourseSkeletonV2Request extends RagChatRequest {
   scope_catalog: OrchestrationV2SourceScope[];
   source_authority: OrchestrationV2SourceAuthority;
   max_attempts: 1 | 2;
+  /** Present only for runs admitted to the IDM pipeline (spec §12.4); legacy requests omit the key. */
+  idm?: IdmCourseSkeletonRequestV1;
 }
 
 export interface RagLessonAuthorChapterShardV2Request extends RagChatRequest {
@@ -247,6 +251,8 @@ export interface RagLessonAuthorChapterShardV2Request extends RagChatRequest {
   shard_plan: OrchestrationV2ChapterShardPlan;
   source_facts: OrchestrationV2SourceFact[];
   max_attempts: 1 | 2;
+  /** Present only for IDM runs; `source_facts` then carry block-scope keys (spec §11.2). */
+  idm_module_context?: IdmModuleContextV1;
 }
 
 export interface RagLessonAuthorUnitV2Request extends RagChatRequest {
@@ -640,10 +646,16 @@ export async function generateRagLessonAuthorCourseSkeletonV2(
 ): Promise<OrchestrationV2CourseSkeletonResponse> {
   const timeoutMs = orchestrationV2ExecutionTimeout(execution);
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const body = request.idm === undefined ? request : { ...request, idm: { ...request.idm,
+    remaining_budget_ms: boundIdmRemainingBudgetMs(request.idm.remaining_budget_ms, timeoutMs) } };
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/course-skeleton', {
-    ...request, api_key: apiKey,
+    ...body, api_key: apiKey,
   }, timeoutMs, execution.signal, execution.beforeProviderDispatch);
-  return readOrchestrationV2CourseSkeletonResponse(response, request.source_snapshot_hash);
+  const parsed = readOrchestrationV2CourseSkeletonResponse(response, request.source_snapshot_hash);
+  if (request.idm === undefined) return parsed;
+  // The shared skeleton reader keeps only the legacy envelope; the IDM design is
+  // carried raw and parsed strictly by the planning repository.
+  return { ...parsed, idm: asRecord(response)?.idm };
 }
 
 /** One independently retryable provider call shape, hard-bound to a single immutable chapter shard. */
@@ -654,8 +666,11 @@ export async function generateRagLessonAuthorChapterShardV2(
 ): Promise<OrchestrationV2ChapterShardResponse> {
   const timeoutMs = orchestrationV2ExecutionTimeout(execution);
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  const body = request.idm_module_context === undefined ? request : { ...request,
+    idm_module_context: { ...request.idm_module_context, remaining_budget_ms: boundIdmRemainingBudgetMs(
+      request.idm_module_context.remaining_budget_ms, timeoutMs) } };
   const response = await postRagJson<unknown>('/v1/lesson-author/orchestration-v2/chapter-shard', {
-    ...request, api_key: apiKey,
+    ...body, api_key: apiKey,
   }, timeoutMs, execution.signal, execution.beforeProviderDispatch);
   return readOrchestrationV2ChapterShardResponse(response, request.skeleton, request.shard_plan);
 }

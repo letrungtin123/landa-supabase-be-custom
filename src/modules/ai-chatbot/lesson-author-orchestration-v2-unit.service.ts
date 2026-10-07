@@ -20,7 +20,13 @@ export interface OrchestrationV2UnitRuntime {
   allowed_component_types: ReadonlySet<CourseComponentType>;
   /** Optional only for direct unit tests and rolling callers; production config always supplies it. */
   unit_soft_deadline_ms?: number;
+  /** Pipeline resolved from the run's runtime hash; absent means legacy. */
+  pipeline?: 'v2-legacy' | 'idm-1';
+  /** IDM units only (spec §12.5, `LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS`); defaults to 120 s. */
+  idm_unit_soft_deadline_ms?: number;
 }
+
+const IDM_UNIT_SOFT_DEADLINE_DEFAULT_MS = 120_000;
 
 export interface OrchestrationV2UnitClient {
   generate(request: RagLessonAuthorUnitV2Request,
@@ -111,12 +117,20 @@ export async function executeOrchestrationV2UnitTask(
     || !runtime.allowed_component_types.size
     || (runtime.unit_soft_deadline_ms !== undefined
       && (!Number.isSafeInteger(runtime.unit_soft_deadline_ms)
-        || runtime.unit_soft_deadline_ms < 5_000 || runtime.unit_soft_deadline_ms > 120_000))) {
+        || runtime.unit_soft_deadline_ms < 5_000 || runtime.unit_soft_deadline_ms > 120_000))
+    || (runtime.idm_unit_soft_deadline_ms !== undefined
+      && (!Number.isSafeInteger(runtime.idm_unit_soft_deadline_ms)
+        || runtime.idm_unit_soft_deadline_ms < 30_000 || runtime.idm_unit_soft_deadline_ms > 300_000))) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
   const input = await atStage('unit_authority_load',
     () => withTransientTransactionRetry(() => repository.load(lease), signal));
   if (input.contract.component_plan.some(plan => !runtime.allowed_component_types.has(plan.type))) {
+    throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
+  }
+  // The assembly decides whether a unit carries an IDM brief; it must agree with the run pipeline.
+  const idmUnit = input.contract.idm_unit_brief != null;
+  if (runtime.pipeline !== undefined && (runtime.pipeline === 'idm-1') !== idmUnit) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }
   // Only durable evidence of a previous provider dispatch can suppress a paid
@@ -132,7 +146,8 @@ export async function executeOrchestrationV2UnitTask(
       () => withTransientTransactionRetry(() => worker.markProviderDispatched(lease), signal));
     providerDispatchMarked = true;
   };
-  const softDeadlineMs = runtime.unit_soft_deadline_ms ?? 45_000;
+  const softDeadlineMs = idmUnit ? runtime.idm_unit_soft_deadline_ms ?? IDM_UNIT_SOFT_DEADLINE_DEFAULT_MS
+    : runtime.unit_soft_deadline_ms ?? 45_000;
   const workflowBudgetMs = Math.min(480_000, lease.execution_budget_ms, softDeadlineMs);
   // Let Python cross its own deadline and serialize the validated fallback
   // before the transport aborts. Never exceed the durable task budget.

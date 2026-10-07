@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
-import { readOrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
+import { readOrchestrationV2ArchitectureAssembly,
+  type OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
+import { idmUnitDesignAt } from './lesson-author-idm-architecture.logic.js';
+import { remapFactsToBlockScopes } from './lesson-author-idm-scope-view.logic.js';
+import { idmScopeFactKeys, loadIdmRunScopeView,
+  loadIdmSnapshotFacts } from './lesson-author-idm-scope-view.repository.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { prepareOrchestrationV2UnitGenerationContract, ORCHESTRATION_V2_UNIT_CONTRACT,
@@ -119,13 +124,14 @@ export function createOrchestrationV2UnitRepository(
       const lesson = chapter?.lessons[Number(pathMatch[2]) - 1];
       const unit = lesson?.units[Number(pathMatch[3]) - 1];
       if (!chapter || !unit || chapter.chapter_key !== lease.chapter_key) fail('ORCHESTRATION_V2_UNIT_EVIDENCE_INVALID');
-      const factsResult = await tx.query(`SELECT document_id::text,fact_key,scope_key,fact_text,source_ref,
+      const contract = assembly.idm === undefined ? prepareOrchestrationV2UnitGenerationContract({ assembly,
+        unit_path: unitPath, source_facts: (await tx.query(`SELECT document_id::text,fact_key,scope_key,fact_text,source_ref,
           source_page,source_chunk,locator FROM lesson_author_workspace_source_facts
         WHERE snapshot_id=$1 AND workspace_id=$2 AND tenant_id=$3 AND course_id=$4
           AND scope_key=ANY($5::text[]) ORDER BY ordinal`,
-      [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id, unit.source_scope_ids]);
-      const contract = prepareOrchestrationV2UnitGenerationContract({ assembly, unit_path: unitPath,
-        source_facts: factsResult.rows as unknown as OrchestrationV2SourceFact[] });
+      [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id, unit.source_scope_ids]))
+        .rows as unknown as OrchestrationV2SourceFact[] })
+        : await idmUnitContract(tx, lease, assembly, unitPath, pathMatch, unit.source_scope_ids);
       const expectedInputHash = orchestrationV2Hash({ assembly_hash: assembly.assembly_hash,
         inventory_hash: inventoryHash, node_id: lease.node_id,
         contract_hash: row.node_contract_hash, source_scope_ids: unit.source_scope_ids });
@@ -153,6 +159,27 @@ export function createOrchestrationV2UnitRepository(
           type: String(document.type), status: String(document.status),
         })) }), contract };
     });
+  }
+
+  /**
+   * IDM unit contract (spec §8.3): facts come from the unit's block scopes through
+   * the run's scope view; the brief also needs the facts of the whole lesson.
+   */
+  async function idmUnitContract(tx: GenerationJobSql, lease: OrchestrationV2TaskLease,
+    assembly: OrchestrationV2ArchitectureAssembly, unitPath: string, pathMatch: RegExpExecArray,
+    unitScopes: readonly string[]): Promise<Readonly<OrchestrationV2UnitGenerationContract>> {
+    const view = await loadIdmRunScopeView(tx, lease, assembly.idm!.design_hash);
+    const { lesson } = idmUnitDesignAt(assembly, Number(pathMatch[1]) - 1, Number(pathMatch[2]) - 1,
+      Number(pathMatch[3]) - 1);
+    const lessonScopes = lesson.units.flatMap(item => item.block_ids).map(blockId =>
+      view.design.block_scopes.find(scope => scope.block_id === blockId)?.scope_key
+        ?? fail('ORCHESTRATION_V2_UNIT_EVIDENCE_INVALID'));
+    if (unitScopes.some(scope => !lessonScopes.includes(scope))) fail('ORCHESTRATION_V2_UNIT_EVIDENCE_INVALID');
+    const lessonFacts = await loadIdmSnapshotFacts(tx, lease, idmScopeFactKeys(view, lessonScopes));
+    const unitKeys = new Set(idmScopeFactKeys(view, unitScopes));
+    return prepareOrchestrationV2UnitGenerationContract({ assembly, unit_path: unitPath,
+      source_facts: remapFactsToBlockScopes(lessonFacts.filter(fact => unitKeys.has(fact.fact_key)), view),
+      idm: { design: view.design, lesson_facts: lessonFacts } });
   }
 
   async function complete(lease: OrchestrationV2TaskLease, publication: Readonly<OrchestrationV2UnitPublication>,

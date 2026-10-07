@@ -9,6 +9,7 @@ import {
   type OrchestrationV2TaskKind,
 } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
+import { idmAuthorNote, idmChapterLessonDesigns } from './lesson-author-idm-architecture.logic.js';
 
 export interface OrchestrationV2StoredTask extends OrchestrationV2PersistedTask { id: string }
 
@@ -98,9 +99,13 @@ export function orchestrationV2ComponentPlanId(assemblyHash: string, canonicalPa
   return `cp2_${orchestrationV2Hash({ assembly: assemblyHash, path: canonicalPath }).slice(0, 32)}`;
 }
 
-const content = (title: string, purpose: string | null, data: WorkspaceJson): WorkspaceContent => ({
-  title, purpose, data, implementation_notes: null,
+const content = (title: string, purpose: string | null, data: WorkspaceJson,
+  implementationNotes: string | null = null): WorkspaceContent => ({
+  title, purpose, data, implementation_notes: implementationNotes,
 });
+const IDM_COURSE_NOTE_MAX_CHARS = 7_000;
+const IDM_MODULE_NOTE_MAX_CHARS = 3_000;
+const IDM_LESSON_NOTE_MAX_CHARS = 2_000;
 
 function deterministicBudget(executionBudgetMs: number): OrchestrationV2Budget {
   return { input_tokens: 0, embedding_tokens: 0, max_output_tokens: 0,
@@ -149,11 +154,15 @@ export function prepareOrchestrationV2InventoryIdentity(input: {
       protected_contract: protectedContract, baseline: kind === 'unit' ? null : baseline });
   };
 
+  // IDM runs only (spec §8.4): author notes from the course design and the
+  // module design. Legacy assemblies carry no `idm`, so every note stays null.
+  const idm = assembly.idm;
   const allScopes = assembly.architecture.chapters.flatMap(chapter => chapter.source_scope_ids);
   storyboard('course', 'course', null, 0, content(assembly.architecture.title, null, {
     summary: assembly.architecture.summary, target_audience: assembly.architecture.target_audience,
     prerequisites: assembly.architecture.prerequisites, assessment_strategy: assembly.architecture.assessment_strategy,
-  }), allScopes, [], { chapter_count: assembly.chapter_count });
+  }, idm ? idmAuthorNote([idm.notes.course], IDM_COURSE_NOTE_MAX_CHARS) : null),
+  allScopes, [], { chapter_count: assembly.chapter_count });
 
   const unitBindings: Array<{ chapter_key: string; chapter_node_id: string; unit_node_id: string;
     unit_path: string; unit_contract_hash: string; source_scope_ids: string[]; unit: unknown }> = [];
@@ -161,16 +170,21 @@ export function prepareOrchestrationV2InventoryIdentity(input: {
     const chapterPath = `chapter_${chapterIndex + 1}`;
     storyboard('chapter', chapterPath, 'course', chapterIndex, content(chapter.title, null, {
       objective: chapter.objective, learning_outcomes: chapter.learning_outcomes ?? [],
-    }), chapter.source_scope_ids);
+    }, idm ? idmAuthorNote([idm.notes.modules[idm.module_keys[chapterIndex] ?? '']], IDM_MODULE_NOTE_MAX_CHARS) : null),
+    chapter.source_scope_ids);
+    const lessonDesigns = idm ? idmChapterLessonDesigns(idm, chapter.chapter_key) : null;
+    if (lessonDesigns && lessonDesigns.length !== chapter.lessons.length) fail();
     const chapterNodeId = paths.get(chapterPath)!;
     let chapterUnitIndex = 0;
     for (const [lessonIndex, lesson] of chapter.lessons.entries()) {
       const lessonPath = `${chapterPath}.lesson_${lessonIndex + 1}`;
       const lessonScopes = lesson.units.flatMap(unit => unit.source_scope_ids);
+      const lessonDesign = lessonDesigns?.[lessonIndex];
       storyboard('lesson', lessonPath, chapterPath, lessonIndex, content(lesson.title, null, {
         objective: lesson.objective, learning_objectives: lesson.learning_objectives,
         learning_activities: lesson.learning_activities, assessment: lesson.assessment,
-      }), lessonScopes, lesson.learning_objectives.map((_value, index) => `lo_${index + 1}`),
+      }, idm && lessonDesign ? idmAuthorNote([idm.notes.lessons[lessonDesign.lesson_key], lessonDesign.notes],
+        IDM_LESSON_NOTE_MAX_CHARS) : null), lessonScopes, lesson.learning_objectives.map((_value, index) => `lo_${index + 1}`),
       { objective_slots: lesson.learning_objectives.length });
       for (const [unitIndex, unit] of lesson.units.entries()) {
         const unitPath = `${lessonPath}.unit_${unitIndex + 1}`;
@@ -295,8 +309,11 @@ export function prepareOrchestrationV2InventoryPublication(input: {
     depends_on: chapterValidationKeys, budget: finalBudget });
   const manifest = sealOrchestrationV2PersistedManifest({ source_snapshot_hash: assembly.source_snapshot_hash,
     tasks: [...existing, ...newTasks] });
+  // IDM: the run admits every snapshot fact; facts outside the course are
+  // accounted for by their disposition (spec §8.5). Legacy adds nothing.
+  const admittedFactCount = assembly.admitted_fact_count + (assembly.idm?.excluded_fact_count ?? 0);
   const receiptBase = { contract: 'lesson-author-inventory-publication-v2' as const,
-    assembly_hash: assembly.assembly_hash, admitted_fact_count: assembly.admitted_fact_count,
+    assembly_hash: assembly.assembly_hash, admitted_fact_count: admittedFactCount,
     inventory_hash: inventoryHash, manifest_hash: manifest.manifest_hash,
     node_count: nodes.length, unit_count: unitCount, component_count: componentCount,
     media_brief_count: mediaBriefCount, task_count: manifest.tasks.length };

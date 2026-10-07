@@ -21,6 +21,8 @@ export interface OrchestrationV2RuntimeConfig {
   dispatch_batch_size: number;
   recovery_batch_size: number;
   unit_soft_deadline_ms: number;
+  /** IDM runs only (spec §12.5): W5 writer + W6 judge need a longer unit budget. */
+  idm_unit_soft_deadline_ms: number;
   outbox: OrchestrationV2OutboxConfig;
   worker: OrchestrationV2WorkerLimits & { recovery_batch_size: number };
 }
@@ -55,6 +57,7 @@ export function readOrchestrationV2RuntimeConfig(): Readonly<OrchestrationV2Runt
     dispatch_batch_size: env.LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE,
     recovery_batch_size: env.LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE,
     unit_soft_deadline_ms: env.LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS,
+    idm_unit_soft_deadline_ms: env.LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS,
     outbox,
     worker: Object.freeze({
       ...workerLimits,

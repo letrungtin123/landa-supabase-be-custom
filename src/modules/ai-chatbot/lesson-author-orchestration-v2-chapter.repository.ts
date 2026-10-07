@@ -9,6 +9,7 @@ import {
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import type { OrchestrationV2TaskLease, createOrchestrationV2WorkerRepository } from './lesson-author-orchestration-v2-worker.repository.js';
+import { loadIdmRunScopeView, loadIdmScopeFacts } from './lesson-author-idm-scope-view.repository.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 
@@ -109,11 +110,15 @@ export function createOrchestrationV2ChapterRepository(
       if (expectedInputHash !== lease.input_context_hash || expectedContractHash !== lease.contract_hash) {
         fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
       }
-      const facts = await tx.query(`SELECT document_id::text,fact_key,scope_key,fact_text,fact_hash,source_ref,
+      // IDM: the chapter's COURSE facts are the facts of its block scopes (spec §8.5),
+      // re-keyed through the run's scope view; legacy reads its snapshot scopes.
+      const facts = assembly.idm === undefined ? await tx.query(`SELECT document_id::text,fact_key,scope_key,fact_text,fact_hash,source_ref,
           source_page,source_chunk,locator FROM lesson_author_workspace_source_facts
         WHERE snapshot_id=$1 AND workspace_id=$2 AND tenant_id=$3 AND course_id=$4
           AND scope_key=ANY($5::text[]) ORDER BY ordinal`,
-      [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id, acceptedChapter.source_scope_ids]);
+      [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id, acceptedChapter.source_scope_ids])
+        : { rows: await loadIdmScopeFacts(tx, lease, await loadIdmRunScopeView(tx, lease, assembly.idm.design_hash),
+          acceptedChapter.source_scope_ids, true) };
       const paths = units.rows.flatMap(item => {
         const payload = record(item.payload), nodes = Array.isArray(payload?.nodes) ? payload.nodes : [];
         return nodes.map(node => String(record(node)?.path ?? ''));

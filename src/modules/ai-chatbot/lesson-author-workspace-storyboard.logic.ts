@@ -63,9 +63,18 @@ export function workspaceStoryboardBoundSeed(input: {
     || parsedBinding.data.canonical_path !== input.canonical_path
     || !Number.isSafeInteger(input.sort_order) || input.sort_order < 0) contract();
   const baseline = readContent(input.kind, input.baseline);
-  if (parsedBinding.data.baseline_hash !== hash(baseline)) contract();
+  if (parsedBinding.data.baseline_hash !== boundBaselineHash(input.kind, baseline)) contract();
   return { kind: input.kind, canonical_path: input.canonical_path, parent_path: input.parent_path,
     sort_order: input.sort_order, binding: parsedBinding.data, baseline };
+}
+/** The hash a storyboard binding authenticates. A unit binding is fixed at
+ * inventory time, before generate_unit writes the unit's IDM QA author note
+ * (spec §8.4) into revision 0, so it covers every field except that note; the
+ * accepted unit artifact hash binds the note instead. Only IDM units carry a
+ * note: for every legacy baseline this is exactly hash(baseline). */
+function boundBaselineHash(kind: WorkspaceStoryboardKind, baseline: WorkspaceContent): string {
+  return hash(kind === 'unit' && baseline.implementation_notes !== null
+    ? { ...baseline, implementation_notes: null } : baseline);
 }
 function readContent(kind: WorkspaceStoryboardKind, value: unknown) {
   const content = readWorkspaceContent(value);
@@ -180,7 +189,7 @@ export function workspaceStoryboardSeed(blueprint: LessonAuthorBlueprint, kind: 
  */
 export function editWorkspaceStoryboard(seed: WorkspaceStoryboardSeed, value: unknown): WorkspaceContent {
   if (!bindingSchema.safeParse(seed.binding).success || seed.binding.kind !== seed.kind || seed.binding.canonical_path !== seed.canonical_path
-    || seed.binding.baseline_hash !== hash(seed.baseline)) contract();
+    || seed.binding.baseline_hash !== boundBaselineHash(seed.kind, seed.baseline)) contract();
   const content = readContent(seed.kind, value);
   if (seed.kind === 'chapter') {
     const baselineData = seed.baseline.data as { learning_objectives?: string[]; learning_outcomes?: string[] };
@@ -211,8 +220,10 @@ export function workspaceStoryboardView(seed: WorkspaceStoryboardSeed, current: 
   const content = editWorkspaceStoryboard(seed, current);
   return { kind: seed.kind, content, readonly_references: structuredClone(seed.binding.readonly_references),
     media_type: seed.binding.media_type, brief_format: seed.binding.brief_format,
-    user_modified: hash(content) !== seed.binding.baseline_hash,
-    author_review_required: hash(content) !== seed.binding.baseline_hash,
+    // seed.baseline is authenticated by editWorkspaceStoryboard above; it equals
+    // binding.baseline_hash except for an IDM unit's generation-time note.
+    user_modified: hash(content) !== hash(seed.baseline),
+    author_review_required: hash(content) !== hash(seed.baseline),
     semantic_fidelity: 'not_measured' as const, apply_readiness: 'NOT_EVALUATED' as const };
 }
 

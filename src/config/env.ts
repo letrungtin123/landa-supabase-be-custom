@@ -102,6 +102,15 @@ function optionalCsv(key: string): string[] {
   return raw.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+function optionalUuidCsv(key: string): string[] {
+  const values = optionalCsv(key).map((item) => item.toLowerCase());
+  const invalid = values.find((item) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(item));
+  if (invalid !== undefined) {
+    throw new Error(`[ENV] ${key} must be a comma-separated list of UUIDs, received: "${invalid}"`);
+  }
+  return [...new Set(values)];
+}
+
 function optionalString(key: string, fallback: string): string {
   return process.env[key]?.trim() || fallback;
 }
@@ -236,6 +245,13 @@ export const env = {
   ),
   LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS', 30, 5, 45),
   LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE', 25, 1, 500),
+  // AI ID IDM pipeline (spec §5.4). Admission-only switch: new V2 runs of allow-listed tenants
+  // (empty list = every tenant) record the IDM runtime hash; running runs are never re-routed.
+  LESSON_AUTHOR_IDM_PIPELINE_ENABLED: optionalBoolean('LESSON_AUTHOR_IDM_PIPELINE_ENABLED', false),
+  LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST: optionalUuidCsv('LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST'),
+  LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS: optionalBoundedInt(
+    'LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS', 120_000, 30_000, 300_000,
+  ),
   AI_RAG_INDEX_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_INDEX_REQUEST_TIMEOUT_MS', 900_000, 10_000, 3_600_000),
   AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),

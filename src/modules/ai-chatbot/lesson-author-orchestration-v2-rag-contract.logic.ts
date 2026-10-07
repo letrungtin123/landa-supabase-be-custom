@@ -174,6 +174,8 @@ export interface OrchestrationV2CourseSkeletonResponse {
   usage_source?: 'provider' | 'reserved_upper_bound';
   content_origin?: 'provider_validated' | 'structured_fallback';
   quality_state?: 'validated' | 'review_required';
+  /** Raw IDM course design, attached by the client only for IDM requests; parsed in `completeSkeleton`. */
+  idm?: unknown;
 }
 
 export interface OrchestrationV2ChapterShardResponse {
