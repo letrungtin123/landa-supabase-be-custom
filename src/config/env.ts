@@ -115,6 +115,23 @@ function optionalString(key: string, fallback: string): string {
   return process.env[key]?.trim() || fallback;
 }
 
+/** Optional `scheme://host[:port]` (http/https, no path, query, fragment or credentials). */
+function optionalOrigin(key: string): string {
+  const raw = process.env[key]?.trim();
+  if (!raw) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`[ENV] ${key} must be an origin such as https://host:8443`);
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password
+    || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== '/')) {
+    throw new Error(`[ENV] ${key} must be an origin such as https://host:8443 (no path, query or credentials)`);
+  }
+  return parsed.origin;
+}
+
 function optionalOneOf<const T extends readonly string[]>(key: string, fallback: T[number], allowed: T): T[number] {
   const value = optionalString(key, fallback);
   if (!allowed.includes(value as T[number])) {
@@ -253,6 +270,15 @@ export const env = {
     'LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS', 120_000, 30_000, 300_000,
   ),
   AI_RAG_INDEX_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_INDEX_REQUEST_TIMEOUT_MS', 900_000, 10_000, 3_600_000),
+  // Idle keep-alive of reused sockets to the AI service. It must stay below the server side
+  // (uvicorn AI_RAG_KEEP_ALIVE_TIMEOUT_SECONDS=75, nginx keepalive_timeout 75 s) so a socket is
+  // never reused just as the server closes it (ECONNRESET).
+  AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS: optionalBoundedInt('AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS', 30_000, 1_000, 60_000),
+  // SEP-1: the AI service downloads KB sources through a short-lived signed URL instead of a
+  // storage service key. TTL covers the AI's index-slot wait plus the download.
+  AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS: optionalBoundedInt('AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS', 600, 60, 3_600),
+  // Origin the AI server reaches storage on when SUPABASE_URL is local to this host (empty = keep it).
+  AI_RAG_STORAGE_SIGNED_URL_ORIGIN: optionalOrigin('AI_RAG_STORAGE_SIGNED_URL_ORIGIN'),
   AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),
   // A source-backed Blueprint may use the provider's full 65,536-token

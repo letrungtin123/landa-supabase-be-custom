@@ -19,7 +19,7 @@ import {
 } from './gemini.service.js';
 import type { AiEngine } from './ai-engine.types.js';
 import { getTenantAiRuntimeSettings } from './ai-settings.service.js';
-import { deleteKbGeminiRemoteResources, linkDocumentGemini } from './kb.service.js';
+import { createKbDocumentSourceDownloadUrl, deleteKbGeminiRemoteResources, linkDocumentGemini } from './kb.service.js';
 import {
   estimateTokensFromText,
   finalizeTenantAiTokens,
@@ -306,12 +306,17 @@ async function indexDocumentToRag(job: AiEngineTransitionJob, doc: TransitionDoc
       estimatedTokens: estimateDocumentIndexTokens(doc),
     });
     reservationId = reservation.id;
+    // SEP-1: the AI service downloads the source through this short-lived URL (no storage key).
+    const sourceDownloadUrl = doc.file_path
+      ? await createKbDocumentSourceDownloadUrl(doc.file_path, job.tenant_id)
+      : null;
     const result = await indexRagDocument({
       tenantId: job.tenant_id,
       kbId: doc.kb_id,
       documentId: doc.id,
       embeddingModel: settings.embeddingModel,
       embeddingDimensions: settings.embeddingDimensions,
+      sourceDownloadUrl,
     });
     if (result.status !== 'learned') {
       throw new Error(result.error_reason || `Không thể index RAG cho tài liệu ${doc.id}`);

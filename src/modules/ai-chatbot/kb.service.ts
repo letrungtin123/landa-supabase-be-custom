@@ -6,7 +6,9 @@ import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
 import { cacheKey } from '../../config/cache.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
-import { uploadFile, buildStoragePath, buildFileName, deleteFile } from '../../config/storage.js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { uploadFile, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../config/storage.js';
+import { signKbDocumentSourceUrl } from './kb-source-download-url.logic.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { getRedisClient } from '../../config/redis.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -1426,6 +1428,31 @@ export async function updateDocumentStatus(
   );
   const tenantId = result.rows[0]?.tenant_id;
   if (tenantId) await invalidateTenantAiCaches(tenantId);
+}
+
+let sourceUrlSigningClient: SupabaseClient | null = null;
+
+/**
+ * SEP-1: signed URL (TTL AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS) the AI service downloads one KB
+ * source through, instead of holding the storage service key. The URL is a bearer credential:
+ * pass it straight to the index request and never log or persist it.
+ */
+export async function createKbDocumentSourceDownloadUrl(filePath: string, tenantId: string): Promise<string> {
+  return signKbDocumentSourceUrl({
+    filePath,
+    tenantId,
+    bucket: STORAGE_BUCKET,
+    ttlSeconds: env.AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS,
+    origin: env.AI_RAG_STORAGE_SIGNED_URL_ORIGIN,
+    sign: async (bucket, objectPath, ttlSeconds) => {
+      sourceUrlSigningClient ??= createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { data, error } = await sourceUrlSigningClient.storage.from(bucket).createSignedUrl(objectPath, ttlSeconds);
+      if (error || !data?.signedUrl) throw new Error('KB_SOURCE_SIGNED_URL_FAILED');
+      return data.signedUrl;
+    },
+  });
 }
 
 /**

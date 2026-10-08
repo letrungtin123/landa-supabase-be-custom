@@ -7,6 +7,7 @@ import {
   createRabbitChannel,
   getChannel,
 } from '../config/rabbitmq/index.js';
+import { logRagServiceMetaOnce } from '../modules/ai-chatbot/ai-rag-client.service.js';
 import { createOrchestrationV2OutboxRepository } from '../modules/ai-chatbot/lesson-author-orchestration-v2-outbox.repository.js';
 import { assertOrchestrationV2ProductionProcessFence } from '../modules/ai-chatbot/lesson-author-orchestration-v2-process-fence.js';
 import {
@@ -76,6 +77,9 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
+  // SEP-1 #5: record the AI service build/contract identity once; a mismatch or an unreachable
+  // service only warns (the AI may be deployed separately and come up later).
+  void logRagServiceMetaOnce();
   const deps = createOrchestrationV2WorkerRuntimeDependencies(config);
   const channel = await createRabbitChannel();
   consumer = await startOrchestrationV2RabbitConsumer(channel, config.queue,

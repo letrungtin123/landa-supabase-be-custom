@@ -24,7 +24,7 @@
     "worker:lesson-author-orchestration-v2": "node scripts/start-local-lesson-author-orchestration-v2-worker.mjs",
     "test:lesson-author-orchestration-v2": "node scripts/test-lesson-author-orchestration-v2.mjs",
     "test:tenant-data-quota": "tsx --test src/modules/tenants/tenant-data-quota.logic.test.ts",
-    "test:kb-operations": "tsx --test src/modules/ai-chatbot/kb-operation.logic.test.ts",
+    "test:kb-operations": "tsx --test src/modules/ai-chatbot/kb-operation.logic.test.ts src/modules/ai-chatbot/kb-source-download-url.logic.test.ts src/modules/ai-chatbot/ai-rag-client.transport.test.ts",
     "test:tenant-data-quota:integration": "tsx src/scripts/test-tenant-data-quota-integration.ts",
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",
     "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts",

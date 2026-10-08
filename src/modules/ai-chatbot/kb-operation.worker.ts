@@ -26,12 +26,14 @@ import {
   type KbOperationJob,
 } from './kb-operation.service.js';
 import {
+  createKbDocumentSourceDownloadUrl,
   deleteDocumentGeminiMappingsStrict,
   deleteKbGeminiRemoteResources,
   getDocument,
   linkDocumentGemini,
   updateDocumentStatus,
 } from './kb.service.js';
+import { AppError } from '../../middleware/error-handler.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 
@@ -39,6 +41,11 @@ let drainInFlight = false;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Safe code of an application error (e.g. AI_PROVIDER_UNAVAILABLE from the AI service) for logs. */
+function kbOperationErrorCode(error: unknown): string | null {
+  return error instanceof AppError && error.code ? error.code : null;
 }
 
 function previousFilePath(job: KbOperationJob): string | null {
@@ -143,12 +150,20 @@ async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
     });
     reservationId = reservation.id;
     await assertLease(job);
+    // SEP-1: the AI service reads the stored source through this short-lived URL (it holds no
+    // storage key). Signed right before the request so the TTL covers the AI's queue and download.
+    const sourceDownloadUrl = doc.file_path
+      ? await createKbDocumentSourceDownloadUrl(doc.file_path, job.tenant_id)
+      : null;
+    // A transient AI failure (503 + code, e.g. AI_PROVIDER_UNAVAILABLE) rejects here and reaches
+    // runKbOperation's catch, where failKbOperation schedules the retry with backoff.
     const result = await indexRagDocument({
       tenantId: job.tenant_id,
       kbId: job.kb_id,
       documentId: doc.id,
       embeddingModel: settings.embeddingModel,
       embeddingDimensions: settings.embeddingDimensions,
+      sourceDownloadUrl,
     });
     if (result.status !== 'learned') {
       throw new Error(result.error_reason || 'AI RAG không thể học tài liệu này');
@@ -289,7 +304,9 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
         : errorMessage(error);
       await updateDocumentStatus(job.document_id, 'error', message).catch(() => undefined);
     }
-    console.error(`[KbOperationWorker] ${job.operation} ${job.id} failed: ${errorMessage(error)}`);
+    const code = kbOperationErrorCode(error);
+    console.error(`[KbOperationWorker] ${job.operation} ${job.id} failed${code ? ` (code=${code})` : ''}`
+      + `${outcome.terminal ? ' (terminal)' : ' (will retry)'}: ${errorMessage(error)}`);
   } finally {
     if (lockClient) {
       try {

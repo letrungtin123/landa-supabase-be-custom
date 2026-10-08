@@ -21,8 +21,8 @@ import {
   type OrchestrationV2SourceSnapshotPageResponse,
   type OrchestrationV2SourceScope,
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
-import { boundIdmRemainingBudgetMs, type IdmCourseSkeletonRequestV1,
-  type IdmModuleContextV1 } from './lesson-author-idm.contract.js';
+import { boundIdmRemainingBudgetMs, IDM_CONTRACT_VERSION, IDM_PIPELINE_VERSION, IDM_PROMPT_POLICY_VERSION,
+  type IdmCourseSkeletonRequestV1, type IdmModuleContextV1 } from './lesson-author-idm.contract.js';
 import { readOrchestrationV2UnitProviderResponse,
   type OrchestrationV2UnitGenerationContract,
   type OrchestrationV2UnitProviderResponse } from './lesson-author-orchestration-v2-unit.logic.js';
@@ -326,6 +326,17 @@ function readSafeUsage(value: unknown): Partial<AiUsage> | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
+/** User-facing text (kb_documents.error_reason on a terminal failure) for SEP-1 index/storage codes. */
+const RAG_INDEX_ERROR_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  DOCUMENT_TYPE_UNSUPPORTED: 'Định dạng tài liệu chưa được hỗ trợ để AI học. Hãy dùng PDF, Word, PowerPoint, Excel, TXT, Markdown hoặc CSV.',
+  STORAGE_OBJECT_UNAVAILABLE: 'Không tìm thấy tệp nguồn của tài liệu trong kho lưu trữ.',
+  STORAGE_DOWNLOAD_FAILED: 'Không tải được tệp nguồn từ kho lưu trữ. Hệ thống sẽ thử lại.',
+  STORAGE_URL_REJECTED: 'Cấu hình tải tệp nguồn cho dịch vụ AI chưa đúng. Vui lòng liên hệ quản trị viên.',
+  STORAGE_REDIRECT_REJECTED: 'Cấu hình tải tệp nguồn cho dịch vụ AI chưa đúng. Vui lòng liên hệ quản trị viên.',
+  SOURCE_DOWNLOAD_URL_REQUIRED: 'Cấu hình tải tệp nguồn cho dịch vụ AI chưa đúng. Vui lòng liên hệ quản trị viên.',
+  DATABASE_NOT_READY: 'Dịch vụ AI đang khởi động. Hệ thống sẽ thử lại.',
+});
+
 function readSafeRagErrorCode(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const code = value.trim();
@@ -356,20 +367,41 @@ function isRagRequestTimeout(error: unknown): boolean {
   return error instanceof Error && error.message === 'AI_RAG_REQUEST_TIMEOUT';
 }
 
+/**
+ * SEP-1 #6: keep-alive agents for the AI service. A reused socket idles out after
+ * AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS (default 30 s), below the server side (uvicorn 75 s, nginx 75 s),
+ * so the client never writes a request onto a socket the server is closing (ECONNRESET). Every
+ * request still sets its own, longer timeout while it is in flight.
+ */
+export function createRagHttpAgents(idleTimeoutMs: number): { http: http.Agent; https: https.Agent } {
+  const options = { keepAlive: true, timeout: idleTimeoutMs, scheduling: 'lifo' as const };
+  return { http: new http.Agent(options), https: new https.Agent(options) };
+}
+
+const ragHttpAgents = createRagHttpAgents(env.AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS);
+
 interface PreparedRagRequest {
+  method: 'GET' | 'POST';
   requestBody: string;
   url: URL;
   transport: typeof http | typeof https;
+  agent: http.Agent | https.Agent;
   correlationId?: string;
 }
 
-function prepareRagRequest(path: string, body: Record<string, unknown>): PreparedRagRequest {
-  const requestBody = JSON.stringify(body);
+function prepareRagRequest(
+  path: string,
+  body: Record<string, unknown> | null,
+  method: 'GET' | 'POST' = 'POST',
+): PreparedRagRequest {
+  const requestBody = body === null ? '' : JSON.stringify(body);
   const url = new URL(`${requireRagServiceUrl()}${path}`);
-  const correlationId = typeof body.correlation_id === 'string' && body.correlation_id.trim()
+  const correlationId = typeof body?.correlation_id === 'string' && body.correlation_id.trim()
     ? body.correlation_id.trim()
     : undefined;
-  return { requestBody, url, transport: url.protocol === 'https:' ? https : http, correlationId };
+  const secure = url.protocol === 'https:';
+  return { method, requestBody, url, transport: secure ? https : http,
+    agent: secure ? ragHttpAgents.https : ragHttpAgents.http, correlationId };
 }
 
 export function buildRagHmacHeaders(input: {
@@ -397,12 +429,12 @@ async function requestRagJson(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ statusCode: number; payload: unknown }> {
-  const { requestBody, url, transport } = prepared;
+  const { method, requestBody, url, transport, agent } = prepared;
   const hmacHeaders = buildRagHmacHeaders({
     keyId: env.AI_RAG_SERVICE_HMAC_KEY_ID,
     secret: env.AI_RAG_SERVICE_HMAC_SECRET,
     timestamp: Math.floor(Date.now() / 1_000).toString(),
-    method: 'POST',
+    method,
     path: url.pathname,
     requestBody,
     requestId: randomUUID(),
@@ -410,10 +442,13 @@ async function requestRagJson(
 
   return new Promise((resolve, reject) => {
     const req = transport.request(url, {
-      method: 'POST',
+      method,
+      agent,
       headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(requestBody).toString(),
+        ...(method === 'POST' ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(requestBody).toString(),
+        } : {}),
         ...(getRagServiceToken() ? { 'X-Landa-AI-Service-Token': getRagServiceToken() } : {}),
         ...hmacHeaders,
         ...(prepared.correlationId ? { 'X-Correlation-Id': prepared.correlationId } : {}),
@@ -440,7 +475,7 @@ async function requestRagJson(
       req.destroy(new Error('AI_RAG_REQUEST_TIMEOUT'));
     });
     req.on('error', reject);
-    req.write(requestBody);
+    if (method === 'POST') req.write(requestBody);
     req.end();
   });
 }
@@ -452,7 +487,15 @@ async function postRagJson<T>(
   signal?: AbortSignal,
   beforeRequestDispatch?: () => Promise<void>,
 ): Promise<T> {
-  const prepared = prepareRagRequest(path, body);
+  return sendRagJson<T>(prepareRagRequest(path, body), timeoutMs, signal, beforeRequestDispatch);
+}
+
+async function sendRagJson<T>(
+  prepared: PreparedRagRequest,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  beforeRequestDispatch?: () => Promise<void>,
+): Promise<T> {
   await beforeRequestDispatch?.();
   try {
     const response = await requestRagJson(prepared, timeoutMs, signal);
@@ -478,7 +521,7 @@ async function postRagJson<T>(
           ? 'Tài liệu vượt giới hạn xử lý an toàn. Vui lòng giảm dung lượng hoặc độ dài tài liệu.'
           : code === 'SERVICE_BUSY'
             ? 'Dịch vụ AI đang bận. Vui lòng thử lại sau.'
-            : message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.';
+            : RAG_INDEX_ERROR_MESSAGES[code] ?? (message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.');
       throw new RagServiceError(
         safeMessage,
         response.statusCode >= 500 ? 503 : response.statusCode,
@@ -699,22 +742,100 @@ export async function generateRagLessonAuthorUnitV2(
   return readOrchestrationV2UnitProviderResponse(response, request.unit_contract);
 }
 
-export async function indexRagDocument(input: {
+export interface RagIndexDocumentInput {
   tenantId: string;
   kbId: string;
   documentId: string;
   embeddingModel: string;
   embeddingDimensions: number;
-}): Promise<RagIndexResponse> {
-  const apiKey = await getGoogleAiStudioApiKey(input.tenantId);
-  return postRagJson<RagIndexResponse>('/v1/kb/documents/index', {
+  /**
+   * SEP-1: short-lived signed URL for kb_documents.file_path (see createKbDocumentSourceDownloadUrl).
+   * A bearer credential: never log it. Omitted for text-only documents.
+   */
+  sourceDownloadUrl?: string | null;
+}
+
+export function buildRagIndexRequestBody(input: RagIndexDocumentInput, apiKey: string): Record<string, unknown> {
+  return {
     api_key: apiKey,
     tenant_id: input.tenantId,
     kb_id: input.kbId,
     document_id: input.documentId,
     embedding_model: input.embeddingModel,
     embedding_dimensions: input.embeddingDimensions,
-  }, env.AI_RAG_INDEX_REQUEST_TIMEOUT_MS);
+    ...(input.sourceDownloadUrl ? { source_download_url: input.sourceDownloadUrl } : {}),
+  };
+}
+
+/**
+ * A transient AI failure (provider 503/429/timeout, SERVICE_BUSY, DATABASE_NOT_READY, storage
+ * download failure) rejects with RagServiceError(statusCode 503, code); the durable workers' existing
+ * catch path then schedules a retry. HTTP 200 with status "error" stays a deterministic failure.
+ */
+export async function indexRagDocument(input: RagIndexDocumentInput): Promise<RagIndexResponse> {
+  const apiKey = await getGoogleAiStudioApiKey(input.tenantId);
+  return postRagJson<RagIndexResponse>('/v1/kb/documents/index', buildRagIndexRequestBody(input, apiKey),
+    env.AI_RAG_INDEX_REQUEST_TIMEOUT_MS);
+}
+
+/** Contract versions this backend speaks; compared with GET /v1/meta of the AI service (SEP-1 #5). */
+export const EXPECTED_RAG_SERVICE_CONTRACTS = Object.freeze({
+  orchestration_v2_contract_version: 2,
+  idm_pipeline_version: IDM_PIPELINE_VERSION,
+  idm_contract_version: IDM_CONTRACT_VERSION,
+  idm_prompt_policy_version: IDM_PROMPT_POLICY_VERSION,
+  // 2 = the index route accepts source_download_url (this backend always sends it for files).
+  rag_index_request_version: 2,
+});
+
+export interface RagServiceMetaComparison {
+  buildSha: string;
+  schemaStatus: string;
+  mismatches: string[];
+}
+
+export function compareRagServiceMeta(meta: unknown): RagServiceMetaComparison {
+  const record = asRecord(meta);
+  const contracts = asRecord(record?.contracts) ?? {};
+  const buildSha = typeof record?.build_sha === 'string' && /^[0-9A-Za-z._-]{1,64}$/.test(record.build_sha)
+    ? record.build_sha : 'unknown';
+  const schemaStatus = asRecord(record?.schema_check)?.status;
+  return {
+    buildSha,
+    schemaStatus: typeof schemaStatus === 'string' && /^[a-z_]{1,32}$/.test(schemaStatus) ? schemaStatus : 'unknown',
+    mismatches: Object.entries(EXPECTED_RAG_SERVICE_CONTRACTS)
+      .filter(([key, expected]) => contracts[key] !== expected)
+      .map(([key]) => key),
+  };
+}
+
+export async function fetchRagServiceMeta(timeoutMs = 10_000): Promise<unknown> {
+  return sendRagJson<unknown>(prepareRagRequest('/v1/meta', null, 'GET'), timeoutMs);
+}
+
+/**
+ * Log the AI service identity once (V2 worker startup). Warns on a contract mismatch, a schema check
+ * that has not passed, or an unreachable service; never throws and never blocks startup.
+ */
+export async function logRagServiceMetaOnce(
+  log: Pick<Console, 'log' | 'warn'> = console,
+  fetchMeta: () => Promise<unknown> = fetchRagServiceMeta,
+): Promise<void> {
+  try {
+    const comparison = compareRagServiceMeta(await fetchMeta());
+    const event = comparison.mismatches.length > 0 ? 'ai_rag_meta_mismatch'
+      : comparison.schemaStatus !== 'ok' ? 'ai_rag_meta_schema_not_ready' : 'ai_rag_meta';
+    const payload = JSON.stringify({ event, build_sha: comparison.buildSha, schema_check: comparison.schemaStatus,
+      mismatches: comparison.mismatches });
+    if (event === 'ai_rag_meta') log.log('[AiRagMeta]', payload);
+    else log.warn('[AiRagMeta]', payload);
+  } catch (error) {
+    log.warn('[AiRagMeta]', JSON.stringify({
+      event: 'ai_rag_meta_unavailable',
+      code: error instanceof AppError ? error.code ?? null : null,
+      status: error instanceof AppError ? error.statusCode : null,
+    }));
+  }
 }
 
 export async function deleteRagDocument(input: {
