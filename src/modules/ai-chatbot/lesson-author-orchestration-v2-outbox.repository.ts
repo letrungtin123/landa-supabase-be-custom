@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { orchestrationV2RetryDelayMs, type OrchestrationV2DispatchIdentity } from './lesson-author-orchestration-v2-dispatch.logic.js';
+import {
+  withOrchestrationV2TransactionRetry,
+  type OrchestrationV2TransientRetryOptions,
+} from './lesson-author-orchestration-v2-lock-order.js';
 
 export interface OrchestrationV2OutboxLease extends OrchestrationV2DispatchIdentity {
   lease_token: string;
@@ -54,7 +58,23 @@ function lease(row: Record<string, unknown>): OrchestrationV2OutboxLease {
   return output;
 }
 
-export function createOrchestrationV2OutboxRepository(db: GenerationJobDatabase, id: () => string = randomUUID) {
+export interface OrchestrationV2OutboxRepositoryOptions {
+  /** Bounded 40P01/40001 retry of every whole transaction (tests inject sleep/random). */
+  retry?: OrchestrationV2TransientRetryOptions;
+}
+
+/**
+ * Every outbox transaction locks only its own outbox row (SKIP LOCKED for
+ * picks) and then lets the triggers take the course fence (C) before the
+ * tenant quota lock (Q). It never takes Q explicitly; see
+ * lesson-author-orchestration-v2-lock-order.ts for the global order.
+ */
+export function createOrchestrationV2OutboxRepository(
+  rawDb: GenerationJobDatabase,
+  id: () => string = randomUUID,
+  options: OrchestrationV2OutboxRepositoryOptions = {},
+) {
+  const db = withOrchestrationV2TransactionRetry(rawDb, options.retry);
   async function claimNext(config: OrchestrationV2OutboxConfig): Promise<OrchestrationV2OutboxLease | null> {
     assertOrchestrationV2OutboxConfig(config);
     return db.transaction(async tx => {
@@ -100,15 +120,11 @@ export function createOrchestrationV2OutboxRepository(db: GenerationJobDatabase,
 
   async function markPublished(current: OrchestrationV2OutboxLease): Promise<void> {
     await db.transaction(async tx => {
-      // The tenant-data-quota trigger acquires this advisory lock after an
-      // UPDATE has already locked the row. Acquire it first so dispatcher
-      // publication and worker claim transactions cannot invert lock order.
-      const quotaLock = await tx.query(`SELECT pg_advisory_xact_lock(
-          hashtextextended(tenant_id::text,20260907)) AS locked
-        FROM lesson_author_workspace_v2_dispatch_outbox
-        WHERE id=$1 AND run_id=$2 AND task_id=$3 AND dispatch_epoch=$4`,
-      [current.outbox_id, current.run_id, current.task_id, current.dispatch_epoch]);
-      if (quotaLock.rows.length !== 1) fail('ORCHESTRATION_V2_OUTBOX_LEASE_LOST');
+      // Natural order only: outbox row -> course fence (C, BEFORE ROW trigger)
+      // -> tenant quota (Q, AFTER STATEMENT trigger). Taking Q explicitly first
+      // inverted C/Q against worker dispatch fences and completions (40P01).
+      // Provider claims now take C before their AI token writes, so they no
+      // longer need this publication to hold Q first.
       const result = await tx.query(`UPDATE lesson_author_workspace_v2_dispatch_outbox
         SET status='published',published_at=clock_timestamp(),lease_token=NULL,lease_expires_at=NULL,
           failure_code=NULL,updated_at=clock_timestamp()

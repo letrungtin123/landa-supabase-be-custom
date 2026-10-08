@@ -114,12 +114,14 @@ test('broker failure schedules durable retry and never marks published', async (
 });
 
 test('published CAS and expired publishing recovery are lease/state fenced', async () => {
-  const published = fixture([[{ locked: '' }], [{ id: claim.outbox_id }]]);
+  const published = fixture([[{ id: claim.outbox_id }]]);
   await published.repo.markPublished(claim);
-  assert.match(published.queries[0]!.sql, /pg_advisory_xact_lock/);
-  assert.match(published.queries[0]!.sql, /20260907/);
-  assert.match(published.queries[1]!.sql, /status='publishing'/);
-  assert.match(published.queries[1]!.sql, /lease_token=\$5::uuid AND lease_expires_at>clock_timestamp\(\)/);
+  // The outbox row is locked first; the course fence and the tenant quota
+  // lock follow from the triggers. No explicit quota lock precedes them.
+  assert.equal(published.queries.length, 1);
+  assert.doesNotMatch(published.queries[0]!.sql, /pg_advisory_xact_lock|20260907/);
+  assert.match(published.queries[0]!.sql, /status='publishing'/);
+  assert.match(published.queries[0]!.sql, /lease_token=\$5::uuid AND lease_expires_at>clock_timestamp\(\)/);
   const recovered = fixture([[{ status: 'pending' }]]);
   assert.equal(await recovered.repo.recoverOne(config), 'pending');
   assert.match(recovered.queries[0]!.sql, /status='publishing' AND lease_expires_at<=clock_timestamp\(\)/);

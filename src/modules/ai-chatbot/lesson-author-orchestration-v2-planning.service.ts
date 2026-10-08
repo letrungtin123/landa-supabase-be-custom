@@ -20,6 +20,7 @@ import {
 import { IDM_V2_COMPONENT_TYPES, buildIdmModuleContext } from './lesson-author-idm-scope-view.logic.js';
 import { assembleIdmOrchestrationArchitecture, assertIdmShardDesign } from './lesson-author-idm-architecture.logic.js';
 import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
+import { withOrchestrationV2TransientRetry } from './lesson-author-orchestration-v2-lock-order.js';
 
 type PlanningRepository = ReturnType<typeof createOrchestrationV2PlanningRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -57,35 +58,11 @@ export class OrchestrationV2PlanningServiceError extends Error {
   }
 }
 
-const TRANSIENT_TRANSACTION_CODES = new Set(['40P01', '40001']);
-
-function transactionCode(error: unknown): string | null {
-  if (!error || typeof error !== 'object') return null;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : null;
-}
-
-async function waitForTransactionRetry(delayMs: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED');
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED')); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, delayMs);
-    timer.unref();
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-/** Retry only a rolled-back PostgreSQL transaction boundary. Provider calls
- * stay outside this helper, so a deadlock can never duplicate paid AI work. */
-async function withTransientTransactionRetry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!TRANSIENT_TRANSACTION_CODES.has(transactionCode(error) ?? '') || attempt >= 3) throw error;
-      await waitForTransactionRetry(attempt * 20, signal);
-    }
-  }
+/** Retry only a rolled-back PostgreSQL transaction boundary (bounded
+ * exponential backoff with jitter, abortable). Provider calls stay outside
+ * this helper, so a deadlock can never duplicate paid AI work. */
+function withTransientTransactionRetry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  return withOrchestrationV2TransientRetry(() => operation(), { signal });
 }
 
 function common(
@@ -137,9 +114,12 @@ export async function executeOrchestrationV2PlanningTask(
   signal: AbortSignal,
 ): Promise<'source_snapshot' | 'course_skeleton' | 'chapter_blueprint' | 'validate_architecture'> {
   const idmRun = runtime.pipeline === IDM_PIPELINE_VERSION;
+  // Every repository load/persist below is one lease-fenced transaction with
+  // no external side effect, so a deadlock victim is simply re-run.
+  const db = <T>(operation: () => Promise<T>) => withTransientTransactionRetry(operation, signal);
   if (lease.kind === 'validate_architecture') {
-    const input = idmRun ? await planning.loadArchitectureInput(lease, IDM_PIPELINE_VERSION)
-      : await planning.loadArchitectureInput(lease);
+    const input = idmRun ? await db(() => planning.loadArchitectureInput(lease, IDM_PIPELINE_VERSION))
+      : await db(() => planning.loadArchitectureInput(lease));
     if (idmRun && !input.idm_view) throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     const assembly = input.idm_view
       ? assembleIdmOrchestrationArchitecture(input.skeleton, input.idm_view, input.shard_artifacts)
@@ -148,7 +128,7 @@ export async function executeOrchestrationV2PlanningTask(
       () => planning.completeArchitecture(lease, assembly, runtime.budgets.inventory_publish_budget_ms), signal);
     return 'validate_architecture';
   }
-  const authority = await planning.loadAuthority(lease);
+  const authority = await db(() => planning.loadAuthority(lease));
   const execution = { timeoutMs: lease.execution_budget_ms, signal };
   if (lease.kind === 'source_snapshot') {
     let pageAuthority: OrchestrationV2SourceSnapshotPageResponse['source_authority'] | null = null;
@@ -160,24 +140,24 @@ export async function executeOrchestrationV2PlanningTask(
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
       pageAuthority ??= page.source_authority;
-      await planning.persistSourcePage(lease, page, startOrdinal);
+      await db(() => planning.persistSourcePage(lease, page, startOrdinal));
     });
     const persistedAuthority = pageAuthority as OrchestrationV2SourceSnapshotPageResponse['source_authority'] | null;
     if (!persistedAuthority || response.source_authority.structure_hash !== persistedAuthority.structure_hash) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
-    const scopes = await planning.loadPersistedSourceCatalog(lease);
+    const scopes = await db(() => planning.loadPersistedSourceCatalog(lease));
     await planning.completeSource(lease, { ...response, source_authority: persistedAuthority }, scopes,
       runtime.budgets.skeleton);
     return 'source_snapshot';
   }
   if (lease.kind === 'course_skeleton') {
-    const scopes = await planning.loadSourceCatalog(lease);
-    const sourceAuthority = await planning.loadSourceAuthority(lease);
+    const scopes = await db(() => planning.loadSourceCatalog(lease));
+    const sourceAuthority = await db(() => planning.loadSourceAuthority(lease));
     const idm = runtime.pipeline === IDM_PIPELINE_VERSION ? await (async () => {
       // Capacity is enforced here, before the dispatch fence, so an oversize
       // snapshot fails the task without any provider call (spec §12.4).
-      const input = await planning.loadIdmSkeletonInput(lease);
+      const input = await db(() => planning.loadIdmSkeletonInput(lease));
       return buildIdmCourseSkeletonRequest({
         locale: authority.locale, course_title: input.course_title, source_documents: authority.source_documents,
         source_facts: input.source_facts, input_tokens: input.input_tokens,
@@ -195,7 +175,7 @@ export async function executeOrchestrationV2PlanningTask(
       if (providerDispatchMarked) {
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
-      await worker.markProviderDispatched(lease);
+      await db(() => worker.markProviderDispatched(lease));
       providerDispatchMarked = true;
     } }));
     if (!providerDispatchMarked) {
@@ -207,8 +187,8 @@ export async function executeOrchestrationV2PlanningTask(
     return 'course_skeleton';
   }
   if (lease.kind === 'chapter_blueprint') {
-    const input = idmRun ? await planning.loadChapterInput(lease, IDM_PIPELINE_VERSION)
-      : await planning.loadChapterInput(lease);
+    const input = idmRun ? await db(() => planning.loadChapterInput(lease, IDM_PIPELINE_VERSION))
+      : await db(() => planning.loadChapterInput(lease));
     if (idmRun && !input.idm) throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     // IDM: the module context is built before the dispatch fence, so an invalid
     // design fails the task without a provider call (spec §7.6.1, §11.2).
@@ -228,7 +208,7 @@ export async function executeOrchestrationV2PlanningTask(
       if (providerDispatchMarked) {
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
-      await worker.markProviderDispatched(lease);
+      await db(() => worker.markProviderDispatched(lease));
       providerDispatchMarked = true;
     } }));
     if (!providerDispatchMarked) {

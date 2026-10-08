@@ -10,6 +10,7 @@ import type {
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
 import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
+import { withOrchestrationV2TransientRetry } from './lesson-author-orchestration-v2-lock-order.js';
 
 type UnitRepository = ReturnType<typeof createOrchestrationV2UnitRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -42,35 +43,12 @@ export class OrchestrationV2UnitServiceError extends Error {
   }
 }
 
-const TRANSIENT_TRANSACTION_CODES = new Set(['40P01', '40001']);
-
-function transactionCode(error: unknown): string | null {
-  if (!error || typeof error !== 'object') return null;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : null;
-}
-
-async function waitForTransactionRetry(delayMs: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED');
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error('ORCHESTRATION_V2_TASK_ABORTED')); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, delayMs);
-    timer.unref();
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
 /** PostgreSQL deadlock/serialization failures roll back the whole transaction.
- * Replaying only that DB boundary is safe and must never replay the provider. */
-async function withTransientTransactionRetry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!TRANSIENT_TRANSACTION_CODES.has(transactionCode(error) ?? '') || attempt >= 3) throw error;
-      await waitForTransactionRetry(attempt * 20, signal);
-    }
-  }
+ * Replaying only that DB boundary (bounded exponential backoff with jitter,
+ * abortable) is safe and must never replay the provider. A boundary whose
+ * repository already exhausted its own retries is not retried again. */
+function withTransientTransactionRetry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  return withOrchestrationV2TransientRetry(() => operation(), { signal });
 }
 
 type OrchestrationV2UnitStage =

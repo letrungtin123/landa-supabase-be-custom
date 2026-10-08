@@ -8,6 +8,10 @@ import { getTenantAiRuntimeSettings } from './ai-settings.service.js';
 import { resolveOrchestrationV2LessonAuthorModel } from './lesson-author-orchestration-v2-execution.config.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { orchestrationV2ObservedUsage } from './lesson-author-orchestration-v2-worker.logic.js';
+import {
+  lockOrchestrationV2AiTokenUsage,
+  lockOrchestrationV2CourseFence,
+} from './lesson-author-orchestration-v2-lock-order.js';
 import type {
   OrchestrationV2ProviderUsageSource,
   OrchestrationV2TaskLease,
@@ -45,14 +49,26 @@ const fail = (code: OrchestrationV2AccountingError['code']): never => {
 function identity(task: TaskRow) {
   const output = {
     taskId: String(task.id), runId: String(task.run_id), workspaceId: String(task.workspace_id),
-    tenantId: String(task.tenant_id), model: String(task.model), kind: String(task.kind),
+    tenantId: String(task.tenant_id), courseId: typeof task.course_id === 'string' ? task.course_id : '',
+    model: String(task.model), kind: String(task.kind),
   };
   if (![output.taskId, output.runId, output.workspaceId, output.tenantId].every(value => UUID.test(value))
-    || !output.model || !['course_skeleton', 'chapter_blueprint', 'generate_unit'].includes(output.kind)) {
+    || !output.courseId || !output.model
+    || !['course_skeleton', 'chapter_blueprint', 'generate_unit'].includes(output.kind)) {
     fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
   }
   return output;
 }
+
+/*
+ * Lock order inside every accounting mutation (see lock-order.ts): the caller
+ * already holds its own run/task rows; this module then takes the course
+ * fence (C) before the first write to an AI token table — those tables are
+ * quota-registered (tenant quota lock Q at statement end) but not
+ * course-scoped, so without this C would be acquired after Q by the caller's
+ * next task/artifact write. Reservation row -> monthly usage (M) -> Q follows,
+ * matching reserveTenantAiTokens() (M before its quota-registered insert).
+ */
 
 function budget(task: TaskRow) {
   const input = Number(task.input_tokens), embedding = Number(task.embedding_tokens),
@@ -90,6 +106,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       || !UUID.test(String(owner?.conversation_id)) || !UUID.test(String(owner?.correlation_id))) {
       fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     }
+    await lockOrchestrationV2CourseFence(tx, target.courseId);
     const settings = await deps.settings(target.tenantId);
     if (settings.activeEngine !== 'self_built_rag'
       || resolveOrchestrationV2LessonAuthorModel(settings.lessonAuthorModel) !== target.model
@@ -145,6 +162,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
     // Reject malformed exact usage before touching the locked reservation. The
     // upper-bound path deliberately derives usage from server-owned DB budgets.
     const observedUsage = usageSource === 'provider' ? completeUsage(observed) : null;
+    await lockOrchestrationV2CourseFence(tx, lease.course_id);
     const settings = await deps.settings(lease.tenant_id);
     if (settings.activeEngine !== 'self_built_rag'
       || resolveOrchestrationV2LessonAuthorModel(settings.lessonAuthorModel) !== lease.model) {
@@ -169,6 +187,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       }
       return { inputTokens, outputTokens, embeddingTokens, totalTokens };
     })();
+    await lockOrchestrationV2AiTokenUsage(tx, lease.tenant_id, reservationId);
     await deps.finalize({ reservationId, tenantId: lease.tenant_id, usage,
       embeddingModel: settings.embeddingModel,
       source: { service: 'self_built_rag', usage_source: usageSource, orchestration_version: 2 },
@@ -188,9 +207,11 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
   async function releaseUndispatched(tx: GenerationJobSql, task: TaskRow): Promise<void> {
     const target = identity(task), reservationId = String(task.ai_reservation_id);
     if (!UUID.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    await lockOrchestrationV2CourseFence(tx, target.courseId);
     const locked = await tx.query(`SELECT id::text FROM ai_token_reservations
       WHERE id=$1 AND tenant_id=$2 AND status='reserved' FOR UPDATE`, [reservationId, target.tenantId]);
     if (locked.rows.length !== 1) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    await lockOrchestrationV2AiTokenUsage(tx, target.tenantId, reservationId);
     await deps.release(reservationId, target.tenantId);
     const saved = await tx.query(`SELECT status FROM ai_token_reservations WHERE id=$1 AND tenant_id=$2`,
       [reservationId, target.tenantId]);
@@ -206,6 +227,14 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
   async function holdUnknown(tx: GenerationJobSql, task: TaskRow): Promise<void> {
     const target = identity(task), reservationId = String(task.ai_reservation_id);
     if (!UUID.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    await lockOrchestrationV2CourseFence(tx, target.courseId);
+    // Reservation row -> monthly usage (M) before this size-changing update
+    // takes the tenant quota lock, so a later reconcile (finalize) in the same
+    // transaction never waits for M while holding Q.
+    const reservation = await tx.query(`SELECT id::text FROM ai_token_reservations
+      WHERE id=$1 AND tenant_id=$2 AND status='reserved' FOR UPDATE`, [reservationId, target.tenantId]);
+    if (reservation.rows.length !== 1) fail('ORCHESTRATION_V2_ACCOUNTING_READBACK_INVALID');
+    await lockOrchestrationV2AiTokenUsage(tx, target.tenantId, reservationId);
     const held = await tx.query(`UPDATE ai_token_reservations SET budget_metadata=budget_metadata||$3::jsonb
       WHERE id=$1 AND tenant_id=$2 AND status='reserved'
       RETURNING id::text,status,budget_metadata`, [reservationId, target.tenantId, JSON.stringify({
@@ -226,6 +255,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       || task.accounting_state !== 'pending_reconciliation') {
       fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     }
+    await lockOrchestrationV2CourseFence(tx, target.courseId);
     const locked = await tx.query(`SELECT r.id::text,r.status,r.estimated_tokens::text,r.budget_metadata
       FROM ai_token_reservations r
       JOIN lesson_author_workspace_v2_tasks t ON t.ai_reservation_id=r.id AND t.id=$3 AND t.run_id=$4
@@ -237,6 +267,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     }
     const settings = await deps.settings(target.tenantId);
+    await lockOrchestrationV2AiTokenUsage(tx, target.tenantId, reservationId);
     await deps.finalize({ reservationId, tenantId: target.tenantId, usage: {
       inputTokens: limits.input, outputTokens: limits.outputCeiling,
       embeddingTokens: limits.embedding, totalTokens: limits.total,

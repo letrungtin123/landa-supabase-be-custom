@@ -72,7 +72,7 @@ export function createOrchestrationV2WorkerRuntimeDependencies(
         }, orchestrationV2QuotaAccounting.settleProvider, signal);
       }
       if (lease.kind === 'publish_inventory') {
-        return executeOrchestrationV2InventoryTask(lease, inventory, runtime.inventory_budgets);
+        return executeOrchestrationV2InventoryTask(lease, inventory, runtime.inventory_budgets, signal);
       }
       if (lease.kind === 'generate_unit') {
         return executeOrchestrationV2UnitTask(lease, unit, worker, { generate: generateRagLessonAuthorUnitV2 }, {
@@ -85,8 +85,8 @@ export function createOrchestrationV2WorkerRuntimeDependencies(
         }, normalizeLessonAuthorProposal, orchestrationV2QuotaAccounting.settleProvider,
         orchestrationV2QuotaAccounting.releaseUndispatched, signal);
       }
-      if (lease.kind === 'validate_chapter') return runOrchestrationV2ChapterValidation(lease, chapter);
-      if (lease.kind === 'finalize_course') return runOrchestrationV2Finalization(lease, finalization);
+      if (lease.kind === 'validate_chapter') return runOrchestrationV2ChapterValidation(lease, chapter, signal);
+      if (lease.kind === 'finalize_course') return runOrchestrationV2Finalization(lease, finalization, signal);
       throw new Error('ORCHESTRATION_V2_TASK_KIND_UNSUPPORTED');
     },
   };

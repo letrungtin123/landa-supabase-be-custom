@@ -188,16 +188,20 @@ test('capacity wake is a no-op when no bounded slot is eligible', async () => {
 
 test('capacity deferral returns a published delivery to durable pending state with a bounded delay', async () => {
   const f = fixture([
-    [{ locked: true }], [{ delay_ms: 7_500, capacity_deferral_count: 3 }],
+    [{ delay_ms: 7_500, capacity_deferral_count: 3 }],
   ]);
   assert.deepEqual(await f.repo.deferPublished(envelope, 2_500), { delay_ms: 7_500, deferral_count: 3 });
-  assert.match(f.queries[0]!.sql, /pg_advisory_xact_lock/);
-  assert.match(f.queries[1]!.sql, /status='pending'/);
-  assert.match(f.queries[1]!.sql, /attempt_count=0/);
-  assert.match(f.queries[1]!.sql, /capacity_deferral_count=LEAST/);
-  assert.match(f.queries[1]!.sql, /1::bigint<<LEAST\(outbox\.capacity_deferral_count,5\)/);
-  assert.match(f.queries[1]!.sql, /task\.status='queued'/);
-  assert.equal(f.queries[1]!.params[5], 2_500);
+  // One fenced statement: outbox row lock, then the triggers' course fence and
+  // tenant quota lock. Holding the quota lock first was the production cycle.
+  assert.equal(f.queries.length, 1);
+  assert.doesNotMatch(f.queries[0]!.sql, /pg_advisory_xact_lock|20260907/);
+  assert.match(f.queries[0]!.sql, /status='pending'/);
+  assert.match(f.queries[0]!.sql, /attempt_count=0/);
+  assert.match(f.queries[0]!.sql, /capacity_deferral_count=LEAST/);
+  assert.match(f.queries[0]!.sql, /1::bigint<<LEAST\(outbox\.capacity_deferral_count,5\)/);
+  assert.match(f.queries[0]!.sql, /task\.status='queued'/);
+  assert.match(f.queries[0]!.sql, /FOR UPDATE OF outbox/);
+  assert.equal(f.queries[0]!.params[5], 2_500);
   f.done();
 });
 

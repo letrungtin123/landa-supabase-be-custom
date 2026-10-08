@@ -15,6 +15,13 @@ import {
   orchestrationV2StableJitterMs,
   type OrchestrationV2WorkerLimits,
 } from './lesson-author-orchestration-v2-worker.logic.js';
+import {
+  ORCHESTRATION_V2_TRANSIENT_DB_REQUEUE_EPOCH_LIMIT,
+  isOrchestrationV2TransientDbFailureCode,
+  orchestrationV2TransientDbRequeueDelayMs,
+  withOrchestrationV2TransactionRetry,
+  type OrchestrationV2TransientRetryOptions,
+} from './lesson-author-orchestration-v2-lock-order.js';
 
 export interface OrchestrationV2TaskLease {
   task_id: string;
@@ -228,7 +235,26 @@ function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {
   return Object.freeze(lease);
 }
 
-export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase, id: () => string = randomUUID) {
+export interface OrchestrationV2WorkerRepositoryOptions {
+  /** Bounded 40P01/40001 retry of every whole transaction (tests inject sleep/random). */
+  retry?: OrchestrationV2TransientRetryOptions;
+}
+
+/**
+ * Every function below is one complete transaction that follows the global
+ * lock order documented in lesson-author-orchestration-v2-lock-order.ts:
+ * advisory G -> T -> W, own run -> task -> outbox rows, course fence (C),
+ * course-scoped rows, AI token rows, and the tenant quota lock (Q) last and
+ * only implicitly. A deadlock/serialization victim is re-run from BEGIN; the
+ * lease token, dispatch epoch and replay evidence fences are re-evaluated on
+ * every attempt, so a retry can never resurrect a stale claim.
+ */
+export function createOrchestrationV2WorkerRepository(
+  rawDb: GenerationJobDatabase,
+  id: () => string = randomUUID,
+  options: OrchestrationV2WorkerRepositoryOptions = {},
+) {
+  const db = withOrchestrationV2TransactionRetry(rawDb, options.retry);
   async function claimExact(
     envelope: OrchestrationV2DispatchEnvelope,
     limitsInput: OrchestrationV2WorkerLimits,
@@ -307,6 +333,9 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         capacityReason = 'workspace_capacity';
       }
       if (capacityReason) return { disposition: 'deferred', reason: capacityReason };
+      // reserveProvider writes quota-registered AI token tables that are not
+      // course-scoped; it takes the course fence (C) itself before that write,
+      // so this claim keeps run/task/outbox -> C -> M -> Q like every writer.
       const reservationId = provider ? await reserveProvider(tx, task) : null;
       if (provider && !UUID.test(String(reservationId))) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
       const leaseToken = id();
@@ -341,14 +370,11 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
       fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
     }
     return db.transaction(async tx => {
-      // Preserve the existing quota-lock-before-row-lock order until the
-      // zero-delta quota trigger hotfix is installed everywhere.
-      const quotaLock = await tx.query(`SELECT pg_advisory_xact_lock(
-          hashtextextended(tenant_id::text,20260907)) AS locked
-        FROM lesson_author_workspace_v2_dispatch_outbox
-        WHERE id=$1 AND run_id=$2 AND task_id=$3 AND dispatch_epoch=$4 AND routing_shard=$5`,
-      [envelope.outbox_id, envelope.run_id, envelope.task_id, envelope.dispatch_epoch, envelope.routing_shard]);
-      if (quotaLock.rows.length !== 1) return null;
+      // Lock order: outbox row -> course fence (C, BEFORE ROW trigger) ->
+      // tenant quota (Q, AFTER STATEMENT trigger). The tenant quota advisory
+      // lock must never be taken explicitly here: holding Q while waiting for C
+      // inverted the order used by claims, dispatch fences and completions
+      // (C then Q) and was the production 40P01 cycle of capacity deferrals.
       const deferred = await tx.query(`WITH authority AS (
           SELECT outbox.id,LEAST(120000::bigint,
             5000::bigint*(1::bigint<<LEAST(outbox.capacity_deferral_count,5))+$6::bigint) AS delay_ms
@@ -720,7 +746,15 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         }
         await releaseUndispatched(tx, task);
       }
-      if (!runIsActive || Number(task.attempt_count) >= Number(task.max_attempts)) {
+      // A deadlock/serialization victim that exhausted its bounded retries
+      // before any provider dispatch (dispatch_started_at IS NULL under this
+      // lease) did no work at all: PostgreSQL rolled the transaction back. It
+      // is requeued with its attempt refunded instead of consuming the task's
+      // last attempt, bounded by the dispatch epoch which still advances per claim.
+      const transientDbRequeue = runIsActive && isOrchestrationV2TransientDbFailureCode(failureCode)
+        && Number(task.attempt_count) >= 1
+        && Number(task.dispatch_epoch) < ORCHESTRATION_V2_TRANSIENT_DB_REQUEUE_EPOCH_LIMIT;
+      if (!runIsActive || (Number(task.attempt_count) >= Number(task.max_attempts) && !transientDbRequeue)) {
         const failed = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='failed',
             failure_code=$4,finished_at=clock_timestamp(),lease_token=NULL,heartbeat_at=NULL,lease_expires_at=NULL,
             ai_reservation_id=NULL,accounting_state='not_required'
@@ -732,18 +766,25 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         return 'failed';
       }
 
+      const requeueDelayMs = transientDbRequeue
+        ? orchestrationV2TransientDbRequeueDelayMs(Number(task.dispatch_epoch),
+          orchestrationV2StableJitterMs(`${String(task.id)}:${String(task.dispatch_epoch)}`))
+        : 0;
       const queued = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='queued',
-          failure_code=NULL,next_attempt_at=clock_timestamp(),lease_token=NULL,heartbeat_at=NULL,
+          attempt_count=CASE WHEN $4::boolean THEN attempt_count-1 ELSE attempt_count END,
+          failure_code=NULL,next_attempt_at=clock_timestamp()+($5::bigint*interval '1 millisecond'),
+          lease_token=NULL,heartbeat_at=NULL,
           lease_expires_at=NULL,deadline_at=NULL,ai_reservation_id=NULL,accounting_state='not_required'
         WHERE id=$1 AND run_id=$2 AND status='running' AND lease_token=$3::uuid
-          AND dispatch_started_at IS NULL AND attempt_count<max_attempts RETURNING id`,
-      [lease.task_id, lease.run_id, lease.lease_token]);
+          AND dispatch_started_at IS NULL
+          AND (CASE WHEN $4::boolean THEN attempt_count-1 ELSE attempt_count END)<max_attempts RETURNING id`,
+      [lease.task_id, lease.run_id, lease.lease_token, transientDbRequeue, requeueDelayMs]);
       if (queued.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
       const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
-          (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+          (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard,available_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+($9::bigint*interval '1 millisecond')) RETURNING id`,
       [id(), task.run_id, task.workspace_id, task.tenant_id, task.course_id, task.id,
-        task.dispatch_epoch, task.routing_shard]);
+        task.dispatch_epoch, task.routing_shard, requeueDelayMs]);
       if (outbox.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
       return 'requeued';
     });

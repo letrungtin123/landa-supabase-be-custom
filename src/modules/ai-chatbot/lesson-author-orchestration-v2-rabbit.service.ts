@@ -9,6 +9,7 @@ import {
   runOrchestrationV2WorkerRecoveryCycle,
   type OrchestrationV2WorkerRuntimeDependencies,
 } from './lesson-author-orchestration-v2-worker.service.js';
+import { isOrchestrationV2TransientRetryExhausted } from './lesson-author-orchestration-v2-lock-order.js';
 
 type OutboxRepository = ReturnType<typeof createOrchestrationV2OutboxRepository>;
 
@@ -72,7 +73,10 @@ export async function runOrchestrationV2TransientSqlCycle<T>(
     } catch (error) {
       const code = typeof error === 'object' && error !== null && 'code' in error
         ? String((error as { code?: unknown }).code ?? '') : '';
-      if (!isOrchestrationV2TransientPostgresError(error) || attempt === SQL_CYCLE_ATTEMPTS) throw error;
+      // A repository transaction that already spent its own bounded retries is
+      // not re-run as a whole cycle immediately; the caller backs off instead.
+      if (!isOrchestrationV2TransientPostgresError(error) || attempt === SQL_CYCLE_ATTEMPTS
+        || isOrchestrationV2TransientRetryExhausted(error)) throw error;
       const baseDelayMs = 25 * (2 ** (attempt - 1));
       const jitterRatio = Math.max(0, Math.min(0.999, random()));
       const delayMs = baseDelayMs + Math.floor(baseDelayMs * jitterRatio);
@@ -243,9 +247,23 @@ export async function runOrchestrationV2WorkerRecoveryLoop(input: {
   signal: AbortSignal;
 }): Promise<void> {
   while (!input.signal.aborted) {
-    const result = await runOrchestrationV2TransientSqlCycle(
-      () => runOrchestrationV2WorkerRecoveryCycle(input.deps, input.batch_size),
-      input.signal, input.deps.report, 'worker_recovery');
+    let result: Awaited<ReturnType<typeof runOrchestrationV2WorkerRecoveryCycle>> | undefined;
+    try {
+      result = await runOrchestrationV2TransientSqlCycle(
+        () => runOrchestrationV2WorkerRecoveryCycle(input.deps, input.batch_size),
+        input.signal, input.deps.report, 'worker_recovery');
+    } catch (error) {
+      // Lock contention must not terminate the worker process (and every
+      // in-flight task with it); recovery is idempotent and resumes next poll.
+      if (!isOrchestrationV2TransientPostgresError(error)) throw error;
+      reportSafely(input.deps.report, {
+        event: 'worker_recovery_transient_sql_cycle_deferred',
+        code: String((error as { code?: unknown }).code ?? ''),
+        recovery: 'continue_polling',
+      });
+      await wait(input.poll_interval_ms, input.signal);
+      continue;
+    }
     if (!result) break;
     if (Object.values(result).some(value => value > 0)) input.deps.report({ event: 'worker_recovery_cycle', ...result });
     await wait(input.poll_interval_ms, input.signal);

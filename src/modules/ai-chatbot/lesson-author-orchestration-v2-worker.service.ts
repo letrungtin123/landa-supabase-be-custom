@@ -8,6 +8,11 @@ import type {
   OrchestrationV2TaskLease,
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import {
+  ORCHESTRATION_V2_DB_DEADLOCK_RETRY_EXHAUSTED,
+  ORCHESTRATION_V2_DB_SERIALIZATION_RETRY_EXHAUSTED,
+  orchestrationV2TransientSqlState,
+} from './lesson-author-orchestration-v2-lock-order.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 type ReserveProvider = Parameters<WorkerRepository['claimExact']>[2];
@@ -65,8 +70,8 @@ function executionFailureCode(error: unknown): string {
     ? ((error as { code?: unknown; internal_failure_code?: unknown }).internal_failure_code
       ?? (error as { code?: unknown }).code)
     : null;
-  if (candidate === '40P01') return 'ORCHESTRATION_V2_DB_DEADLOCK_RETRY_EXHAUSTED';
-  if (candidate === '40001') return 'ORCHESTRATION_V2_DB_SERIALIZATION_RETRY_EXHAUSTED';
+  if (candidate === '40P01') return ORCHESTRATION_V2_DB_DEADLOCK_RETRY_EXHAUSTED;
+  if (candidate === '40001') return ORCHESTRATION_V2_DB_SERIALIZATION_RETRY_EXHAUSTED;
   if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,99}$/.test(candidate)) return candidate;
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{0,99}$/.test(error.message)) return error.message;
   return 'ORCHESTRATION_V2_TASK_EXECUTION_FAILED';
@@ -122,18 +127,39 @@ function runLeaseHeartbeat(
   controller: AbortController,
   report: OrchestrationV2WorkerRuntimeDependencies['report'],
 ): () => Promise<void> {
-  const intervalMs = Math.max(1_000, Math.floor(limits.lease_seconds * 1_000 / 3));
+  const leaseMs = limits.lease_seconds * 1_000;
+  const intervalMs = Math.max(1_000, Math.floor(leaseMs / 3));
   let stopped = false;
   let inFlight: Promise<void> | null = null;
+  // Local lower bound of the DB lease start: the claim (or last renewal)
+  // committed before this instant, so the DB lease ends no later than
+  // lastRenewedAt + leaseMs.
+  let lastRenewedAt = Date.now();
   const tick = () => {
     if (stopped || inFlight) return;
     inFlight = repository.renew(lease, limits.lease_seconds).then((renewed) => {
+      if (renewed) lastRenewedAt = Date.now();
       if (!renewed && !controller.signal.aborted) {
         reportSafely(report, { event: 'worker_lease_lost', run_id: lease.run_id, task_id: lease.task_id });
         controller.abort(new Error('ORCHESTRATION_V2_TASK_LEASE_LOST'));
       }
     }).catch((error) => {
+      const transientCode = orchestrationV2TransientSqlState(error);
+      if (transientCode && Date.now() - lastRenewedAt < leaseMs / 2) {
+        // The renewal transaction was rolled back after its bounded retries;
+        // the DB lease is unchanged and still valid. Within the first half of
+        // the lease the next tick (lease/3 later) still renews before expiry,
+        // so one failed renewal is tolerated. Aborting here used to turn one
+        // lock-wait victim into a lost (or pessimistically charged) task.
+        reportSafely(report, { event: 'worker_heartbeat_transient_failure', run_id: lease.run_id,
+          task_id: lease.task_id, sqlstate: transientCode, recovery: 'retry_next_tick' });
+        return;
+      }
+      // A non-transient failure, or a second consecutive transient failure that
+      // would let the lease expire before the next tick: stop the execution so
+      // recovery stays the only authority over this task.
       reportSafely(report, { event: 'worker_heartbeat_failed', run_id: lease.run_id, task_id: lease.task_id,
+        ...(transientCode ? { sqlstate: transientCode } : {}),
         error: error instanceof Error ? error.message : String(error) });
       if (!controller.signal.aborted) controller.abort(error);
     }).finally(() => { inFlight = null; });
@@ -254,8 +280,11 @@ export async function handleOrchestrationV2Delivery(
   try {
     claim = await deps.repository.claimExact(envelope, deps.limits, deps.reserveProvider);
   } catch (error) {
+    // Nothing was claimed (the claim transaction rolled back after its bounded
+    // retries), so the delivery is only requeued; the task is never failed here.
+    const sqlstate = orchestrationV2TransientSqlState(error);
     reportSafely(deps.report, { event: 'worker_claim_unconfirmed', outbox_id: envelope.outbox_id,
-      run_id: envelope.run_id, task_id: envelope.task_id,
+      run_id: envelope.run_id, task_id: envelope.task_id, ...(sqlstate ? { sqlstate } : {}),
       error: error instanceof Error ? error.message : String(error) });
     return Object.freeze({ settlement: 'requeue', disposition: 'claim_unconfirmed', envelope, error });
   }
@@ -279,8 +308,12 @@ export async function handleOrchestrationV2Delivery(
           deferral_count: deferred.deferral_count, defer_reason: claim.reason });
         return Object.freeze({ settlement: 'ack', disposition: 'deferred', envelope });
       } catch (error) {
+        // The deferral rolled back after its bounded retries: the outbox row is
+        // still 'published' and the task still 'queued'. Requeue the delivery;
+        // a capacity deferral can never finalize or fail the task.
+        const sqlstate = orchestrationV2TransientSqlState(error);
         reportSafely(deps.report, { event: 'worker_delivery_defer_unconfirmed', outbox_id: envelope.outbox_id,
-          run_id: envelope.run_id, task_id: envelope.task_id,
+          run_id: envelope.run_id, task_id: envelope.task_id, ...(sqlstate ? { sqlstate } : {}),
           error: error instanceof Error ? error.message : String(error) });
         return Object.freeze({ settlement: 'requeue', disposition: 'claim_unconfirmed', envelope, error });
       }
