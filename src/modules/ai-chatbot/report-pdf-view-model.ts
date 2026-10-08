@@ -28,9 +28,23 @@ import { describeReportFact, type ReportPdfNarrative, type ReportPdfNarrativeIte
 import { REPORT_SIGNAL_THRESHOLDS } from './report-chat.service.js';
 
 /** Bump when the layout or wording changes: stored PDFs are keyed by this version. */
-export const REPORT_PDF_TEMPLATE_VERSION = '3.0.0';
+export const REPORT_PDF_TEMPLATE_VERSION = '3.0.1';
 
 export interface ReportPdfTenantBranding { name: string; logoDataUri: string | null }
+
+const BRAND_LINE_MAX_CHARS = 80;
+
+/**
+ * Brand line of the cover footer: the tenant's display name (the one shown at
+ * the top of the cover), shortened with an ellipsis past 80 characters; the
+ * localized report title when the tenant has no name. Escaped when rendered.
+ */
+export function buildReportPdfBrandLine(tenantName: string | null | undefined, dict: ReportPdfDictionary): string {
+  const name = (tenantName ?? '').replace(/\s+/g, ' ').trim();
+  if (!name) return dict.meta.title;
+  const characters = Array.from(name);
+  return characters.length > BRAND_LINE_MAX_CHARS ? `${characters.slice(0, BRAND_LINE_MAX_CHARS - 1).join('').trimEnd()}…` : name;
+}
 
 export interface ReportPdfKpiCard {
   id: ReportKpiId;
@@ -93,6 +107,8 @@ export interface ReportPdfViewModel {
   templateVersion: string;
   title: string;
   tenant: ReportPdfTenantBranding;
+  /** Cover footer brand: tenant display name, or the report title without one. */
+  brandLine: string;
   periodLabel: string;
   comparisonLabel: string | null;
   comparisonTitle: string;
@@ -384,6 +400,7 @@ export function buildReportPdfViewModel(input: {
     templateVersion,
     title: dict.meta.title,
     tenant: input.tenant,
+    brandLine: buildReportPdfBrandLine(input.tenant.name, dict),
     periodLabel,
     comparisonLabel,
     comparisonTitle,

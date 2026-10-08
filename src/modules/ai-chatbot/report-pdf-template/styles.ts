@@ -85,7 +85,9 @@ h3 { font-size: 10.5pt; line-height: 1.3; font-weight: 700; color: var(--ink); }
 .cover .prepared { font-size: 8.4pt; color: var(--muted); max-width: 150mm; }
 .cover .cover-footer { position: absolute; left: 18mm; right: 18mm; bottom: 9mm; display: flex; justify-content: space-between; align-items: center;
   font-size: 8pt; color: var(--muted); border-top: 0.6pt solid var(--line); padding-top: 2.5mm; }
-.cover .cover-footer .brand { font-weight: 800; color: var(--navy-2); letter-spacing: 0.04em; }
+.cover .cover-footer .brand { font-weight: 800; color: var(--navy-2); letter-spacing: 0.04em; min-width: 0; flex: 1 1 auto; margin-right: 6mm;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cover .cover-footer .confidential { flex: 0 0 auto; white-space: nowrap; }
 
 /* ── Delta chips ── */
 .delta { display: inline-flex; align-items: center; gap: 1mm; padding: 0.5mm 2.2mm; border-radius: 3mm; font-size: 8.2pt; font-weight: 700; white-space: nowrap; }

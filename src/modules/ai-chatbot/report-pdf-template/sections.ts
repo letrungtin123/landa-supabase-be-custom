@@ -75,7 +75,7 @@ export function renderCover(model: ReportPdfViewModel): SafeHtml {
     </dl>
     <p class="prepared">${dict.cover.preparedBy}</p>
   </div>
-  <div class="cover-footer"><span class="brand">${dict.meta.brand}</span><span>${dict.meta.confidentialFooter}</span></div>
+  <div class="cover-footer"><span class="brand">${model.brandLine}</span><span class="confidential">${dict.meta.confidentialFooter}</span></div>
 </section>`;
 }
 

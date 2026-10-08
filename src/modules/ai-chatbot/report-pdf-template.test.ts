@@ -11,6 +11,7 @@ import { escapeHtml, html, renderNarrativeText } from './report-pdf-template/htm
 import { buildReportPdfFileName, buildReportPdfViewModel, type ReportPdfViewModel } from './report-pdf-view-model.js';
 import { composeReportPdfDocument } from './report-pdf.service.js';
 import {
+  allReportPdfFixtures,
   emptyReportFixture,
   englishExtendedReportFixture,
   englishReportFixture,
@@ -87,6 +88,23 @@ test('renders a self-contained, script-free document with escaped tenant data', 
   assert.ok(document.includes('&lt;b&gt;khu vực&lt;/b&gt;'));
   assert.ok(!/\b(?:src|href)="(?:https?:)?\/\//i.test(document), 'no external resources');
   assert.ok(!document.includes('{{C'), 'every entity token is substituted');
+});
+
+test('the cover brand line is the tenant name (escaped, shortened), never a fixed product name', () => {
+  for (const fixture of allReportPdfFixtures()) {
+    const document = renderReportPdfHtml(model(fixture), NO_FONTS);
+    assert.ok(!/NESSO|Learning Analytics</.test(document), fixture.name);
+  }
+  assert.ok(renderReportPdfHtml(model(vietnameseReportFixture()), NO_FONTS).includes('<span class="brand">Công ty Cổ phần Dược phẩm An Khang</span>'));
+  const long = model(longNamesReportFixture('en'));
+  assert.equal(Array.from(long.brandLine).length, 80);
+  assert.ok(long.brandLine.startsWith('Tập đoàn Công nghiệp') && long.brandLine.endsWith('…'));
+  const hostile = renderReportPdfHtml(model({ ...englishReportFixture(), tenantName: 'Acme <img src=x onerror=alert(1)> & "Co"' }), NO_FONTS);
+  assert.ok(hostile.includes('<span class="brand">Acme &lt;img src=x onerror=alert(1)&gt; &amp; &quot;Co&quot;</span>'));
+  assert.ok(!hostile.includes('<img src=x'));
+  // Without a tenant name the brand line is the localized report title.
+  assert.equal(model({ ...englishReportFixture(), tenantName: '   ' }).brandLine, 'Learning Performance Report');
+  assert.equal(model({ ...vietnameseReportFixture(), tenantName: '' }).brandLine, 'Báo cáo hiệu quả học tập');
 });
 
 test('renders the whole document in the request locale', () => {

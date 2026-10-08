@@ -7,7 +7,6 @@ type P<K extends string> = Record<K, string>;
 
 export const reportPdfVi = {
   meta: {
-    brand: 'NESSO Learning Analytics',
     title: 'Báo cáo hiệu quả học tập',
     eyebrow: 'Báo cáo phân tích đào tạo',
     confidential: 'Bảo mật',

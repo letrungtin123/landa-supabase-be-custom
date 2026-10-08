@@ -6,7 +6,6 @@ type P<K extends string> = Record<K, string>;
 
 export const reportPdfEn: ReportPdfDictionary = {
   meta: {
-    brand: 'NESSO Learning Analytics',
     title: 'Learning Performance Report',
     eyebrow: 'Learning analytics report',
     confidential: 'Confidential',
