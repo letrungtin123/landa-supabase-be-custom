@@ -20,6 +20,7 @@ import {
   type ReportNearestDataPeriod,
 } from './report-date.logic.js';
 import { foldReportText, normalizeReportEntityName } from './report-text.logic.js';
+import { extractReportCourseReference, isReportCourseQuestion, type ReportCatalogCourse } from './report-course-mention.logic.js';
 import { resolveSnapshotChartGranularity, type ReportGranularity } from './report-time-expression.logic.js';
 import { findNearestReportEnrollmentDates, loadReportUnitBreakdownRows } from './report-chat.repository.js';
 import {
@@ -29,6 +30,7 @@ import {
 } from './report-unit-breakdown.logic.js';
 
 export { resolveComparableReportPeriod, type ReportComparisonPeriod } from './report-date.logic.js';
+export { extractReportCourseReference } from './report-course-mention.logic.js';
 export {
   generateReportNarrative,
   hasNumericReportNarrativeClaim,
@@ -285,32 +287,26 @@ function normalizeReportQuestion(question: string): string {
   return foldReportText(question);
 }
 
-const COURSE_REFERENCE_PATTERN = /\b(?:kh(?:óa|oá|oa)(?:\s+học)?|course)\s+(?:(?:là|la|về|ve|about)\s+)?(.+?)(?=\s+(?:có|co|bao\s+nhiêu|bao\s+nhieu|số\s+lượng|so\s+luong|số|so|người\s+học|nguoi\s+hoc|học\s+viên|hoc\s+vien|lượt\s+ghi\s+danh|luot\s+ghi\s+danh|enrollments?|learners?|trong|từ|tu|tháng|thang|năm|nam|from|during|in)(?=\s|[?.!,;]|$)|[?.!,;]|$)/iu;
-const ENGLISH_TRAILING_COURSE_REFERENCE_PATTERNS = [
-  /\b(?:taking|attending|enrolled\s+(?:in|on)|for|about|on)\s+(?:the\s+)?(.+?)\s+course\b/iu,
-  /(?:^|[?.!,;]\s*)(?:the\s+)?(.+?)\s+course\b(?=\s+(?:has|have|with|in|from|during|for|enrollments?|learners?|students?)\b|[?.!,;]|$)/iu,
-] as const;
-
 function normalizeCourseReference(value: string): string {
   return normalizeReportEntityName(value);
 }
 
-export function extractReportCourseReference(question: string): string | null {
-  const quoted = /["“]([^"”]{2,160})["”]/u.exec(question)?.[1]?.trim();
-  if (quoted) return quoted;
-  const normalizedQuestion = question.replace(/\s+/g, ' ');
-  for (const pattern of ENGLISH_TRAILING_COURSE_REFERENCE_PATTERNS) {
-    const trailingCourseReference = pattern.exec(normalizedQuestion)?.[1]?.trim();
-    if (trailingCourseReference) return trailingCourseReference;
-  }
-  const leadingCourseReference = COURSE_REFERENCE_PATTERN.exec(normalizedQuestion)?.[1]?.trim();
-  if (leadingCourseReference) return leadingCourseReference;
-  return null;
+/** Learners, enrollments, progress or completion of a course: what its detail answers. */
+export function isCourseLearnerDetailRequest(question: string): boolean {
+  return isReportCourseQuestion(question);
 }
 
-export function isCourseLearnerDetailRequest(question: string): boolean {
-  const normalized = normalizeReportQuestion(question);
-  return /\b(bao nhieu|how many|so luong|nguoi hoc|hoc vien|learners?|students?|danh sach|list|who)\b/.test(normalized);
+function toReportCourseDetail(course: reportsService.ReportCoursePerformance): ReportCourseDetail {
+  return {
+    course_id: course.course_id,
+    name: course.name,
+    total_enrollments: course.total_enrollments,
+    completed_enrollments: course.completed_enrollments,
+    incomplete_enrollments: course.incomplete_enrollments,
+    not_started_enrollments: course.not_started_enrollments,
+    in_progress_enrollments: course.in_progress_enrollments,
+    completion_rate: course.completion_rate,
+  };
 }
 
 export function resolveReportCourseDetail(
@@ -323,16 +319,35 @@ export function resolveReportCourseDetail(
   if (!normalizedRequest) return null;
   const exactMatches = candidates.filter((candidate) => normalizeCourseReference(candidate.name) === normalizedRequest);
   if (exactMatches.length !== 1) return null;
-  const course = exactMatches[0];
+  return toReportCourseDetail(exactMatches[0]);
+}
+
+/**
+ * Detail of a catalog course (resolved by the router from the tenant's own
+ * course names) inside the snapshot's org scope and period. A course without
+ * enrollments there is reported with zeros, so the card answers "0 lượt ghi
+ * danh" for that course instead of silently showing the generic report.
+ */
+export async function loadReportCourseDetail(
+  input: {
+    tenantId: string;
+    course: ReportCatalogCourse;
+    scope: Pick<ReportScope, 'groupId' | 'subgroupId' | 'teamId'>;
+    range: reportsService.ReportDateRange;
+  },
+  load: typeof reportsService.getReportCoursePerformanceById = reportsService.getReportCoursePerformanceById,
+): Promise<ReportCourseDetail> {
+  const row = await load(input.tenantId, input.course.id, input.scope.groupId, input.scope.subgroupId, input.scope.teamId, input.range);
+  if (row) return toReportCourseDetail(row);
   return {
-    course_id: course.course_id,
-    name: course.name,
-    total_enrollments: course.total_enrollments,
-    completed_enrollments: course.completed_enrollments,
-    incomplete_enrollments: course.incomplete_enrollments,
-    not_started_enrollments: course.not_started_enrollments,
-    in_progress_enrollments: course.in_progress_enrollments,
-    completion_rate: course.completion_rate,
+    course_id: input.course.id,
+    name: input.course.name,
+    total_enrollments: 0,
+    completed_enrollments: 0,
+    incomplete_enrollments: 0,
+    not_started_enrollments: 0,
+    in_progress_enrollments: 0,
+    completion_rate: 0,
   };
 }
 
@@ -420,6 +435,8 @@ export async function buildReportChatSnapshot(input: {
   granularity?: ReportGranularity | null;
   /** Course name as written, from the router, used when the question has no recognisable course phrase. */
   courseHint?: string | null;
+  /** Catalog course resolved upstream; its detail is read by id within the scope (zeros when it has no enrollment). */
+  course?: ReportCatalogCourse | null;
   scopeOptions?: ReportScopeOptions;
 }): Promise<ReportChatSnapshot> {
   const normalized = normalizeReportChatFilter(input.filter);
@@ -453,8 +470,19 @@ export async function buildReportChatSnapshot(input: {
     return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope', {}, undefined, { unit_breakdown_status: 'not_computed' });
   }
 
-  const requestedCourse = (input.question ? extractReportCourseReference(input.question) : null) ?? input.courseHint?.trim() ?? null;
-  const shouldResolveCourseDetail = Boolean(requestedCourse && isCourseLearnerDetailRequest(input.question ?? ''));
+  const question = input.question ?? '';
+  const catalogCourse = input.course?.id ? input.course : null;
+  // Without a catalog course, the name written in the question (or the
+  // router's hint) is looked up among the period's courses, as before.
+  const requestedCourse = catalogCourse
+    ? null
+    : (input.question ? extractReportCourseReference(input.question) : null) ?? input.courseHint?.trim() ?? null;
+  const courseDetailRequest: Promise<ReportCourseDetail | null> = catalogCourse
+    ? loadReportCourseDetail({ tenantId: input.tenantId, course: catalogCourse, scope, range: normalized.dateRange })
+    : requestedCourse && isCourseLearnerDetailRequest(question)
+      ? reportsService.findReportCoursePerformanceByName(input.tenantId, requestedCourse, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange)
+        .then((candidates) => resolveReportCourseDetail(question, candidates, requestedCourse))
+      : Promise.resolve(null);
   const chartGranularity = resolveSnapshotChartGranularity(input.granularity, { date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo });
   // The comparison series uses the current chart's effective granularity so
   // both series have the same bucket size and align by index in the PDF.
@@ -462,7 +490,7 @@ export async function buildReportChatSnapshot(input: {
   const chart = (metric: 'total_enrollments' | 'active_learners', range: reportsService.ReportDateRange, granularity: reportsService.ReportChartGranularity) => reportsService.getReportChart(
     input.tenantId, range.startDate.getFullYear(), metric, scope.groupId, scope.subgroupId, scope.teamId, false, false, range, granularity, { limitBuckets: 62 },
   );
-  const [summary, previousSummary, enrollmentChart, activeLearnerChart, previousEnrollmentChart, previousActiveLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseCandidates, unitBreakdown] = await Promise.all([
+  const [summary, previousSummary, enrollmentChart, activeLearnerChart, previousEnrollmentChart, previousActiveLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseDetail, unitBreakdown] = await Promise.all([
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
     chart('total_enrollments', normalized.dateRange, chartGranularity),
@@ -472,9 +500,7 @@ export async function buildReportChatSnapshot(input: {
     reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     resolveReportScopeDisplay(input.tenantId, scope),
-    shouldResolveCourseDetail
-      ? reportsService.findReportCoursePerformanceByName(input.tenantId, requestedCourse!, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange)
-      : Promise.resolve([]),
+    courseDetailRequest,
     buildReportUnitBreakdownSection({
       tenantId: input.tenantId,
       scope,
@@ -483,9 +509,6 @@ export async function buildReportChatSnapshot(input: {
       load: loadReportUnitBreakdownRows,
     }),
   ]);
-  const courseDetail = shouldResolveCourseDetail
-    ? resolveReportCourseDetail(input.question ?? '', courseCandidates, requestedCourse)
-    : null;
   const availability = hasReportData(summary) ? 'available' : 'empty';
   const snapshot = createReportSnapshot(
     base,

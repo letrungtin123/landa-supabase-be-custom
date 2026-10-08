@@ -59,6 +59,24 @@ const COPY: Record<ReportClarificationReason, Record<'vi' | 'en', Copy>> = {
     vi: () => 'Bạn được xem báo cáo của nhiều đơn vị.',
     en: () => 'You can view reports for several units.',
   },
+  // The names are catalog names the question itself contains. One name means
+  // several courses share it, so asking for it in quotes would not help.
+  course_ambiguous: {
+    vi: (params) => {
+      const names = params.courses ?? [];
+      if (names.length === 1) return `Có nhiều khóa học cùng tên ${quote(names[0])}, nên chưa thể chọn đúng một khóa học.`;
+      return names.length > 1
+        ? `Câu hỏi nhắc đến nhiều khóa học: ${names.map(quote).join(', ')}. Hãy hỏi lại với tên một khóa học trong dấu ngoặc kép.`
+        : 'Câu hỏi khớp với nhiều khóa học. Hãy hỏi lại với tên một khóa học trong dấu ngoặc kép.';
+    },
+    en: (params) => {
+      const names = params.courses ?? [];
+      if (names.length === 1) return `Several courses are named ${quote(names[0])}, so one course cannot be chosen.`;
+      return names.length > 1
+        ? `Your question names several courses: ${names.map(quote).join(', ')}. Ask again with one course name in quotes.`
+        : 'Your question matches several courses. Ask again with one course name in quotes.';
+    },
+  },
 };
 
 export function formatReportClarificationMessage(clarification: ReportClarification, locale: 'vi' | 'en'): string {

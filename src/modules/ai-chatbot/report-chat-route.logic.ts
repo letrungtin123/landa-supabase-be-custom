@@ -6,7 +6,12 @@
 
 import { z } from 'zod';
 import type { ReportChatFilterInput } from './report-chat.service.js';
-import { MAX_REPORT_RANGE_DAYS, parseYmd, sameRange, type ReportDateRangeYmd } from './report-date.logic.js';
+import { MAX_REPORT_RANGE_DAYS, parseYmd, rollingMonthsRange, sameRange, type ReportDateRangeYmd } from './report-date.logic.js';
+import {
+  REPORT_COURSE_DEFAULT_PERIOD_MONTHS,
+  reportCourseChoiceNames,
+  type ReportCourseResolution,
+} from './report-course-mention.logic.js';
 import {
   findReportUnitById,
   hasReportUnitWord,
@@ -51,7 +56,8 @@ export type ReportClarificationReason =
   | 'unit_not_found'
   | 'unit_forbidden'
   | 'unit_multiple'
-  | 'scope_required';
+  | 'scope_required'
+  | 'course_ambiguous';
 
 export interface ReportClarificationOption {
   id: string;
@@ -66,8 +72,11 @@ export interface ReportClarificationOption {
 export interface ReportClarification {
   version: 1;
   reasons: ReportClarificationReason[];
-  /** `mention` is only ever the text the user (or the model, copying it) wrote, never a catalog name. */
-  params: { mention?: string; max_days?: number };
+  /**
+   * `mention` is only ever the text the user (or the model, copying it) wrote, never a catalog name.
+   * `courses` are the catalog names of courses the question itself names (course_ambiguous).
+   */
+  params: { mention?: string; max_days?: number; courses?: string[] };
   options: ReportClarificationOption[];
 }
 
@@ -76,7 +85,10 @@ export interface ReportRequestContext {
   clamped_to_today?: boolean;
   granularity?: ReportGranularity;
   compare?: boolean;
+  /** The catalog name when `course_id` is set; otherwise the name as the model wrote it. */
   course_hint?: string;
+  /** Tenant catalog course the question names (never an id supplied by the model). */
+  course_id?: string;
   unit_source?: 'question' | 'model' | 'filters' | 'own_scope';
 }
 
@@ -278,6 +290,7 @@ export function buildReportClarification(input: {
   periods: Array<ReportDateRangeYmd | null>;
   units: UnitChoice[];
   mention?: string;
+  courses?: string[];
 }): ReportClarification {
   const options: ReportClarificationOption[] = [];
   for (const choice of input.units.length > 0 ? input.units : [{ unit: null }]) {
@@ -301,9 +314,15 @@ export function buildReportClarification(input: {
     params: {
       ...(input.mention ? { mention: input.mention } : {}),
       ...(input.reasons.includes('date_too_long') ? { max_days: MAX_REPORT_RANGE_DAYS } : {}),
+      ...(input.courses?.length ? { courses: input.courses } : {}),
     },
     options,
   };
+}
+
+/** Request fields of a catalog course; empty unless exactly one course was resolved. */
+export function reportCourseRequestFields(course: ReportCourseResolution): Pick<ReportRequestContext, 'course_hint' | 'course_id'> {
+  return course.status === 'resolved' ? { course_hint: course.course.name, course_id: course.course.id } : {};
 }
 
 export function decideReportRoute(input: {
@@ -313,13 +332,22 @@ export function decideReportRoute(input: {
   deterministicIntent: boolean;
   units: ReportUnitResolution;
   scope: ReportActorScope;
+  /** Course the question names, resolved against the tenant catalog. */
+  course?: ReportCourseResolution;
 }): ReportRouteDecision {
   const modelWantsReport = input.model?.tool === 'get_report_snapshot';
   if (!modelWantsReport && !input.deterministicIntent) return { kind: 'direct' };
 
+  const course: ReportCourseResolution = input.course ?? { status: 'none' };
   const period = reconcileReportPeriod(input.parse, input.model?.range ?? null, input.today);
   const unit = decideUnits(input.units, input.scope);
-  const resolvedRange = period.kind === 'resolved' ? period.range : null;
+  // "How many learners does course X have" names no period: month-to-date is
+  // usually empty, so a named course defaults to the last 12 months. It stays
+  // period_source 'default', which the card marks as the default period.
+  const coursePeriod = modelWantsReport && course.status === 'resolved' && period.kind === 'resolved' && !period.range
+    ? rollingMonthsRange(input.today, REPORT_COURSE_DEFAULT_PERIOD_MONTHS)
+    : null;
+  const resolvedRange = period.kind === 'resolved' ? period.range ?? coursePeriod : null;
   const resolvedUnit = unit.kind === 'resolved' ? unit.unit : null;
 
   if (period.kind === 'clarify' || unit.kind === 'clarify') {
@@ -334,6 +362,22 @@ export function decideReportRoute(input: {
         periods: period.kind === 'clarify' ? period.options : [resolvedRange],
         units: unit.kind === 'clarify' ? unit.choices : [{ unit: resolvedUnit }],
         mention: unit.kind === 'clarify' ? unit.mention : undefined,
+      }),
+      suggested_filter: filterFor(resolvedRange, resolvedUnit),
+    };
+  }
+
+  // Two different courses tie for the longest name in the question: ask,
+  // never guess. Chips would re-run the same question, so the reply asks for
+  // the name in quotes instead (an explicit reference wins on the next turn).
+  if (course.status === 'ambiguous') {
+    return {
+      kind: 'clarification',
+      clarification: buildReportClarification({
+        reasons: ['course_ambiguous'],
+        periods: [],
+        units: [],
+        courses: reportCourseChoiceNames(course.courses),
       }),
       suggested_filter: filterFor(resolvedRange, resolvedUnit),
     };
@@ -355,7 +399,9 @@ export function decideReportRoute(input: {
       ...(period.clamped ? { clamped_to_today: true } : {}),
       ...(granularity ? { granularity } : {}),
       ...(compare ? { compare: true } : {}),
-      ...(input.model?.course ? { course_hint: input.model.course } : {}),
+      ...(course.status === 'resolved'
+        ? reportCourseRequestFields(course)
+        : input.model?.course ? { course_hint: input.model.course } : {}),
       ...(resolvedUnit && unit.kind === 'resolved' && unit.source ? { unit_source: unit.source } : {}),
     },
   };

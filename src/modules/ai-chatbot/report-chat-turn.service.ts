@@ -18,6 +18,7 @@ import { formatReportClarificationMessage } from './report-chat-clarification.lo
 import {
   buildReportClarification,
   checkReportFilterScope,
+  reportCourseRequestFields,
   type ReportActorScope,
   type ReportClarification,
   type ReportRequestContext,
@@ -26,6 +27,7 @@ import {
 import {
   defaultReportRouterDeps,
   loadReportActorScope,
+  resolveReportQuestionCourse,
   routeAdminReportQuestion,
   type ReportRouterDeps,
 } from './report-chat-router.service.js';
@@ -202,14 +204,24 @@ async function resolveDecision(input: AdminReportTurnInput, deps: AdminReportTur
     };
   }
   const filter = input.reportFilters ?? correction!.filter;
-  const scope = await loadReportActorScope(input, deps.router, false);
+  const reportQuestion = correction?.reportQuestion ?? input.question;
+  // Filters chosen in the UI re-run the original question: it keeps naming
+  // the same catalog course (an ambiguous name is not asked again here).
+  const [scope, course] = await Promise.all([
+    loadReportActorScope(input, deps.router, false),
+    resolveReportQuestionCourse({ tenantId: input.tenantId, question: reportQuestion, correlationId: input.correlationId }, deps.router),
+  ]);
   const check = checkReportFilterScope(filter, scope);
-  const request: ReportRequestContext = { period_source: input.reportFilters ? 'filters' : 'correction', unit_source: 'filters' };
+  const request: ReportRequestContext = {
+    period_source: input.reportFilters ? 'filters' : 'correction',
+    unit_source: 'filters',
+    ...reportCourseRequestFields(course),
+  };
   return {
     decision: check.kind === 'ok'
       ? { kind: 'snapshot', filter: check.filter, request }
       : { kind: 'clarification', clarification: check.clarification, suggested_filter: check.suggested_filter },
-    reportQuestion: correction?.reportQuestion ?? input.question,
+    reportQuestion,
     correction: correction ? { user_message: input.question, corrected_year: correction.year } : null,
   };
 }
@@ -250,6 +262,9 @@ async function respondWithAnalysis(
       question: reportQuestion,
       granularity: decision.request.granularity ?? null,
       courseHint: decision.request.course_hint ?? null,
+      course: decision.request.course_id && decision.request.course_hint
+        ? { id: decision.request.course_id, name: decision.request.course_hint }
+        : null,
       scopeOptions: { requireExplicitLearnerPlusScope: true },
     });
   } catch (error) {

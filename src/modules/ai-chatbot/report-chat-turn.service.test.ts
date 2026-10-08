@@ -19,7 +19,7 @@ import {
 } from './report-chat-turn.service.js';
 import { createReportSnapshot, generateReportNarrative, type ReportChatFilterInput, type ReportChatSnapshot } from './report-chat.service.js';
 import type { ReportSummary } from '../reports/reports.service.js';
-import { REPORT_REFERENCE_DATE, REPORT_TODAY, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
+import { COURSE_IDS, REPORT_COURSE_CATALOG, REPORT_REFERENCE_DATE, REPORT_TODAY, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
 
 test.after(async () => {
   await pool.end();
@@ -57,6 +57,7 @@ interface Harness {
   chunks: string[];
   finalized: Array<Record<string, unknown>>;
   snapshotFilters: ReportChatFilterInput[];
+  snapshotCourses: Array<{ id: string; name: string } | null>;
 }
 
 function harness(options: {
@@ -68,6 +69,7 @@ function harness(options: {
 } = {}): Harness {
   const saved: Harness['saved'] = [];
   const snapshotFilters: ReportChatFilterInput[] = [];
+  const snapshotCourses: Harness['snapshotCourses'] = [];
   const router: ReportRouterDeps = {
     modelTimeoutMs: 50,
     callModel: async (input) => {
@@ -80,6 +82,7 @@ function harness(options: {
       );
     },
     loadCatalog: async () => REPORT_UNIT_CATALOG,
+    loadCourseCatalog: async () => REPORT_COURSE_CATALOG,
     loadLabels: async () => ({}),
     loadAllowedGroupIds: async () => (typeof options.allowedGroupIds === 'function' ? options.allowedGroupIds() : options.allowedGroupIds ?? []),
     log: () => undefined,
@@ -90,11 +93,13 @@ function harness(options: {
     chunks: [],
     finalized: [],
     snapshotFilters,
+    snapshotCourses,
     deps: {
       router,
       route: (input, deps) => routeAdminReportQuestion({ ...input, referenceDate: REPORT_REFERENCE_DATE }, deps),
       buildSnapshot: async (input) => {
         snapshotFilters.push(input.filter ?? {});
+        snapshotCourses.push(input.course ?? null);
         return options.buildSnapshot ? options.buildSnapshot(input.filter ?? {}) : fakeSnapshot(input.filter ?? {});
       },
       generateNarrative: options.generateNarrative
@@ -309,4 +314,45 @@ test('a question that is not a report is left to the normal chat', async () => {
   assert.equal(await run(h, turnInput('Viết giúp tôi một email chúc mừng sinh nhật')), 'not_report');
   assert.equal(h.saved.length, 0);
   assert.equal(h.chunks.length, 0);
+});
+
+test('a course named without "khóa học" and no period: catalog course, last 12 months marked as the default period', async () => {
+  const h = harness({ modelArgs: {} });
+  assert.equal(await run(h, turnInput('Customer experience v2 có bao nhiêu học viên tham gia')), 'handled');
+  assert.deepEqual(h.snapshotFilters, [{ date_from: '2025-10-09', date_to: REPORT_TODAY }]);
+  assert.deepEqual(h.snapshotCourses, [{ id: COURSE_IDS.customerExperienceV2, name: 'Customer Experience V2' }]);
+  assert.deepEqual(h.saved[0].metadata.report_request, {
+    period_source: 'default', course_hint: 'Customer Experience V2', course_id: COURSE_IDS.customerExperienceV2,
+  });
+});
+
+test('filters chosen in the UI re-run the question with the same catalog course', async () => {
+  const h = harness();
+  await run(h, turnInput('Customer experience v2 có bao nhiêu học viên tham gia', { reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31' } }));
+  assert.deepEqual(h.snapshotFilters, [{ date_from: '2026-07-01', date_to: '2026-07-31' }]);
+  assert.deepEqual(h.snapshotCourses, [{ id: COURSE_IDS.customerExperienceV2, name: 'Customer Experience V2' }]);
+  assert.deepEqual(h.saved[0].metadata.report_request, {
+    period_source: 'filters', unit_source: 'filters', course_hint: 'Customer Experience V2', course_id: COURSE_IDS.customerExperienceV2,
+  });
+  // A course question without a catalog course keeps the snapshot's own name lookup.
+  const legacy = harness();
+  await run(legacy, turnInput('Báo cáo', { reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31' } }));
+  assert.deepEqual(legacy.snapshotCourses, [null]);
+});
+
+test('two courses tying for the longest name get a localized question, not a guessed course', async () => {
+  const h = harness({ modelArgs: {} });
+  await run(h, turnInput('Customer Experience và Quality Check có bao nhiêu học viên?'));
+  assert.deepEqual(h.snapshotFilters, []);
+  assert.equal(h.saved[0].metadata.kind, 'report_clarification');
+  assert.deepEqual((h.saved[0].metadata.report_clarification as { reasons: string[] }).reasons, ['course_ambiguous']);
+  assert.equal(h.chunks[0], 'Câu hỏi nhắc đến nhiều khóa học: “Customer Experience”, “Quality Check”. Hãy hỏi lại với tên một khóa học trong dấu ngoặc kép. Mở bộ lọc để chọn thời gian và đơn vị.');
+});
+
+test('a course catalog outage only drops the course: the report still answers', async () => {
+  const h = harness({ modelArgs: {} });
+  h.deps.router.loadCourseCatalog = async () => { throw new Error('redis down'); };
+  assert.equal(await run(h, turnInput('Customer experience v2 có bao nhiêu học viên tham gia')), 'handled');
+  assert.deepEqual(h.snapshotFilters, [{}]);
+  assert.deepEqual(h.snapshotCourses, [null]);
 });

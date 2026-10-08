@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { formatReportClarificationMessage } from './report-chat-clarification.logic.js';
+import { buildReportClarification } from './report-chat-route.logic.js';
 import { COURSE_IDS, REPORT_COURSE_CATALOG, REPORT_UNIT_CATALOG } from './report-chat.fixture.js';
 import { dayCountBetween, MAX_REPORT_RANGE_DAYS, rollingMonthsRange } from './report-date.logic.js';
 import {
@@ -129,3 +131,19 @@ test('the course default period is the last 12 months ending today and stays wit
   assert.deepEqual(rollingMonthsRange('2028-02-29', 12), { date_from: '2027-03-01', date_to: '2028-02-29' });
 });
 
+test('the course clarification names the courses from the question in vi and en', () => {
+  const several = buildReportClarification({ reasons: ['course_ambiguous'], periods: [], units: [], courses: ['Customer Experience', 'Quality Check'] });
+  assert.deepEqual(several.options, []);
+  assert.deepEqual(several.params, { courses: ['Customer Experience', 'Quality Check'] });
+  assert.equal(
+    formatReportClarificationMessage(several, 'vi'),
+    'Câu hỏi nhắc đến nhiều khóa học: “Customer Experience”, “Quality Check”. Hãy hỏi lại với tên một khóa học trong dấu ngoặc kép. Mở bộ lọc để chọn thời gian và đơn vị.',
+  );
+  assert.equal(
+    formatReportClarificationMessage(several, 'en'),
+    'Your question names several courses: “Customer Experience”, “Quality Check”. Ask again with one course name in quotes. Open the filters to choose the period and unit.',
+  );
+  const shared = buildReportClarification({ reasons: ['course_ambiguous'], periods: [], units: [], courses: ['Kỹ năng bán hàng'] });
+  assert.equal(formatReportClarificationMessage(shared, 'vi'), 'Có nhiều khóa học cùng tên “Kỹ năng bán hàng”, nên chưa thể chọn đúng một khóa học. Mở bộ lọc để chọn thời gian và đơn vị.');
+  assert.equal(formatReportClarificationMessage(shared, 'en'), 'Several courses are named “Kỹ năng bán hàng”, so one course cannot be chosen. Open the filters to choose the period and unit.');
+});

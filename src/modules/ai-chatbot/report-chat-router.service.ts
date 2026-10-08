@@ -22,6 +22,13 @@ import {
 } from './report-chat-route.logic.js';
 import { hasReportUnitWord, resolveReportOrgUnits, type ReportGroupLabels, type ReportOrgUnitCatalog } from './report-org-unit.logic.js';
 import { loadReportGroupLabels, loadReportOrgUnitCatalog } from './report-org-unit-resolver.service.js';
+import { loadReportCourseCatalog } from './report-course-catalog.service.js';
+import {
+  isReportCourseQuestion,
+  resolveReportCourseMention,
+  type ReportCourseCatalog,
+  type ReportCourseResolution,
+} from './report-course-mention.logic.js';
 import { parseReportTimeExpression } from './report-time-expression.logic.js';
 
 const REPORT_ROUTER_FUNCTIONS: FunctionDeclaration[] = [
@@ -98,6 +105,7 @@ export interface ReportRouterActor {
 export interface ReportRouterDeps {
   callModel: typeof callReportRouterModel;
   loadCatalog: (tenantId: string) => Promise<ReportOrgUnitCatalog>;
+  loadCourseCatalog: (tenantId: string) => Promise<ReportCourseCatalog>;
   loadLabels: (tenantId: string) => Promise<ReportGroupLabels>;
   loadAllowedGroupIds: (actor: ReportRouterActor) => Promise<string[]>;
   log: (event: Record<string, unknown>) => void;
@@ -108,10 +116,46 @@ export interface ReportRouterDeps {
 export const defaultReportRouterDeps: ReportRouterDeps = {
   callModel: callReportRouterModel,
   loadCatalog: loadReportOrgUnitCatalog,
+  loadCourseCatalog: loadReportCourseCatalog,
   loadLabels: loadReportGroupLabels,
   loadAllowedGroupIds: loadReportAllowedGroupIds,
   log: (event) => console.info(JSON.stringify(event)),
 };
+
+/**
+ * The tenant course a learner/enrollment/progress question names. Catalogs
+ * are read only for such questions; org-unit names are passed so that a
+ * course sharing a unit's name is never picked from free text. A catalog
+ * failure only means "no course": the report itself still answers.
+ */
+export async function resolveReportQuestionCourse(
+  input: { tenantId: string; question: string; modelCourse?: string | null; labels?: ReportGroupLabels; correlationId?: string | null },
+  deps: Pick<ReportRouterDeps, 'loadCatalog' | 'loadCourseCatalog' | 'loadLabels' | 'log'>,
+): Promise<ReportCourseResolution> {
+  if (!isReportCourseQuestion(input.question)) return { status: 'none' };
+  try {
+    const [catalog, units, labels] = await Promise.all([
+      deps.loadCourseCatalog(input.tenantId),
+      deps.loadCatalog(input.tenantId),
+      input.labels ? Promise.resolve(input.labels) : deps.loadLabels(input.tenantId),
+    ]);
+    return resolveReportCourseMention({
+      question: input.question,
+      catalog,
+      modelCourse: input.modelCourse ?? null,
+      labels,
+      unitNames: units.units.map((unit) => unit.name),
+    });
+  } catch (error) {
+    deps.log({
+      event: 'report_course_catalog_unavailable',
+      correlation_id: input.correlationId ?? null,
+      tenant_id: input.tenantId,
+      error_class: errorClass(error),
+    });
+    return { status: 'none' };
+  }
+}
 
 /** learner_plus scope; the catalog is loaded only when names must be resolved or shown. */
 export async function loadReportActorScope(
@@ -165,9 +209,14 @@ export async function routeAdminReportQuestion(
 
   const isReport = model?.tool === 'get_report_snapshot' || deterministicIntent;
   const needCatalog = isReport && ((model?.org_units.length ?? 0) > 0 || hasReportUnitWord(input.question, labels));
-  const scope = isReport
-    ? await loadReportActorScope(input, deps, needCatalog)
-    : { restricted: false, allowedGroupIds: null, catalog: null };
+  const [scope, course]: [ReportActorScope, ReportCourseResolution] = isReport
+    ? await Promise.all([
+      loadReportActorScope(input, deps, needCatalog),
+      resolveReportQuestionCourse({
+        tenantId: input.tenantId, question: input.question, modelCourse: model?.course ?? null, labels, correlationId: input.correlationId,
+      }, deps),
+    ])
+    : [{ restricted: false, allowedGroupIds: null, catalog: null }, { status: 'none' }];
   const units = scope.catalog && needCatalog
     ? resolveReportOrgUnits({
       question: input.question,
@@ -177,7 +226,7 @@ export async function routeAdminReportQuestion(
       allowedGroupIds: scope.allowedGroupIds,
     })
     : { status: 'none' as const };
-  const decision = decideReportRoute({ today, parse, model, deterministicIntent, units, scope });
+  const decision = decideReportRoute({ today, parse, model, deterministicIntent, units, scope, course });
   deps.log({
     event: 'report_router_decision',
     correlation_id: input.correlationId ?? null,
@@ -188,6 +237,8 @@ export async function routeAdminReportQuestion(
     time_status: parse.status,
     time_confidence: parse.confidence,
     unit_status: units.status,
+    course_status: course.status,
+    ...(course.status === 'resolved' ? { course_source: course.source } : {}),
     ...(decision.kind === 'snapshot' ? { period_source: decision.request.period_source } : {}),
     ...(decision.kind === 'clarification' ? { reasons: decision.clarification.reasons } : {}),
   });

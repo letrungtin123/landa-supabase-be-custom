@@ -8,7 +8,7 @@ import type { UserRole } from '../../types/index.js';
 import { parseReportRouterToolCall, type ReportClarificationReason, type ReportRouteDecision } from './report-chat-route.logic.js';
 import { routeAdminReportQuestion, type ReportRouterDeps } from './report-chat-router.service.js';
 import type { ReportChatFilterInput } from './report-chat.service.js';
-import { REPORT_REFERENCE_DATE, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
+import { COURSE_IDS, REPORT_COURSE_CATALOG, REPORT_REFERENCE_DATE, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
 import { reportUnitFilter } from './report-org-unit.logic.js';
 
 /** Report filter of a fixture unit (the unit and its ancestors). */
@@ -25,8 +25,8 @@ interface GoldenCase {
   expect:
     | { kind: 'direct' }
     | { kind: 'filters'; filter?: ReportChatFilterInput }
-    | { kind: 'snapshot'; filter: ReportChatFilterInput; granularity?: string; compare?: boolean; course?: string; source?: string }
-    | { kind: 'clarification'; reasons: ReportClarificationReason[]; options?: ReportChatFilterInput[]; optionCount?: number; mention?: string; hidden?: string[] };
+    | { kind: 'snapshot'; filter: ReportChatFilterInput; granularity?: string; compare?: boolean; course?: string; courseId?: string | null; source?: string }
+    | { kind: 'clarification'; reasons: ReportClarificationReason[]; options?: ReportChatFilterInput[]; optionCount?: number; mention?: string; hidden?: string[]; courses?: string[] };
 }
 
 const r = (date_from: string, date_to: string) => ({ date_from, date_to });
@@ -125,7 +125,16 @@ const CASES: GoldenCase[] = [
   { q: 'Báo cáo học viên mùa hè', model: m('2024-06-01', '2024-08-31'), expect: { kind: 'clarification', reasons: ['date_conflict'], options: [r('2026-06-01', '2026-08-31'), r('2024-06-01', '2024-08-31')] } },
   { q: 'Báo cáo học viên dịp Tết', model: m('2026-02-14', '2026-02-22'), expect: { kind: 'snapshot', filter: r('2026-02-14', '2026-02-22'), source: 'model' } },
   { q: 'How many learners in the Marketing team this month?', locale: 'en', model: 'decline', expect: { kind: 'snapshot', filter: { ...r('2026-10-01', '2026-10-08'), ...u(UNIT_IDS.marketing) } } },
-  { q: 'Khóa học "An toàn lao động" có bao nhiêu người học tháng 7', model: m('2026-07-01', '2026-07-31', { course: 'An toàn lao động' }), expect: { kind: 'snapshot', filter: r('2026-07-01', '2026-07-31'), course: 'An toàn lao động' } },
+  { q: 'Khóa học "An toàn lao động" có bao nhiêu người học tháng 7', model: m('2026-07-01', '2026-07-31', { course: 'An toàn lao động' }), expect: { kind: 'snapshot', filter: r('2026-07-01', '2026-07-31'), course: 'An toàn lao động', courseId: null } },
+  // Courses named without "khóa học": found in the tenant catalog; no period = last 12 months, marked as the default period
+  { q: 'Customer experience v2 có bao nhiêu học viên tham gia', model: m(), expect: { kind: 'snapshot', filter: r('2025-10-09', '2026-10-08'), course: 'Customer Experience V2', courseId: COURSE_IDS.customerExperienceV2, source: 'default' } },
+  { q: 'Customer experience v2 có bao nhiêu học viên tham gia', model: m(undefined, undefined, { course: 'Customer experience' }), expect: { kind: 'snapshot', filter: r('2025-10-09', '2026-10-08'), course: 'Customer Experience V2', courseId: COURSE_IDS.customerExperienceV2, source: 'default' } },
+  { q: 'Khóa Customer Experience có bao nhiêu người học tháng 7', model: m('2026-07-01', '2026-07-31'), expect: { kind: 'snapshot', filter: r('2026-07-01', '2026-07-31'), course: 'Customer Experience', courseId: COURSE_IDS.customerExperience, source: 'agreed' } },
+  { q: 'How many learners are enrolled in Customer Experience V2?', locale: 'en', model: m(), expect: { kind: 'snapshot', filter: r('2025-10-09', '2026-10-08'), course: 'Customer Experience V2', courseId: COURSE_IDS.customerExperienceV2, source: 'default' } },
+  { q: 'Customer Experience V2 có bao nhiêu học viên năm 2025', model: m('2025-01-01', '2025-12-31'), expect: { kind: 'snapshot', filter: r('2025-01-01', '2025-12-31'), courseId: COURSE_IDS.customerExperienceV2 } },
+  { q: 'Customer experience v2 có bao nhiêu học viên tham gia', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m(), expect: { kind: 'snapshot', filter: { ...r('2025-10-09', '2026-10-08'), ...u(UNIT_IDS.nesso) }, courseId: COURSE_IDS.customerExperienceV2, source: 'default' } },
+  { q: 'Customer Experience và Quality Check có bao nhiêu học viên?', model: m(), expect: { kind: 'clarification', reasons: ['course_ambiguous'], optionCount: 0, courses: ['Customer Experience', 'Quality Check'] } },
+  { q: 'Có bao nhiêu học viên trong team Marketing tháng 7?', model: m('2026-07-01', '2026-07-31', units('Marketing')), expect: { kind: 'snapshot', filter: { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.marketing) }, courseId: null } },
 ];
 
 function deps(testCase: GoldenCase): ReportRouterDeps {
@@ -138,6 +147,7 @@ function deps(testCase: GoldenCase): ReportRouterDeps {
       );
     },
     loadCatalog: async () => REPORT_UNIT_CATALOG,
+    loadCourseCatalog: async () => REPORT_COURSE_CATALOG,
     loadLabels: async () => ({}),
     loadAllowedGroupIds: async () => testCase.allowed ?? [],
     log: () => undefined,
@@ -153,6 +163,7 @@ function check(testCase: GoldenCase, decision: ReportRouteDecision): void {
     if (expected.granularity) assert.equal(decision.request.granularity, expected.granularity, label);
     if (expected.compare) assert.equal(decision.request.compare, true, label);
     if (expected.course) assert.equal(decision.request.course_hint, expected.course, label);
+    if (expected.courseId !== undefined) assert.equal(decision.request.course_id ?? null, expected.courseId, label);
     if (expected.source) assert.equal(decision.request.period_source, expected.source, label);
   }
   if (expected.kind === 'filters' && decision.kind === 'filters' && expected.filter) {
@@ -163,6 +174,7 @@ function check(testCase: GoldenCase, decision: ReportRouteDecision): void {
     if (expected.options) assert.deepEqual(decision.clarification.options.map((option) => option.filter), expected.options, label);
     if (expected.optionCount !== undefined) assert.equal(decision.clarification.options.length, expected.optionCount, label);
     if (expected.mention) assert.equal(decision.clarification.params.mention, expected.mention, label);
+    if (expected.courses) assert.deepEqual(decision.clarification.params.courses, expected.courses, label);
     for (const name of expected.hidden ?? []) assert.ok(!JSON.stringify(decision).includes(name), `${label}: reveals ${name}`);
   }
 }

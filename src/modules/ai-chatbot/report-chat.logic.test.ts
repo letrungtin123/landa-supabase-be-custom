@@ -14,6 +14,7 @@ import {
   isReportNarrativeAllowed,
   isPotentialReportYearCorrection,
   isStoredReportChatSnapshot,
+  loadReportCourseDetail,
   normalizeReportChatFilter,
   resolveReportYearCorrection,
   resolveComparableReportPeriod,
@@ -183,7 +184,39 @@ test('suppresses course detail selection when the candidate name is ambiguous or
     resolveReportCourseDetail('Khóa Customer Experience có bao nhiêu người học?', [candidate, { ...candidate, course_id: 'duplicate-course' }]),
     null,
   );
-  assert.equal(resolveReportCourseDetail('Báo cáo tiến độ Khóa Customer Experience trong tháng 7', [candidate]), null);
+  assert.equal(resolveReportCourseDetail('Giới thiệu nội dung Khóa Customer Experience trong tháng 7', [candidate]), null);
+  // Progress and completion are what a course detail shows (not started / learning / completed).
+  assert.equal(resolveReportCourseDetail('Báo cáo tiến độ Khóa Customer Experience trong tháng 7', [candidate])?.course_id, 'course-customer-experience');
+});
+
+test('a catalog course is read by id inside the snapshot scope, and reported with zeros when it has no enrollment', async () => {
+  const calls: unknown[][] = [];
+  const range = normalizeReportChatFilter({ date_from: '2025-10-09', date_to: '2026-10-08' }).dateRange;
+  const course = { id: 'course-v1:LAndA2+65867+2026', name: 'Customer Experience V2' };
+  // learner_plus: the snapshot scope is their group; the course figures are computed inside it only.
+  const scope = { groupId: 'group-learner-plus', subgroupId: undefined, teamId: undefined };
+
+  const empty = await loadReportCourseDetail({ tenantId: 'tenant-1', course, scope, range }, async (...args) => {
+    calls.push(args);
+    return null;
+  });
+  assert.deepEqual(calls, [['tenant-1', course.id, 'group-learner-plus', undefined, undefined, range]]);
+  assert.deepEqual(empty, {
+    course_id: course.id,
+    name: 'Customer Experience V2',
+    total_enrollments: 0,
+    completed_enrollments: 0,
+    incomplete_enrollments: 0,
+    not_started_enrollments: 0,
+    in_progress_enrollments: 0,
+    completion_rate: 0,
+  });
+
+  const row = {
+    course_id: course.id, name: 'Customer Experience V2', total_enrollments: 8, completed_enrollments: 7, incomplete_enrollments: 1,
+    not_started_enrollments: 0, in_progress_enrollments: 1, completion_rate: 87.5,
+  };
+  assert.deepEqual(await loadReportCourseDetail({ tenantId: 'tenant-1', course, scope, range }, async () => row), row);
 });
 
 test('uses the exact Vietnamese KPI titles shown in the learning report dashboard', () => {
