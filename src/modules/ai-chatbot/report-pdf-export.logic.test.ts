@@ -62,14 +62,30 @@ function harness(overrides: Partial<ReportPdfExportDeps> & { allowed?: boolean; 
   return { service: createReportPdfExportService(deps), deps, state, store, fixture };
 }
 
-async function waitForTerminal(service: ReturnType<typeof harness>['service'], jobId: string) {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const status = await service.get({ ...actor, ...reference, jobId });
+async function waitForTerminal(service: ReturnType<typeof harness>['service'], jobId: string, owner: { userId: string; tenantId: string; role: 'staff' } = actor, ref = reference) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const status = await service.get({ ...owner, ...ref, jobId });
     if (status.phase === 'ready' || status.phase === 'failed') return status;
     await new Promise((resolve) => setImmediate(resolve));
   }
   throw new Error('job did not finish');
 }
+
+/** Renderer whose renders stay pending until `open()`; later renders finish immediately. */
+function gatedRenderer() {
+  const pending: Array<() => void> = [];
+  let opened = false;
+  const result = () => ({ pdf: Buffer.from('%PDF-1.7 test'), pageCount: 8, overflow: [], durationMs: 5 });
+  return {
+    open: () => { opened = true; pending.splice(0).forEach((finish) => finish()); },
+    renderer: () => ({
+      measure: async () => ({}),
+      render: () => (opened ? Promise.resolve(result()) : new Promise<ReturnType<typeof result>>((resolve) => { pending.push(() => resolve(result())); })),
+    }),
+  };
+}
+
+const messageId = (index: number) => `44444444-4444-4444-8444-${String(index).padStart(12, '0')}`;
 
 const rejectsWith = (code: string) => (error: unknown) => (error as { code?: string }).code === code;
 
@@ -218,6 +234,74 @@ test('rate-limits new exports per user and per tenant', async () => {
   const keys = buildReportPdfRateLimitKeys({ tenantId: TENANT, userId: USER, nowMs: 599_000, windowSeconds: 600 });
   assert.equal(keys.retryAfterSeconds, 1);
   assert.match(keys.user, new RegExp(`:${TENANT}:${USER}:0$`));
+});
+
+test('finished exports never block new ones: only in-progress exports count against the capacity', async () => {
+  const { service } = harness({ store: () => null, limits: { activeJobs: 2, tenantActiveJobs: 2 } });
+  const ids: string[] = [];
+  for (let index = 1; index <= 5; index += 1) {
+    const ref = { conversationId: CONVERSATION, assistantMessageId: messageId(index) };
+    const job = await service.start({ ...actor, ...ref, locale: 'vi' });
+    assert.equal((await waitForTerminal(service, job.id, actor, ref)).phase, 'ready', `export ${index}`);
+    ids.push(job.id);
+  }
+  // Earlier finished jobs remain downloadable until their TTL.
+  const first = await service.download({ ...actor, conversationId: CONVERSATION, assistantMessageId: messageId(1), jobId: ids[0], audit });
+  assert.equal(first.pdf.toString(), '%PDF-1.7 test');
+});
+
+test('a tenant at its active cap is refused before the rate limiter is charged; other tenants keep exporting', async () => {
+  const gate = gatedRenderer();
+  const charged: string[] = [];
+  const { service } = harness({
+    store: () => null,
+    renderer: gate.renderer,
+    limits: { activeJobs: 4, tenantActiveJobs: 2 },
+    rateLimit: async (who) => { charged.push(who.tenantId); return { allowed: true, scope: null, retryAfterSeconds: 0 }; },
+  });
+  const start = (owner: typeof actor, index: number) => service.start({ ...owner, conversationId: CONVERSATION, assistantMessageId: messageId(index), locale: 'vi' });
+  const other = { ...actor, tenantId: '55555555-5555-4555-8555-555555555555' };
+  const third = { ...actor, tenantId: '66666666-6666-4666-8666-666666666666' };
+  const busy = await start(actor, 1);
+  await start(actor, 2);
+  await assert.rejects(() => start(actor, 3), rejectsWith('REPORT_PDF_QUEUE_FULL'));
+  assert.deepEqual(charged, [TENANT, TENANT], 'the refused attempt consumed no allowance');
+  await start(other, 4);
+  await start(other, 5);
+  await assert.rejects(() => start(third, 6), rejectsWith('REPORT_PDF_QUEUE_FULL'), 'process-wide cap of in-progress exports');
+  assert.equal(charged.length, 4);
+  gate.open();
+  await waitForTerminal(service, busy.id, actor, { conversationId: CONVERSATION, assistantMessageId: messageId(1) });
+  await waitForTerminal(service, (await start(actor, 2)).id, actor, { conversationId: CONVERSATION, assistantMessageId: messageId(2) });
+  const retried = await start(actor, 3);
+  assert.equal((await waitForTerminal(service, retried.id, actor, { conversationId: CONVERSATION, assistantMessageId: messageId(3) })).phase, 'ready');
+});
+
+test('synchronous exports count as in-progress exports of their tenant', async () => {
+  const gate = gatedRenderer();
+  const { service } = harness({ store: () => null, renderer: gate.renderer, limits: { tenantActiveJobs: 1 } });
+  const inline = service.exportNow({ ...actor, ...reference, locale: 'vi', audit });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await assert.rejects(() => service.start({ ...actor, conversationId: CONVERSATION, assistantMessageId: messageId(7), locale: 'vi' }), rejectsWith('REPORT_PDF_QUEUE_FULL'));
+  gate.open();
+  assert.equal((await inline).pdf.toString(), '%PDF-1.7 test');
+  const job = await service.start({ ...actor, conversationId: CONVERSATION, assistantMessageId: messageId(7), locale: 'vi' });
+  assert.equal((await waitForTerminal(service, job.id, actor, { conversationId: CONVERSATION, assistantMessageId: messageId(7) })).phase, 'ready');
+});
+
+test('finished jobs are bounded in number and bytes, evicting the oldest finished first', async () => {
+  const { service } = harness({ store: () => null, limits: { finishedJobs: 3, finishedArtifactBytes: 13 * 2 } });
+  const jobs: Array<{ id: string; ref: typeof reference }> = [];
+  for (let index = 1; index <= 3; index += 1) {
+    const ref = { conversationId: CONVERSATION, assistantMessageId: messageId(index) };
+    const job = await service.start({ ...actor, ...ref, locale: 'vi' });
+    await waitForTerminal(service, job.id, actor, ref);
+    jobs.push({ id: job.id, ref });
+  }
+  // Three 13-byte artifacts exceed the 26-byte budget: the oldest finished job is gone.
+  await assert.rejects(() => service.get({ ...actor, ...jobs[0].ref, jobId: jobs[0].id }), rejectsWith('REPORT_PDF_JOB_NOT_FOUND'));
+  assert.equal((await service.get({ ...actor, ...jobs[1].ref, jobId: jobs[1].id })).phase, 'ready');
+  assert.equal((await service.get({ ...actor, ...jobs[2].ref, jobId: jobs[2].id })).phase, 'ready');
 });
 
 test('the AI narrative writer accounts tokens and only returns validated narratives', async () => {

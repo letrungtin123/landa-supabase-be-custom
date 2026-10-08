@@ -7,7 +7,8 @@
 //   deterministic key, and job ids are deterministic, so status/download keep
 //   working after a restart or on another instance. Without storage the
 //   artifact stays in memory for the job TTL (previous behavior).
-// - One audit row per delivered PDF; per-user/tenant start rate limit.
+// - One audit row per delivered PDF; per-user/tenant start rate limit, charged
+//   only after the per-process/per-tenant capacity of in-progress exports.
 // ═══════════════════════════════════════════════════════════════
 import { randomUUID } from 'node:crypto';
 import { env } from '../../config/env.js';
@@ -35,8 +36,27 @@ import { buildReportPdfFileName, type ReportPdfTenantBranding } from './report-p
 
 const ACTIVE_JOB_MAX_AGE_MS = 20 * 60 * 1000;
 const TERMINAL_JOB_TTL_MS = 15 * 60 * 1000;
-const MAX_CACHED_JOBS = 20;
 const MAX_ARTIFACT_BYTES = 15 * 1024 * 1024;
+
+/**
+ * Only in-progress exports (jobs and synchronous exports) count against the
+ * capacity, per process and per tenant. Finished jobs stay available for
+ * status/download until their TTL, outside the capacity, within a hard bound
+ * on their number and in-memory bytes (oldest finished evicted first).
+ */
+export interface ReportPdfExportLimits {
+  activeJobs: number;
+  tenantActiveJobs: number;
+  finishedJobs: number;
+  finishedArtifactBytes: number;
+}
+
+const defaultReportPdfExportLimits = (): ReportPdfExportLimits => ({
+  activeJobs: 20,
+  tenantActiveJobs: env.REPORT_PDF_TENANT_ACTIVE_JOBS,
+  finishedJobs: 100,
+  finishedArtifactBytes: 200 * 1024 * 1024,
+});
 
 export type ReportPdfExportActor = { userId: string; tenantId: string; role: UserRole };
 export type ReportPdfPermissionChecker = (actor: ReportPdfExportActor) => Promise<boolean>;
@@ -78,6 +98,7 @@ export interface ReportPdfExportDeps {
   audit: (entry: TransactionalAuditEntry) => Promise<void>;
   rateLimit: (actor: ReportPdfExportActor) => Promise<ReportPdfRateLimitDecision>;
   log: (event: Record<string, unknown>) => void;
+  limits?: Partial<ReportPdfExportLimits>;
 }
 
 const log = (event: Record<string, unknown>) => console.info(`[ReportPdf] ${JSON.stringify(event)}`);
@@ -142,8 +163,13 @@ const split = (input: JobInput) => ({
 
 export class ReportPdfExportService {
   private readonly jobs = new Map<string, Job>();
+  /** In-flight synchronous exports per tenant: they render too, so they count as active. */
+  private readonly inlineExports = new Map<string, number>();
+  private readonly limits: ReportPdfExportLimits;
 
-  constructor(private readonly deps: ReportPdfExportDeps = defaultReportPdfExportDeps) {}
+  constructor(private readonly deps: ReportPdfExportDeps = defaultReportPdfExportDeps) {
+    this.limits = { ...defaultReportPdfExportLimits(), ...deps.limits };
+  }
 
   private async assertPermission(actor: ReportPdfExportActor): Promise<void> {
     if (await this.deps.permissionChecker(actor)) return;
@@ -258,6 +284,43 @@ export class ReportPdfExportService {
       }
       if (isReportPdfExportTerminal(job.phase) && job.expiresAtMs !== null && now >= job.expiresAtMs) this.jobs.delete(job.id);
     }
+    this.evictFinished();
+  }
+
+  /** Keeps finished jobs within their hard bounds, evicting the oldest finished first. */
+  private evictFinished(): void {
+    const finished = [...this.jobs.values()]
+      .filter((job) => isReportPdfExportTerminal(job.phase))
+      .sort((left, right) => (left.expiresAtMs ?? 0) - (right.expiresAtMs ?? 0));
+    let count = finished.length;
+    let bytes = finished.reduce((sum, job) => sum + (job.artifact?.byteLength ?? 0), 0);
+    for (const job of finished) {
+      if (count <= this.limits.finishedJobs && bytes <= this.limits.finishedArtifactBytes) break;
+      this.jobs.delete(job.id);
+      count -= 1;
+      bytes -= job.artifact?.byteLength ?? 0;
+    }
+  }
+
+  private activeCount(tenantId?: string): number {
+    let count = 0;
+    for (const job of this.jobs.values()) {
+      if (!isReportPdfExportTerminal(job.phase) && (tenantId === undefined || job.tenantId === tenantId)) count += 1;
+    }
+    for (const [tenant, inline] of this.inlineExports) {
+      if (tenantId === undefined || tenant === tenantId) count += inline;
+    }
+    return count;
+  }
+
+  /** Checked before the rate limiter, so a refused attempt does not consume allowance. */
+  private assertCapacity(tenantId: string): void {
+    const scope = this.activeCount() >= this.limits.activeJobs ? 'process'
+      : this.activeCount(tenantId) >= this.limits.tenantActiveJobs ? 'tenant'
+        : null;
+    if (!scope) return;
+    this.deps.log({ event: 'report_pdf_queue_full', tenant_id: tenantId, scope });
+    throw new ReportPdfExportError('Report PDF queue full', 429, 'REPORT_PDF_QUEUE_FULL');
   }
 
   private ownedJob(actor: ReportPdfExportActor, reference: ReportPdfReference, jobId: string): Job | null {
@@ -285,6 +348,7 @@ export class ReportPdfExportService {
       ReportPdfExportService.finish(job, { phase: 'failed', artifact: null, errorCode: normalized.code });
       if (normalized.statusCode >= 500) this.deps.log({ event: 'report_pdf_export_failed', request_id: requestId, tenant_id: actor.tenantId, code: normalized.code });
     }
+    this.evictFinished();
   }
 
   private async enforceRateLimit(actor: ReportPdfExportActor): Promise<void> {
@@ -299,9 +363,12 @@ export class ReportPdfExportService {
     const id = buildReportPdfJobId({ ...actor, ...reference, locale: input.locale, templateVersion: REPORT_PDF_TEMPLATE_VERSION });
     const existing = this.jobs.get(id);
     if (existing && existing.phase !== 'failed') return ReportPdfExportService.toStatus(existing);
-    if (existing) this.jobs.delete(id);
+    this.assertCapacity(actor.tenantId);
     await this.enforceRateLimit(actor);
-    if (this.jobs.size >= MAX_CACHED_JOBS) throw new ReportPdfExportError('Report PDF queue full', 429, 'REPORT_PDF_QUEUE_FULL');
+    // The same job may have been started, or the capacity taken, while the limiter answered.
+    const raced = this.jobs.get(id);
+    if (raced && raced.phase !== 'failed') return ReportPdfExportService.toStatus(raced);
+    this.assertCapacity(actor.tenantId);
     const now = Date.now();
     const job: Job = {
       id, ...reference, userId: actor.userId, tenantId: actor.tenantId, phase: 'validating', locale: input.locale,
@@ -359,13 +426,23 @@ export class ReportPdfExportService {
   async exportNow(input: JobInput & { locale: ReportPdfLocale; audit: ReportPdfAuditContext }): Promise<{ pdf: Buffer; fileName: string }> {
     const { actor, reference } = split(input);
     await this.assertPermission(actor);
+    this.purge();
+    this.assertCapacity(actor.tenantId);
     await this.enforceRateLimit(actor);
-    const artifact = await this.buildArtifact({ actor, reference, locale: input.locale, requestId: input.audit.requestId });
-    const store = this.deps.store();
-    const pdf = artifact.pdf ?? (store && artifact.storageKey ? await store.get(artifact.storageKey) : null);
-    if (!pdf) throw new ReportPdfExportError('Report PDF not ready', 409, 'REPORT_PDF_NOT_READY');
-    await this.auditDelivery(actor, reference, artifact.fileName, pdf.byteLength, input.audit);
-    return { pdf, fileName: artifact.fileName };
+    this.assertCapacity(actor.tenantId);
+    this.inlineExports.set(actor.tenantId, (this.inlineExports.get(actor.tenantId) ?? 0) + 1);
+    try {
+      const artifact = await this.buildArtifact({ actor, reference, locale: input.locale, requestId: input.audit.requestId });
+      const store = this.deps.store();
+      const pdf = artifact.pdf ?? (store && artifact.storageKey ? await store.get(artifact.storageKey) : null);
+      if (!pdf) throw new ReportPdfExportError('Report PDF not ready', 409, 'REPORT_PDF_NOT_READY');
+      await this.auditDelivery(actor, reference, artifact.fileName, pdf.byteLength, input.audit);
+      return { pdf, fileName: artifact.fileName };
+    } finally {
+      const left = (this.inlineExports.get(actor.tenantId) ?? 1) - 1;
+      if (left > 0) this.inlineExports.set(actor.tenantId, left);
+      else this.inlineExports.delete(actor.tenantId);
+    }
   }
 }
 

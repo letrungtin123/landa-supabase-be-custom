@@ -392,6 +392,8 @@ export const env = {
   REPORT_PDF_RATE_LIMIT_WINDOW_SECONDS: optionalBoundedInt('REPORT_PDF_RATE_LIMIT_WINDOW_SECONDS', 600, 60, 86_400),
   REPORT_PDF_USER_EXPORTS_PER_WINDOW: optionalBoundedInt('REPORT_PDF_USER_EXPORTS_PER_WINDOW', 10, 1, 1_000),
   REPORT_PDF_TENANT_EXPORTS_PER_WINDOW: optionalBoundedInt('REPORT_PDF_TENANT_EXPORTS_PER_WINDOW', 60, 1, 10_000),
+  // Exports of one tenant that may be in progress at once on an API process.
+  REPORT_PDF_TENANT_ACTIVE_JOBS: optionalBoundedInt('REPORT_PDF_TENANT_ACTIVE_JOBS', 5, 1, 50),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
