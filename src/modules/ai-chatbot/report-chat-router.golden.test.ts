@@ -26,7 +26,7 @@ interface GoldenCase {
     | { kind: 'direct' }
     | { kind: 'filters'; filter?: ReportChatFilterInput }
     | { kind: 'snapshot'; filter: ReportChatFilterInput; granularity?: string; compare?: boolean; course?: string; source?: string }
-    | { kind: 'clarification'; reasons: ReportClarificationReason[]; options?: ReportChatFilterInput[]; optionCount?: number; unitName?: string };
+    | { kind: 'clarification'; reasons: ReportClarificationReason[]; options?: ReportChatFilterInput[]; optionCount?: number; mention?: string; hidden?: string[] };
 }
 
 const r = (date_from: string, date_to: string) => ({ date_from, date_to });
@@ -98,11 +98,14 @@ const CASES: GoldenCase[] = [
   { q: 'Báo cáo chi nhánh Miền Nam tháng 7', model: m('2026-07-01', '2026-07-31', units('Miền Nam')), expect: { kind: 'clarification', reasons: ['unit_ambiguous'], options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.southSales) }, { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.southProduction) }] } },
   { q: 'Báo cáo nhóm Nesso tháng 7', model: m('2026-07-01', '2026-07-31', units('Nesso')), expect: { kind: 'snapshot', filter: { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) } } },
   // RBAC (learner_plus)
-  { q: 'Báo cáo team Marketing tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Marketing')), expect: { kind: 'clarification', reasons: ['unit_forbidden'], unitName: 'Marketing', options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
+  // A unit outside a learner_plus' groups is answered exactly like an unknown name (typed text only).
+  { q: 'Báo cáo team Marketing tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Marketing')), expect: { kind: 'clarification', reasons: ['unit_not_found'], mention: 'Marketing', options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
+  { q: 'Báo cáo phòng ban Markting tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Markting')), expect: { kind: 'clarification', reasons: ['unit_not_found'], mention: 'Markting', hidden: ['Marketing', 'Miền Nam - Kinh doanh', 'L&A Holdings'], options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
   { q: 'Báo cáo học viên tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31'), expect: { kind: 'snapshot', filter: { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) } } },
   { q: 'Báo cáo học viên tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.holdings, UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31'), expect: { kind: 'clarification', reasons: ['scope_required'], options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.holdings) }, { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
   { q: 'Báo cáo nhóm Kinh doanh tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Kinh doanh')), expect: { kind: 'snapshot', filter: { ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.salesNesso) } } },
-  { q: 'Báo cáo chi nhánh Miền Nam tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Miền Nam')), expect: { kind: 'clarification', reasons: ['unit_forbidden'], unitName: 'Miền Nam', options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
+  { q: 'Báo cáo chi nhánh Miền Nam tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Miền Nam')), expect: { kind: 'clarification', reasons: ['unit_not_found'], mention: 'Miền Nam', hidden: ['Miền Nam - Kinh doanh', 'Miền Nam - Sản xuất'], options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
+  { q: 'So sánh team Marketing và team QC tháng 7', role: 'learner_plus', allowed: [UNIT_IDS.nesso], model: m('2026-07-01', '2026-07-31', units('Marketing', 'QC')), expect: { kind: 'clarification', reasons: ['unit_not_found'], mention: 'Marketing', hidden: ['Miền Nam - Kinh doanh', 'Miền Nam - Sản xuất', 'L&A Holdings'], options: [{ ...r('2026-07-01', '2026-07-31'), ...u(UNIT_IDS.nesso) }] } },
   // Unit and period both unclear: one turn asks for both (bounded options)
   { q: 'Báo cáo nhóm Kinh doanh tháng 11', model: m('2026-11-01', '2026-11-30', units('Kinh doanh')), expect: { kind: 'clarification', reasons: ['unit_ambiguous', 'date_future'], optionCount: 6 } },
   // Model behaviour
@@ -152,7 +155,8 @@ function check(testCase: GoldenCase, decision: ReportRouteDecision): void {
     assert.deepEqual(decision.clarification.reasons, expected.reasons, `${label}: ${JSON.stringify(decision.clarification)}`);
     if (expected.options) assert.deepEqual(decision.clarification.options.map((option) => option.filter), expected.options, label);
     if (expected.optionCount !== undefined) assert.equal(decision.clarification.options.length, expected.optionCount, label);
-    if (expected.unitName) assert.equal(decision.clarification.params.unit_name, expected.unitName, label);
+    if (expected.mention) assert.equal(decision.clarification.params.mention, expected.mention, label);
+    for (const name of expected.hidden ?? []) assert.ok(!JSON.stringify(decision).includes(name), `${label}: reveals ${name}`);
   }
 }
 

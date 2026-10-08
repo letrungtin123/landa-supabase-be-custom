@@ -66,7 +66,8 @@ export interface ReportClarificationOption {
 export interface ReportClarification {
   version: 1;
   reasons: ReportClarificationReason[];
-  params: { mention?: string; unit_name?: string; max_days?: number };
+  /** `mention` is only ever the text the user (or the model, copying it) wrote, never a catalog name. */
+  params: { mention?: string; max_days?: number };
   options: ReportClarificationOption[];
 }
 
@@ -230,7 +231,7 @@ interface UnitChoice {
 
 type UnitOutcome =
   | { kind: 'resolved'; unit: ReportOrgUnit | null; source?: ReportRequestContext['unit_source'] }
-  | { kind: 'clarify'; reason: ReportClarificationReason; choices: UnitChoice[]; mention?: string; unitName?: string };
+  | { kind: 'clarify'; reason: ReportClarificationReason; choices: UnitChoice[]; mention?: string };
 
 function permittedGroupsOf(scope: ReportActorScope): ReportOrgUnit[] {
   return scope.restricted && scope.catalog && scope.allowedGroupIds ? permittedReportGroups(scope.catalog, scope.allowedGroupIds) : [];
@@ -244,6 +245,8 @@ function decideUnits(units: ReportUnitResolution, scope: ReportActorScope): Unit
     case 'ambiguous':
       return { kind: 'clarify', reason: 'unit_ambiguous', mention: units.mention, choices: units.candidates.map((unit) => ({ unit })) };
     case 'not_found': {
+      // Also the answer for a learner_plus naming a unit outside their groups
+      // (the resolver hides it): chips are their own groups.
       const choices: UnitChoice[] = units.suggestions.map((unit) => ({ unit }));
       if (scope.restricted) {
         for (const group of permitted) if (!choices.some((choice) => choice.unit?.id === group.id)) choices.push({ unit: group });
@@ -252,8 +255,6 @@ function decideUnits(units: ReportUnitResolution, scope: ReportActorScope): Unit
       }
       return { kind: 'clarify', reason: 'unit_not_found', mention: units.mention, choices };
     }
-    case 'forbidden':
-      return { kind: 'clarify', reason: 'unit_forbidden', unitName: units.mention, choices: permitted.map((unit) => ({ unit })) };
     case 'multiple':
       return { kind: 'clarify', reason: 'unit_multiple', choices: units.units.map((unit) => ({ unit })) };
     default:
@@ -275,7 +276,6 @@ export function buildReportClarification(input: {
   periods: Array<ReportDateRangeYmd | null>;
   units: UnitChoice[];
   mention?: string;
-  unitName?: string;
 }): ReportClarification {
   const options: ReportClarificationOption[] = [];
   for (const choice of input.units.length > 0 ? input.units : [{ unit: null }]) {
@@ -298,7 +298,6 @@ export function buildReportClarification(input: {
     reasons: input.reasons,
     params: {
       ...(input.mention ? { mention: input.mention } : {}),
-      ...(input.unitName ? { unit_name: input.unitName } : {}),
       ...(input.reasons.includes('date_too_long') ? { max_days: MAX_REPORT_RANGE_DAYS } : {}),
     },
     options,
@@ -333,7 +332,6 @@ export function decideReportRoute(input: {
         periods: period.kind === 'clarify' ? period.options : [resolvedRange],
         units: unit.kind === 'clarify' ? unit.choices : [{ unit: resolvedUnit }],
         mention: unit.kind === 'clarify' ? unit.mention : undefined,
-        unitName: unit.kind === 'clarify' ? unit.unitName : undefined,
       }),
       suggested_filter: filterFor(resolvedRange, resolvedUnit),
     };
@@ -364,7 +362,8 @@ export function decideReportRoute(input: {
 /**
  * Filters chosen in the UI (or replayed from a previous report) are checked
  * against the actor's scope before any data is read: learner_plus gets an
- * explicit clarification instead of a silent default or a generic error.
+ * explicit clarification instead of a silent default or a generic error. A
+ * unit outside their groups is refused with the generic text, never by name.
  */
 export function checkReportFilterScope(filter: ReportChatFilterInput, scope: ReportActorScope):
   | { kind: 'ok'; filter: ReportChatFilterInput }
@@ -388,7 +387,7 @@ export function checkReportFilterScope(filter: ReportChatFilterInput, scope: Rep
     return {
       kind: 'clarification',
       clarification: buildReportClarification({
-        reasons: ['unit_forbidden'], periods: [period], units: permitted.map((candidate) => ({ unit: candidate })), unitName: unit.name,
+        reasons: ['unit_forbidden'], periods: [period], units: permitted.map((candidate) => ({ unit: candidate })),
       }),
       suggested_filter: period ?? {},
     };

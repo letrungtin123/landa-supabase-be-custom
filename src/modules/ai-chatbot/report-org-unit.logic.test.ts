@@ -98,18 +98,30 @@ test('uses tenant group labels as unit words', () => {
   assert.equal(resolvedId(resolve('báo cáo khu vực Miền Nam - Kinh doanh', { labels: { subgroup: 'Khu vực' } })), UNIT_IDS.southSales);
 });
 
-test('learner_plus: a unit outside their groups is forbidden, never silently replaced', () => {
-  const forbidden = resolve('báo cáo team Marketing', { allowed: [UNIT_IDS.nesso] });
-  assert.equal(forbidden.status, 'forbidden');
-  assert.equal(forbidden.status === 'forbidden' ? forbidden.mention : '', 'Marketing');
-  assert.equal(resolvedId(resolve('báo cáo nhóm Nesso', { allowed: [UNIT_IDS.nesso] })), UNIT_IDS.nesso);
+test('learner_plus: a unit outside their groups is answered like an unknown name, never silently replaced', () => {
+  const allowed = [UNIT_IDS.nesso];
+  const outside = resolve('báo cáo team Marketing', { allowed });
+  const unknown = resolve('báo cáo team Zebra', { allowed });
+  assert.deepEqual(outside, { status: 'not_found', mention: 'Marketing', suggestions: [] });
+  assert.deepEqual(unknown, { status: 'not_found', mention: 'Zebra', suggestions: [] }, 'same shape as a name that does not exist');
+  // Only the text as typed is echoed: a typo never reveals the real name.
+  assert.deepEqual(resolve('báo cáo phòng ban Markting', { allowed }), { status: 'not_found', mention: 'Markting', suggestions: [] });
+  assert.equal(resolvedId(resolve('báo cáo phòng ban Markting')), UNIT_IDS.marketing, 'staff still get the typo-tolerant match');
+  assert.equal(resolvedId(resolve('báo cáo nhóm Nesso', { allowed })), UNIT_IDS.nesso);
   // All three "Nesso" units are inside the permitted group: the choice stays with the user.
-  const permittedChoice = resolve('báo cáo Nesso', { model: [{ name: 'Nesso' }], allowed: [UNIT_IDS.nesso] });
+  const permittedChoice = resolve('báo cáo Nesso', { model: [{ name: 'Nesso' }], allowed });
   assert.equal(permittedChoice.status === 'ambiguous' ? permittedChoice.candidates.length : 0, 3);
   // Ambiguity is reduced to permitted candidates; a single one left resolves.
-  assert.equal(resolvedId(resolve('báo cáo nhóm Kinh doanh', { allowed: [UNIT_IDS.nesso] })), UNIT_IDS.salesNesso);
-  const allForbidden = resolve('báo cáo chi nhánh Miền Nam', { allowed: [UNIT_IDS.nesso] });
-  assert.equal(allForbidden.status, 'forbidden');
+  assert.equal(resolvedId(resolve('báo cáo nhóm Kinh doanh', { allowed })), UNIT_IDS.salesNesso);
+  const allOutside = resolve('báo cáo chi nhánh Miền Nam', { allowed });
+  assert.deepEqual(allOutside, { status: 'not_found', mention: 'Miền Nam', suggestions: [] });
+  const twoOutside = resolve('so sánh team Marketing và team QC', { allowed });
+  assert.deepEqual(twoOutside, { status: 'not_found', mention: 'Marketing', suggestions: [] });
+  for (const resolution of [outside, allOutside, twoOutside]) {
+    for (const unit of REPORT_UNIT_CATALOG.units.filter((candidate) => candidate.group_id !== UNIT_IDS.nesso && candidate.name !== 'Marketing')) {
+      assert.ok(!JSON.stringify(resolution).includes(unit.name), `reveals ${unit.name}`);
+    }
+  }
 });
 
 test('learner_plus: suggestions never reveal units outside their groups', () => {

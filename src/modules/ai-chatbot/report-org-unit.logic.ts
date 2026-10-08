@@ -2,8 +2,9 @@
 // team a question refers to by name, never by an ID supplied by the model.
 // Matching is diacritics- and case-insensitive with partial and typo
 // tolerance; anything that is not a single confident match becomes an
-// explicit outcome (ambiguous, not found, forbidden, multiple) that the router
-// turns into a clarification turn with choice chips.
+// explicit outcome (ambiguous, not found, multiple) that the router turns
+// into a clarification turn with choice chips. For a learner_plus actor a
+// unit outside their groups is answered exactly like an unknown name.
 
 import { normalizeReportEntityName, reportEntityTokens, reportTextSimilarity } from './report-text.logic.js';
 
@@ -36,7 +37,6 @@ export type ReportUnitResolution =
   | { status: 'resolved'; unit: ReportOrgUnit; source: 'question' | 'model' }
   | { status: 'ambiguous'; mention: string; candidates: ReportOrgUnit[] }
   | { status: 'not_found'; mention: string; suggestions: ReportOrgUnit[] }
-  | { status: 'forbidden'; mention: string; unit: ReportOrgUnit }
   | { status: 'multiple'; units: ReportOrgUnit[] };
 
 interface UnitWord {
@@ -357,25 +357,28 @@ export function isReportUnitPermitted(unit: ReportOrgUnit, allowedGroupIds: read
   return allowedGroupIds === null || allowedGroupIds.includes(unit.group_id);
 }
 
-function applyPermissions(resolution: ReportUnitResolution, allowedGroupIds: readonly string[] | null): ReportUnitResolution {
-  if (allowedGroupIds === null) return resolution;
+/**
+ * learner_plus: a match outside the actor's groups becomes `hidden(unit)`, the
+ * same "not found" answer an unknown name gets, so the reply neither confirms
+ * that the unit exists nor shows its real name.
+ */
+function applyPermissions(
+  resolution: ReportUnitResolution,
+  allowedGroupIds: readonly string[],
+  hidden: (unit: ReportOrgUnit) => ReportUnitResolution,
+): ReportUnitResolution {
   switch (resolution.status) {
     case 'resolved':
-      return isReportUnitPermitted(resolution.unit, allowedGroupIds)
-        ? resolution
-        : { status: 'forbidden', mention: resolution.unit.name, unit: resolution.unit };
+      return isReportUnitPermitted(resolution.unit, allowedGroupIds) ? resolution : hidden(resolution.unit);
     case 'ambiguous': {
       const permitted = resolution.candidates.filter((unit) => isReportUnitPermitted(unit, allowedGroupIds));
-      if (permitted.length === 0) return { status: 'forbidden', mention: resolution.mention, unit: resolution.candidates[0] };
+      if (permitted.length === 0) return hidden(resolution.candidates[0]);
       if (permitted.length === 1) return { status: 'resolved', unit: permitted[0], source: 'question' };
       return { ...resolution, candidates: permitted };
     }
-    case 'not_found':
-      // Never reveal unit names outside the actor's scope as suggestions.
-      return { ...resolution, suggestions: resolution.suggestions.filter((unit) => isReportUnitPermitted(unit, allowedGroupIds)) };
     case 'multiple': {
       const forbidden = resolution.units.find((unit) => !isReportUnitPermitted(unit, allowedGroupIds));
-      return forbidden ? { status: 'forbidden', mention: forbidden.name, unit: forbidden } : resolution;
+      return forbidden ? hidden(forbidden) : resolution;
     }
     default:
       return resolution;
@@ -403,6 +406,9 @@ export function resolveReportOrgUnits(input: {
 }): ReportUnitResolution {
   const words = buildReportUnitWords(input.labels);
   const catalog = indexCatalog(input.catalog.units);
+  const allowed = input.allowedGroupIds;
+  // A restricted actor is only ever suggested units inside their own groups.
+  const suggestionPool = allowed === null ? catalog : catalog.filter((entry) => isReportUnitPermitted(entry.unit, allowed));
   const mentions = dedupeMentions([
     ...questionMentions(input.question, catalog, words),
     ...modelMentions(input.modelUnits ?? [], words),
@@ -410,14 +416,18 @@ export function resolveReportOrgUnits(input: {
   if (mentions.length === 0) return { status: 'none' };
 
   const scored = mentions.map((mention) => ({ mention, candidates: scoreMention(mention, catalog) }));
+  // Echoes only the text as written (never a catalog name) with permitted suggestions.
+  const notFound = (mention: UnitMention): ReportUnitResolution => ({
+    status: 'not_found', mention: mention.display, suggestions: suggestionsFor(mention, suggestionPool),
+  });
   const missing = scored.find((entry) => entry.candidates.length === 0);
-  if (missing) {
-    return applyPermissions(
-      { status: 'not_found', mention: missing.mention.display, suggestions: suggestionsFor(missing.mention, catalog) },
-      input.allowedGroupIds,
-    );
-  }
-  if (scored.length === 1) return applyPermissions(decideSingle(scored[0].mention, scored[0].candidates), input.allowedGroupIds);
+  if (missing) return notFound(missing.mention);
+  const permit = (resolution: ReportUnitResolution): ReportUnitResolution => (allowed === null
+    ? resolution
+    : applyPermissions(resolution, allowed, (unit) => notFound(
+      scored.find((entry) => entry.candidates.some((candidate) => candidate.unit.id === unit.id))?.mention ?? scored[0].mention,
+    )));
+  if (scored.length === 1) return permit(decideSingle(scored[0].mention, scored[0].candidates));
 
   // Several mentions: a unit consistent with all of them ("team Marketing,
   // chi nhánh Miền Nam") is a refinement; otherwise they are separate units.
@@ -426,20 +436,14 @@ export function resolveReportOrgUnits(input: {
   if (consistent.length > 0) {
     const deepest = Math.max(...consistent.map((unit) => LEVEL_RANK[unit.level]));
     const best = consistent.filter((unit) => LEVEL_RANK[unit.level] === deepest);
-    return applyPermissions(
-      best.length === 1
-        ? { status: 'resolved', unit: best[0], source: scored[0].mention.source }
-        : { status: 'ambiguous', mention: scored.map((entry) => entry.mention.display).join(' / '), candidates: best.slice(0, MAX_CANDIDATES) },
-      input.allowedGroupIds,
-    );
+    return permit(best.length === 1
+      ? { status: 'resolved', unit: best[0], source: scored[0].mention.source }
+      : { status: 'ambiguous', mention: scored.map((entry) => entry.mention.display).join(' / '), candidates: best.slice(0, MAX_CANDIDATES) });
   }
   const distinct = [...new Map(scored.map((entry) => [entry.candidates[0].unit.id, entry.candidates[0].unit] as const)).values()];
-  return applyPermissions(
-    distinct.length === 1
-      ? { status: 'resolved', unit: distinct[0], source: scored[0].mention.source }
-      : { status: 'multiple', units: distinct.slice(0, MAX_CANDIDATES) },
-    input.allowedGroupIds,
-  );
+  return permit(distinct.length === 1
+    ? { status: 'resolved', unit: distinct[0], source: scored[0].mention.source }
+    : { status: 'multiple', units: distinct.slice(0, MAX_CANDIDATES) });
 }
 
 /**

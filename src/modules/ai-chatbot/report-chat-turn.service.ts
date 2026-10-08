@@ -43,7 +43,7 @@ import {
   loadLatestReportAnalysisContext,
   touchReportConversation,
 } from './report-chat.repository.js';
-import { findReportUnitById, isReportUnitPermitted, permittedReportGroups } from './report-org-unit.logic.js';
+import { permittedReportGroups } from './report-org-unit.logic.js';
 
 export type ReportChatSideEvent =
   | {
@@ -164,14 +164,12 @@ async function clarificationForDomainError(
   if (code === 'REPORT_SCOPE_REQUIRED') {
     return { clarification: buildReportClarification({ reasons: ['scope_required'], periods: [period], units: choices }), suggested: period ?? {} };
   }
-  const requested = scope.catalog ? findReportUnitById(scope.catalog, filter.team_id ?? filter.subgroup_id ?? filter.group_id) : null;
-  const named = requested && !isReportUnitPermitted(requested, scope.allowedGroupIds) ? requested.name : undefined;
+  // The unit came as an id from the filters: the reply never names it (it may lie outside the actor's groups).
   return {
     clarification: buildReportClarification({
       reasons: [code === 'REPORT_SCOPE_FORBIDDEN' ? 'unit_forbidden' : 'unit_not_found'],
       periods: [period],
       units: choices,
-      ...(named ? { unitName: named } : {}),
     }),
     suggested: period ?? {},
   };

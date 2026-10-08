@@ -61,7 +61,7 @@ interface Harness {
 
 function harness(options: {
   modelArgs?: Record<string, unknown> | 'decline' | 'error' | 'hang';
-  allowedGroupIds?: string[];
+  allowedGroupIds?: string[] | (() => string[]);
   buildSnapshot?: (filter: ReportChatFilterInput) => Promise<ReportChatSnapshot>;
   generateNarrative?: AdminReportTurnDeps['generateNarrative'];
   modelSignals?: AbortSignal[];
@@ -81,7 +81,7 @@ function harness(options: {
     },
     loadCatalog: async () => REPORT_UNIT_CATALOG,
     loadLabels: async () => ({}),
-    loadAllowedGroupIds: async () => options.allowedGroupIds ?? [],
+    loadAllowedGroupIds: async () => (typeof options.allowedGroupIds === 'function' ? options.allowedGroupIds() : options.allowedGroupIds ?? []),
     log: () => undefined,
   };
   return {
@@ -175,14 +175,42 @@ test('a learner_plus 403 while reading data becomes a localized clarification, n
   assert.equal(h.chunks[0], 'You do not have access to reports for this unit. Choose an option below or open the filters.');
 });
 
-test('a learner_plus filter for a unit outside their groups is refused by name before any data read', async () => {
+test('a learner_plus filter for a unit outside their groups is refused before any data read, without its name', async () => {
   const h = harness({ allowedGroupIds: [UNIT_IDS.nesso] });
   await run(h, turnInput('Báo cáo', { role: 'learner_plus', reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31', team_id: UNIT_IDS.marketing } }));
   assert.deepEqual(h.snapshotFilters, []);
-  const clarification = h.saved[0].metadata.report_clarification as { reasons: string[]; params: { unit_name?: string } };
+  const clarification = h.saved[0].metadata.report_clarification as { reasons: string[]; params: Record<string, unknown>; options: Array<{ filter: ReportChatFilterInput }> };
   assert.deepEqual(clarification.reasons, ['unit_forbidden']);
-  assert.equal(clarification.params.unit_name, 'Marketing');
-  assert.equal(h.chunks[0], 'Bạn không có quyền xem báo cáo của “Marketing”. Chọn một lựa chọn bên dưới hoặc mở bộ lọc.');
+  assert.deepEqual(clarification.params, {});
+  assert.deepEqual(clarification.options.map((option) => option.filter), [{ date_from: '2026-07-01', date_to: '2026-07-31', group_id: UNIT_IDS.nesso }]);
+  assert.equal(h.chunks[0], 'Bạn không có quyền xem báo cáo của đơn vị này. Chọn một lựa chọn bên dưới hoặc mở bộ lọc.');
+  assert.ok(!JSON.stringify(h.saved).includes('Marketing') && !h.chunks.join(' ').includes('Marketing'));
+});
+
+test('a 403 for a known unit outside the groups (membership changed meanwhile) never names the unit', async () => {
+  let calls = 0;
+  const h = harness({
+    // Allowed when the filter is checked, removed from the group before the data read.
+    allowedGroupIds: () => (calls++ === 0 ? [UNIT_IDS.holdings, UNIT_IDS.nesso] : [UNIT_IDS.nesso]),
+    buildSnapshot: async () => { throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này', code: 'REPORT_SCOPE_FORBIDDEN' }; },
+  });
+  await run(h, turnInput('Báo cáo', {
+    role: 'learner_plus', locale: 'en', reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31', group_id: UNIT_IDS.holdings, subgroup_id: UNIT_IDS.southSales, team_id: UNIT_IDS.marketing },
+  }));
+  assert.deepEqual((h.saved[0].metadata.report_clarification as { reasons: string[] }).reasons, ['unit_forbidden']);
+  assert.equal(h.chunks[0], 'You do not have access to reports for this unit. Choose an option below or open the filters.');
+  for (const name of ['Marketing', 'Miền Nam - Kinh doanh', 'L&A Holdings']) assert.ok(!JSON.stringify(h.saved).includes(name), name);
+});
+
+test('a learner_plus naming a unit outside their groups gets the "not found" answer with chips for their own groups', async () => {
+  const h = harness({ allowedGroupIds: [UNIT_IDS.nesso], modelArgs: { date_from: '2026-07-01', date_to: '2026-07-31', org_units: [{ name: 'Markting' }] } });
+  await run(h, turnInput('Báo cáo phòng ban Markting tháng 7', { role: 'learner_plus' }));
+  const clarification = h.saved[0].metadata.report_clarification as { reasons: string[]; params: Record<string, unknown>; options: Array<{ filter: ReportChatFilterInput }> };
+  assert.deepEqual(clarification.reasons, ['unit_not_found']);
+  assert.deepEqual(clarification.params, { mention: 'Markting' });
+  assert.deepEqual(clarification.options.map((option) => option.filter), [{ date_from: '2026-07-01', date_to: '2026-07-31', group_id: UNIT_IDS.nesso }]);
+  assert.equal(h.chunks[0], 'Không tìm thấy đơn vị “Markting” trong tổ chức. Chọn một lựa chọn bên dưới hoặc mở bộ lọc.');
+  assert.ok(!JSON.stringify(h.saved).includes('Marketing'));
 });
 
 test('learner_plus with several groups and no unit is asked to choose instead of getting the first group', async () => {

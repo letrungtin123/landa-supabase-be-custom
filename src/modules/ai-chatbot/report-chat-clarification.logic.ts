@@ -46,9 +46,10 @@ const COPY: Record<ReportClarificationReason, Record<'vi' | 'en', Copy>> = {
     vi: (params) => (params.mention ? `Không tìm thấy đơn vị ${quote(params.mention)} trong tổ chức.` : 'Không tìm thấy đơn vị đã chọn trong tổ chức.'),
     en: (params) => (params.mention ? `No unit named ${quote(params.mention)} was found in your organization.` : 'The selected unit was not found in your organization.'),
   },
+  // Never names the unit: a learner_plus must not learn names outside their groups.
   unit_forbidden: {
-    vi: (params) => (params.unit_name ? `Bạn không có quyền xem báo cáo của ${quote(params.unit_name)}.` : 'Bạn không có quyền xem báo cáo của đơn vị này.'),
-    en: (params) => (params.unit_name ? `You do not have access to reports for ${quote(params.unit_name)}.` : 'You do not have access to reports for this unit.'),
+    vi: () => 'Bạn không có quyền xem báo cáo của đơn vị này.',
+    en: () => 'You do not have access to reports for this unit.',
   },
   unit_multiple: {
     vi: () => 'Mỗi báo cáo xem một đơn vị.',
