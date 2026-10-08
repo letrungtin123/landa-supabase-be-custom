@@ -7,6 +7,7 @@ import { Type } from '@google/genai';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { getGeminiClient } from './gemini.service.js';
+import { reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import type { ReportChatSnapshot } from './report-chat.service.js';
 import { withReportDeadline } from './report-deadline.logic.js';
 
@@ -83,8 +84,9 @@ export interface ReportNarrativeDeps {
 
 async function generateWithGemini(input: ReportNarrativeGenerateInput): Promise<string> {
   const aiClient = await getGeminiClient(input.tenantId);
+  const model = resolveReportAiModel(input.model);
   const response = await aiClient.models.generateContent({
-    model: input.model,
+    model,
     contents: [{ role: 'user', parts: [{ text: input.payload }] }],
     config: {
       systemInstruction: input.systemInstruction,
@@ -99,7 +101,7 @@ async function generateWithGemini(input: ReportNarrativeGenerateInput): Promise<
         },
         required: ['selected_signal_ids', 'interpretation', 'recommended_actions', 'limitations'],
       },
-      maxOutputTokens: 800,
+      ...reportAiGenerationConfig(model, 800),
       abortSignal: input.signal,
     } as any,
   });

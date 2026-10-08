@@ -398,6 +398,8 @@ export const env = {
   // deterministic parser only and the narrative uses its rule-based fallback.
   REPORT_CHAT_ROUTER_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_ROUTER_TIMEOUT_MS', 8_000, 1_000, 30_000),
   REPORT_CHAT_NARRATIVE_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_NARRATIVE_TIMEOUT_MS', 15_000, 1_000, 60_000),
+  /** Model for the AI Report calls (router, chat and PDF narratives). Empty = the tenant chat model. */
+  REPORT_AI_MODEL: optionalString('REPORT_AI_MODEL', 'gemini-3.8-flash'),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',

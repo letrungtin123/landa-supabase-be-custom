@@ -15,10 +15,12 @@ import {
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
 import { getGeminiClient } from './gemini.service.js';
+import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import type { ReportInsights } from './report-insights.logic.js';
 import type { ReportPdfLocale } from './report-pdf-i18n.js';
 import {
   buildReportPdfAiNarrativeRequest,
+  ReportPdfAiNarrativeSchema,
   toReportPdfAiNarrative,
   validateReportPdfNarrative,
   type ReportPdfNarrative,
@@ -43,6 +45,7 @@ export interface ReportPdfAiGenerateInput {
   model: string;
   systemInstruction: string;
   payload: string;
+  /** Visible answer budget; reportAiGenerationConfig adds the thinking headroom on top. */
   maxOutputTokens: number;
   signal: AbortSignal;
 }
@@ -54,11 +57,11 @@ export interface ReportPdfAiNarrativeDeps {
   reserve: typeof reserveTenantAiTokens;
   finalize: typeof finalizeTenantAiTokens;
   release: typeof releaseTenantAiTokenReservation;
-  generate: (input: ReportPdfAiGenerateInput) => Promise<{ text: string; usage: Partial<AiUsage> | null }>;
+  generate: (input: ReportPdfAiGenerateInput) => Promise<{ text: string; usage: Partial<AiUsage> | null; finishReason?: string | null }>;
   log: (event: Record<string, unknown>) => void;
 }
 
-async function generateWithGemini(input: ReportPdfAiGenerateInput): Promise<{ text: string; usage: Partial<AiUsage> | null }> {
+async function generateWithGemini(input: ReportPdfAiGenerateInput): Promise<{ text: string; usage: Partial<AiUsage> | null; finishReason: string | null }> {
   const client = await getGeminiClient(input.tenantId);
   const response = await client.models.generateContent({
     model: input.model,
@@ -67,14 +70,14 @@ async function generateWithGemini(input: ReportPdfAiGenerateInput): Promise<{ te
       systemInstruction: input.systemInstruction,
       responseMimeType: 'application/json',
       responseSchema: RESPONSE_SCHEMA as unknown as Record<string, unknown>,
-      maxOutputTokens: input.maxOutputTokens,
-      temperature: 0.3,
+      ...reportAiGenerationConfig(input.model, input.maxOutputTokens, { temperature: 0.3 }),
       abortSignal: input.signal,
     },
   });
   const usage = response.usageMetadata;
   return {
     text: response.text ?? '',
+    finishReason: response.candidates?.[0]?.finishReason ?? null,
     usage: usage ? {
       inputTokens: usage.promptTokenCount ?? 0,
       outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
@@ -114,7 +117,10 @@ export function createReportPdfAiNarrativeWriter(
         deps.log({ ...base, outcome: 'skipped', reason: 'no_provider_key' });
         return null;
       }
+      const model = resolveReportAiModel(settings.chatModel);
       const inputTokens = estimateTokensFromText(request.systemInstruction, request.payload);
+      // Thinking tokens are billed as output: reserve the headroom the request may use.
+      const headroom = REPORT_AI_THINKING_HEADROOM_TOKENS;
       const grant = await deps.reserve({
         tenantId: context.tenantId,
         userId: context.userId,
@@ -122,11 +128,11 @@ export function createReportPdfAiNarrativeWriter(
         target: 'admin',
         engine: settings.activeEngine,
         provider: settings.provider,
-        model: settings.chatModel,
+        model,
         operation: 'chat',
-        minimumTokens: inputTokens + MIN_OUTPUT_TOKENS,
-        maximumTokens: inputTokens + MAX_OUTPUT_TOKENS,
-        budget: { inputTokens, outputTokens: MAX_OUTPUT_TOKENS, maxOutputTokens: MAX_OUTPUT_TOKENS, metadata: { budget_version: 2, operation: 'chat', report_pdf: true } },
+        minimumTokens: inputTokens + MIN_OUTPUT_TOKENS + headroom,
+        maximumTokens: inputTokens + MAX_OUTPUT_TOKENS + headroom,
+        budget: { inputTokens, outputTokens: MAX_OUTPUT_TOKENS + headroom, maxOutputTokens: MAX_OUTPUT_TOKENS + headroom, metadata: { budget_version: 2, operation: 'chat', report_pdf: true } },
       });
       reservationId = grant.id;
       const controller = new AbortController();
@@ -135,10 +141,10 @@ export function createReportPdfAiNarrativeWriter(
       try {
         response = await deps.generate({
           tenantId: context.tenantId,
-          model: settings.chatModel,
+          model,
           systemInstruction: request.systemInstruction,
           payload: request.payload,
-          maxOutputTokens: Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, grant.reservedTokens - inputTokens)),
+          maxOutputTokens: Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, grant.reservedTokens - inputTokens - headroom)),
           signal: controller.signal,
         });
       } finally {
@@ -153,7 +159,11 @@ export function createReportPdfAiNarrativeWriter(
       try { parsed = JSON.parse(response.text); } catch { parsed = null; }
       const narrative = toReportPdfAiNarrative(parsed, insights);
       if (!narrative) {
-        deps.log({ ...base, outcome: 'rejected', reason: 'schema' });
+        // Shape only (finish reason, sizes, failing paths): never the narrative text.
+        const issues = parsed === null ? [] : ReportPdfAiNarrativeSchema.safeParse(parsed).error?.issues ?? [];
+        deps.log({ ...base, outcome: 'rejected', reason: 'schema', model, finish_reason: response.finishReason ?? null,
+          text_chars: response.text.length, json: parsed !== null,
+          issues: issues.slice(0, 8).map((issue) => `${issue.path.join('.')}:${issue.code}`) });
         return null;
       }
       const validation = validateReportPdfNarrative(narrative, insights, locale);

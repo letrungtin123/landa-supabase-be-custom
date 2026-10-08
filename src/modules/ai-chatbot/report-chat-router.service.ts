@@ -9,6 +9,7 @@ import { env } from '../../config/env.js';
 import type { UserRole } from '../../types/index.js';
 import { loadReportAllowedGroupIds } from '../reports/report-access.service.js';
 import { getGeminiClient } from './gemini.service.js';
+import { reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import { withReportDeadline } from './report-deadline.logic.js';
 import { localYmd } from './report-date.logic.js';
 import {
@@ -72,14 +73,15 @@ export async function callReportRouterModel(input: {
   signal?: AbortSignal;
 }): Promise<ReportRouterModelOutput> {
   const aiClient = await getGeminiClient(input.tenantId);
+  const model = resolveReportAiModel(input.model);
   const response = await aiClient.models.generateContent({
-    model: input.model,
+    model,
     contents: [{ role: 'user', parts: [{ text: input.question }] }],
     config: {
       systemInstruction: routerInstruction(input.locale, input.today),
       tools: [{ functionDeclarations: REPORT_ROUTER_FUNCTIONS }],
       toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } },
-      maxOutputTokens: 256,
+      ...reportAiGenerationConfig(model, 256),
       ...(input.signal ? { abortSignal: input.signal } : {}),
     },
   });
