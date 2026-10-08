@@ -1744,16 +1744,78 @@ export async function findReportCoursePerformanceByName(
        LIMIT 25`,
       [tenantId, range.startDate, range.endDate, ...cohort.params, normalizedName],
     );
-    return result.rows.map((row) => ({
-      course_id: row.course_id,
-      name: row.name,
-      total_enrollments: Number(row.total_enrollments) || 0,
-      completed_enrollments: Number(row.completed_enrollments) || 0,
-      incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
-      not_started_enrollments: Number(row.not_started_enrollments) || 0,
-      in_progress_enrollments: Number(row.in_progress_enrollments) || 0,
-      completion_rate: Number(row.completion_rate) || 0,
-    }));
+    return result.rows.map(toReportCoursePerformance);
+  });
+}
+
+function toReportCoursePerformance(row: ReportCoursePerformance): ReportCoursePerformance {
+  return {
+    course_id: row.course_id,
+    name: row.name,
+    total_enrollments: Number(row.total_enrollments) || 0,
+    completed_enrollments: Number(row.completed_enrollments) || 0,
+    incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
+    not_started_enrollments: Number(row.not_started_enrollments) || 0,
+    in_progress_enrollments: Number(row.in_progress_enrollments) || 0,
+    completion_rate: Number(row.completion_rate) || 0,
+  };
+}
+
+/**
+ * One course's figures in the same authorized enrollment cohort as the
+ * dashboard rankings (tenant, org scope and period). Null when the course has
+ * no enrollment in that cohort. The id comes from the tenant's own course
+ * catalog, never from the model.
+ */
+export async function getReportCoursePerformanceById(
+  tenantId: string,
+  courseId: string,
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+  dateRange?: ReportDateRange,
+): Promise<ReportCoursePerformance | null> {
+  const id = courseId.trim();
+  if (!id) return null;
+
+  const range = getReportRange(undefined, undefined, dateRange);
+  const byIdCacheKey = cacheKey('reports', 'course-performance-by-id', 'v1', tenantId, stableHash({
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    courseId: id,
+  }));
+
+  return cacheJson(byIdCacheKey, getSummaryCacheTtl(range), async () => {
+    const cohort = buildReportEnrollmentCte({
+      tenantParam: '$1',
+      rangeStartParam: '$2',
+      rangeEndParam: '$3',
+      groupId,
+      subgroupId,
+      teamId,
+      scopeParamStart: 4,
+    });
+    const courseIdParam = 4 + cohort.params.length;
+    const result = await query<ReportCoursePerformance>(
+      `WITH ${cohort.sql}
+       SELECT
+         re.course_id,
+         MAX(re.course_name) AS name,
+         COUNT(*)::bigint AS total_enrollments,
+         COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
+         COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
+         COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
+         COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
+         COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
+       FROM report_enrollments re
+       WHERE re.course_id = $${courseIdParam}
+       GROUP BY re.course_id`,
+      [tenantId, range.startDate, range.endDate, ...cohort.params, id],
+    );
+    return result.rows[0] ? toReportCoursePerformance(result.rows[0]) : null;
   });
 }
 
