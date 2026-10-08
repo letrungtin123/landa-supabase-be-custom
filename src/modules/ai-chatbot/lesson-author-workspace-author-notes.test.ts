@@ -6,7 +6,8 @@ import { idmFixture } from './lesson-author-idm.fixture.js';
 import type { WorkspaceApplyMapping, WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import { workspaceApplyBlockMetadata, workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes, workspaceBlockAuthorNotes,
   workspaceCourseAuthorNotes } from './lesson-author-workspace-author-notes.logic.js';
-import { persistWorkspaceAuthorNotes, WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
+import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes,
+  WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
 
 const uuid = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const context = { workspace_id: uuid(1), content_locale: 'vi' as const };
@@ -157,6 +158,17 @@ test('persist: a concurrent author edit (hash fence miss) fails closed; unready 
   const tampered = fakeTx({ courseNode: { ...courseNodeRow, content_hash: hash('other') } });
   assert.deepEqual(await persistWorkspaceAuthorNotes(tampered.tx, { ...base, materialized: [], mappings: [], blockHash: async () => hash('x') }),
     { delta: [], touched: [] }, 'an unverifiable course revision is never persisted');
+});
+
+test('semantic replay: only the unmapped course root notes may be written, once', async () => {
+  const first = fakeTx({ courseNode: courseNodeRow, storedRootNotes: null });
+  assert.deepEqual(await persistCourseAuthorNotes(first.tx, base), [base.rootId]);
+  assert.ok(first.calls.every(call => !/^UPDATE/.test(call.sql) || /parent_id IS NULL AND block_type='course'/.test(call.sql)),
+    'no mapped block is touched');
+  const written = JSON.parse(first.calls.find(call => /^UPDATE/.test(call.sql))!.params[1] as string);
+  const again = fakeTx({ courseNode: courseNodeRow, storedRootNotes: written });
+  assert.deepEqual(await persistCourseAuthorNotes(again.tx, base), []);
+  assert.equal(again.calls.some(call => /^UPDATE/.test(call.sql)), false);
 });
 
 test('persist: V2 course notes carry the IDM Hold items, SME questions and nice-to-know', async () => {

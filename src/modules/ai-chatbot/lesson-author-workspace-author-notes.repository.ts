@@ -101,18 +101,30 @@ export async function persistWorkspaceAuthorNotes(tx: GenerationJobSql, input: {
     delta.push({ node_id: refresh.write.node_id, block_id: refresh.mapping.target_block_id, revision: refresh.write.revision,
       content_hash: refresh.write.content_hash, before_hash: refresh.mapping.target_hash, after_hash: after });
   }
-  const courseNotes = await readWorkspaceCourseAuthorNotes(tx, input);
-  if (courseNotes) {
-    const stored = await tx.query(`SELECT metadata->'${COURSE_AUTHOR_NOTES_KEY}' AS notes FROM course_blocks
-      WHERE id=$1 AND course_id=$2 AND parent_id IS NULL AND block_type='course' AND deleted_at IS NULL`, [input.rootId, input.courseId]);
-    if (stored.rows.length !== 1) throw new WorkspaceAuthorNotesTargetChanged();
-    if (workspaceAuthorNotesHash((stored.rows[0] as Row).notes ?? null) !== workspaceAuthorNotesHash(courseNotes)) {
-      const root = await tx.query(`UPDATE course_blocks SET ${SET_AUTHOR_NOTES_SQL}
-        WHERE id=$1 AND course_id=$3 AND parent_id IS NULL AND block_type='course' AND deleted_at IS NULL RETURNING id`,
-      [input.rootId, JSON.stringify(courseNotes), input.courseId]);
-      if (root.rows.length !== 1) throw new WorkspaceAuthorNotesTargetChanged();
-      touched.push(input.rootId);
-    }
-  }
+  touched.push(...await persistCourseAuthorNotes(tx, input));
   return { delta, touched };
+}
+
+/**
+ * Course-level notes only, on the locked course root. The root is never an
+ * Apply mapping target, so this needs no receipt delta and is safe even for a
+ * semantic replay (an already-applied scope re-applied unchanged): that is how
+ * a course applied before notes existed gets its course-level notes. Returns
+ * the root id when it was written, nothing when the notes are already current.
+ */
+export async function persistCourseAuthorNotes(tx: GenerationJobSql, input: {
+  tenantId: string; courseId: string; workspaceId: string; courseNodeId: string; isV2: boolean; rootId: string;
+  context: WorkspaceAuthorNotesContext;
+}): Promise<string[]> {
+  const courseNotes = await readWorkspaceCourseAuthorNotes(tx, input);
+  if (!courseNotes) return [];
+  const stored = await tx.query(`SELECT metadata->'${COURSE_AUTHOR_NOTES_KEY}' AS notes FROM course_blocks
+    WHERE id=$1 AND course_id=$2 AND parent_id IS NULL AND block_type='course' AND deleted_at IS NULL`, [input.rootId, input.courseId]);
+  if (stored.rows.length !== 1) throw new WorkspaceAuthorNotesTargetChanged();
+  if (workspaceAuthorNotesHash((stored.rows[0] as Row).notes ?? null) === workspaceAuthorNotesHash(courseNotes)) return [];
+  const root = await tx.query(`UPDATE course_blocks SET ${SET_AUTHOR_NOTES_SQL}
+    WHERE id=$1 AND course_id=$3 AND parent_id IS NULL AND block_type='course' AND deleted_at IS NULL RETURNING id`,
+  [input.rootId, JSON.stringify(courseNotes), input.courseId]);
+  if (root.rows.length !== 1) throw new WorkspaceAuthorNotesTargetChanged();
+  return [input.rootId];
 }

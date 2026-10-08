@@ -15,7 +15,8 @@ import type { WorkspaceApplyReceipt } from './lesson-author-workspace-apply.cont
 import { compileOrchestrationV2WorkspaceApply, type OrchestrationV2ApplyArtifact,
   type OrchestrationV2ApplyChapterReceipt } from './lesson-author-orchestration-v2-apply.logic.js';
 import { workspaceApplyBlockMetadata, type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
-import { persistWorkspaceAuthorNotes, WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
+import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes,
+  WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -223,6 +224,18 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         if (semanticPrior.rows.length > 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         if (semanticPrior.rows.length === 1) {
           const priorReceipt = semanticPrior.rows[0] as Row;
+          // Blocks stay untouched (the receipt already proves them). Only the
+          // course-level author notes on the unmapped root may be refreshed, so
+          // a course applied before notes existed gets them on a re-Apply.
+          failureStage = 'course_author_notes_replay';
+          const touched = await persistCourseAuthorNotes(tx, { tenantId: target.tenantId, courseId: target.courseId,
+            workspaceId: target.workspaceId, courseNodeId, isV2, rootId,
+            context: { workspace_id: target.workspaceId, content_locale: compiled.content_locale } });
+          if (touched.length && (!await authority.canEdit(tx, target)
+            || await authority.currentSourceHash(tx, { target, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash)) {
+            throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
+          }
+          cacheIds.push(...touched);
           return { receipt_id: text(priorReceipt.id), workspace_id: target.workspaceId, node_id: target.nodeId,
             correlation_id: text(w.correlation_id), revision_set_hash: text(priorReceipt.revision_set_hash),
             created_block_count: 0, updated_block_count: 0, replayed: true };
