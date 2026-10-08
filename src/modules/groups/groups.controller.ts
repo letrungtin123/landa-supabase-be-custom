@@ -10,6 +10,9 @@ import {
   createTransactionalAuditEntry,
   runAuditedTransaction,
 } from '../../middleware/audit-log.js';
+// Group/subgroup/team names feed the chat-report org-unit catalog (Redis, 60 s):
+// every committed create/rename/delete invalidates it for the tenant.
+import { invalidateReportOrgUnitCatalog } from '../ai-chatbot/report-org-unit-resolver.service.js';
 
 // ═══ Org Groups ═══
 
@@ -30,6 +33,7 @@ export async function createOrgGroupController(req: Request, res: Response, next
       () => svc.createOrgGroup(tenantId, req.body),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'org_group', { code: 'group.org.created' }, created.id, created.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, group, 'Tạo nhóm thành công', 201);
   } catch (err) { next(err); }
 }
@@ -54,6 +58,7 @@ export async function updateOrgGroupController(req: Request, res: Response, next
         updated.name,
       ),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -66,6 +71,7 @@ export async function deleteOrgGroupController(req: Request, res: Response, next
       () => svc.deleteOrgGroup(req.params.id, tenantId),
       (removed) => createTransactionalAuditEntry(req, 'DELETE', 'org_group', { code: 'group.org.deleted' }, removed.id, removed.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -87,6 +93,7 @@ export async function createSubGroupController(req: Request, res: Response, next
       () => svc.createSubGroup(req.params.groupId, tenantId, req.body),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'sub_group', { code: 'group.sub.created' }, created.id, created.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, sg, 'Tạo phân nhóm thành công', 201);
   } catch (err) { next(err); }
 }
@@ -116,6 +123,7 @@ export async function updateSubGroupController(req: Request, res: Response, next
         updated.name,
       ),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -128,6 +136,7 @@ export async function deleteSubGroupController(req: Request, res: Response, next
       () => svc.deleteSubGroup(req.params.id, tenantId),
       (removed) => createTransactionalAuditEntry(req, 'DELETE', 'sub_group', { code: 'group.sub.deleted' }, removed.id, removed.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -149,6 +158,7 @@ export async function createTeamController(req: Request, res: Response, next: Ne
       () => svc.createTeam(req.params.subgroupId, tenantId, req.body),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'team', { code: 'group.team.created' }, created.id, created.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, team, 'Tạo team thành công', 201);
   } catch (err) { next(err); }
 }
@@ -199,6 +209,7 @@ export async function updateTeamController(req: Request, res: Response, next: Ne
         updated.name,
       ),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
@@ -211,6 +222,7 @@ export async function deleteTeamController(req: Request, res: Response, next: Ne
       () => svc.deleteTeam(req.params.id, tenantId),
       (removed) => createTransactionalAuditEntry(req, 'DELETE', 'team', { code: 'group.team.deleted' }, removed.id, removed.name),
     );
+    await invalidateReportOrgUnitCatalog(tenantId);
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
 }
