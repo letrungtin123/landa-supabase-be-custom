@@ -23,6 +23,8 @@ import {
   getReportPdfExportJob,
   startReportPdfExportJob,
 } from './report-pdf-export.service.js';
+import { parseReportFilters } from './report-chat-filter.logic.js';
+import { REPORT_PERMISSION_CHECK_FAILED_CODE, reportChatErrorBody, type ReportChatErrorCode } from './report-chat-error.logic.js';
 import * as chatService from './chat.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
@@ -33,46 +35,15 @@ const reportPdfLocks = new Set<string>();
 const reportPdfLastExportAt = new Map<string, number>();
 const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
 
-function parseReportFilters(value: unknown): {
-  date_from?: string;
-  date_to?: string;
-  group_id?: string;
-  subgroup_id?: string;
-  team_id?: string;
-} | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new AppError('report_filters không hợp lệ', 400);
-  }
-  const input = value as Record<string, unknown>;
-  const readDate = (key: 'date_from' | 'date_to') => {
-    const raw = input[key];
-    if (raw === undefined) return undefined;
-    if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-      throw new AppError(`${key} không hợp lệ`, 400);
-    }
-    return raw;
-  };
-  const readId = (key: 'group_id' | 'subgroup_id' | 'team_id') => {
-    const raw = input[key];
-    if (raw === undefined || raw === 'all' || raw === '') return undefined;
-    if (typeof raw !== 'string' || !UUID_REGEX.test(raw)) {
-      throw new AppError(`${key} không hợp lệ`, 400);
-    }
-    return raw;
-  };
-  const dateFrom = readDate('date_from');
-  const dateTo = readDate('date_to');
-  const groupId = readId('group_id');
-  const subgroupId = readId('subgroup_id');
-  const teamId = readId('team_id');
-  return {
-    ...(dateFrom ? { date_from: dateFrom } : {}),
-    ...(dateTo ? { date_to: dateTo } : {}),
-    ...(groupId ? { group_id: groupId } : {}),
-    ...(subgroupId ? { subgroup_id: subgroupId } : {}),
-    ...(teamId ? { team_id: teamId } : {}),
-  };
+/** Body `locale` first (validated in sendMessage), then the dashboard's X-UI-Locale header. */
+function readReportRequestLocale(req: Request, bodyLocale: unknown): 'vi' | 'en' {
+  if (bodyLocale === 'en' || bodyLocale === 'vi') return bodyLocale;
+  return req.get('X-UI-Locale')?.trim().toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+function sendReportChatError(res: Response, code: ReportChatErrorCode, locale: 'vi' | 'en'): void {
+  const { status, body } = reportChatErrorBody(code, locale);
+  res.status(status).json(body);
 }
 
 function sendReportPdfError(res: Response, error: unknown): void {
@@ -637,20 +608,20 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       || !checkpointKey || target!=='lesson_author'))) {
     sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
   }
-  let parsedReportFilters: ReturnType<typeof parseReportFilters>;
-  try {
-    parsedReportFilters = parseReportFilters(report_filters);
-  } catch (error) {
-    sendError(res, error instanceof Error ? error.message : 'report_filters không hợp lệ', 400);
+  const reportLocale = readReportRequestLocale(req, locale);
+  const reportFiltersResult = parseReportFilters(report_filters);
+  if (!reportFiltersResult.ok) {
+    sendReportChatError(res, reportFiltersResult.code, reportLocale);
     return;
   }
+  const parsedReportFilters = reportFiltersResult.value;
   let canAccessReports = false;
   if (target === 'admin') {
     try {
       canAccessReports = await hasPermission(req.user!, 'report_summary', 'can_view');
     } catch (error) {
       console.error('[ReportChat] permission check failed:', error);
-      sendError(res, 'Lỗi kiểm tra quyền báo cáo', 500);
+      sendReportChatError(res, REPORT_PERMISSION_CHECK_FAILED_CODE, reportLocale);
       return;
     }
   }

@@ -11,18 +11,24 @@ import {
   getReportComparisonDisplay,
   hasNumericReportNarrativeClaim,
   isReportNarrativeAllowed,
-  hasDeterministicReportIntent,
   isPotentialReportYearCorrection,
   isStoredReportChatSnapshot,
   normalizeReportChatFilter,
-  resolveReportDateFilter,
   resolveReportYearCorrection,
   resolveComparableReportPeriod,
   resolveReportCourseDetail,
-  resolveDeterministicReportRoute,
 } from './report-chat.service.js';
 import type { ReportCoursePerformance, ReportSummary } from '../reports/reports.service.js';
 import { resolveLearnerPlusReportScope } from '../reports/report-access.service.js';
+import { decideReportRoute, detectReportIntent, reconcileReportPeriod } from './report-chat-route.logic.js';
+import { parseReportTimeExpression } from './report-time-expression.logic.js';
+import { localYmd } from './report-date.logic.js';
+
+function resolveDates(question: string, referenceDate: Date, model?: { date_from: string; date_to: string }) {
+  const today = localYmd(referenceDate);
+  const outcome = reconcileReportPeriod(parseReportTimeExpression(question, { today }), model ?? null, today);
+  return outcome.kind === 'resolved' ? outcome.range : outcome;
+}
 
 test.after(async () => {
   await pool.end();
@@ -64,24 +70,25 @@ test('rejects incomplete, reversed, and overlong report date ranges', () => {
 });
 
 test('recognizes explicit learning-report requests when the model router does not call its tool', () => {
-  assert.equal(hasDeterministicReportIntent('Bảng xếp hạng khóa học tháng 5/2026'), true);
-  assert.equal(hasDeterministicReportIntent('Show course completion metrics by team'), true);
-  assert.equal(hasDeterministicReportIntent('Thời tiết hôm nay thế nào?'), false);
-  assert.equal(hasDeterministicReportIntent('Giải thích khóa học là gì'), false);
+  assert.equal(detectReportIntent('Bảng xếp hạng khóa học tháng 5/2026'), true);
+  assert.equal(detectReportIntent('Show course completion metrics by team'), true);
+  assert.equal(detectReportIntent('Thời tiết hôm nay thế nào?'), false);
+  assert.equal(detectReportIntent('Giải thích khóa học là gì'), false);
 });
 
-test('routes an explicit dated report request directly to its backend snapshot', () => {
-  assert.deepEqual(
-    resolveDeterministicReportRoute({
-      question: 'Báo cáo cho tôi Khóa Customer Experience có bao nhiêu người học trong tháng 7',
-      locale: 'vi',
-      referenceDate: new Date('2026-09-19T05:00:00.000Z'),
-    }),
-    {
-      kind: 'snapshot',
-      suggested_filter: { date_from: '2026-07-01', date_to: '2026-07-31' },
-    },
-  );
+test('routes an explicit dated report request to its backend snapshot even without model parameters', () => {
+  const question = 'Báo cáo cho tôi Khóa Customer Experience có bao nhiêu người học trong tháng 7';
+  const today = localYmd(new Date('2026-09-19T05:00:00.000Z'));
+  const decision = decideReportRoute({
+    today,
+    parse: parseReportTimeExpression(question, { today }),
+    model: null,
+    deterministicIntent: detectReportIntent(question),
+    units: { status: 'none' },
+    scope: { restricted: false, allowedGroupIds: null, catalog: null },
+  });
+  assert.equal(decision.kind, 'snapshot');
+  assert.deepEqual(decision.kind === 'snapshot' ? decision.filter : null, { date_from: '2026-07-01', date_to: '2026-07-31' });
 });
 
 test('resolves a uniquely named course detail request without trusting an AI-generated course id', () => {
@@ -182,40 +189,21 @@ test('uses the exact Vietnamese KPI titles shown in the learning report dashboar
 test('resolves report dates without a year against the current Vietnam calendar year', () => {
   const referenceDate = new Date('2026-09-19T05:00:00.000Z');
 
+  // The model guessed an old year for a question that names none: the parser's inferred year wins.
   assert.deepEqual(
-    resolveReportDateFilter({
-      question: 'số học viên có hoạt động học từ 1/7 đến 31/7 là bao nhiêu',
-      locale: 'vi',
-      referenceDate,
-      suggestedFilter: { date_from: '2024-07-01', date_to: '2024-07-31' },
-    }),
+    resolveDates('số học viên có hoạt động học từ 1/7 đến 31/7 là bao nhiêu', referenceDate, { date_from: '2024-07-01', date_to: '2024-07-31' }),
     { date_from: '2026-07-01', date_to: '2026-07-31' },
   );
-  assert.deepEqual(
-    resolveReportDateFilter({ question: 'báo cáo tháng 5', locale: 'vi', referenceDate }),
-    { date_from: '2026-05-01', date_to: '2026-05-31' },
-  );
-  assert.deepEqual(
-    resolveReportDateFilter({ question: 'báo cáo tháng 5/2024', locale: 'vi', referenceDate }),
-    { date_from: '2024-05-01', date_to: '2024-05-31' },
-  );
+  assert.deepEqual(resolveDates('báo cáo tháng 5', referenceDate), { date_from: '2026-05-01', date_to: '2026-05-31' });
+  assert.deepEqual(resolveDates('báo cáo tháng 5/2024', referenceDate), { date_from: '2024-05-01', date_to: '2024-05-31' });
 });
 
 test('resolves relative report dates against the Vietnam calendar day', () => {
   const referenceDate = new Date('2026-09-19T05:00:00.000Z');
 
-  assert.deepEqual(
-    resolveReportDateFilter({ question: 'báo cáo hôm qua', locale: 'vi', referenceDate }),
-    { date_from: '2026-09-18', date_to: '2026-09-18' },
-  );
-  assert.deepEqual(
-    resolveReportDateFilter({ question: 'báo cáo tuần trước', locale: 'vi', referenceDate }),
-    { date_from: '2026-09-07', date_to: '2026-09-13' },
-  );
-  assert.deepEqual(
-    resolveReportDateFilter({ question: 'report this month', locale: 'en', referenceDate }),
-    { date_from: '2026-09-01', date_to: '2026-09-19' },
-  );
+  assert.deepEqual(resolveDates('báo cáo hôm qua', referenceDate), { date_from: '2026-09-18', date_to: '2026-09-18' });
+  assert.deepEqual(resolveDates('báo cáo tuần trước', referenceDate), { date_from: '2026-09-07', date_to: '2026-09-13' });
+  assert.deepEqual(resolveDates('report this month', referenceDate), { date_from: '2026-09-01', date_to: '2026-09-19' });
 });
 
 test('replays the preceding report when the user only corrects its year', () => {

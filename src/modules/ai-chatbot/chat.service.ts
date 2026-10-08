@@ -146,17 +146,9 @@ import { runStoredInputFilter } from './input-filter/input-filter.service.js';
 import { INPUT_FILTER_CONFIG_KEY } from './input-filter/input-filter.schema.js';
 import type { FilterResult } from './input-filter/core/index.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
-import {
-  buildReportChatSnapshot,
-  formatReportFilterRequest,
-  getReportSnapshotHash,
-  generateReportNarrative,
-  isPotentialReportYearCorrection,
-  resolveReportYearCorrection,
-  routeAdminReportQuestion,
-  type ReportChatFilterInput,
-  type NormalizedReportChatFilter,
-} from './report-chat.service.js';
+import type { ReportChatFilterInput } from './report-chat.service.js';
+import { handleAdminReportTurn, type ReportChatSideEvent } from './report-chat-turn.service.js';
+import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -1535,7 +1527,9 @@ interface ConversationContext {
 }
 
 async function markKbStorePermissionProblemFromChat(ctx: ConversationContext | null, err: unknown): Promise<void> {
-  if (!ctx?.botKbId || !isGeminiPermissionDeniedError(err)) return;
+  // A report 403 (learner_plus outside their scope) is not a Gemini File
+  // Search failure and must never mark the bot KB store as broken.
+  if (!ctx?.botKbId || !isKbStorePermissionFailure(err)) return;
   try {
     await markKbGeminiStoreRemoteProblem(
       ctx.botKbId,
@@ -1674,41 +1668,6 @@ async function loadHistory(conversationId: string): Promise<{ role: string; part
     // This prevents a single historical answer from silently consuming a tenant's full quota.
     parts: [{ text: m.content.slice(0, HISTORY_MESSAGE_MAX_CHARS) }],
   }));
-}
-
-function readStoredReportFilter(value: unknown): NormalizedReportChatFilter | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const filter = value as Record<string, unknown>;
-  if (typeof filter.date_from !== 'string' || typeof filter.date_to !== 'string') return null;
-  return {
-    date_from: filter.date_from,
-    date_to: filter.date_to,
-    ...(typeof filter.group_id === 'string' ? { group_id: filter.group_id } : {}),
-    ...(typeof filter.subgroup_id === 'string' ? { subgroup_id: filter.subgroup_id } : {}),
-    ...(typeof filter.team_id === 'string' ? { team_id: filter.team_id } : {}),
-  };
-}
-
-async function loadLatestReportAnalysisContext(conversationId: string): Promise<{
-  question: string;
-  filter: NormalizedReportChatFilter;
-} | null> {
-  const result = await query<{ metadata: unknown }>(
-    `SELECT metadata
-     FROM chat_messages
-     WHERE conversation_id = $1
-       AND role = 'assistant'
-       AND metadata ->> 'kind' = 'report_analysis'
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [conversationId],
-  );
-  const metadata = result.rows[0]?.metadata;
-  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
-  const record = metadata as Record<string, unknown>;
-  const question = typeof record.report_question === 'string' ? record.report_question : '';
-  const filter = readStoredReportFilter(record.report_filter);
-  return question && filter ? { question, filter } : null;
 }
 
 /** Helper: parse retry delay from Gemini 429 error message */
@@ -2256,19 +2215,7 @@ export type ChatStreamSideEvent =
     locale: 'vi' | 'en';
   }
   | { type: 'progress'; stage: string; detail?: string }
-  | {
-    type: 'report_filter';
-    message_id: string;
-    question: string;
-    locale: 'vi' | 'en';
-    suggested_filter?: Pick<ReportChatFilterInput, 'date_from' | 'date_to'>;
-  }
-  | {
-    type: 'report_result';
-    message_id: string;
-    metadata: Record<string, unknown>;
-  }
-  | { type: 'report_status'; stage: 'collecting' | 'analyzing' };
+  | ReportChatSideEvent;
 
 /**
  * The current RAG contract is request/response JSON, not an internal event
@@ -8772,133 +8719,30 @@ export async function sendMessageStream(
       });
 
     // Report routing is limited to the normal admin deployment. The model can
-    // request a fixed server-owned snapshot, but it never receives database
-    // credentials, arbitrary query parameters, or organization IDs to invent.
+    // only propose structured parameters; dates, org units and scope are
+    // resolved and validated server-side (report-chat-turn.service.ts).
     if (ctx.target === 'admin' && options.canAccessReports && options.reportActorRole) {
-      const requestedLocale = options.locale ?? 'vi';
-      const previousReport = !options.reportFilters && isPotentialReportYearCorrection(trimmed)
-        ? await loadLatestReportAnalysisContext(conversationId)
-        : null;
-      const reportCorrection = previousReport
-        ? resolveReportYearCorrection({
-          question: trimmed,
-          previousFilter: previousReport.filter,
-          previousQuestion: previousReport.question,
-        })
-        : null;
-      const route = options.reportFilters || reportCorrection
-        ? { kind: 'snapshot' as const }
-        : await routeAdminReportQuestion({
-          tenantId: ctx.tenantId,
-          model: aiSettings.chatModel,
-          question: trimmed,
-          locale: requestedLocale,
-        });
-      const reportQuestion = reportCorrection?.reportQuestion ?? trimmed;
-      const reportFilter = options.reportFilters ?? reportCorrection?.filter ?? route.suggested_filter;
-
-      if (route.kind === 'filters') {
-        const assistantText = formatReportFilterRequest(requestedLocale);
-        const saved = await query<{ id: string }>(
-          `INSERT INTO chat_messages (conversation_id, role, content, metadata)
-           VALUES ($1, 'assistant', $2, $3)
-           RETURNING id::text AS id`,
-          [conversationId, assistantText, {
-            kind: 'report_filter_request',
-            locale: requestedLocale,
-            report_question: trimmed,
-            report_suggested_filter: route.suggested_filter ?? {},
-          }],
-        );
-        await query(
-          `UPDATE chat_conversations
-           SET updated_at = now(), title = CASE WHEN $3::boolean THEN $2 ELSE title END
-           WHERE id = $1 AND tenant_id = $4`,
-          [conversationId, trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : ''), ctx.messageCount === 0, tenantId],
-        );
-        onChunk(assistantText);
-        onSideEvent?.({
-          type: 'report_filter',
-          message_id: saved.rows[0].id,
-          question: trimmed,
-          locale: requestedLocale,
-          suggested_filter: route.suggested_filter,
-        });
-        await finalizeAiReservation(
-          estimateAiTurnUsage([ctx.systemPrompt, trimmed], assistantText),
+      const reportOutcome = await handleAdminReportTurn({
+        conversationId,
+        tenantId: ctx.tenantId,
+        userId,
+        role: options.reportActorRole,
+        locale: options.locale ?? 'vi',
+        question: trimmed,
+        reportFilters: options.reportFilters,
+        chatModel: aiSettings.chatModel,
+        isFirstMessage: ctx.messageCount === 0,
+        correlationId: options.correlationId ?? null,
+      }, {
+        chunk: onChunk,
+        sideEvent: (event) => onSideEvent?.(event),
+        finalize: (inputParts, outputText, metadata) => finalizeAiReservation(
+          estimateAiTurnUsage([ctx.systemPrompt, ...inputParts], outputText),
           { service: aiSettings.activeEngine, operation: 'chat' },
-          { report_chat: true, report_stage: 'filter_request' },
-        );
-        onDone();
-        return;
-      }
-
-      if (route.kind === 'snapshot') {
-        onSideEvent?.({ type: 'report_status', stage: 'collecting' });
-        const snapshot = await buildReportChatSnapshot({
-          tenantId: ctx.tenantId,
-          actor: { userId, tenantId: ctx.tenantId, role: options.reportActorRole },
-          filter: reportFilter,
-          question: reportQuestion,
-        });
-        onSideEvent?.({ type: 'report_status', stage: 'analyzing' });
-        const narrative = await generateReportNarrative({
-          tenantId: ctx.tenantId,
-          model: aiSettings.chatModel,
-          locale: requestedLocale,
-          snapshot,
-        });
-        // Facts live exclusively in report_snapshot. This short text is only a
-        // fallback for legacy/accessibility rendering and must not contain data.
-        const assistantText = requestedLocale === 'en'
-          ? 'Your report analysis is ready.'
-          : 'Phân tích báo cáo đã sẵn sàng.';
-        onChunk(assistantText);
-        const metadata: Record<string, unknown> = {
-          kind: 'report_analysis',
-          report_chat: true,
-          report_ui_version: 2,
-          locale: requestedLocale,
-          report_contract_version: snapshot.version,
-          report_filter: snapshot.filter,
-          report_scope: snapshot.scope,
-          report_question: reportQuestion,
-          ...(reportCorrection ? {
-            report_follow_up_correction: {
-              user_message: trimmed,
-              corrected_year: reportCorrection.year,
-            },
-          } : {}),
-          report_generated_at: snapshot.generated_at,
-          report_snapshot_hash: getReportSnapshotHash(snapshot),
-          report_snapshot: snapshot,
-          report_narrative: narrative,
-        };
-        const saved = await query<{ id: string }>(
-          `INSERT INTO chat_messages (conversation_id, role, content, metadata)
-           VALUES ($1, 'assistant', $2, $3)
-           RETURNING id::text AS id`,
-          [conversationId, assistantText, metadata],
-        );
-        await query(
-          `UPDATE chat_conversations
-           SET updated_at = now(), title = CASE WHEN $3::boolean THEN $2 ELSE title END
-           WHERE id = $1 AND tenant_id = $4`,
-          [conversationId, trimmed.slice(0, 50) + (trimmed.length > 50 ? '...' : ''), ctx.messageCount === 0, tenantId],
-        );
-        onSideEvent?.({ type: 'report_result', message_id: saved.rows[0].id, metadata });
-        await finalizeAiReservation(
-          // Gemini only receives signal IDs/categories, never the factual
-          // snapshot. Account for that actual bounded narrative request rather
-          // than treating the complete backend snapshot as model input.
-          estimateAiTurnUsage([
-            ctx.systemPrompt,
-            trimmed,
-            JSON.stringify(snapshot.signals.map((signal) => ({ id: signal.id, category: signal.category, severity: signal.severity }))),
-          ], JSON.stringify(narrative)),
-          { service: aiSettings.activeEngine, operation: 'chat' },
-          { report_chat: true, report_stage: 'analysis', report_snapshot_hash: metadata.report_snapshot_hash },
-        );
+          metadata,
+        ),
+      });
+      if (reportOutcome === 'handled') {
         onDone();
         return;
       }

@@ -21,17 +21,40 @@ export interface ReportScope {
   allowedGroupIds: string[] | null;
 }
 
+export interface ReportScopeOptions {
+  /**
+   * Chat reports must not silently pick "the first allowed group" for a
+   * learner_plus who belongs to several groups; they ask the user instead.
+   * The Reports page keeps its existing default.
+   */
+  requireExplicitLearnerPlusScope?: boolean;
+}
+
+/** Codes on the thrown `{ status, message, code }` objects; the Reports page reads status/message only. */
+export const REPORT_SCOPE_FORBIDDEN_CODE = 'REPORT_SCOPE_FORBIDDEN';
+export const REPORT_SCOPE_REQUIRED_CODE = 'REPORT_SCOPE_REQUIRED';
+export const REPORT_SCOPE_INVALID_CODE = 'REPORT_SCOPE_INVALID';
+
+function scopeInvalid(message: string): { status: number; message: string; code: string } {
+  return { status: 400, message, code: REPORT_SCOPE_INVALID_CODE };
+}
+
 export function resolveLearnerPlusReportScope(
   allowedGroupIds: string[],
   requested: RequestedReportScope,
   hierarchy: { groupId?: string; subgroupId?: string; teamId?: string },
+  options: ReportScopeOptions = {},
 ): ReportScope {
   if (allowedGroupIds.length === 0) {
     return { groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: [] };
   }
+  const requestedAny = Boolean(hierarchy.groupId || requested.groupId || requested.subgroupId || requested.teamId);
+  if (!requestedAny && options.requireExplicitLearnerPlusScope && allowedGroupIds.length > 1) {
+    throw { status: 400, message: 'Vui lòng chọn đơn vị cần xem báo cáo', code: REPORT_SCOPE_REQUIRED_CODE };
+  }
   const effectiveGroupId = hierarchy.groupId || requested.groupId || allowedGroupIds[0];
   if (!allowedGroupIds.includes(effectiveGroupId)) {
-    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này' };
+    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này', code: REPORT_SCOPE_FORBIDDEN_CODE };
   }
   return {
     groupId: effectiveGroupId,
@@ -62,12 +85,12 @@ export async function resolveReportHierarchy(
       [requested.teamId, tenantId],
     );
     const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Team không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
+    if (!row) throw scopeInvalid('Team không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     if (requested.subgroupId && requested.subgroupId !== row.subgroup_id) {
-      throw { status: 400, message: 'Team không thuộc nhóm con đã chọn' };
+      throw scopeInvalid('Team không thuộc nhóm con đã chọn');
     }
     if (requested.groupId && requested.groupId !== row.group_id) {
-      throw { status: 400, message: 'Team không thuộc nhóm đã chọn' };
+      throw scopeInvalid('Team không thuộc nhóm đã chọn');
     }
     return { groupId: row.group_id, subgroupId: row.subgroup_id, teamId: row.team_id };
   }
@@ -82,9 +105,9 @@ export async function resolveReportHierarchy(
       [requested.subgroupId, tenantId],
     );
     const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Nhóm con không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
+    if (!row) throw scopeInvalid('Nhóm con không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     if (requested.groupId && requested.groupId !== row.group_id) {
-      throw { status: 400, message: 'Nhóm con không thuộc nhóm đã chọn' };
+      throw scopeInvalid('Nhóm con không thuộc nhóm đã chọn');
     }
     return { groupId: row.group_id, subgroupId: row.subgroup_id };
   }
@@ -95,11 +118,26 @@ export async function resolveReportHierarchy(
       [requested.groupId, tenantId],
     );
     const row = result.rows[0];
-    if (!row) throw { status: 400, message: 'Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại' };
+    if (!row) throw scopeInvalid('Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     return { groupId: row.group_id };
   }
 
   return {};
+}
+
+/** Groups a learner_plus actor may report on: the groups of their own teams, in their tenant. */
+export async function loadReportAllowedGroupIds(actor: Pick<ReportScopeActor, 'userId' | 'tenantId'>): Promise<string[]> {
+  const result = await query<{ group_id: string }>(
+    `SELECT DISTINCT og.id AS group_id
+     FROM team_members tm
+     JOIN teams t ON t.id = tm.team_id
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE tm.user_id = $1
+       AND og.tenant_id = $2`,
+    [actor.userId, actor.tenantId],
+  );
+  return result.rows.map((row) => row.group_id);
 }
 
 /**
@@ -110,6 +148,7 @@ export async function resolveReportHierarchy(
 export async function enforceReportScope(
   actor: ReportScopeActor,
   requested: RequestedReportScope,
+  options: ReportScopeOptions = {},
 ): Promise<ReportScope> {
   if (actor.role !== 'learner_plus') {
     const hierarchy = await resolveReportHierarchy(actor.tenantId, requested);
@@ -121,19 +160,10 @@ export async function enforceReportScope(
     };
   }
 
-  const result = await query<{ group_id: string }>(
-    `SELECT DISTINCT og.id AS group_id
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1`,
-    [actor.userId],
-  );
-  const allowedGroupIds = result.rows.map((row) => row.group_id);
+  const allowedGroupIds = await loadReportAllowedGroupIds(actor);
   if (allowedGroupIds.length === 0) {
-    return resolveLearnerPlusReportScope(allowedGroupIds, requested, {});
+    return resolveLearnerPlusReportScope(allowedGroupIds, requested, {}, options);
   }
   const hierarchy = await resolveReportHierarchy(actor.tenantId, requested);
-  return resolveLearnerPlusReportScope(allowedGroupIds, requested, hierarchy);
+  return resolveLearnerPlusReportScope(allowedGroupIds, requested, hierarchy, options);
 }

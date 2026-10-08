@@ -1,17 +1,36 @@
-import { Type } from '@google/genai';
-import { z } from 'zod';
 import { stableHash } from '../../config/cache.js';
 import { query } from '../../config/database.js';
-import { getGeminiClient } from './gemini.service.js';
 import {
   enforceReportScope,
   type ReportScope,
   type ReportScopeActor,
+  type ReportScopeOptions,
 } from '../reports/report-access.service.js';
 import * as reportsService from '../reports/reports.service.js';
+import {
+  MAX_REPORT_RANGE_DAYS,
+  REPORT_TIME_ZONE,
+  clampYmd,
+  localYmd,
+  parseYmd,
+  resolveComparableReportPeriod,
+  resolveNearestReportDataPeriod,
+  type ReportComparisonPeriod,
+  type ReportNearestDataPeriod,
+} from './report-date.logic.js';
+import { foldReportText, normalizeReportEntityName } from './report-text.logic.js';
+import { resolveSnapshotChartGranularity, type ReportGranularity } from './report-time-expression.logic.js';
+import { findNearestReportEnrollmentDates } from './report-chat.repository.js';
 
-const REPORT_TIME_ZONE = 'Asia/Ho_Chi_Minh';
-const MAX_REPORT_RANGE_DAYS = 366;
+export { resolveComparableReportPeriod, type ReportComparisonPeriod } from './report-date.logic.js';
+export {
+  generateReportNarrative,
+  hasNumericReportNarrativeClaim,
+  isReportNarrativeAllowed,
+  type ReportNarrative,
+} from './report-chat-narrative.service.js';
+
+export const REPORT_RANGE_INVALID_CODE = 'REPORT_RANGE_INVALID';
 const LEGACY_SNAPSHOT_VERSION = 1 as const;
 const SNAPSHOT_VERSION = 2 as const;
 export const REPORT_SIGNAL_THRESHOLD_VERSION = 'v1' as const;
@@ -119,12 +138,6 @@ export type ReportCourseDetail = Pick<
   | 'completion_rate'
 >;
 
-export interface ReportComparisonPeriod {
-  date_from: string;
-  date_to: string;
-  basis: 'calendar_month' | 'month_to_date' | 'calendar_week' | 'year_to_date' | 'calendar_year' | 'equal_length';
-}
-
 export interface ReportComparisonDisplay {
   title: string;
   date_label: string;
@@ -150,26 +163,13 @@ export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'vers
   availability: {
     state: 'available' | 'empty' | 'no_accessible_scope';
     limitations: string[];
+    /** Only for an empty period: the closest calendar month that has enrollments in the same scope. */
+    nearest_data_period?: ReportNearestDataPeriod;
   };
 }
 
 export type StoredReportChatSnapshot = LegacyReportChatSnapshot | ReportChatSnapshot;
 
-export interface ReportNarrative {
-  selected_signal_ids: string[];
-  interpretation: string[];
-  recommended_actions: Array<{
-    signal_id: string | null;
-    priority: 'high' | 'medium' | 'low';
-    action: string;
-  }>;
-  limitations: string[];
-}
-
-export interface ReportRouterResult {
-  kind: 'direct' | 'filters' | 'snapshot';
-  suggested_filter?: Pick<ReportChatFilterInput, 'date_from' | 'date_to'>;
-}
 
 export interface ReportYearCorrection {
   year: number;
@@ -210,162 +210,6 @@ const VIETNAMESE_REPORT_KPI_VOCABULARY: readonly ReportKpiVocabularyItem[] = [
 
 export function getVietnameseReportKpiVocabulary(): readonly ReportKpiVocabularyItem[] {
   return VIETNAMESE_REPORT_KPI_VOCABULARY;
-}
-
-function localYmd(date: Date): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: REPORT_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date);
-  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? '';
-  return `${read('year')}-${read('month')}-${read('day')}`;
-}
-
-function parseYmd(value: string): { year: number; month: number; day: number } | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return null;
-  const [, rawYear, rawMonth, rawDay] = match;
-  const year = Number(rawYear);
-  const month = Number(rawMonth);
-  const day = Number(rawDay);
-  if (year < 1900 || month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return null;
-  return { year, month, day };
-}
-
-function formatYmd(year: number, month: number, day: number): string {
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-function clampYmd(year: number, month: number, day: number): string | null {
-  if (year < 1900 || month < 1 || month > 12 || day < 1) return null;
-  return formatYmd(year, month, Math.min(day, new Date(Date.UTC(year, month, 0)).getUTCDate()));
-}
-
-function addDays(value: string, offset: number): string {
-  const parts = parseYmd(value);
-  if (!parts) return value;
-  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
-  date.setUTCDate(date.getUTCDate() + offset);
-  return formatYmd(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
-}
-
-function startOfWeek(value: string): string {
-  const parts = parseYmd(value);
-  if (!parts) return value;
-  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
-  const offset = (date.getUTCDay() + 6) % 7;
-  return addDays(value, -offset);
-}
-
-function endOfMonth(year: number, month: number): string {
-  return formatYmd(year, month, new Date(Date.UTC(year, month, 0)).getUTCDate());
-}
-
-function dayCountBetween(dateFrom: string, dateTo: string): number {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  if (!from || !to) return 0;
-  const fromMs = Date.UTC(from.year, from.month - 1, from.day);
-  const toMs = Date.UTC(to.year, to.month - 1, to.day);
-  return Math.floor((toMs - fromMs) / 86_400_000) + 1;
-}
-
-function isCalendarMonth(dateFrom: string, dateTo: string): boolean {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  return Boolean(from
-    && to
-    && from.year === to.year
-    && from.month === to.month
-    && from.day === 1
-    && dateTo === endOfMonth(to.year, to.month));
-}
-
-function isCalendarWeek(dateFrom: string, dateTo: string): boolean {
-  return startOfWeek(dateFrom) === dateFrom && dayCountBetween(dateFrom, dateTo) === 7;
-}
-
-function isCalendarYear(dateFrom: string, dateTo: string): boolean {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  return Boolean(from && to && from.month === 1 && from.day === 1 && to.month === 12 && to.day === 31);
-}
-
-function isMonthToDate(dateFrom: string, dateTo: string): boolean {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  return Boolean(from
-    && to
-    && from.year === to.year
-    && from.month === to.month
-    && from.day === 1
-    && to.day < new Date(Date.UTC(to.year, to.month, 0)).getUTCDate());
-}
-
-function isYearToDate(dateFrom: string, dateTo: string): boolean {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  return Boolean(from
-    && to
-    && from.year === to.year
-    && from.month === 1
-    && from.day === 1
-    && !(to.month === 12 && to.day === 31));
-}
-
-function sameCalendarDateInYear(dateFrom: string, dateTo: string, targetYear: number): { date_from: string; date_to: string } {
-  const from = parseYmd(dateFrom)!;
-  const to = parseYmd(dateTo)!;
-  return {
-    date_from: clampYmd(targetYear, from.month, from.day)!,
-    date_to: clampYmd(targetYear, to.month, to.day)!,
-  };
-}
-
-export function resolveComparableReportPeriod(dateFrom: string, dateTo: string): ReportComparisonPeriod {
-  const from = parseYmd(dateFrom);
-  const to = parseYmd(dateTo);
-  if (!from || !to) throw { status: 400, message: 'Khoảng ngày báo cáo không hợp lệ' };
-
-  if (isCalendarYear(dateFrom, dateTo)) {
-    return {
-      date_from: formatYmd(from.year - 1, 1, 1),
-      date_to: formatYmd(from.year - 1, 12, 31),
-      basis: 'calendar_year',
-    };
-  }
-  if (isYearToDate(dateFrom, dateTo)) {
-    return { ...sameCalendarDateInYear(dateFrom, dateTo, from.year - 1), basis: 'year_to_date' };
-  }
-  if (isCalendarMonth(dateFrom, dateTo)) {
-    const previousMonth = from.month === 1 ? 12 : from.month - 1;
-    const previousYear = from.month === 1 ? from.year - 1 : from.year;
-    return {
-      date_from: formatYmd(previousYear, previousMonth, 1),
-      date_to: endOfMonth(previousYear, previousMonth),
-      basis: 'calendar_month',
-    };
-  }
-  if (isCalendarWeek(dateFrom, dateTo)) {
-    return { date_from: addDays(dateFrom, -7), date_to: addDays(dateTo, -7), basis: 'calendar_week' };
-  }
-  if (isMonthToDate(dateFrom, dateTo)) {
-    const previousMonth = from.month === 1 ? 12 : from.month - 1;
-    const previousYear = from.month === 1 ? from.year - 1 : from.year;
-    return {
-      date_from: formatYmd(previousYear, previousMonth, 1),
-      date_to: clampYmd(previousYear, previousMonth, to.day)!,
-      basis: 'month_to_date',
-    };
-  }
-  const days = dayCountBetween(dateFrom, dateTo);
-  return {
-    date_from: addDays(dateFrom, -days),
-    date_to: addDays(dateFrom, -1),
-    basis: 'equal_length',
-  };
 }
 
 function formatComparisonDate(value: string, locale: 'vi' | 'en'): string {
@@ -416,11 +260,7 @@ export function getReportComparisonDisplays(comparison: ReportComparisonPeriod):
 }
 
 function normalizeReportQuestion(question: string): string {
-  return question
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLocaleLowerCase('vi-VN')
-    .trim();
+  return foldReportText(question);
 }
 
 const COURSE_REFERENCE_PATTERN = /\b(?:kh(?:óa|oá|oa)(?:\s+học)?|course)\s+(?:(?:là|la|về|ve|about)\s+)?(.+?)(?=\s+(?:có|co|bao\s+nhiêu|bao\s+nhieu|số\s+lượng|so\s+luong|số|so|người\s+học|nguoi\s+hoc|học\s+viên|hoc\s+vien|lượt\s+ghi\s+danh|luot\s+ghi\s+danh|enrollments?|learners?|trong|từ|tu|tháng|thang|năm|nam|from|during|in)(?=\s|[?.!,;]|$)|[?.!,;]|$)/iu;
@@ -430,12 +270,7 @@ const ENGLISH_TRAILING_COURSE_REFERENCE_PATTERNS = [
 ] as const;
 
 function normalizeCourseReference(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLocaleLowerCase('vi-VN')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+  return normalizeReportEntityName(value);
 }
 
 export function extractReportCourseReference(question: string): string | null {
@@ -459,8 +294,8 @@ export function isCourseLearnerDetailRequest(question: string): boolean {
 export function resolveReportCourseDetail(
   question: string,
   candidates: reportsService.ReportCoursePerformance[],
+  requestedCourse: string | null = extractReportCourseReference(question),
 ): ReportCourseDetail | null {
-  const requestedCourse = extractReportCourseReference(question);
   if (!requestedCourse || !isCourseLearnerDetailRequest(question)) return null;
   const normalizedRequest = normalizeCourseReference(requestedCourse);
   if (!normalizedRequest) return null;
@@ -479,96 +314,9 @@ export function resolveReportCourseDetail(
   };
 }
 
-function containsExplicitYear(question: string): boolean {
-  return /\b(?:19|20)\d{2}\b/.test(question);
-}
-
-function readDateRangeFromShortDates(question: string, defaultYear: number): Pick<ReportChatFilterInput, 'date_from' | 'date_to'> | null {
-  const values = [...question.matchAll(/\b(\d{1,2})\s*[/.\-]\s*(\d{1,2})(?:\s*[/.\-]\s*((?:19|20)\d{2}))?\b/g)]
-    .map((match) => {
-      const day = Number(match[1]);
-      const month = Number(match[2]);
-      const year = match[3] ? Number(match[3]) : defaultYear;
-      return clampYmd(year, month, day);
-    })
-    .filter((value): value is string => Boolean(value));
-  if (values.length === 0) return null;
-  return {
-    date_from: values[0],
-    date_to: values[Math.min(values.length - 1, 1)],
-  };
-}
-
 function rebaseDateToYear(value: string | undefined, year: number): string | undefined {
   const parts = value ? parseYmd(value) : null;
   return parts ? clampYmd(year, parts.month, parts.day) ?? undefined : undefined;
-}
-
-export function resolveReportDateFilter(input: {
-  question: string;
-  locale: 'vi' | 'en';
-  suggestedFilter?: Pick<ReportChatFilterInput, 'date_from' | 'date_to'>;
-  referenceDate?: Date;
-}): Pick<ReportChatFilterInput, 'date_from' | 'date_to'> {
-  const reference = localYmd(input.referenceDate ?? new Date());
-  const referenceParts = parseYmd(reference);
-  if (!referenceParts) return input.suggestedFilter ?? {};
-  const question = normalizeReportQuestion(input.question);
-  const hasExplicitYear = containsExplicitYear(question);
-
-  if (!hasExplicitYear) {
-    if (/\b(hom qua|yesterday)\b/.test(question)) {
-      const date = addDays(reference, -1);
-      return { date_from: date, date_to: date };
-    }
-    if (/\b(hom nay|today)\b/.test(question)) return { date_from: reference, date_to: reference };
-    if (/\b(tuan truoc|last week)\b/.test(question)) {
-      const end = addDays(startOfWeek(reference), -1);
-      return { date_from: startOfWeek(end), date_to: end };
-    }
-    if (/\b(tuan nay|this week|current week)\b/.test(question)) {
-      return { date_from: startOfWeek(reference), date_to: reference };
-    }
-    if (/\b(thang truoc|last month)\b/.test(question)) {
-      const previousMonth = referenceParts.month === 1 ? 12 : referenceParts.month - 1;
-      const previousYear = referenceParts.month === 1 ? referenceParts.year - 1 : referenceParts.year;
-      return { date_from: formatYmd(previousYear, previousMonth, 1), date_to: endOfMonth(previousYear, previousMonth) };
-    }
-    if (/\b(thang nay|this month|current month)\b/.test(question)) {
-      return { date_from: formatYmd(referenceParts.year, referenceParts.month, 1), date_to: reference };
-    }
-    if (/\b(nam nay|this year|current year)\b/.test(question)) {
-      return { date_from: formatYmd(referenceParts.year, 1, 1), date_to: reference };
-    }
-
-    const shortDateRange = readDateRangeFromShortDates(question, referenceParts.year);
-    if (shortDateRange) return shortDateRange;
-  }
-
-  const monthMatch = /\b(?:thang|month)\s*(\d{1,2})(?:\s*(?:\/|\-|nam|year)\s*((?:19|20)\d{2}))?\b/.exec(question);
-  if (monthMatch) {
-    const month = Number(monthMatch[1]);
-    const year = monthMatch[2] ? Number(monthMatch[2]) : referenceParts.year;
-    if (month >= 1 && month <= 12) {
-      return { date_from: formatYmd(year, month, 1), date_to: endOfMonth(year, month) };
-    }
-  }
-
-  if (hasExplicitYear) {
-    const shortDateRange = readDateRangeFromShortDates(question, referenceParts.year);
-    if (shortDateRange) return shortDateRange;
-  }
-
-  const suggested = input.suggestedFilter ?? {};
-  if (!hasExplicitYear) {
-    const dateFrom = rebaseDateToYear(suggested.date_from, referenceParts.year);
-    const dateTo = rebaseDateToYear(suggested.date_to, referenceParts.year);
-    return {
-      ...(dateFrom ? { date_from: dateFrom } : {}),
-      ...(dateTo ? { date_to: dateTo } : {}),
-    };
-  }
-  return suggested;
 }
 
 function reportYearCorrectionMatch(question: string): RegExpExecArray | null {
@@ -597,19 +345,22 @@ export function resolveReportYearCorrection(input: {
   };
 }
 
+function rangeError(message: string): { status: number; message: string; code: string } {
+  return { status: 400, message, code: REPORT_RANGE_INVALID_CODE };
+}
+
 function dateRangeFromYmd(dateFrom: string, dateTo: string): reportsService.ReportDateRange {
-  const pattern = /^\d{4}-\d{2}-\d{2}$/;
-  if (!pattern.test(dateFrom) || !pattern.test(dateTo)) {
-    throw { status: 400, message: 'date_from/date_to phải có định dạng YYYY-MM-DD' };
+  if (!parseYmd(dateFrom) || !parseYmd(dateTo)) {
+    throw rangeError('date_from/date_to phải có định dạng YYYY-MM-DD');
   }
   const startDate = new Date(`${dateFrom}T00:00:00.000+07:00`);
   const endDate = new Date(`${dateTo}T23:59:59.999+07:00`);
   if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate.getTime() > endDate.getTime()) {
-    throw { status: 400, message: 'Khoảng ngày không hợp lệ' };
+    throw rangeError('Khoảng ngày không hợp lệ');
   }
   const dayCount = Math.floor((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
   if (dayCount > MAX_REPORT_RANGE_DAYS) {
-    throw { status: 400, message: `Khoảng ngày báo cáo tối đa ${MAX_REPORT_RANGE_DAYS} ngày` };
+    throw rangeError(`Khoảng ngày báo cáo tối đa ${MAX_REPORT_RANGE_DAYS} ngày`);
   }
   return { startDate, endDate, dateFrom, dateTo };
 }
@@ -619,7 +370,7 @@ export function normalizeReportChatFilter(input: ReportChatFilterInput = {}): {
   dateRange: reportsService.ReportDateRange;
 } {
   if ((input.date_from && !input.date_to) || (!input.date_from && input.date_to)) {
-    throw { status: 400, message: 'date_from và date_to phải được gửi cùng nhau' };
+    throw rangeError('date_from và date_to phải được gửi cùng nhau');
   }
   const today = localYmd(new Date());
   const defaultFrom = `${today.slice(0, 8)}01`;
@@ -643,13 +394,18 @@ export async function buildReportChatSnapshot(input: {
   actor: ReportScopeActor;
   filter?: ReportChatFilterInput;
   question?: string;
+  /** Breakdown the user asked for ("theo tuần"); coarsened to keep at most 62 chart buckets. */
+  granularity?: ReportGranularity | null;
+  /** Course name as written, from the router, used when the question has no recognisable course phrase. */
+  courseHint?: string | null;
+  scopeOptions?: ReportScopeOptions;
 }): Promise<ReportChatSnapshot> {
   const normalized = normalizeReportChatFilter(input.filter);
   const scope = await enforceReportScope(input.actor, {
     groupId: normalized.filter.group_id,
     subgroupId: normalized.filter.subgroup_id,
     teamId: normalized.filter.team_id,
-  });
+  }, input.scopeOptions);
   const effectiveFilter: NormalizedReportChatFilter = {
     date_from: normalized.filter.date_from,
     date_to: normalized.filter.date_to,
@@ -675,13 +431,14 @@ export async function buildReportChatSnapshot(input: {
     return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope');
   }
 
-  const requestedCourse = input.question ? extractReportCourseReference(input.question) : null;
+  const requestedCourse = (input.question ? extractReportCourseReference(input.question) : null) ?? input.courseHint?.trim() ?? null;
   const shouldResolveCourseDetail = Boolean(requestedCourse && isCourseLearnerDetailRequest(input.question ?? ''));
+  const chartGranularity = resolveSnapshotChartGranularity(input.granularity, { date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo });
   const [summary, previousSummary, enrollmentChart, activeLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseCandidates] = await Promise.all([
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
-    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
-    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'active_learners', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, 'auto', { limitBuckets: 62 }),
+    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, chartGranularity, { limitBuckets: 62 }),
+    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'active_learners', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, chartGranularity, { limitBuckets: 62 }),
     reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     resolveReportScopeDisplay(input.tenantId, scope),
@@ -690,9 +447,9 @@ export async function buildReportChatSnapshot(input: {
       : Promise.resolve([]),
   ]);
   const courseDetail = shouldResolveCourseDetail
-    ? resolveReportCourseDetail(input.question ?? '', courseCandidates)
+    ? resolveReportCourseDetail(input.question ?? '', courseCandidates, requestedCourse)
     : null;
-  return createReportSnapshot(
+  const snapshot = createReportSnapshot(
     base,
     summary,
     previousSummary,
@@ -705,6 +462,22 @@ export async function buildReportChatSnapshot(input: {
     enrollmentChart.granularity ? { granularity: enrollmentChart.granularity } : {},
     courseDetail ?? undefined,
   );
+  if (snapshot.availability.state !== 'empty') return snapshot;
+  // Two LIMIT 1 index lookups, only for an empty period: lets the card offer
+  // the nearest month that has data instead of a dead end.
+  const nearest = await findNearestReportEnrollmentDates({
+    tenantId: input.tenantId,
+    scope,
+    range: normalized.dateRange,
+  });
+  const nearestPeriod = resolveNearestReportDataPeriod({
+    ...nearest,
+    range: { date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo },
+    today: localYmd(new Date()),
+  });
+  return nearestPeriod
+    ? { ...snapshot, availability: { ...snapshot.availability, nearest_data_period: nearestPeriod } }
+    : snapshot;
 }
 
 function emptyReportSummary(range: reportsService.ReportDateRange): reportsService.ReportSummary {
@@ -990,202 +763,6 @@ export async function loadStoredReportSnapshot(input: {
     question: typeof metadata.report_question === 'string' ? metadata.report_question : '',
     locale: metadata.locale === 'en' ? 'en' : 'vi',
   };
-}
-
-const REPORT_ROUTER_TOOL = {
-  functionDeclarations: [
-    {
-      name: 'get_report_snapshot',
-      description: 'Use only when the user asks for factual learning/report metrics, trends, completion, enrollment, learner progress, or course rankings from the dashboard database.',
-      parameters: {
-        type: 'OBJECT',
-        properties: {
-          date_from: { type: 'STRING', description: 'Optional YYYY-MM-DD start date resolved from the request.' },
-          date_to: { type: 'STRING', description: 'Optional YYYY-MM-DD end date resolved from the request.' },
-          requires_filters: { type: 'BOOLEAN', description: 'True only when a group/team scope is explicitly requested but cannot be selected safely without the user choosing it in the UI.' },
-        },
-      },
-    },
-    {
-      name: 'respond_directly',
-      description: 'Use for every request that does not require factual dashboard report data.',
-      parameters: { type: 'OBJECT', properties: {} },
-    },
-  ],
-};
-
-export function hasDeterministicReportIntent(question: string): boolean {
-  const normalized = question
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .toLocaleLowerCase('vi-VN');
-
-  const reportCue = /\b(bao cao|thong ke|phan tich|so lieu|dashboard|report|analytics?|metrics?)\b/.test(normalized);
-  const learningMetricCue = /\b(hoc vien|nguoi hoc|khoa hoc|dao tao|tien do|hoan thanh|ghi danh|dang ky|enrollment|completion|learner|course|training)\b/.test(normalized);
-  const rankingCue = /\b(bang xep hang|xep hang|ranking|top)\b/.test(normalized);
-  const explicitMetricCue = /\b(ty le hoan thanh|luot dang ky|tinh hinh hoc tap|completion rate|enrollments?)\b/.test(normalized);
-
-  return (reportCue && learningMetricCue)
-    || (rankingCue && learningMetricCue)
-    || explicitMetricCue;
-}
-
-export function resolveDeterministicReportRoute(input: {
-  question: string;
-  locale: 'vi' | 'en';
-  referenceDate?: Date;
-}): ReportRouterResult | null {
-  if (!hasDeterministicReportIntent(input.question)) return null;
-  const suggestedFilter = resolveReportDateFilter(input);
-  return suggestedFilter.date_from && suggestedFilter.date_to
-    ? { kind: 'snapshot', suggested_filter: suggestedFilter }
-    : null;
-}
-
-export async function routeAdminReportQuestion(input: {
-  tenantId: string;
-  model: string;
-  question: string;
-  locale: 'vi' | 'en';
-  referenceDate?: Date;
-}): Promise<ReportRouterResult> {
-  // Concrete time expressions are resolved by the backend before any model
-  // routing, so an explicit report question does not make the user reapply an
-  // already unambiguous date range in the widget.
-  const deterministicRoute = resolveDeterministicReportRoute(input);
-  if (deterministicRoute) return deterministicRoute;
-
-  const referenceDate = localYmd(input.referenceDate ?? new Date());
-  const aiClient = await getGeminiClient(input.tenantId);
-  const response = await aiClient.models.generateContent({
-    model: input.model,
-    contents: [{ role: 'user', parts: [{ text: input.question }] }],
-    config: {
-      systemInstruction: input.locale === 'en'
-        ? `You are a strict intent router. Today is ${referenceDate} in Asia/Ho_Chi_Minh. Do not answer the user. Choose get_report_snapshot only for factual dashboard data requests. Choose respond_directly for writing, explanations, or any request that does not require dashboard data. Resolve dates without a year to the current year, and relative dates from today. Never invent IDs, SQL, metrics, filters, or data.`
-        : `Bạn là bộ định tuyến ý định nghiêm ngặt. Hôm nay là ${referenceDate} theo múi giờ Asia/Ho_Chi_Minh. Không trả lời người dùng. Chỉ chọn get_report_snapshot khi người dùng cần số liệu thực tế từ dashboard. Chọn respond_directly cho viết nội dung, giải thích hoặc mọi yêu cầu không cần dữ liệu dashboard. Mốc ngày không nêu năm phải dùng năm hiện tại; mốc tương đối phải tính từ hôm nay. Không tự tạo ID, SQL, metric, bộ lọc hoặc số liệu.`,
-      tools: [REPORT_ROUTER_TOOL] as any,
-      toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
-      maxOutputTokens: 256,
-    } as any,
-  });
-  const part = response.candidates?.[0]?.content?.parts?.find((item: any) => item.functionCall) as any;
-  const call = part?.functionCall ?? response.functionCalls?.[0];
-  const args = call?.args && typeof call.args === 'object' ? call.args as Record<string, unknown> : {};
-  const suggestedFilter = resolveReportDateFilter({
-    question: input.question,
-    locale: input.locale,
-    suggestedFilter: {
-      ...(typeof args.date_from === 'string' ? { date_from: args.date_from } : {}),
-      ...(typeof args.date_to === 'string' ? { date_to: args.date_to } : {}),
-    },
-    referenceDate: input.referenceDate,
-  });
-  if (call?.name !== 'get_report_snapshot') {
-    // The model router is preferred for intent and explicit date extraction.
-    // This fallback prevents obvious report requests from being answered by KB RAG when it declines the tool call.
-    return hasDeterministicReportIntent(input.question) ? { kind: 'filters', suggested_filter: suggestedFilter } : { kind: 'direct' };
-  }
-  return args.requires_filters === true
-    ? { kind: 'filters', suggested_filter: suggestedFilter }
-    : { kind: 'snapshot', suggested_filter: suggestedFilter };
-}
-
-const ReportNarrativeSchema = z.object({
-  selected_signal_ids: z.array(z.string().trim().min(1).max(80)).max(3),
-  interpretation: z.array(z.string().trim().min(1).max(220)).max(3),
-  recommended_actions: z.array(z.object({
-    signal_id: z.string().trim().min(1).max(80).nullable(),
-    priority: z.enum(['high', 'medium', 'low']),
-    action: z.string().trim().min(1).max(220),
-  })).max(3),
-  limitations: z.array(z.string().trim().min(1).max(180)).max(3),
-});
-
-export function hasNumericReportNarrativeClaim(narrative: ReportNarrative): boolean {
-  return [
-    ...narrative.interpretation,
-    ...narrative.recommended_actions.map((item) => item.action),
-    ...narrative.limitations,
-  ].some((value) => /\d/.test(value));
-}
-
-export function isReportNarrativeAllowed(narrative: ReportNarrative, snapshot: Pick<ReportChatSnapshot, 'signals'>): boolean {
-  const allowed = new Set(snapshot.signals.map((signal) => signal.id));
-  return !hasNumericReportNarrativeClaim(narrative)
-    && narrative.selected_signal_ids.every((id) => allowed.has(id))
-    && narrative.recommended_actions.every((action) => action.signal_id === null || allowed.has(action.signal_id));
-}
-
-function fallbackReportNarrative(snapshot: ReportChatSnapshot, locale: 'vi' | 'en'): ReportNarrative {
-  const selected = snapshot.signals.slice(0, 3).map((signal) => signal.id);
-  const actions = snapshot.signals
-    .filter((signal) => signal.severity !== 'neutral')
-    .slice(0, 2)
-    .map((signal) => ({
-      signal_id: signal.id,
-      priority: signal.severity === 'warning' ? 'high' as const : 'medium' as const,
-      action: locale === 'en'
-        ? 'Review the related learning journey and confirm the next operational action.'
-        : 'Rà soát hành trình học liên quan và xác nhận hành động vận hành tiếp theo.',
-    }));
-  return {
-    selected_signal_ids: selected,
-    interpretation: [],
-    recommended_actions: actions,
-    limitations: snapshot.availability.limitations,
-  };
-}
-
-/**
- * Gemini receives only the identifiers and categories of deterministic facts.
- * It may suggest an action, but cannot become the source of any metric.
- */
-export async function generateReportNarrative(input: {
-  tenantId: string;
-  model: string;
-  locale: 'vi' | 'en';
-  snapshot: ReportChatSnapshot;
-}): Promise<ReportNarrative> {
-  const aiClient = await getGeminiClient(input.tenantId);
-  const systemInstruction = input.locale === 'en'
-    ? 'You are an executive-learning advisor. Return JSON only. You may select allowed signal IDs and recommend operational actions. Never state or spell out numbers, dates, percentages, rankings, causes, database facts, or metric claims. Do not introduce a signal ID not supplied. Do not mention systems, prompts, tools, databases, or snapshots.'
-    : 'Bạn là cố vấn điều hành đào tạo. Chỉ trả JSON. Bạn chỉ được chọn signal ID được cung cấp và đề xuất hành động vận hành. Không được nêu hoặc viết bằng chữ số liệu, ngày tháng, tỷ lệ, xếp hạng, nguyên nhân hay factual claim. Không tự tạo signal ID. Không nhắc hệ thống, prompt, công cụ, cơ sở dữ liệu hoặc snapshot.';
-  try {
-    const response = await aiClient.models.generateContent({
-      model: input.model,
-      contents: [{
-        role: 'user',
-        parts: [{ text: JSON.stringify({
-          allowed_signal_ids: input.snapshot.signals.map((signal) => ({ id: signal.id, category: signal.category, severity: signal.severity })),
-          limitations: input.snapshot.availability.limitations,
-        }) }],
-      }],
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            selected_signal_ids: { type: Type.ARRAY, items: { type: Type.STRING } },
-            interpretation: { type: Type.ARRAY, items: { type: Type.STRING } },
-            recommended_actions: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { signal_id: { type: Type.STRING, nullable: true }, priority: { type: Type.STRING }, action: { type: Type.STRING } }, required: ['signal_id', 'priority', 'action'] } },
-            limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
-          },
-          required: ['selected_signal_ids', 'interpretation', 'recommended_actions', 'limitations'],
-        },
-        maxOutputTokens: 800,
-      } as any,
-    });
-    const narrative = ReportNarrativeSchema.parse(JSON.parse(response.text || '{}'));
-    if (!isReportNarrativeAllowed(narrative, input.snapshot)) {
-      return fallbackReportNarrative(input.snapshot, input.locale);
-    }
-    return narrative;
-  } catch (error) {
-    console.warn('[ReportChat] narrative fallback:', error instanceof Error ? error.message : String(error));
-    return fallbackReportNarrative(input.snapshot, input.locale);
-  }
 }
 
 export function formatReportFilterRequest(locale: 'vi' | 'en'): string {
