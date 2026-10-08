@@ -1,54 +1,116 @@
-import { getReportComparisonDisplay, type ReportAnalyticsSignal, type ReportMetricFact, type StoredReportChatSnapshot } from './report-chat.service.js';
-import { renderExecutiveReportPdf, type ReportPdfNarrative } from './report-pdf-presentation.js';
+// ═══════════════════════════════════════════════════════════════
+// Report PDF composition: snapshot -> insights -> narrative (validated AI or
+// rule-based, plus the stored chat narrative when valid) -> view model ->
+// self-contained HTML -> PDF through the shared browser renderer.
+// The immutable snapshot remains the only factual source of the document.
+// ═══════════════════════════════════════════════════════════════
+import type { StoredReportChatSnapshot } from './report-chat.service.js';
+import type { ReportPdfLocale } from './report-pdf-i18n.js';
+import { buildReportInsights, type ReportInsights } from './report-insights.logic.js';
+import {
+  buildRuleBasedReportNarrative,
+  mergeStoredChatNarrative,
+  validateReportPdfNarrative,
+  type ReportPdfNarrative,
+} from './report-pdf-narrative.logic.js';
+import { getReportPdfRenderer, type ReportPdfRenderer } from './report-pdf-renderer.service.js';
+import { planReportPdfPages, toReportPdfLayoutMeasurements } from './report-pdf-layout.logic.js';
+import { renderReportPdfHtml, renderReportPdfMeasureHtml } from './report-pdf-template/document.js';
+import {
+  buildReportPdfViewModel,
+  REPORT_PDF_TEMPLATE_VERSION,
+  type ReportPdfTenantBranding,
+  type ReportPdfViewModel,
+} from './report-pdf-view-model.js';
 
-export type { ReportPdfNarrative } from './report-pdf-presentation.js';
+export { REPORT_PDF_TEMPLATE_VERSION } from './report-pdf-view-model.js';
+export type { ReportPdfNarrative } from './report-pdf-narrative.logic.js';
 
-function snapshotMetric(snapshot: StoredReportChatSnapshot, id: ReportMetricFact['id']): ReportMetricFact | null {
-  return snapshot.version === 2 ? snapshot.factual_metrics.find((metric) => metric.id === id) ?? null : null;
+export type ReportPdfAiNarrativeWriter = (insights: ReportInsights, locale: ReportPdfLocale) => Promise<ReportPdfNarrative | null>;
+
+export interface ReportPdfComposeInput {
+  snapshot: StoredReportChatSnapshot;
+  snapshotHash: string;
+  locale: ReportPdfLocale;
+  tenant: ReportPdfTenantBranding;
+  storedNarrative?: unknown;
+  storedNarrativeLocale?: ReportPdfLocale;
+  writeAiNarrative?: ReportPdfAiNarrativeWriter;
+  fontCss?: string;
 }
 
-function metricDelta(metric: ReportMetricFact | null): number | null {
-  return metric?.unit === 'percentage' ? metric.delta_percentage_points : metric?.delta_absolute ?? null;
+export interface ReportPdfComposition {
+  html: string;
+  insights: ReportInsights;
+  narrative: ReportPdfNarrative;
+  model: ReportPdfViewModel;
 }
 
-function signalFor(snapshot: StoredReportChatSnapshot, id: string): ReportAnalyticsSignal | null {
-  return snapshot.version === 2 ? snapshot.signals.find((signal) => signal.id === id) ?? null : null;
-}
-
-function fallbackNarrative(snapshot: StoredReportChatSnapshot, locale: 'vi' | 'en'): ReportPdfNarrative {
-  const comparison = snapshot.version === 2 ? getReportComparisonDisplay(snapshot.comparison, locale) : null;
-  const suffix = comparison?.delta_suffix ?? (locale === 'en' ? 'vs the comparison period' : 'so với giai đoạn so sánh');
-  const completion = metricDelta(snapshotMetric(snapshot, 'completion_rate'));
-  const enrollments = metricDelta(snapshotMetric(snapshot, 'total_enrollments'));
-  const highlights: string[] = [];
-  if (completion !== null && completion !== 0) highlights.push(locale === 'en' ? `Completion ${completion > 0 ? 'improved' : 'declined'} ${suffix}.` : `Tỷ lệ hoàn thành ${completion > 0 ? 'cải thiện' : 'giảm'} ${suffix}.`);
-  if (enrollments !== null && enrollments !== 0) highlights.push(locale === 'en' ? `Enrollment volume ${enrollments > 0 ? 'increased' : 'decreased'} ${suffix}.` : `Lượt ghi danh ${enrollments > 0 ? 'tăng' : 'giảm'} ${suffix}.`);
-  if (!highlights.length) highlights.push(locale === 'en' ? 'The selected period did not show a material change in the available comparison metrics.' : 'Giai đoạn đã chọn chưa cho thấy thay đổi đáng kể ở các chỉ số có dữ liệu so sánh.');
-
-  const risks: string[] = [];
-  const recommendations: string[] = [];
-  const course = signalFor(snapshot, 'high_enrollment_low_completion')?.evidence.course_name;
-  if (course) {
-    risks.push(locale === 'en' ? `${course} has high participation with a low completion rate.` : `${course} có lượng tham gia cao nhưng tỷ lệ hoàn thành thấp.`);
-    recommendations.push(locale === 'en' ? `Review incomplete learner cohorts and the delivery schedule for ${course}.` : `Rà soát nhóm người học chưa hoàn thành và lịch triển khai của ${course}.`);
+/** Pure composition (plus the optional, already-guarded AI writer). */
+export async function composeReportPdfDocument(input: ReportPdfComposeInput): Promise<ReportPdfComposition> {
+  const insights = buildReportInsights(input.snapshot);
+  let narrative = buildRuleBasedReportNarrative(insights, input.locale);
+  if (input.writeAiNarrative) {
+    const candidate = await input.writeAiNarrative(insights, input.locale);
+    // The writer validates too; this second check keeps the guarantee local.
+    if (candidate && validateReportPdfNarrative(candidate, insights, input.locale).ok) narrative = candidate;
   }
-  if (signalFor(snapshot, 'completion_decline')) {
-    risks.push(locale === 'en' ? 'Average completion rate declined against the comparison period.' : 'Tỷ lệ hoàn thành trung bình giảm so với giai đoạn so sánh.');
-    recommendations.push(locale === 'en' ? 'Review courses and learner cohorts with incomplete progress.' : 'Rà soát các khóa học và nhóm người học có tiến độ chưa hoàn thành.');
+  if (input.storedNarrative !== undefined && input.storedNarrativeLocale) {
+    narrative = mergeStoredChatNarrative({
+      narrative,
+      stored: input.storedNarrative,
+      storedLocale: input.storedNarrativeLocale,
+      locale: input.locale,
+      snapshot: input.snapshot,
+    });
   }
-  if (signalFor(snapshot, 'end_period_activity_drop')) {
-    risks.push(locale === 'en' ? 'Learning activity fell near the end of the reporting period.' : 'Hoạt động học giảm ở cuối kỳ báo cáo.');
-    recommendations.push(locale === 'en' ? 'Check the learning schedule and reminders near the end of the period.' : 'Kiểm tra lịch học và nhắc nhở người học trong giai đoạn cuối kỳ.');
-  }
-  return { headline: locale === 'en' ? 'Executive summary' : 'Tóm tắt điều hành', highlights: highlights.slice(0, 3), risks: risks.slice(0, 3), recommendations: recommendations.slice(0, 3) };
+  const model = buildReportPdfViewModel({
+    snapshot: input.snapshot,
+    snapshotHash: input.snapshotHash,
+    locale: input.locale,
+    tenant: input.tenant,
+    insights,
+    narrative,
+    templateVersion: REPORT_PDF_TEMPLATE_VERSION,
+  });
+  return { html: renderReportPdfHtml(model, input.fontCss ? { fontCss: input.fontCss } : {}), insights, narrative, model };
 }
 
-export async function generateReportPdfNarrative(input: { tenantId: string; model: string; locale: 'vi' | 'en'; question: string; snapshot: StoredReportChatSnapshot }): Promise<ReportPdfNarrative> {
-  // The immutable snapshot remains the only factual source for PDF content.
-  void input.tenantId; void input.model; void input.question;
-  return fallbackNarrative(input.snapshot, input.locale);
+export interface ReportPdfRenderOutput {
+  pdf: Buffer;
+  pageCount: number;
+  narrativeSource: ReportPdfNarrative['source'];
+  overflow: string[];
+  durationMs: number;
 }
 
-export async function renderReportPdf(input: { snapshot: StoredReportChatSnapshot; narrative: ReportPdfNarrative; locale: 'vi' | 'en' }): Promise<Buffer> {
-  return renderExecutiveReportPdf(input);
+/**
+ * Second layout pass: measure every section and table row in the real browser
+ * and paginate with exact heights (long tables are split with a header).
+ */
+export async function paginateReportPdfDocument(
+  composition: ReportPdfComposition,
+  renderer: Pick<ReportPdfRenderer, 'measure'>,
+  fontCss?: string,
+): Promise<ReportPdfComposition> {
+  const options = fontCss ? { fontCss } : {};
+  const raw = await renderer.measure(renderReportPdfMeasureHtml(composition.model, options));
+  const pages = planReportPdfPages(composition.model, toReportPdfLayoutMeasurements(raw, composition.model));
+  const model = { ...composition.model, pages };
+  return { ...composition, model, html: renderReportPdfHtml(model, options) };
+}
+
+export async function renderReportPdf(
+  input: ReportPdfComposeInput,
+  renderer: ReportPdfRenderer = getReportPdfRenderer(),
+): Promise<ReportPdfRenderOutput> {
+  const composition = await paginateReportPdfDocument(await composeReportPdfDocument(input), renderer, input.fontCss);
+  const result = await renderer.render(composition.html);
+  return {
+    pdf: result.pdf,
+    pageCount: result.pageCount,
+    narrativeSource: composition.narrative.source,
+    overflow: result.overflow,
+    durationMs: result.durationMs,
+  };
 }

@@ -239,6 +239,8 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   'branding.image.updated': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
   'branding.image.deleted': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
   'report.summary.refreshed': { context: [], changes: [] },
+  // A delivered report PDF: the localized file name and its size only.
+  'report.pdf.exported': { context: ['file_name', 'file_size_bytes'], changes: [] },
   'badge.rule.updated': { context: ['affected_count'], changes: ['is_enabled'] },
 };
 

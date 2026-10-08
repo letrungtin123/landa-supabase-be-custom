@@ -13,6 +13,7 @@ import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesso
 import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/lesson-author-durable-blueprint.service.js';
 import { startLessonAuthorWorkspaceWorker, stopLessonAuthorWorkspaceWorker } from './modules/ai-chatbot/lesson-author-workspace-runtime.service.js';
 import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/lesson-author-chapter-runtime.service.js';
+import { shutdownReportPdfRenderer } from './modules/ai-chatbot/report-pdf-renderer.service.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
@@ -277,6 +278,7 @@ async function gracefulShutdown(signal: string) {
   await stopLessonAuthorWorkspaceWorker();
   await stopDurableBlueprintWorker();
   await stopChapterCheckpointMaintenance();
+  await shutdownReportPdfRenderer();
   await closeRedis();
   await closeRabbitMQ();
   process.exit(0);

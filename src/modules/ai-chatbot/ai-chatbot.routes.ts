@@ -34,6 +34,7 @@ import * as botCtrl from './bot.controller.js';
 import * as chatCtrl from './chat.controller.js';
 import * as transcriptCtrl from './lesson-author-transcription.controller.js';
 import { getAiOverviewController } from './ai-report.controller.js';
+import { reportPdfHandlers } from './report-pdf.controller.js';
 import { env } from '../../config/env.js';
 import fs from 'fs';
 import path from 'path';
@@ -362,10 +363,10 @@ router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversat
 router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);
 router.delete('/chat/conversations/:id', allowRuntimeChatTarget, chatCtrl.deleteConversation);
 router.get('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.getMessages);
-router.post('/chat/conversations/:id/report-pdf', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.exportReportPdf);
-router.post('/chat/conversations/:id/report-pdf/jobs', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.startReportPdfJob);
-router.get('/chat/conversations/:id/report-pdf/jobs/:jobId', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.getReportPdfJob);
-router.get('/chat/conversations/:id/report-pdf/jobs/:jobId/download', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), chatCtrl.downloadReportPdfJob);
+router.post('/chat/conversations/:id/report-pdf', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.exportReportPdf);
+router.post('/chat/conversations/:id/report-pdf/jobs', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.startReportPdfJob);
+router.get('/chat/conversations/:id/report-pdf/jobs/:jobId', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.getReportPdfJob);
+router.get('/chat/conversations/:id/report-pdf/jobs/:jobId/download', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.downloadReportPdfJob);
 router.post('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.sendMessage);
 
 export default router;

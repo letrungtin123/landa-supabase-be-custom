@@ -329,6 +329,17 @@ export async function deleteLessonAuthorPrivateFiles(storagePaths: readonly stri
 }
 
 /**
+ * Whether an object exists in the application bucket. A missing object is
+ * `false`; any other provider failure is thrown so callers cannot mistake an
+ * outage for "not found".
+ */
+export async function storageObjectExists(storagePath: string): Promise<boolean> {
+  await ensureBucket();
+  const { data } = await supabase.storage.from(STORAGE_BUCKET).exists(storagePath);
+  return data === true;
+}
+
+/**
  * Download a file buffer from Supabase Storage.
  * Used by authenticated/private download endpoints.
  */
