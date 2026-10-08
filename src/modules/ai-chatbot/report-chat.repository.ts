@@ -1,5 +1,6 @@
 // SQL for the admin report chat path. Every read is tenant-scoped: org units
-// through org_groups.tenant_id, enrollments through enrollments.tenant_id and
+// through org_groups.tenant_id, course names through courses.tenant_id,
+// enrollments through enrollments.tenant_id and
 // users.tenant_id, the unit breakdown through the tenant_id of every table it
 // reads, conversations through the caller's already-verified conversation
 // (loaded with user_id + tenant_id by the chat service).
@@ -8,6 +9,7 @@ import { query } from '../../config/database.js';
 import { buildLearnerScopeExists, type ReportDateRange } from '../reports/reports.service.js';
 import type { ReportScope } from '../reports/report-access.service.js';
 import type { NormalizedReportChatFilter } from './report-chat.service.js';
+import type { ReportCatalogCourse } from './report-course-mention.logic.js';
 import type { ReportOrgUnit, ReportOrgUnitLevel } from './report-org-unit.logic.js';
 import {
   buildReportUnitBreakdownQuery,
@@ -128,6 +130,21 @@ export async function loadReportOrgUnitRows(tenantId: string, limit: number): Pr
       subgroup_id: row.subgroup_id,
       subgroup_name: row.subgroup_name,
     }));
+}
+
+/** The tenant's live course names; returns `limit + 1` rows at most so the caller can detect truncation. */
+export async function loadReportCourseNameRows(tenantId: string, limit: number): Promise<ReportCatalogCourse[]> {
+  const result = await query<{ id: string; name: string }>(
+    `SELECT c.id::text AS id, btrim(c.display_name)::text AS name
+     FROM courses c
+     WHERE c.tenant_id = $1
+       AND c.deleted_at IS NULL
+       AND btrim(COALESCE(c.display_name, '')) <> ''
+     ORDER BY c.display_name, c.id
+     LIMIT $2`,
+    [tenantId, limit + 1],
+  );
+  return result.rows.map((row) => ({ id: row.id, name: row.name }));
 }
 
 /**

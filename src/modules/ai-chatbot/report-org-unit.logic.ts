@@ -39,13 +39,13 @@ export type ReportUnitResolution =
   | { status: 'not_found'; mention: string; suggestions: ReportOrgUnit[] }
   | { status: 'multiple'; units: ReportOrgUnit[] };
 
-interface UnitWord {
+export interface UnitWord {
   /** Lower-case tokens as typed; Vietnamese words keep their diacritics. */
   tokens: string[];
   level: ReportOrgUnitLevel | null;
 }
 
-interface QuestionToken {
+export interface QuestionToken {
   /** As written (NFC), for messages shown back to the user. */
   original: string;
   raw: string;
@@ -136,7 +136,7 @@ function lowerTokens(value: string): string[] {
   return value.normalize('NFC').toLocaleLowerCase('vi-VN').split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 }
 
-function tokenizeQuestion(question: string): QuestionToken[] {
+export function tokenizeQuestion(question: string): QuestionToken[] {
   const text = question.normalize('NFC');
   const tokens: QuestionToken[] = [];
   let previousEnd = 0;
@@ -181,6 +181,21 @@ function unitWordAt(tokens: QuestionToken[], index: number, words: UnitWord[]): 
     return word;
   }
   return null;
+}
+
+/**
+ * True when the tokens `start`..`end` (inclusive) are written as an org-unit
+ * name: right after a unit word ("team Marketing", "phòng ban QC") or right
+ * before an English trailing one ("Marketing team").
+ */
+export function isReportUnitNameSpan(tokens: QuestionToken[], start: number, end: number, words: UnitWord[]): boolean {
+  const longest = words.reduce((max, word) => Math.max(max, word.tokens.length), 0);
+  for (let index = Math.max(0, start - longest); index < start; index += 1) {
+    const word = unitWordAt(tokens, index, words);
+    if (word && index + word.tokens.length === start) return true;
+  }
+  const next = tokens[end + 1];
+  return Boolean(next && !next.breakBefore && ENGLISH_TRAILING_UNIT_WORDS.has(next.raw));
 }
 
 export function hasReportUnitWord(question: string, labels: ReportGroupLabels = {}): boolean {

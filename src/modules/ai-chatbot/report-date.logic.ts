@@ -81,6 +81,15 @@ export function addMonths(value: string, offset: number): string {
   return clampYmd(year, month, parts.day) ?? value;
 }
 
+/**
+ * The last `months` months ending `today`, read like "12 tháng gần đây":
+ * 2026-10-08 -> 2025-10-09..2026-10-08. Twelve months never exceed
+ * MAX_REPORT_RANGE_DAYS (366 days when the window holds a 29 February).
+ */
+export function rollingMonthsRange(today: string, months: number): ReportDateRangeYmd {
+  return { date_from: addDays(addMonths(today, -months), 1), date_to: today };
+}
+
 export function startOfWeek(value: string): string {
   const parts = parseYmd(value);
   if (!parts) return value;

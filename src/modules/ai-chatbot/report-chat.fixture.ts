@@ -1,6 +1,8 @@
-// Test-only org-unit catalog shaped like the real tenants (Vietnamese names
-// with diacritics, punctuation, duplicates across levels and siblings).
+// Test-only org-unit and course catalogs shaped like the real tenants
+// (Vietnamese names with diacritics, punctuation, duplicates across levels
+// and siblings).
 
+import type { ReportCourseCatalog } from './report-course-mention.logic.js';
 import type { ReportOrgUnit, ReportOrgUnitCatalog } from './report-org-unit.logic.js';
 
 const group = (id: string, name: string): ReportOrgUnit => ({
@@ -55,6 +57,38 @@ export const REPORT_UNIT_CATALOG: ReportOrgUnitCatalog = {
     team(UNIT_IDS.finance, 'Tài chính - Kế toán', southProduction),
     team(UNIT_IDS.qc, 'QC', southProduction),
     team(UNIT_IDS.salesNesso, 'Kinh doanh Nesso', nessoBranch),
+  ],
+};
+
+export const COURSE_IDS = {
+  customerExperience: 'course-v1:LAndA2+06+2026',
+  customerExperienceV2: 'course-v1:LAndA2+65867+2026',
+  qualityCheck: 'course-v1:LAndA2+QC+2026',
+  safety: 'course-v1:LAndA2+ATLD+2026',
+  marketing: 'course-v1:LAndA2+MKT+2026',
+  hse: 'course-v1:LAndA2+HSE+2026',
+  test: 'course-v1:LAndA2+TEST+2026',
+  salesSkills: 'course-v1:LAndA2+SALES+2026',
+  salesSkillsCopy: 'course-v1:LAndA2+SALES2+2026',
+} as const;
+
+/**
+ * Test-only course catalog shaped like the production tenant: nested names
+ * ("Customer Experience" / "... V2"), a course named like a team
+ * ("Marketing"), short and generic names, and two courses sharing a name.
+ */
+export const REPORT_COURSE_CATALOG: ReportCourseCatalog = {
+  truncated: false,
+  courses: [
+    { id: COURSE_IDS.customerExperience, name: 'Customer Experience' },
+    { id: COURSE_IDS.customerExperienceV2, name: 'Customer Experience V2' },
+    { id: COURSE_IDS.qualityCheck, name: 'Quality Check' },
+    { id: COURSE_IDS.safety, name: 'An toàn lao động và 5S tại nơi làm việc' },
+    { id: COURSE_IDS.marketing, name: 'Marketing' },
+    { id: COURSE_IDS.hse, name: 'HSE' },
+    { id: COURSE_IDS.test, name: 'Test 1' },
+    { id: COURSE_IDS.salesSkills, name: 'Kỹ năng bán hàng' },
+    { id: COURSE_IDS.salesSkillsCopy, name: 'Kỹ Năng Bán Hàng' },
   ],
 };
 
