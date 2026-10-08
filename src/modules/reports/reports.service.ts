@@ -382,6 +382,11 @@ function getSummaryCacheTtl(range: ReportDateRange): number {
   return range.dateTo >= today ? 30 : 300;
 }
 
+/** Effective chart granularity of a range (the rule of the Reports charts). */
+export function resolveReportChartGranularity(range: ReportDateRange, requested: ReportChartGranularity = 'auto'): 'day' | 'week' | 'month' {
+  return resolveChartGranularity(range, requested);
+}
+
 function resolveChartGranularity(range: ReportDateRange, requested: ReportChartGranularity = 'auto'): EffectiveChartGranularity {
   const days = getRangeDayCount(range);
   if (requested === 'day' && days <= 366) return 'day';

@@ -1,13 +1,26 @@
 // SQL for the admin report chat path. Every read is tenant-scoped: org units
 // through org_groups.tenant_id, enrollments through enrollments.tenant_id and
-// users.tenant_id, conversations through the caller's already-verified
-// conversation (loaded with user_id + tenant_id by the chat service).
+// users.tenant_id, the unit breakdown through the tenant_id of every table it
+// reads, conversations through the caller's already-verified conversation
+// (loaded with user_id + tenant_id by the chat service).
 
 import { query } from '../../config/database.js';
 import { buildLearnerScopeExists, type ReportDateRange } from '../reports/reports.service.js';
 import type { ReportScope } from '../reports/report-access.service.js';
 import type { NormalizedReportChatFilter } from './report-chat.service.js';
 import type { ReportOrgUnit, ReportOrgUnitLevel } from './report-org-unit.logic.js';
+import {
+  buildReportUnitBreakdownQuery,
+  type ReportUnitBreakdownQueryInput,
+  type ReportUnitBreakdownQueryRow,
+} from './report-unit-breakdown.logic.js';
+
+/** Per-unit breakdown of a report scope: one grouped statement, at most limit + 2 rows. */
+export async function loadReportUnitBreakdownRows(input: ReportUnitBreakdownQueryInput): Promise<ReportUnitBreakdownQueryRow[]> {
+  const { sql, params } = buildReportUnitBreakdownQuery(input);
+  const result = await query<ReportUnitBreakdownQueryRow>(sql, params);
+  return result.rows;
+}
 
 export async function insertReportAssistantMessage(conversationId: string, content: string, metadata: Record<string, unknown>): Promise<string> {
   const saved = await query<{ id: string }>(

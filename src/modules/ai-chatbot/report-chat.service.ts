@@ -21,7 +21,12 @@ import {
 } from './report-date.logic.js';
 import { foldReportText, normalizeReportEntityName } from './report-text.logic.js';
 import { resolveSnapshotChartGranularity, type ReportGranularity } from './report-time-expression.logic.js';
-import { findNearestReportEnrollmentDates } from './report-chat.repository.js';
+import { findNearestReportEnrollmentDates, loadReportUnitBreakdownRows } from './report-chat.repository.js';
+import {
+  buildReportUnitBreakdownSection,
+  type ReportUnitBreakdown,
+  type ReportUnitBreakdownStatus,
+} from './report-unit-breakdown.logic.js';
 
 export { resolveComparableReportPeriod, type ReportComparisonPeriod } from './report-date.logic.js';
 export {
@@ -147,7 +152,23 @@ export interface ReportComparisonDisplay {
 
 export type ReportComparisonDisplays = Record<'vi' | 'en', ReportComparisonDisplay>;
 
-export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'version'> {
+/** A comparison-period series, aligned with the current series by bucket index. */
+export type ReportPreviousTrend = Array<{ bucket: string; value: number }>;
+
+/**
+ * Optional, additive parts of a V2 snapshot. `version` stays 2: the dashboard
+ * card only renders `version === 2` snapshots and these fields are ignored by
+ * every older reader. `unit_breakdown_status` is set on every snapshot built
+ * since they exist; its absence marks an older snapshot.
+ */
+export interface ReportSnapshotExtensions {
+  previous_enrollment_trend?: ReportPreviousTrend;
+  previous_active_learner_trend?: ReportPreviousTrend;
+  unit_breakdown?: ReportUnitBreakdown;
+  unit_breakdown_status?: ReportUnitBreakdownStatus;
+}
+
+export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'version'>, ReportSnapshotExtensions {
   version: typeof SNAPSHOT_VERSION;
   comparison: ReportComparisonPeriod;
   comparison_display: ReportComparisonDisplays;
@@ -429,27 +450,43 @@ export async function buildReportChatSnapshot(input: {
   if (hasNoAccessibleReportScope(scope)) {
     const summary = emptyReportSummary(normalized.dateRange);
     const previousSummary = emptyReportSummary(previousRange);
-    return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope');
+    return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope', {}, undefined, { unit_breakdown_status: 'not_computed' });
   }
 
   const requestedCourse = (input.question ? extractReportCourseReference(input.question) : null) ?? input.courseHint?.trim() ?? null;
   const shouldResolveCourseDetail = Boolean(requestedCourse && isCourseLearnerDetailRequest(input.question ?? ''));
   const chartGranularity = resolveSnapshotChartGranularity(input.granularity, { date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo });
-  const [summary, previousSummary, enrollmentChart, activeLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseCandidates] = await Promise.all([
+  // The comparison series uses the current chart's effective granularity so
+  // both series have the same bucket size and align by index in the PDF.
+  const previousChartGranularity = reportsService.resolveReportChartGranularity(normalized.dateRange, chartGranularity);
+  const chart = (metric: 'total_enrollments' | 'active_learners', range: reportsService.ReportDateRange, granularity: reportsService.ReportChartGranularity) => reportsService.getReportChart(
+    input.tenantId, range.startDate.getFullYear(), metric, scope.groupId, scope.subgroupId, scope.teamId, false, false, range, granularity, { limitBuckets: 62 },
+  );
+  const [summary, previousSummary, enrollmentChart, activeLearnerChart, previousEnrollmentChart, previousActiveLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseCandidates, unitBreakdown] = await Promise.all([
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
-    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'total_enrollments', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, chartGranularity, { limitBuckets: 62 }),
-    reportsService.getReportChart(input.tenantId, normalized.dateRange.startDate.getFullYear(), 'active_learners', scope.groupId, scope.subgroupId, scope.teamId, false, false, normalized.dateRange, chartGranularity, { limitBuckets: 62 }),
+    chart('total_enrollments', normalized.dateRange, chartGranularity),
+    chart('active_learners', normalized.dateRange, chartGranularity),
+    chart('total_enrollments', previousRange, previousChartGranularity),
+    chart('active_learners', previousRange, previousChartGranularity),
     reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     resolveReportScopeDisplay(input.tenantId, scope),
     shouldResolveCourseDetail
       ? reportsService.findReportCoursePerformanceByName(input.tenantId, requestedCourse!, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange)
       : Promise.resolve([]),
+    buildReportUnitBreakdownSection({
+      tenantId: input.tenantId,
+      scope,
+      range: normalized.dateRange,
+      previousRange,
+      load: loadReportUnitBreakdownRows,
+    }),
   ]);
   const courseDetail = shouldResolveCourseDetail
     ? resolveReportCourseDetail(input.question ?? '', courseCandidates, requestedCourse)
     : null;
+  const availability = hasReportData(summary) ? 'available' : 'empty';
   const snapshot = createReportSnapshot(
     base,
     summary,
@@ -459,9 +496,17 @@ export async function buildReportChatSnapshot(input: {
     coursePortfolio,
     completionStatus,
     scopeDisplay,
-    hasReportData(summary) ? 'available' : 'empty',
+    availability,
     enrollmentChart.granularity ? { granularity: enrollmentChart.granularity } : {},
     courseDetail ?? undefined,
+    // An empty period has nothing to compare or break down.
+    availability === 'available'
+      ? buildReportSnapshotExtensions({
+        previousEnrollmentTrend: chartToPreviousTrend(previousEnrollmentChart, enrollmentChart.granularity),
+        previousActiveLearnerTrend: chartToPreviousTrend(previousActiveLearnerChart, activeLearnerChart.granularity),
+        unitBreakdown,
+      })
+      : { unit_breakdown_status: unitBreakdown.unit_breakdown_status === 'leaf_scope' ? 'leaf_scope' : 'not_computed' },
   );
   if (snapshot.availability.state !== 'empty') return snapshot;
   // Two LIMIT 1 index lookups, only for an empty period: lets the card offer
@@ -508,6 +553,31 @@ function chartToSnapshotPoints(chart: { data?: reportsService.ReportChartPoint[]
     label: String(point.bucket_label ?? point.month_label ?? point.bucket ?? point.month ?? ''),
     value: Number(point.value ?? 0) || 0,
   }));
+}
+
+/** Comparison-period series, only when its bucket size matches the current chart's. */
+function chartToPreviousTrend(
+  chart: { data?: reportsService.ReportChartPoint[]; granularity?: string },
+  currentGranularity: string | undefined,
+): ReportPreviousTrend | undefined {
+  if (!currentGranularity || chart.granularity !== currentGranularity) return undefined;
+  const points = chartToSnapshotPoints(chart)
+    .filter((point) => /^\d{4}-\d{2}-\d{2}$/.test(point.bucket))
+    .map(({ bucket, value }) => ({ bucket, value: Math.max(0, value) }));
+  return points.length ? points : undefined;
+}
+
+export function buildReportSnapshotExtensions(input: {
+  previousEnrollmentTrend?: ReportPreviousTrend;
+  previousActiveLearnerTrend?: ReportPreviousTrend;
+  unitBreakdown: { unit_breakdown?: ReportUnitBreakdown; unit_breakdown_status: ReportUnitBreakdownStatus };
+}): ReportSnapshotExtensions {
+  return {
+    ...(input.previousEnrollmentTrend?.length ? { previous_enrollment_trend: input.previousEnrollmentTrend } : {}),
+    ...(input.previousActiveLearnerTrend?.length ? { previous_active_learner_trend: input.previousActiveLearnerTrend } : {}),
+    ...(input.unitBreakdown.unit_breakdown ? { unit_breakdown: input.unitBreakdown.unit_breakdown } : {}),
+    unit_breakdown_status: input.unitBreakdown.unit_breakdown_status,
+  };
 }
 
 function roundReportValue(value: number): number {
@@ -662,6 +732,7 @@ export function createReportSnapshot(
   availabilityState: ReportChatSnapshot['availability']['state'],
   enrollmentTrendContext: ReportTrendContext = {},
   courseDetail?: ReportCourseDetail,
+  extensions: ReportSnapshotExtensions = {},
 ): ReportChatSnapshot {
   const factualMetrics = buildReportMetricFacts(summary, previousSummary);
   const signalLimitations = getReportSignalLimitations(factualMetrics);
@@ -674,6 +745,10 @@ export function createReportSnapshot(
     enrollment_trend: enrollmentTrend,
     ...(enrollmentTrendContext.granularity ? { enrollment_trend_context: enrollmentTrendContext } : {}),
     active_learner_trend: activeLearnerTrend,
+    ...(extensions.previous_enrollment_trend ? { previous_enrollment_trend: extensions.previous_enrollment_trend } : {}),
+    ...(extensions.previous_active_learner_trend ? { previous_active_learner_trend: extensions.previous_active_learner_trend } : {}),
+    ...(extensions.unit_breakdown ? { unit_breakdown: extensions.unit_breakdown } : {}),
+    ...(extensions.unit_breakdown_status ? { unit_breakdown_status: extensions.unit_breakdown_status } : {}),
     top_courses: coursePortfolio.slice(0, 5).map(({ course_id, name, total_enrollments }) => ({ course_id, name, enrollments: total_enrollments })),
     completion_ranking: [...coursePortfolio]
       .sort((left, right) => right.completion_rate - left.completion_rate || right.completed_enrollments - left.completed_enrollments || right.total_enrollments - left.total_enrollments || left.name.localeCompare(right.name))
@@ -728,6 +803,11 @@ export function isStoredReportChatSnapshot(value: unknown): value is StoredRepor
       // Existing V2 snapshots predate versioned signal thresholds. Preserve their
       // integrity contract while new snapshots always carry the threshold version.
       && (value.signal_threshold_version === undefined || typeof value.signal_threshold_version === 'string')
+      // Optional extensions (validated in depth by the PDF insights).
+      && (value.previous_enrollment_trend === undefined || Array.isArray(value.previous_enrollment_trend))
+      && (value.previous_active_learner_trend === undefined || Array.isArray(value.previous_active_learner_trend))
+      && (value.unit_breakdown === undefined || isRecord(value.unit_breakdown))
+      && (value.unit_breakdown_status === undefined || typeof value.unit_breakdown_status === 'string')
       && isRecord(value.availability));
 }
 
