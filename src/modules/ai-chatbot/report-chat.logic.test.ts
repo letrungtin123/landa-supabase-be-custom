@@ -19,7 +19,7 @@ import {
   resolveReportCourseDetail,
 } from './report-chat.service.js';
 import type { ReportCoursePerformance, ReportSummary } from '../reports/reports.service.js';
-import { resolveLearnerPlusReportScope } from '../reports/report-access.service.js';
+import { hasNoAccessibleReportScope, resolveLearnerPlusReportScope } from '../reports/report-access.service.js';
 import { decideReportRoute, detectReportIntent, reconcileReportPeriod } from './report-chat-route.logic.js';
 import { parseReportTimeExpression } from './report-time-expression.logic.js';
 import { localYmd } from './report-date.logic.js';
@@ -500,4 +500,12 @@ test('keeps learner_plus report scope confined to the existing allowed groups', 
     { groupId: 'group-a', subgroupId: 'subgroup-a', teamId: 'team-a', allowedGroupIds: ['group-a'] },
   );
   assert.throws(() => resolveLearnerPlusReportScope(['group-a'], { groupId: 'group-b' }, { groupId: 'group-b' }));
+});
+
+test('a learner_plus without any group is "no accessible scope", never tenant-wide', () => {
+  const noGroups = resolveLearnerPlusReportScope([], { groupId: 'group-b' }, {});
+  assert.deepEqual([noGroups.groupId, noGroups.subgroupId, noGroups.teamId], [undefined, undefined, undefined]);
+  assert.equal(hasNoAccessibleReportScope(noGroups), true);
+  assert.equal(hasNoAccessibleReportScope(resolveLearnerPlusReportScope(['group-a'], {}, {})), false);
+  assert.equal(hasNoAccessibleReportScope({ allowedGroupIds: null }), false, 'staff scope is unrestricted');
 });

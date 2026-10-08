@@ -15,7 +15,7 @@ import { hasPermission } from '../../middleware/authorize.js';
 import type { TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
-import { enforceReportScope } from '../reports/report-access.service.js';
+import { enforceReportScope, hasNoAccessibleReportScope } from '../reports/report-access.service.js';
 import { getReportSnapshotHash, loadStoredReportSnapshot } from './report-chat.service.js';
 import { loadReportPdfTenantBranding, supabaseReportPdfArtifactStore, type ReportPdfArtifactStore } from './report-pdf-artifact.service.js';
 import {
@@ -157,6 +157,9 @@ export class ReportPdfExportService {
       { userId: actor.userId, tenantId: actor.tenantId, role: actor.role },
       { groupId: stored.snapshot.filter.group_id, subgroupId: stored.snapshot.filter.subgroup_id, teamId: stored.snapshot.filter.team_id },
     );
+    // A learner_plus without any group gets all-undefined ids, which would
+    // otherwise match a tenant-wide snapshot (e.g. one taken before a demotion).
+    if (hasNoAccessibleReportScope(scope)) throw new ReportPdfExportError('Report scope no longer allowed', 403, 'REPORT_PDF_SCOPE_DENIED');
     if (scope.groupId !== stored.snapshot.scope.groupId || scope.subgroupId !== stored.snapshot.scope.subgroupId || scope.teamId !== stored.snapshot.scope.teamId) {
       throw new ReportPdfExportError('Report scope no longer allowed', 403, 'REPORT_PDF_SCOPE_DENIED');
     }

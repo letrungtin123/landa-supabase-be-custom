@@ -39,6 +39,15 @@ function scopeInvalid(message: string): { status: number; message: string; code:
   return { status: 400, message, code: REPORT_SCOPE_INVALID_CODE };
 }
 
+/**
+ * A learner_plus actor without any group resolves to a scope whose ids are all
+ * undefined, which reads like "tenant-wide". Every consumer must treat it as
+ * "nothing is visible" (empty data or a denial), never as unrestricted.
+ */
+export function hasNoAccessibleReportScope(scope: Pick<ReportScope, 'allowedGroupIds'>): boolean {
+  return scope.allowedGroupIds !== null && scope.allowedGroupIds.length === 0;
+}
+
 export function resolveLearnerPlusReportScope(
   allowedGroupIds: string[],
   requested: RequestedReportScope,

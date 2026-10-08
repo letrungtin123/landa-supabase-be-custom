@@ -153,6 +153,26 @@ test('re-enforces the report scope before rendering and before serving bytes', a
   assert.equal(revoked.state.audits.length, 0);
 });
 
+test('a learner_plus without any group never passes the scope re-check as tenant-wide', async () => {
+  const fixture = vietnameseReportFixture();
+  const tenantWide = { ...fixture.snapshot, scope: { groupId: undefined, subgroupId: undefined, teamId: undefined } };
+  // enforceReportScope answers a zero-group learner_plus with all-undefined ids, i.e. the ids of a tenant-wide snapshot.
+  const noGroups = async () => ({ groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: [] as string[] });
+  const staff = async () => ({ groupId: undefined, subgroupId: undefined, teamId: undefined, allowedGroupIds: null });
+  const ok = harness({ enforceScope: staff, loadSnapshot: async () => ({ snapshot: tenantWide, question: 'Báo cáo', locale: 'vi' }) });
+  const ready = await ok.service.start({ ...actor, ...reference, locale: 'vi' });
+  assert.equal((await waitForTerminal(ok.service, ready.id)).phase, 'ready');
+
+  const demoted = harness({ enforceScope: noGroups, loadSnapshot: async () => ({ snapshot: tenantWide, question: 'Báo cáo', locale: 'vi' }), store: () => ok.store });
+  await assert.rejects(() => demoted.service.download({ ...actor, ...reference, jobId: ready.id, audit }), rejectsWith('REPORT_PDF_SCOPE_DENIED'));
+  await assert.rejects(() => demoted.service.exportNow({ ...actor, ...reference, locale: 'vi', audit }), rejectsWith('REPORT_PDF_SCOPE_DENIED'));
+  const fresh = harness({ enforceScope: noGroups, loadSnapshot: async () => ({ snapshot: tenantWide, question: 'Báo cáo', locale: 'vi' }), store: () => null });
+  const job = await fresh.service.start({ ...actor, ...reference, locale: 'en' });
+  assert.equal((await waitForTerminal(fresh.service, job.id)).errorCode, 'REPORT_PDF_SCOPE_DENIED');
+  assert.equal(demoted.state.renders + fresh.state.renders, 0);
+  assert.equal(demoted.state.audits.length, 0);
+});
+
 test('refuses to deliver bytes when the audit row cannot be written', async () => {
   const { service } = harness({ audit: async () => { throw new Error('db down'); } });
   const job = await service.start({ ...actor, ...reference, locale: 'vi' });

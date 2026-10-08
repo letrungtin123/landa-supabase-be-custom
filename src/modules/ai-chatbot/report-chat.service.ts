@@ -2,6 +2,7 @@ import { stableHash } from '../../config/cache.js';
 import { query } from '../../config/database.js';
 import {
   enforceReportScope,
+  hasNoAccessibleReportScope,
   type ReportScope,
   type ReportScopeActor,
   type ReportScopeOptions,
@@ -425,7 +426,7 @@ export async function buildReportChatSnapshot(input: {
     comparison,
   } as const;
 
-  if (scope.allowedGroupIds?.length === 0) {
+  if (hasNoAccessibleReportScope(scope)) {
     const summary = emptyReportSummary(normalized.dateRange);
     const previousSummary = emptyReportSummary(previousRange);
     return createReportSnapshot(base, summary, previousSummary, [], [], [], { not_started: 0, in_progress: 0, completed: 0 }, {}, 'no_accessible_scope');
