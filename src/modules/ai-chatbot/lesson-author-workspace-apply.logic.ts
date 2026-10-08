@@ -75,6 +75,8 @@ export interface WorkspaceApplyWrite {
   /** Explicit author-only channel. Repository must not append this to HTML,
    * problem XML, learner component data or create media blocks from briefs. */
   author_metadata: { purpose: string | null; implementation_notes: string | null; storyboard: unknown;
+    /** Component only: workspace review context from the protected binding. */
+    author_review: unknown;
     media_briefs: Array<{ node_id: string; revision: number; content_hash: string; media_type: string | null; content: WorkspaceContent }> };
   mapped_target: { block_id: string; parent_id: string; sort_order: number; before_hash: string } | null;
 }
@@ -136,6 +138,14 @@ export function workspaceApplyMaterializationPlan(writes: readonly WorkspaceAppl
     fail('WORKSPACE_APPLY_TARGET_CHANGED');
   }
   return { writes: [] as WorkspaceApplyWrite[], noopAnchor };
+}
+/** Author-only component review context stays in the protected binding; it is
+ * carried to the author notes channel, never into learner component data. */
+export function workspaceApplyAuthorReview(node: Pick<WorkspaceApplyNode, 'kind' | 'protected_contract'>): unknown {
+  if (node.kind !== 'component') return null;
+  const metadata = node.protected_contract.metadata;
+  return metadata && typeof metadata === 'object' && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>).author_review ?? null : null;
 }
 const same = (a: unknown, b: unknown) => hash(a) === hash(b);
 const within = (path: string, scope: string) => path === scope || path.startsWith(`${scope}.`);
@@ -375,6 +385,7 @@ function compile(input: WorkspaceApplyCompileInput) {
       title: content.title, component: components.get(n.node_id) ?? null,
       author_metadata: { purpose: content.purpose, implementation_notes: content.implementation_notes,
         storyboard: n.kind === 'component' ? null : content.data,
+        author_review: workspaceApplyAuthorReview(n),
         media_briefs: nodes.filter(b => b.kind === 'media_brief' && b.parent_id === n.node_id).sort((a, b) => a.sort_order - b.sort_order).map(b => ({ node_id: b.node_id,
           revision: b.current_revision!, content_hash: b.current!.content_hash, media_type: typeof b.protected_contract.media_type === 'string' ? b.protected_contract.media_type : null,
           content: current.get(b.node_id)! })) },

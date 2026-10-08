@@ -9,7 +9,7 @@ import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-q
 import { orchestrationV2OriginSummary, workspaceDraftQualityChecks } from './lesson-author-quality-receipt.logic.js';
 import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import { editWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
-import { workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
+import { workspaceApplyAuthorReview, workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed } from './lesson-author-workspace-storyboard.logic.js';
 import { assertWorkspaceDraftApplyReady, readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
@@ -307,6 +307,7 @@ function compile(input: OrchestrationV2ApplyInput) {
       component: components.get(node.node_id) ?? null,
       author_metadata: { purpose: content.purpose, implementation_notes: content.implementation_notes,
         storyboard: node.kind === 'component' ? null : content.data,
+        author_review: workspaceApplyAuthorReview(node),
         media_briefs: input.nodes.filter(brief => brief.kind === 'media_brief' && brief.parent_id === node.node_id)
           .sort((a, b) => a.sort_order - b.sort_order).map(brief => ({ node_id: brief.node_id,
             revision: brief.current_revision!, content_hash: brief.current!.content_hash,

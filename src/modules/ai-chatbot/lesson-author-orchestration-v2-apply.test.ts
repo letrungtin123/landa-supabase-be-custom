@@ -12,12 +12,15 @@ import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2
 import { acceptOrchestrationV2GeneratedUnit, prepareOrchestrationV2UnitGenerationContract,
   readOrchestrationV2UnitProviderResponse, orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import { workspaceApplyTargetHash, type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
+import { workspaceApplyBlockMetadata } from './lesson-author-workspace-author-notes.logic.js';
+import { COURSE_AUTHOR_NOTES_KEY, readCourseAuthorNotes } from '../course-authoring/course-author-notes.logic.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
 const hash = (value: unknown) => orchestrationV2Hash(value);
 const allowed = new Set<CourseComponentType>(['html']);
 
-function fixture(withSemanticReview = false) {
+type AuthorReview = { purpose: string | null; example_scenario: string | null; visual_asset: string | null; user_behavior_navigation: string | null };
+function fixture(withSemanticReview = false, authorReview?: AuthorReview) {
   const source = hash('v2-apply-source');
   const skeleton = { contract_version: 2 as const, source_snapshot_hash: source, locale: 'vi' as const,
     title: 'Course', summary: 'Summary', target_audience: 'Leaders', prerequisites: [],
@@ -30,7 +33,8 @@ function fixture(withSemanticReview = false) {
       title: 'Lesson', objective: 'Learn', learning_objectives: ['Apply safely'], learning_activities: ['Read'],
       assessment: 'Check', units: [{ title: 'Unit', purpose: 'Teach safely', learning_objective_refs: ['lo_1'],
         source_scope_ids: ['scope-1'], component_plan: [{ type: 'html' as const, title: 'Explanation',
-          rationale: 'Core teaching', source_scope_ids: ['scope-1'] }], media_brief: null }] }] };
+          rationale: 'Core teaching', source_scope_ids: ['scope-1'], ...(authorReview ? { author_review: authorReview } : {}) }],
+        media_brief: null }] }] };
   const assembly = assembleOrchestrationV2Architecture(skeleton,
     [{ scope_key: 'scope-1', title: 'Scope', source_ref: 'doc.pdf', fact_count: 2, content_chars: 60 }],
     [{ artifact_hash: hash('v2-apply-shard'), shard }]);
@@ -140,6 +144,22 @@ test('V2 Apply compiles a validated chapter into exact draft hierarchy writes', 
   assert.equal(result.validation_contract, 'workspace-scoped-apply-2');
   assert.equal(result.quality_receipt.origin_summary.counts.provider, 1);
   assert.equal(result.quality_receipt.origin_summary.legacy_quality_status, 'NOT_RUN');
+});
+
+test('V2 author review and storyboard reach only the author notes key, never the learner component (N6)', () => {
+  const review = { purpose: 'REVIEW_PURPOSE_ONLY', example_scenario: 'REVIEW_EXAMPLE_ONLY', visual_asset: null, user_behavior_navigation: null };
+  const { input } = fixture(false, review);
+  const result = compileOrchestrationV2WorkspaceApply(input);
+  const component = result.writes.find(write => write.kind === 'component')!;
+  assert.deepEqual(component.author_metadata.author_review, review);
+  const context = { workspace_id: input.workspace_id, content_locale: input.content_locale };
+  const stored = workspaceApplyBlockMetadata(component, context);
+  assert.deepEqual(readCourseAuthorNotes(stored[COURSE_AUTHOR_NOTES_KEY])!.author_review, review);
+  const { [COURSE_AUTHOR_NOTES_KEY]: _notes, ...learnerMetadata } = stored;
+  assert.equal(JSON.stringify({ data: component.component?.data, learnerMetadata }).includes('_ONLY'), false);
+  const lesson = readCourseAuthorNotes(workspaceApplyBlockMetadata(result.writes.find(write => write.kind === 'lesson')!, context)[COURSE_AUTHOR_NOTES_KEY])!;
+  assert.deepEqual(lesson.storyboard, { assessment: 'Check', learning_activities: ['Read'], learning_objectives: ['Apply safely'], objective: 'Learn' });
+  assert.equal(lesson.content_locale, 'vi');
 });
 
 test('semantic review is covered by the shared unit artifact hash through chapter receipt and Apply', () => {

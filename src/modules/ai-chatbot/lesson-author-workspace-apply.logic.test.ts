@@ -11,6 +11,8 @@ import { generationSnapshotHash as hash } from './lesson-author-generation-job.l
 import type { LessonAuthorBlueprint } from './chat.service.js';
 import type { LessonAuthorProposal } from '../course-authoring/course-authoring.service.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
+import { COURSE_AUTHOR_NOTES_KEY, readCourseAuthorNotes } from '../course-authoring/course-author-notes.logic.js';
+import { workspaceApplyBlockMetadata } from './lesson-author-workspace-author-notes.logic.js';
 
 const uuid = (n: number) => `10000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const allowed = new Set<CourseComponentType>(['html', 'problem', 'la_sortable', 'la_crossword', 'la_diagram', 'la_faq']);
@@ -137,6 +139,35 @@ test('effective metadata overlay, author-only notes and briefs do not enter lear
   const component = result.writes.find(w => w.canonical_path === `${first}.component_1`)!;
   assert.equal(component.component!.title, 'Updated component');
   assert.equal(JSON.stringify(component.component).includes('_ONLY'), false);
+});
+test('compiled writes persist author notes only under the reserved metadata key (N6)', () => {
+  const blueprint = workspaceInventoryFixture(1);
+  blueprint.chapters[0].lessons[0].units[0].media_plan = { type: 'video', title: 'Brief', rationale: 'AUTHOR_RATIONALE_ONLY', content_outline: 'AUTHOR_BRIEF_ONLY' };
+  const input = fixture(blueprint);
+  edit(input, 'chapter_1.lesson_1', c => { c.implementation_notes = 'LESSON_NOTES_ONLY'; });
+  edit(input, first, c => { c.implementation_notes = 'AUTHOR_NOTES_ONLY'; });
+  edit(input, `${first}.component_1`, c => { c.implementation_notes = 'COMPONENT_NOTES_ONLY'; });
+  const context = { workspace_id: input.workspace_id, content_locale: 'en' as const };
+  const result = compileWorkspaceApply(input);
+  const metadata = new Map(result.writes.map(w => [w.canonical_path, workspaceApplyBlockMetadata(w, context)]));
+  const notes = (path: string) => readCourseAuthorNotes(metadata.get(path)![COURSE_AUTHOR_NOTES_KEY])!;
+  assert.equal(notes('chapter_1.lesson_1').implementation_notes, 'LESSON_NOTES_ONLY');
+  assert.deepEqual(notes('chapter_1.lesson_1').storyboard!.learning_activities, blueprint.chapters[0].lessons[0].learning_activities);
+  assert.equal(notes(first).implementation_notes, 'AUTHOR_NOTES_ONLY');
+  assert.deepEqual(notes(first).media_briefs.map(b => [b.rationale, b.content_points]), [['AUTHOR_RATIONALE_ONLY', ['AUTHOR_BRIEF_ONLY']]]);
+  assert.equal(notes(`${first}.component_1`).implementation_notes, 'COMPONENT_NOTES_ONLY');
+  for (const write of result.writes) {
+    const stored = metadata.get(write.canonical_path)!;
+    assert.equal(stored.workspace_node_id, write.node_id);
+    assert.equal(notes(write.canonical_path).revision, write.revision);
+    // Learner payload: compiled data and component metadata never carry notes.
+    assert.equal(JSON.stringify(write.component?.data ?? null).includes('_ONLY'), false);
+    const { [COURSE_AUTHOR_NOTES_KEY]: _notes, workspace_storyboard: _storyboard, ...learnerMetadata } = stored;
+    assert.equal(JSON.stringify(learnerMetadata).includes('_ONLY'), false, write.canonical_path);
+  }
+  // Re-compiling the same revision set yields byte-identical notes.
+  const again = compileWorkspaceApply(input);
+  assert.deepEqual(again.writes.map(w => workspaceApplyBlockMetadata(w, context)), result.writes.map(w => metadata.get(w.canonical_path)));
 });
 test('mapped targets remain ID-bound through renames; unit-to-chapter Apply reuses the same IDs', () => {
   const input = fixture(undefined, first); mapTargets(input);

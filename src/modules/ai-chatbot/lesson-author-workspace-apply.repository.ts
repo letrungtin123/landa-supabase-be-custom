@@ -14,6 +14,8 @@ import { readWorkspaceContent, workspaceLocale } from './lesson-author-workspace
 import type { WorkspaceApplyReceipt } from './lesson-author-workspace-apply.controller.js';
 import { compileOrchestrationV2WorkspaceApply, type OrchestrationV2ApplyArtifact,
   type OrchestrationV2ApplyChapterReceipt } from './lesson-author-orchestration-v2-apply.logic.js';
+import { workspaceApplyBlockMetadata, type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
+import { persistWorkspaceAuthorNotes, WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
@@ -245,12 +247,16 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           target_sort_order: integer(row.target_sort_order),
         })));
         const delta: Array<Record<string, unknown>> = []; let created = 0, updated = 0;
+        // Author-only notes (QA notes, Hold/SME, nice-to-know, media briefs,
+        // course summary) travel under the reserved metadata key; learner
+        // payloads (data, component metadata) are compiled exactly as before.
+        const notesContext: WorkspaceAuthorNotesContext = { workspace_id: target.workspaceId, content_locale: compiled.content_locale };
         failureStage = 'materialize_blocks';
         for (const write of materialization.writes) {
           failureStage = `materialize_block:${write.node_id}`;
           const parent = write.kind === 'chapter' ? rootId : targetIds.get(write.parent_node_id);
           if (!parent) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED');
-          const metadata = { ...(write.component?.metadata ?? {}), workspace_id: target.workspaceId, workspace_node_id: write.node_id, generated_by: 'lesson_author_ai', ...(write.kind === 'component' ? {} : { workspace_storyboard: write.author_metadata.storyboard }) };
+          const metadata = workspaceApplyBlockMetadata(write, notesContext);
           const data = write.component ? write.component.data : {};
           let blockId = targetIds.get(write.node_id); const before = blockId ? targetHashes.get(write.node_id)! : null;
           if (blockId) {
@@ -266,6 +272,15 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           const after = await blockHash(tx, blockId, target.courseId, target.tenantId); targetHashes.set(write.node_id, after); cacheIds.push(blockId);
           delta.push({ node_id: write.node_id, block_id: blockId, revision: write.revision, content_hash: write.content_hash, before_hash: before, after_hash: after });
         }
+        // Notes-only refresh of content-current mapped blocks (exact before-hash
+        // fence + receipt delta) and the course-level notes on the locked root.
+        failureStage = 'author_notes';
+        const pendingNodes = new Set(materialization.writes.map(write => write.node_id));
+        const notes = await persistWorkspaceAuthorNotes(tx, { tenantId: target.tenantId, courseId: target.courseId,
+          workspaceId: target.workspaceId, courseNodeId, isV2, rootId, context: notesContext,
+          materialized: compiled.writes.filter(write => !pendingNodes.has(write.node_id)), mappings,
+          blockHash: blockId => blockHash(tx, blockId, target.courseId, target.tenantId) });
+        delta.push(...notes.delta); updated += notes.delta.length; cacheIds.push(...notes.touched);
         // The selected scope can already be fully current because it was
         // materialized by a broader Apply. Record one exact no-op mapping proof
         // so the immutable receipt remains non-empty without touching a block.
@@ -322,6 +337,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
       await invalidateBlockReadCaches(cacheIds); await invalidateCourseReadCaches(target.courseId, target.tenantId); return receipt;
     } catch (error) {
       if (error instanceof WorkspaceApplyError) throw error;
+      if (error instanceof WorkspaceAuthorNotesTargetChanged) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED');
       if (error instanceof WorkspaceApplyCompileError) {
         console.warn('[LessonAuthorWorkspaceApply] compile rejected', {
           workspace_id: target.workspaceId,
