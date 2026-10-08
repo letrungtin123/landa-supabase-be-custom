@@ -17,7 +17,7 @@ import {
   type AdminReportTurnInput,
   type ReportChatSideEvent,
 } from './report-chat-turn.service.js';
-import { createReportSnapshot, type ReportChatFilterInput, type ReportChatSnapshot } from './report-chat.service.js';
+import { createReportSnapshot, generateReportNarrative, type ReportChatFilterInput, type ReportChatSnapshot } from './report-chat.service.js';
 import type { ReportSummary } from '../reports/reports.service.js';
 import { REPORT_REFERENCE_DATE, REPORT_TODAY, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
 
@@ -60,15 +60,20 @@ interface Harness {
 }
 
 function harness(options: {
-  modelArgs?: Record<string, unknown> | 'decline' | 'error';
+  modelArgs?: Record<string, unknown> | 'decline' | 'error' | 'hang';
   allowedGroupIds?: string[];
   buildSnapshot?: (filter: ReportChatFilterInput) => Promise<ReportChatSnapshot>;
+  generateNarrative?: AdminReportTurnDeps['generateNarrative'];
+  modelSignals?: AbortSignal[];
 } = {}): Harness {
   const saved: Harness['saved'] = [];
   const snapshotFilters: ReportChatFilterInput[] = [];
   const router: ReportRouterDeps = {
+    modelTimeoutMs: 50,
     callModel: async (input) => {
+      if (input.signal) options.modelSignals?.push(input.signal);
       if (options.modelArgs === 'error') throw Object.assign(new Error('Gemini PERMISSION_DENIED'), { status: 403 });
+      if (options.modelArgs === 'hang') return new Promise<never>(() => undefined);
       return parseReportRouterToolCall(
         options.modelArgs === 'decline' ? { name: 'respond_directly', args: {} } : { name: 'get_report_snapshot', args: options.modelArgs ?? {} },
         input.today,
@@ -92,7 +97,8 @@ function harness(options: {
         snapshotFilters.push(input.filter ?? {});
         return options.buildSnapshot ? options.buildSnapshot(input.filter ?? {}) : fakeSnapshot(input.filter ?? {});
       },
-      generateNarrative: async () => ({ selected_signal_ids: [], interpretation: ['Hoạt động học ổn định.'], recommended_actions: [], limitations: [] }),
+      generateNarrative: options.generateNarrative
+        ?? (async () => ({ selected_signal_ids: [], interpretation: ['Hoạt động học ổn định.'], recommended_actions: [], limitations: [] })),
       loadLatestAnalysis: async () => null,
       saveAssistantMessage: async (_conversationId, content, metadata) => {
         saved.push({ content, metadata });
@@ -233,6 +239,41 @@ test('a model outage falls back to the deterministic parser instead of failing t
   const h = harness({ modelArgs: 'error' });
   assert.equal(await run(h, turnInput('Báo cáo học viên tháng 7/2025')), 'handled');
   assert.deepEqual(h.snapshotFilters, [{ date_from: '2025-07-01', date_to: '2025-07-31' }]);
+});
+
+test('a router model call that never answers is abandoned at its deadline; the parser alone routes the turn', async () => {
+  const signals: AbortSignal[] = [];
+  const h = harness({ modelArgs: 'hang', modelSignals: signals });
+  const started = Date.now();
+  assert.equal(await run(h, turnInput('Báo cáo học viên tháng 7/2025')), 'handled');
+  assert.ok(Date.now() - started < 2_000, 'the turn did not wait on Gemini');
+  assert.deepEqual(h.snapshotFilters, [{ date_from: '2025-07-01', date_to: '2025-07-31' }]);
+  assert.equal(h.saved[0].metadata.kind, 'report_analysis');
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, true, 'the Gemini request is aborted at the deadline');
+});
+
+test('a narrative call that never answers falls back to the rule-based narrative at its deadline', async () => {
+  const signals: AbortSignal[] = [];
+  const hanging = (input: Parameters<typeof generateReportNarrative>[0]) => generateReportNarrative(input, {
+    timeoutMs: 50,
+    generate: ({ signal }) => { signals.push(signal); return new Promise<string>(() => undefined); },
+  });
+  const h = harness({ modelArgs: { date_from: '2026-07-01', date_to: '2026-07-31' }, generateNarrative: hanging });
+  const started = Date.now();
+  assert.equal(await run(h, turnInput('Báo cáo học viên tháng 7', { locale: 'en' })), 'handled');
+  assert.ok(Date.now() - started < 2_000, 'the turn did not wait on Gemini');
+  const narrative = h.saved[0].metadata.report_narrative as { interpretation: string[]; recommended_actions: Array<{ action: string }> };
+  assert.deepEqual(narrative.interpretation, [], 'fallback narrative carries no interpretation');
+  assert.ok(narrative.recommended_actions.every((action) => action.action === 'Review the related learning journey and confirm the next operational action.'));
+  assert.equal(signals[0].aborted, true);
+
+  // A valid answer within the deadline is still used.
+  const answered = await generateReportNarrative({ tenantId: 't', model: 'test-model', locale: 'en', snapshot: fakeSnapshot({}) }, {
+    timeoutMs: 1_000,
+    generate: async () => JSON.stringify({ selected_signal_ids: [], interpretation: ['Activity is steady.'], recommended_actions: [], limitations: [] }),
+  });
+  assert.deepEqual(answered.interpretation, ['Activity is steady.']);
 });
 
 test('a question that is not a report is left to the normal chat', async () => {

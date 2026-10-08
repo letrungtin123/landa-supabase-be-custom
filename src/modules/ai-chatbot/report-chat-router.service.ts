@@ -1,12 +1,15 @@
 // Routing of an admin chat question to the report path. The model always
 // receives the question (no regex fast path skips it) and returns structured
 // parameters; the deterministic parser and the org-unit resolver cross-check
-// them before anything reaches the report SQL.
+// them before anything reaches the report SQL. The model call has a hard
+// deadline: past it the turn continues with the deterministic parser only.
 
 import { FunctionCallingConfigMode, Type, type FunctionDeclaration } from '@google/genai';
+import { env } from '../../config/env.js';
 import type { UserRole } from '../../types/index.js';
 import { loadReportAllowedGroupIds } from '../reports/report-access.service.js';
 import { getGeminiClient } from './gemini.service.js';
+import { withReportDeadline } from './report-deadline.logic.js';
 import { localYmd } from './report-date.logic.js';
 import {
   decideReportRoute,
@@ -66,6 +69,7 @@ export async function callReportRouterModel(input: {
   question: string;
   locale: 'vi' | 'en';
   today: string;
+  signal?: AbortSignal;
 }): Promise<ReportRouterModelOutput> {
   const aiClient = await getGeminiClient(input.tenantId);
   const response = await aiClient.models.generateContent({
@@ -76,6 +80,7 @@ export async function callReportRouterModel(input: {
       tools: [{ functionDeclarations: REPORT_ROUTER_FUNCTIONS }],
       toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } },
       maxOutputTokens: 256,
+      ...(input.signal ? { abortSignal: input.signal } : {}),
     },
   });
   const call = response.functionCalls?.[0] ?? null;
@@ -94,6 +99,8 @@ export interface ReportRouterDeps {
   loadLabels: (tenantId: string) => Promise<ReportGroupLabels>;
   loadAllowedGroupIds: (actor: ReportRouterActor) => Promise<string[]>;
   log: (event: Record<string, unknown>) => void;
+  /** Deadline of the model call; REPORT_CHAT_ROUTER_TIMEOUT_MS when absent. */
+  modelTimeoutMs?: number;
 }
 
 export const defaultReportRouterDeps: ReportRouterDeps = {
@@ -139,10 +146,12 @@ export async function routeAdminReportQuestion(
 
   let model: ReportRouterModelOutput | null = null;
   try {
-    model = await deps.callModel({ tenantId: input.tenantId, model: input.model, question: input.question, locale: input.locale, today });
+    model = await withReportDeadline('report_router_model', deps.modelTimeoutMs ?? env.REPORT_CHAT_ROUTER_TIMEOUT_MS, (signal) => deps.callModel({
+      tenantId: input.tenantId, model: input.model, question: input.question, locale: input.locale, today, signal,
+    }));
   } catch (error) {
     // The deterministic parser and intent gate are a complete fallback; the
-    // turn continues without model parameters instead of failing.
+    // turn continues without model parameters instead of failing (or hanging).
     deps.log({
       event: 'report_router_model_unavailable',
       correlation_id: input.correlationId ?? null,

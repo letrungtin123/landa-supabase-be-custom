@@ -394,6 +394,10 @@ export const env = {
   REPORT_PDF_TENANT_EXPORTS_PER_WINDOW: optionalBoundedInt('REPORT_PDF_TENANT_EXPORTS_PER_WINDOW', 60, 1, 10_000),
   // Exports of one tenant that may be in progress at once on an API process.
   REPORT_PDF_TENANT_ACTIVE_JOBS: optionalBoundedInt('REPORT_PDF_TENANT_ACTIVE_JOBS', 5, 1, 50),
+  // Chat report Gemini calls: past the deadline the router continues with the
+  // deterministic parser only and the narrative uses its rule-based fallback.
+  REPORT_CHAT_ROUTER_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_ROUTER_TIMEOUT_MS', 8_000, 1_000, 30_000),
+  REPORT_CHAT_NARRATIVE_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_NARRATIVE_TIMEOUT_MS', 15_000, 1_000, 60_000),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
