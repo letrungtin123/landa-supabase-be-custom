@@ -236,6 +236,24 @@ test('rate-limits new exports per user and per tenant', async () => {
   assert.match(keys.user, new RegExp(`:${TENANT}:${USER}:0$`));
 });
 
+test('the rate limiter fails open (logged) when Redis hangs or errors', async () => {
+  const logs: Record<string, unknown>[] = [];
+  const hanging = { incrementPair: () => new Promise<[number, number] | null>(() => undefined) };
+  let started = Date.now();
+  const hung = await consumeReportPdfExportAllowance({ tenantId: TENANT, userId: USER }, { counter: hanging, log: (event) => logs.push(event) });
+  const waited = Date.now() - started;
+  assert.equal(hung.allowed, true);
+  assert.ok(waited >= 450 && waited < 2_000, `waited ${waited} ms for a hanging Redis (default 500 ms)`);
+  assert.deepEqual(logs[0], { event: 'report_pdf_rate_limit_unavailable', tenant_id: TENANT, reason: 'timeout' });
+
+  started = Date.now();
+  assert.equal((await consumeReportPdfExportAllowance({ tenantId: TENANT, userId: USER }, { counter: hanging, timeoutMs: 20, log: (event) => logs.push(event) })).allowed, true);
+  assert.ok(Date.now() - started < 1_000);
+  const failing = { incrementPair: async (): Promise<[number, number] | null> => { throw new Error('ECONNRESET'); } };
+  assert.equal((await consumeReportPdfExportAllowance({ tenantId: TENANT, userId: USER }, { counter: failing, log: (event) => logs.push(event) })).allowed, true);
+  assert.deepEqual(logs.map((event) => event.reason), ['timeout', 'timeout', 'error']);
+});
+
 test('finished exports never block new ones: only in-progress exports count against the capacity', async () => {
   const { service } = harness({ store: () => null, limits: { activeJobs: 2, tenantActiveJobs: 2 } });
   const ids: string[] = [];

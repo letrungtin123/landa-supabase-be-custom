@@ -102,6 +102,7 @@ export interface ReportPdfExportDeps {
 }
 
 const log = (event: Record<string, unknown>) => console.info(`[ReportPdf] ${JSON.stringify(event)}`);
+const warn = (event: Record<string, unknown>) => console.warn(`[ReportPdf] ${JSON.stringify(event)}`);
 
 export const defaultReportPdfExportDeps: ReportPdfExportDeps = {
   permissionChecker: (actor) => hasPermission({ id: actor.userId, tenantId: actor.tenantId, role: actor.role }, 'report_summary', 'can_view'),
@@ -113,7 +114,8 @@ export const defaultReportPdfExportDeps: ReportPdfExportDeps = {
   aiWriter: (context) => createReportPdfAiNarrativeWriter(context),
   store: () => (env.REPORT_PDF_STORAGE_ENABLED ? supabaseReportPdfArtifactStore : null),
   audit: appendReportPdfExportAudit,
-  rateLimit: (actor) => consumeReportPdfExportAllowance(actor, { log }),
+  // The limiter only logs when it fails open (Redis missing, failing or slow): a warning.
+  rateLimit: (actor) => consumeReportPdfExportAllowance(actor, { log: warn }),
   log,
 };
 
