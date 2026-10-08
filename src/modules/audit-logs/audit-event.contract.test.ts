@@ -10,6 +10,7 @@ test('tenant operations remain visible to authorized tenant roles', () => {
   assert.equal(getAuditEventViewerScope('group.team_member.added'), 'tenant');
   assert.equal(getAuditEventViewerScope('badge.rule.updated'), 'tenant');
   assert.equal(getAuditEventViewerScope('news.archived'), 'tenant');
+  assert.equal(getAuditEventViewerScope('report.pdf.exported'), 'tenant');
 });
 
 test('superadmin-only feature events fail closed for tenant viewers', () => {
@@ -29,6 +30,11 @@ test('structured audit normalization persists the server-owned viewer scope', ()
     code: 'tenant.modules.updated',
     context: { affected_count: 3 },
   }).viewerScope, 'superadmin_only');
+});
+
+test('a delivered report PDF is a tenant-visible event (rows keep the exporter tenant_id)', () => {
+  const normalized = normalizeStructuredAuditEvent({ code: 'report.pdf.exported', context: { file_name: 'report.pdf', file_size_bytes: 2048 } });
+  assert.equal(normalized.viewerScope, 'tenant');
 });
 
 test('unregistered events cannot be normalized or exposed', () => {

@@ -353,6 +353,8 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'branding.image.updated',
   'branding.image.deleted',
   'report.summary.refreshed',
+  // Tenant admins review who exported their own report PDFs (rows carry the exporter's tenant_id).
+  'report.pdf.exported',
   'badge.rule.updated',
 ]);
 
