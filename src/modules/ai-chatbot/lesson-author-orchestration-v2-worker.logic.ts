@@ -49,3 +49,61 @@ export function orchestrationV2ObservedUsage(value: unknown): Readonly<Record<st
   }
   return Object.freeze(output);
 }
+
+/** The provider key cannot pay for more calls; no retry of any task of the run can succeed. */
+export const ORCHESTRATION_V2_PROVIDER_QUOTA_EXHAUSTED = 'AI_PROVIDER_QUOTA_EXHAUSTED' as const;
+/** The provider kept rate limiting after the AI service's bounded wait; a later attempt can succeed. */
+export const ORCHESTRATION_V2_PROVIDER_RATE_LIMITED = 'AI_PROVIDER_RATE_LIMITED' as const;
+
+/** Definitive provider failures that stop the whole run, units included (no isolated unit failure). */
+export const ORCHESTRATION_V2_RUN_STOPPING_FAILURES: ReadonlySet<string> = Object.freeze(new Set([
+  'AI_PROVIDER_AUTH_REJECTED', ORCHESTRATION_V2_PROVIDER_QUOTA_EXHAUSTED,
+]));
+
+/**
+ * IDM runs only: an exhausted key reported by the AI service ends the run with
+ * that code instead of the ambiguous-outcome path (pessimistic charge, replay,
+ * deterministic fallback content). Legacy V2 runs keep their existing path, so
+ * the service layer raises this error only for `idm-1` provider calls.
+ */
+export class OrchestrationV2ProviderStopError extends Error {
+  readonly code = ORCHESTRATION_V2_PROVIDER_QUOTA_EXHAUSTED;
+
+  constructor() {
+    super(ORCHESTRATION_V2_PROVIDER_QUOTA_EXHAUSTED);
+    this.name = 'OrchestrationV2ProviderStopError';
+  }
+}
+
+/** Re-raise an IDM provider call's exhausted-key failure as a run stop; any other error is unchanged. */
+export function idmProviderFailure(error: unknown): unknown {
+  return error && typeof error === 'object'
+    && (error as { code?: unknown }).code === ORCHESTRATION_V2_PROVIDER_QUOTA_EXHAUSTED
+    ? new OrchestrationV2ProviderStopError() : error;
+}
+
+const RATE_LIMIT_REQUEUE_BASE_MS = 60_000;
+const RATE_LIMIT_REQUEUE_MAX_MS = 120_000;
+
+/** Stable 0..4999 ms jitter so a rate-limited batch does not wake up at the same instant. */
+export function orchestrationV2StableJitterMs(seed: string): number {
+  let hash = 0;
+  for (const character of seed) hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+  return hash % 5_000;
+}
+
+/**
+ * Delay before a rate-limited planning task (course skeleton, chapter blueprint) is
+ * dispatched again: a per-minute window needs about a minute, the second retry
+ * waits longer, both within the outbox's 120 s deferral bound. Units are not
+ * delayed: after a dispatched attempt the replay fence only allows their
+ * deterministic fallback, which makes no provider call.
+ */
+export function orchestrationV2RateLimitRequeueDelayMs(
+  kind: string, failureCode: string, attemptCount: number, jitterMs: number,
+): number {
+  if (failureCode !== ORCHESTRATION_V2_PROVIDER_RATE_LIMITED
+    || (kind !== 'course_skeleton' && kind !== 'chapter_blueprint')) return 0;
+  const attempts = Number.isSafeInteger(attemptCount) && attemptCount > 0 ? attemptCount : 1;
+  return Math.min(RATE_LIMIT_REQUEUE_MAX_MS, RATE_LIMIT_REQUEUE_BASE_MS * attempts + Math.max(0, jitterMs));
+}

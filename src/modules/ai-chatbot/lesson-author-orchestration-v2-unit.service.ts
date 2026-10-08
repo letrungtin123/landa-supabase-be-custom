@@ -9,6 +9,7 @@ import type {
   ReleaseUndispatched,
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
 
 type UnitRepository = ReturnType<typeof createOrchestrationV2UnitRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -164,7 +165,9 @@ export async function executeOrchestrationV2UnitTask(
     max_attempts: lease.provider_max_attempts as 1 | 2,
     remaining_workflow_budget_ms: workflowBudgetMs,
     fallback_only: fallbackOnly,
-  }, { timeoutMs: transportTimeoutMs, signal, beforeProviderDispatch }));
+  }, { timeoutMs: transportTimeoutMs, signal, beforeProviderDispatch })
+    // IDM: an exhausted provider key stops the run instead of a fallback unit (worker definitive path).
+    .catch((error: unknown) => { throw idmUnit ? idmProviderFailure(error) : error; }));
   if (!providerDispatchMarked) {
     throw new OrchestrationV2UnitServiceError('ORCHESTRATION_V2_UNIT_RUNTIME_INVALID');
   }

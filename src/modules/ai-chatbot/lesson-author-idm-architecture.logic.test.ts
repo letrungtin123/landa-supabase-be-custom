@@ -358,6 +358,17 @@ test('IDM finalization adds the excluded facts to the chapter receipts and recor
     { code: 'ORCHESTRATION_V2_FINALIZATION_INCOMPLETE' });
   assert.throws(() => finalizeOrchestrationV2Course({ ...input, idm_accounting: { ...accounting, noise: 2 } }),
     { code: 'ORCHESTRATION_V2_FINALIZATION_INCOMPLETE' });
+  // QC course 234653: 32/32 deterministic fallback units ended `ready`. More than half (or all) fail the
+  // finalizer, so the run ends needs_action with every unit kept for review and Apply.
+  const withOrigins = (unit_count: number, whole_fallback_count: number) => finalizeOrchestrationV2Course({
+    ...input, idm_accounting: accounting, assessment_obligations: [],
+    idm_unit_origins: { unit_count, whole_fallback_count } });
+  assert.throws(() => withOrigins(3, 2), { code: 'IDM_UNITS_MOSTLY_FALLBACK' });
+  assert.throws(() => withOrigins(32, 32), { code: 'IDM_UNITS_MOSTLY_FALLBACK' });
+  assert.equal(withOrigins(4, 2).contract, 'orchestration-course-finalization-v2', 'exactly half is reviewable');
+  assert.equal(withOrigins(0, 0).contract, 'orchestration-course-finalization-v2');
+  assert.throws(() => withOrigins(1, 2), { code: 'ORCHESTRATION_V2_FINALIZATION_INPUT_INVALID' });
+  assert.throws(() => withOrigins(-1, 0), { code: 'ORCHESTRATION_V2_FINALIZATION_INPUT_INVALID' });
 });
 
 test('workspace preview renders an IDM skeleton artifact (standard skeleton, block-scope shard plans)', () => {

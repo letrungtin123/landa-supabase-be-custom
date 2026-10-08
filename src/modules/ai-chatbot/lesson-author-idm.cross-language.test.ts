@@ -237,6 +237,9 @@ class Chain {
       return (params[3] as string[]).map(path => this.revisions.get(path)).filter(Boolean) as Row[];
     }
     if (sql.includes('r.task_count,r.chapter_count,r.admitted_fact_count')) return [this.current.finalAuthority];
+    if (sql.includes('AS whole_fallback_count')) return [{ unit_count: this.unitArtifacts.length,
+      whole_fallback_count: this.unitArtifacts.filter(unit => ((unit.payload as Row).generated_unit as Row)
+        .source_locked_fallback === true).length }];
     if (sql.includes('FROM lesson_author_workspace_v2_assessment_obligations')) {
       return this.obligationRows.map(row => ({ ...row, plan_revision_hash: this.assembly!.assembly_hash,
         status: 'open', resolution_kind: null, resolution_evidence_hash: null }));

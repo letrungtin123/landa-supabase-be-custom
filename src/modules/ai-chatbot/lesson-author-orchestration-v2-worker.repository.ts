@@ -7,9 +7,12 @@ import {
   type OrchestrationV2AttemptTraceEvent,
 } from './lesson-author-orchestration-v2-attempt.logic.js';
 import {
+  ORCHESTRATION_V2_RUN_STOPPING_FAILURES,
   assertOrchestrationV2WorkerLimits,
   isOrchestrationV2ProviderTask,
   orchestrationV2ObservedUsage,
+  orchestrationV2RateLimitRequeueDelayMs,
+  orchestrationV2StableJitterMs,
   type OrchestrationV2WorkerLimits,
 } from './lesson-author-orchestration-v2-worker.logic.js';
 
@@ -157,7 +160,7 @@ async function stopRunAfterTerminalTask(
     ? task.failure_code
     : 'TASK_FAILED';
   const isolatedUnitFailure = task.kind === 'generate_unit'
-    && !['AI_PROVIDER_AUTH_REJECTED'].includes(failureCode);
+    && !ORCHESTRATION_V2_RUN_STOPPING_FAILURES.has(failureCode);
   const lockedRun = await tx.query(`SELECT status,failure_code FROM lesson_author_workspace_v2_runs
     WHERE id=$1 AND workspace_id=$2 AND tenant_id=$3 AND course_id=$4 FOR UPDATE`,
   [task.run_id, task.workspace_id, task.tenant_id, task.course_id]);
@@ -605,7 +608,7 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
 
   async function failProviderRejected(
     lease: OrchestrationV2TaskLease,
-    failureCode: 'AI_PROVIDER_REQUEST_REJECTED' | 'AI_PROVIDER_AUTH_REJECTED',
+    failureCode: 'AI_PROVIDER_REQUEST_REJECTED' | 'AI_PROVIDER_AUTH_REJECTED' | 'AI_PROVIDER_QUOTA_EXHAUSTED',
     releaseRejected: ReleaseRejected,
   ): Promise<void> {
     if (!isOrchestrationV2ProviderTask(lease.kind) || !lease.ai_reservation_id) {
@@ -666,15 +669,20 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
           fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
         }
         await holdUnknown(tx, task);
+        // A planning task the provider kept rate limiting (IDM course skeleton / chapter blueprint) keeps
+        // its code and its retry waits for the per-minute window; everything else is an unknown outcome.
+        const requeueDelayMs = orchestrationV2RateLimitRequeueDelayMs(String(task.kind), failureCode,
+          Number(task.attempt_count), orchestrationV2StableJitterMs(String(task.id)));
+        const unknownCode = requeueDelayMs > 0 ? failureCode : 'PROVIDER_OUTCOME_UNKNOWN';
         const unknown = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='outcome_unknown',
-            accounting_state='pending_reconciliation',failure_code='PROVIDER_OUTCOME_UNKNOWN',finished_at=clock_timestamp(),
+            accounting_state='pending_reconciliation',failure_code=$4,finished_at=clock_timestamp(),
             lease_token=NULL,heartbeat_at=NULL,lease_expires_at=NULL
           WHERE id=$1 AND run_id=$2 AND status='running' AND lease_token=$3::uuid RETURNING id`,
-        [lease.task_id, lease.run_id, lease.lease_token]);
+        [lease.task_id, lease.run_id, lease.lease_token, unknownCode]);
         if (unknown.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
         if (runIsActive && reconcileUnknown && Number(task.attempt_count) < Number(task.max_attempts)) {
           const unknownTask = { ...task, status: 'outcome_unknown',
-            accounting_state: 'pending_reconciliation', failure_code: 'PROVIDER_OUTCOME_UNKNOWN' };
+            accounting_state: 'pending_reconciliation', failure_code: unknownCode };
           await reconcileUnknown(tx, unknownTask);
           const queued = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='queued',
               failure_code=NULL,finished_at=NULL,next_attempt_at=clock_timestamp(),dispatch_started_at=NULL,
@@ -684,17 +692,23 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
               AND accounting_state='pending_reconciliation' AND attempt_count<max_attempts RETURNING id`,
           [lease.task_id, lease.run_id]);
           if (queued.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
-          const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
+          const outbox = requeueDelayMs > 0
+            ? await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
+                (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard,available_at)
+              VALUES($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()+($9::bigint*interval '1 millisecond')) RETURNING id`,
+            [id(), task.run_id, task.workspace_id, task.tenant_id, task.course_id, task.id,
+              task.dispatch_epoch, task.routing_shard, requeueDelayMs])
+            : await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
               (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-          [id(), task.run_id, task.workspace_id, task.tenant_id, task.course_id, task.id,
-            task.dispatch_epoch, task.routing_shard]);
+            [id(), task.run_id, task.workspace_id, task.tenant_id, task.course_id, task.id,
+              task.dispatch_epoch, task.routing_shard]);
           if (outbox.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
           return 'requeued';
         }
         if (!runIsActive || Number(task.attempt_count) >= Number(task.max_attempts)) {
           await stopRunAfterTerminalTask(tx, { ...task, status: 'outcome_unknown',
-            failure_code: 'PROVIDER_OUTCOME_UNKNOWN' });
+            failure_code: unknownCode });
         }
         return 'outcome_unknown';
       }
@@ -747,7 +761,8 @@ export function createOrchestrationV2WorkerRepository(db: GenerationJobDatabase,
         JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id
           AND t.status IN ('failed','timed_out','outcome_unknown')
         WHERE r.status IN ('planning','executing','finalizing')
-          AND NOT (t.kind='generate_unit' AND coalesce(t.failure_code,'')<>'AI_PROVIDER_AUTH_REJECTED'
+          AND NOT (t.kind='generate_unit'
+            AND coalesce(t.failure_code,'') NOT IN ('AI_PROVIDER_AUTH_REJECTED','AI_PROVIDER_QUOTA_EXHAUSTED')
             AND NOT (t.status='outcome_unknown' AND t.attempt_count<t.max_attempts)
             AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks live
               WHERE live.run_id=r.id AND live.status IN ('blocked','queued','running')))

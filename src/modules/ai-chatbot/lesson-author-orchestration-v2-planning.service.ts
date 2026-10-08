@@ -19,6 +19,7 @@ import {
 } from './lesson-author-idm.contract.js';
 import { IDM_V2_COMPONENT_TYPES, buildIdmModuleContext } from './lesson-author-idm-scope-view.logic.js';
 import { assembleIdmOrchestrationArchitecture, assertIdmShardDesign } from './lesson-author-idm-architecture.logic.js';
+import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
 
 type PlanningRepository = ReturnType<typeof createOrchestrationV2PlanningRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -116,6 +117,15 @@ function common(
   };
 }
 
+/** IDM provider calls stop the run on an exhausted key (`idmProviderFailure`); legacy calls are unchanged. */
+async function providerCall<T>(idm: boolean, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    throw idm ? idmProviderFailure(error) : error;
+  }
+}
+
 /** Execute exactly one already-claimed planning task; never schedules or polls. */
 export async function executeOrchestrationV2PlanningTask(
   lease: OrchestrationV2TaskLease,
@@ -176,7 +186,7 @@ export async function executeOrchestrationV2PlanningTask(
       });
     })() : undefined;
     let providerDispatchMarked = false;
-    const response = await clients.skeleton({
+    const response = await providerCall(idm !== undefined, () => clients.skeleton({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       source_snapshot_hash: lease.source_snapshot_hash, scope_catalog: scopes, source_authority: sourceAuthority,
       max_attempts: lease.provider_max_attempts as 1 | 2,
@@ -187,7 +197,7 @@ export async function executeOrchestrationV2PlanningTask(
       }
       await worker.markProviderDispatched(lease);
       providerDispatchMarked = true;
-    } });
+    } }));
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
@@ -209,7 +219,7 @@ export async function executeOrchestrationV2PlanningTask(
       input_tokens: input.idm.input_tokens, max_output_tokens: lease.max_output_tokens,
       provider_max_attempts: lease.provider_max_attempts, remaining_ms: input.idm.remaining_ms }) : undefined;
     let providerDispatchMarked = false;
-    const response = await clients.chapter({
+    const response = await providerCall(idmModuleContext !== undefined, () => clients.chapter({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       skeleton: input.skeleton, shard_plan: input.shard_plan, source_facts: input.source_facts,
       max_attempts: lease.provider_max_attempts as 1 | 2,
@@ -220,7 +230,7 @@ export async function executeOrchestrationV2PlanningTask(
       }
       await worker.markProviderDispatched(lease);
       providerDispatchMarked = true;
-    } });
+    } }));
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }

@@ -186,11 +186,24 @@ export function createOrchestrationV2FinalizationRepository(
         || IDM_DISPOSITIONS.some(name => view.dispositionCounts[name] !== assembly.idm!.disposition_counts[name])) {
         fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
       }
+      // A whole-unit fallback carries the unit-level source_locked_fallback marker in its baseline.
+      const origins = await tx.query(`SELECT count(*)::integer AS unit_count,
+          count(*) FILTER(WHERE a.payload->'generated_unit'->>'source_locked_fallback'='true')::integer
+            AS whole_fallback_count
+        FROM lesson_author_workspace_v2_artifacts a
+        JOIN lesson_author_workspace_v2_tasks t ON t.id=a.task_id AND t.run_id=a.run_id
+        WHERE a.run_id=$1 AND a.workspace_id=$2 AND a.tenant_id=$3 AND a.course_id=$4
+          AND a.artifact_kind='unit_baseline' AND t.kind='generate_unit' AND t.status='succeeded'`,
+      [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id]);
+      const originRow = origins.rows[0];
+      if (origins.rows.length !== 1 || !originRow) fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
       return finalizeOrchestrationV2Course({ source_snapshot_hash: lease.source_snapshot_hash,
         expected_manifest_hash: String(row.manifest_hash), admitted_fact_count: Number(row.admitted_fact_count),
         assembly_hash: assembly.assembly_hash, inventory_hash: String(inventoryPayload.inventory_hash), tasks,
         chapter_receipts: receipts, assessment_obligations: assessmentObligations,
-        idm_accounting: { ...view.dispositionCounts } });
+        idm_accounting: { ...view.dispositionCounts },
+        idm_unit_origins: { unit_count: Number(originRow!.unit_count),
+          whole_fallback_count: Number(originRow!.whole_fallback_count) } });
     });
   }
 

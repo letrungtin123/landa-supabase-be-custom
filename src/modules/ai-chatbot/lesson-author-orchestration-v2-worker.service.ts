@@ -1,6 +1,9 @@
 import type { OrchestrationV2DispatchEnvelope } from './lesson-author-orchestration-v2-dispatch.logic.js';
 import { readOrchestrationV2DispatchEnvelope } from './lesson-author-orchestration-v2-dispatch.logic.js';
-import type { OrchestrationV2WorkerLimits } from './lesson-author-orchestration-v2-worker.logic.js';
+import {
+  OrchestrationV2ProviderStopError,
+  type OrchestrationV2WorkerLimits,
+} from './lesson-author-orchestration-v2-worker.logic.js';
 import type {
   OrchestrationV2TaskLease,
   createOrchestrationV2WorkerRepository,
@@ -49,8 +52,10 @@ export interface OrchestrationV2WorkerRuntimeDependencies {
 }
 
 function definitiveProviderRejection(error: unknown):
-  'AI_PROVIDER_REQUEST_REJECTED' | 'AI_PROVIDER_AUTH_REJECTED' | null {
+  'AI_PROVIDER_REQUEST_REJECTED' | 'AI_PROVIDER_AUTH_REJECTED' | 'AI_PROVIDER_QUOTA_EXHAUSTED' | null {
   if (!error || typeof error !== 'object') return null;
+  // IDM provider calls only (the service layer raises it): an exhausted key stops the run.
+  if (error instanceof OrchestrationV2ProviderStopError) return error.code;
   const code = (error as { code?: unknown }).code;
   return code === 'AI_PROVIDER_REQUEST_REJECTED' || code === 'AI_PROVIDER_AUTH_REJECTED' ? code : null;
 }

@@ -9,6 +9,25 @@ import {
 
 export const ORCHESTRATION_V2_COURSE_CONTRACT = 'orchestration-course-finalization-v2';
 export const ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT = 'orchestration-course-review-required-v1';
+/**
+ * IDM runs: the finalizer refuses a course whose units are mostly the deterministic
+ * source-locked fallback (QC course 234653: 32/32 fallback units ended `ready`). The task
+ * fails with this code, so the run ends `needs_action` with every unit kept for review
+ * and Apply. The SQL-pinned review receipt is reserved for open assessment obligations
+ * and needs at least one, so it cannot carry this outcome without a migration.
+ */
+export const IDM_UNITS_MOSTLY_FALLBACK = 'IDM_UNITS_MOSTLY_FALLBACK' as const;
+
+/** Units published by an IDM run and how many of them are a whole deterministic fallback. */
+export interface OrchestrationV2IdmUnitOrigins {
+  unit_count: number;
+  whole_fallback_count: number;
+}
+
+/** More than half of the units (or every unit) are deterministic fallback content. */
+export function idmUnitsMostlyFallback(origins: Readonly<OrchestrationV2IdmUnitOrigins>): boolean {
+  return origins.unit_count > 0 && origins.whole_fallback_count * 2 > origins.unit_count;
+}
 
 export interface OrchestrationV2FinalizationTask extends OrchestrationV2PersistedTask {
   status: 'running' | 'succeeded';
@@ -89,7 +108,8 @@ export class OrchestrationV2FinalizationError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_FINALIZATION_INPUT_INVALID'
     | 'ORCHESTRATION_V2_FINALIZATION_INCOMPLETE'
-    | 'ORCHESTRATION_V2_FINALIZATION_TOO_LARGE') {
+    | 'ORCHESTRATION_V2_FINALIZATION_TOO_LARGE'
+    | typeof IDM_UNITS_MOSTLY_FALLBACK) {
     super(code);
     this.name = 'OrchestrationV2FinalizationError';
   }
@@ -113,6 +133,8 @@ interface OrchestrationV2FinalizationInput {
   assessment_obligations?: readonly Readonly<OrchestrationV2AssessmentObligationEvidence>[];
   /** IDM runs only: chapter receipts cover course + reference facts; the rest are accounted for by disposition. */
   idm_accounting?: Readonly<OrchestrationV2IdmAccounting>;
+  /** IDM runs only: unit origins; a mostly-fallback course fails with `IDM_UNITS_MOSTLY_FALLBACK`. */
+  idm_unit_origins?: Readonly<OrchestrationV2IdmUnitOrigins>;
 }
 
 export function finalizeOrchestrationV2Course(
@@ -182,6 +204,13 @@ export function finalizeOrchestrationV2Course(
   }
   if (allocated !== input.admitted_fact_count || covered !== input.admitted_fact_count) {
     fail('ORCHESTRATION_V2_FINALIZATION_INCOMPLETE');
+  }
+  const origins = input.idm_unit_origins;
+  if (origins !== undefined) {
+    if (!Number.isSafeInteger(origins.unit_count) || !Number.isSafeInteger(origins.whole_fallback_count)
+      || origins.unit_count < 0 || origins.whole_fallback_count < 0
+      || origins.whole_fallback_count > origins.unit_count) fail('ORCHESTRATION_V2_FINALIZATION_INPUT_INVALID');
+    if (idmUnitsMostlyFallback(origins)) fail(IDM_UNITS_MOSTLY_FALLBACK);
   }
   const idmAccounting = accounting === undefined ? {} : { idm_accounting: { course: accounting.course,
     reference_job_aid: accounting.reference_job_aid, nice_to_know: accounting.nice_to_know,
