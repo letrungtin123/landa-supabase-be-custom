@@ -13,6 +13,7 @@ import { classifyCourseMentorLogoOwnership } from './course-mentor-logo-ownershi
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 import { getTenantRoleLabels, type RoleLabelMap } from '../tenants/tenant-role-labels.service.js';
+import { withoutAuthorOnlyBlockMetadata } from '../course-authoring/course-author-notes.logic.js';
 import {
   buildCourseMarkdown,
   markdownFilename,
@@ -312,7 +313,9 @@ export async function exportCourseMarkdown(courseId: string, tenantId: string) {
 
   return {
     filename: markdownFilename(courseId),
-    markdown: buildCourseMarkdown(courseResult.rows[0], blocksResult.rows),
+    // The export reads only known media fields today; stripping AI ID
+    // author-only metadata keeps that true for any future exporter field.
+    markdown: buildCourseMarkdown(courseResult.rows[0], blocksResult.rows.map(withoutAuthorOnlyBlockMetadata)),
   };
 }
 

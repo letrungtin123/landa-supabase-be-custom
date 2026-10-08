@@ -36,6 +36,7 @@ import {
   type CourseOutlineTransferOperation,
 } from './course-outline-transfer.service.js';
 import { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
+import { withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import { env } from '../../config/env.js';
 import {
   CoursePublishGovernanceError,
@@ -433,7 +434,8 @@ function sanitizeScenarioChatData(raw: any) {
 
 function sanitizeMetadata(metadata: any) {
   if (!metadata || typeof metadata !== 'object') return undefined;
-  const next = { ...metadata };
+  // Server-owned AI ID author notes are never accepted from a browser.
+  const next = { ...withoutServerOwnedAuthorNotes(metadata) };
   if ('problem_media' in next) {
     const media = sanitizeProblemMedia(next.problem_media);
     if (media) next.problem_media = media;
@@ -459,11 +461,41 @@ export async function getOutline(req: Request, res: Response) {
   }
 }
 
+const authorNotesErrors = {
+  TENANT_REQUIRED: [403, 'Không xác định được doanh nghiệp đang thao tác.', 'The active organization could not be determined.'],
+  COURSE_INVALID: [400, 'Mã khóa học không hợp lệ.', 'The course ID is invalid.'],
+  COURSE_NOT_FOUND: [404, 'Không tìm thấy khóa học.', 'The course was not found.'],
+  UNAVAILABLE: [500, 'Chưa thể tải ghi chú AI ID cho tác giả.', 'AI ID notes for authors could not be loaded.'],
+} as const;
+
+/** GET /api/course-authoring/author-notes/:courseId — `courses.can_edit` only.
+ * The single read path for AI ID author notes; learner/CMS reads strip them. */
+export async function getAuthorNotes(req: Request, res: Response) {
+  res.setHeader('Cache-Control', 'no-store');
+  const fail = (code: keyof typeof authorNotesErrors) => {
+    const [status, vi, en] = authorNotesErrors[code];
+    res.status(status).json({ success: false, code: `COURSE_AUTHOR_NOTES_${code}`, message: requestComponentLocale(req) === 'en' ? en : vi });
+  };
+  const tenantId = req.user?.tenantId;
+  const courseId = req.params.courseId;
+  if (!tenantId) return fail('TENANT_REQUIRED');
+  if (!courseId || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)) return fail('COURSE_INVALID');
+  try {
+    sendSuccess(res, await svc.getCourseAuthorNotes(courseId, tenantId));
+  } catch (err) {
+    if (err instanceof AppError && err.statusCode === 404) return fail('COURSE_NOT_FOUND');
+    console.error('[CourseAuthorNotes] read failed', { error: err instanceof Error ? err.name : 'unknown' });
+    fail('UNAVAILABLE');
+  }
+}
+
 /** GET /api/course-authoring/blocks/:blockId */
 export async function getBlock(req: Request, res: Response) {
   try {
+    // `courses.can_view` is enough for this generic read, so the server-owned
+    // AI ID author notes are removed; editors read them via author-notes.
     const block = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
-    sendSuccess(res, block);
+    sendSuccess(res, { ...block, metadata: withoutServerOwnedAuthorNotes(block.metadata) });
   } catch (err: any) {
     const statusCode = err instanceof AppError ? err.statusCode : 500;
     sendError(res, err?.message || 'Không thể tải nội dung khóa học.', statusCode);

@@ -17,6 +17,7 @@ import {
 import { buildStoragePath, downloadFileBuffer, getPublicUrl, uploadFile, deleteFiles, extractStoragePath } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
+import { COURSE_AUTHOR_NOTES_KEY, withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import {
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
   TENANT_DATA_LIMIT_REACHED_SQLSTATE,
@@ -262,9 +263,11 @@ function collectReferencedAssetPaths(payloadRows: PayloadRow[], tenantId: string
   for (const row of payloadRows) {
     const strings: string[] = [];
     collectStringValues(row.data, strings);
-    collectStringValues(row.metadata, strings);
+    // AI ID author notes are not copied (see finishDuplicate), so their text
+    // can never require a destination asset copy.
+    collectStringValues(withoutServerOwnedAuthorNotes(row.metadata), strings);
     collectStringValues(row.published_data, strings);
-    collectStringValues(row.published_metadata, strings);
+    collectStringValues(withoutServerOwnedAuthorNotes(row.published_metadata), strings);
     for (const value of strings) {
       const direct = normalizeCourseOutlineTransferStoragePath(value);
       if (direct?.startsWith(tenantCoursePrefix)) paths.add(direct);
@@ -687,7 +690,10 @@ async function finishDuplicate(job: TransferJobRow): Promise<void> {
               source.block_type,
               source.display_name,
               public.course_outline_transfer_rewrite_jsonb(COALESCE(source.data, '{}'::jsonb), $5::uuid),
-              public.course_outline_transfer_rewrite_jsonb(COALESCE(source.metadata, '{}'::jsonb), $5::uuid),
+              -- AI ID author notes describe the SOURCE course's AI workspace;
+              -- they are author-only and never travel to another course.
+              public.course_outline_transfer_rewrite_jsonb(CASE WHEN jsonb_typeof(source.metadata) = 'object'
+                THEN source.metadata - '${COURSE_AUTHOR_NOTES_KEY}' ELSE COALESCE(source.metadata, '{}'::jsonb) END, $5::uuid),
               CASE WHEN source.id = $1::uuid THEN $6::integer ELSE source.sort_order END,
               false, true, NULL, NULL, NULL, 'active', now(), now()
          FROM subtree source

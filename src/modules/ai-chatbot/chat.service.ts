@@ -149,6 +149,7 @@ import { requestBlockDeletion } from '../course-deletion/course-deletion.service
 import type { ReportChatFilterInput } from './report-chat.service.js';
 import { handleAdminReportTurn, type ReportChatSideEvent } from './report-chat-turn.service.js';
 import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
+import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-notes.logic.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -2647,7 +2648,10 @@ function stringifyBlockExcerpt(data: unknown, metadata: unknown): string {
     : data && typeof data === 'object'
       ? JSON.stringify(data)
       : '';
-  const metadataText = metadata && typeof metadata === 'object' ? JSON.stringify(metadata) : '';
+  // AI ID author notes/storyboard are author-only design metadata; they are
+  // never pasted into a chat prompt excerpt (the reply streams to the user).
+  const promptMetadata = withoutAuthorOnlyMetadata(metadata);
+  const metadataText = promptMetadata && typeof promptMetadata === 'object' ? JSON.stringify(promptMetadata) : '';
   const raw = dataText || metadataText;
   if (!raw) return '';
   return stripHtml(raw)

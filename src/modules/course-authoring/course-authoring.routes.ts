@@ -149,6 +149,10 @@ router.get('/transfer-destination-parents', checkPermission('courses', 'can_edit
 router.post('/transfers', checkPermission('courses', 'can_edit'), ctrl.createOutlineTransfer);
 router.get('/transfers/:jobId', checkPermission('courses', 'can_view'), ctrl.getOutlineTransfer);
 
+// AI ID author notes (QC 364564, N6): author-only, so editors only. The
+// generic block/learner reads strip them for everyone else.
+router.get('/author-notes/:courseId', checkPermission('courses', 'can_edit'), ctrl.getAuthorNotes);
+
 // Blocks CRUD
 router.get('/blocks/:blockId', checkPermission('courses', 'can_view'), ctrl.getBlock);
 router.post('/blocks', checkPermission('courses', 'can_edit'), ctrl.createBlock);

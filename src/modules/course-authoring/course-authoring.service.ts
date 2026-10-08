@@ -26,6 +26,8 @@ import {
 } from './lesson-author-components.logic.js';
 import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/lesson-author-component-registry.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
+import { COURSE_AUTHOR_NOTES_KEY, preserveAuthorNotesSql, readCourseAuthorNotes, withoutServerOwnedAuthorNotes,
+  type CourseAuthorNotesV1 } from './course-author-notes.logic.js';
 import { applyGeneratedUnitComponents, ComponentApplyError, type StoredComponentRow } from './lesson-author-component-apply.logic.js';
 import { getDefaultProblemXml, type CourseComponentLocale } from './course-authoring-problem-defaults.logic.js';
 import {
@@ -347,7 +349,8 @@ export async function createBlock(
   const defaultData = data ?? getDefaultData(blockType, boilerplate, locale);
   const defaultMetadata = {
     ...getDefaultMetadata(blockType, boilerplate),
-    ...(metadata ?? {}),
+    // AI ID author notes are written by Apply only, never by block creation.
+    ...(withoutServerOwnedAuthorNotes(metadata) ?? {}),
   };
 
   const result = await query<{ id: string }>(
@@ -767,6 +770,71 @@ export async function getBlockInfo(blockId: string, tenantId?: string | null): P
   return result.rows[0];
 }
 
+export interface CourseAuthorNotesBlock {
+  block_id: string;
+  parent_id: string | null;
+  block_type: string;
+  display_name: string;
+  notes: CourseAuthorNotesV1;
+}
+export interface CourseAuthorNotesView {
+  course_id: string;
+  course: { display_name: string; description: string | null; root_block_id: string | null };
+  blocks: CourseAuthorNotesBlock[];
+}
+/** Upper bound of blocks returned by one author-notes read. */
+export const COURSE_AUTHOR_NOTES_MAX_BLOCKS = 10_000;
+
+/**
+ * Author-only AI ID notes of one course (QC 364564, N6). The route requires
+ * `courses.can_edit`; this read is additionally tenant-bound and returns only
+ * the active (non-deleted) outline in presentation order. It never returns
+ * learner data, publish state or any other metadata key, and each stored
+ * value must pass the strict versioned reader to be shown.
+ */
+export async function getCourseAuthorNotes(courseId: string, tenantId: string): Promise<CourseAuthorNotesView> {
+  const course = await query<{ id: string; display_name: string; description: string | null }>(
+    `SELECT id, display_name, description FROM courses WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (course.rowCount === 0) throw new AppError('Course not found', 404);
+  const rows = await query<{ id: string; parent_id: string | null; block_type: string; display_name: string; notes: unknown }>(
+    `WITH RECURSIVE tree AS (
+       SELECT b.id, b.parent_id, b.block_type::text AS block_type, b.display_name, b.metadata,
+              ARRAY[b.sort_order, 0]::bigint[] AS path, b.id::text AS tie
+       FROM course_blocks b
+       WHERE b.course_id = $1 AND b.parent_id IS NULL AND b.block_type = 'course' AND b.deleted_at IS NULL
+       UNION ALL
+       SELECT child.id, child.parent_id, child.block_type::text, child.display_name, child.metadata,
+              tree.path || ARRAY[child.sort_order::bigint, 0], tree.tie || '/' || child.id::text
+       FROM course_blocks child JOIN tree ON child.parent_id = tree.id
+       WHERE child.course_id = $1 AND child.deleted_at IS NULL
+     )
+     SELECT id::text AS id, parent_id::text AS parent_id, block_type, display_name,
+            metadata->'${COURSE_AUTHOR_NOTES_KEY}' AS notes
+     FROM tree
+     WHERE jsonb_typeof(metadata) = 'object' AND metadata ? '${COURSE_AUTHOR_NOTES_KEY}'
+     ORDER BY path, tie
+     LIMIT ${COURSE_AUTHOR_NOTES_MAX_BLOCKS}`,
+    [courseId],
+  );
+  const root = await query<{ id: string }>(
+    `SELECT id::text AS id FROM course_blocks WHERE course_id = $1 AND parent_id IS NULL AND block_type = 'course' AND deleted_at IS NULL
+     ORDER BY created_at ASC LIMIT 1`,
+    [courseId],
+  );
+  const blocks = rows.rows.flatMap(row => {
+    const notes = readCourseAuthorNotes(row.notes);
+    return notes ? [{ block_id: row.id, parent_id: row.parent_id, block_type: row.block_type, display_name: row.display_name, notes }] : [];
+  });
+  return {
+    course_id: course.rows[0].id,
+    course: { display_name: course.rows[0].display_name, description: course.rows[0].description ?? null,
+      root_block_id: root.rows[0]?.id ?? null },
+    blocks,
+  };
+}
+
 /** Minimal, allowlist-safe course context for structured audit events. */
 export async function getCourseAuditContext(courseId: string): Promise<{ course_id: string; course_name: string }> {
   const result = await query<{ course_id: string; course_name: string }>(
@@ -803,8 +871,11 @@ export async function updateBlock(
     params.push(JSON.stringify(updates.data));
   }
   if (updates.metadata !== undefined) {
-    setClauses.push(`metadata = $${paramIdx++}`);
-    params.push(updates.metadata);
+    // Metadata PATCH replaces the editable keys (an outline rename sends only
+    // {display_name}), but AI ID author notes are server-owned: a browser can
+    // neither forge nor delete them, and the stored value is carried over.
+    setClauses.push(updates.metadata === null ? `metadata = $${paramIdx++}` : `metadata = ${preserveAuthorNotesSql(`$${paramIdx++}`)}`);
+    params.push(updates.metadata === null ? null : JSON.stringify(withoutServerOwnedAuthorNotes(updates.metadata)));
   }
   if (updates.is_published !== undefined) {
     setClauses.push(`is_published = $${paramIdx++}`);
