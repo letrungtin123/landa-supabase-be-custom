@@ -168,6 +168,48 @@ test('handles several periods: comparison with the previous period vs. a real ch
   assertResolved('năm 2025, từ tháng 3 đến tháng 5', range('2025-03-01', '2025-05-31'));
 });
 
+test('"cùng kỳ năm ngoái" means the same dates one year earlier, never the whole previous year', () => {
+  const wholeLastYear = range('2025-01-01', '2025-12-31');
+  // Year to date is compared by the report with the same dates last year: one report answers it.
+  for (const question of ['Lượt ghi danh năm nay so với cùng kỳ năm ngoái', 'Enrollments year to date vs the same period last year', 'từ đầu năm đến nay so với cùng kỳ']) {
+    const result = parse(question);
+    assert.equal(result.status, 'resolved', question);
+    assert.deepEqual(result.range, range('2026-01-01', '2026-10-08'), question);
+    assert.equal(result.compare, true, question);
+  }
+  assertResolved('năm 2025 so với cùng kỳ năm trước', range('2025-01-01', '2025-12-31'));
+  // A month is compared with the previous month: the user picks the month or the same month last year.
+  const july = parse('Báo cáo tháng 7 so với cùng kỳ năm ngoái');
+  assert.equal(july.issue, 'multiple_periods');
+  assert.deepEqual(july.alternatives, [range('2026-07-01', '2026-07-31'), range('2025-07-01', '2025-07-31')]);
+  const monthToDate = parse('tháng này so với cùng kỳ năm ngoái');
+  assert.deepEqual(monthToDate.alternatives, [range('2026-10-01', '2026-10-08'), range('2025-10-01', '2025-10-08')]);
+  const english = parse('Third quarter enrollments compared with the same period last year');
+  assert.deepEqual(english.alternatives, [range('2026-07-01', '2026-09-30'), range('2025-07-01', '2025-09-30')]);
+  assert.deepEqual(parse('July enrollments year over year').alternatives, [range('2026-07-01', '2026-07-31'), range('2025-07-01', '2025-07-31')]);
+  // Without a period there is nothing to shift: ask instead of guessing.
+  for (const question of ['Báo cáo học viên cùng kỳ năm ngoái', 'Learner report for the same period last year']) {
+    const alone = parse(question);
+    assert.equal(alone.issue, 'ambiguous_period', question);
+    assert.deepEqual(alone.alternatives, [range('2025-10-01', '2025-10-08'), range('2025-01-01', '2025-10-08')], question);
+  }
+  for (const question of ['Báo cáo tháng 7 so với cùng kỳ năm ngoái', 'Báo cáo học viên cùng kỳ năm ngoái', 'tháng này so với cùng kỳ năm ngoái']) {
+    const result = parse(question);
+    assert.ok(![result.range, ...result.alternatives, ...result.periods].some((candidate) => candidate && candidate.date_from === wholeLastYear.date_from && candidate.date_to === wholeLastYear.date_to), question);
+  }
+  // "Năm ngoái" alone is still the whole previous year.
+  assertResolved('báo cáo năm ngoái', wholeLastYear);
+});
+
+test('ranges suggested for a too-long period never end after today', () => {
+  const result = parse('từ 1/1/2025 đến 31/12/2026');
+  assert.equal(result.issue, 'range_too_long');
+  assert.deepEqual(result.alternatives, [range('2025-10-08', '2026-10-08'), range('2025-01-01', '2026-01-01')]);
+  assert.ok(result.alternatives.every((candidate) => candidate.date_to <= today));
+  assert.deepEqual(validateReportRange(range('2025-06-01', '2027-03-31'), { today }).alternatives, [range('2025-10-08', '2026-10-08'), range('2025-06-01', '2026-06-01')]);
+  assert.deepEqual(validateReportRange(range('2027-01-01', '2028-06-30'), { today }).alternatives, [], 'a period entirely after today offers nothing');
+});
+
 test('clamps the part of a period after today and records it', () => {
   const result = parse('báo cáo tháng 10');
   assert.deepEqual(result.range, range('2026-10-01', '2026-10-08'));

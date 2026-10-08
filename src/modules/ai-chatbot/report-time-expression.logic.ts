@@ -35,7 +35,9 @@ export type ReportTimeIssueCode =
   | 'range_too_long'
   | 'multiple_periods'
   | 'future_without_year'
-  | 'open_range';
+  | 'open_range'
+  /** "Cùng kỳ năm ngoái" with no period to take the dates from. */
+  | 'ambiguous_period';
 
 export interface ReportTimeParseResult {
   status: 'none' | 'resolved' | 'needs_clarification';
@@ -57,7 +59,7 @@ export interface ReportTimeParseResult {
   compare: boolean;
 }
 
-type MentionKind = 'date' | 'day_only' | 'month' | 'quarter' | 'half' | 'year' | 'relative' | 'day_span' | 'open_end';
+type MentionKind = 'date' | 'day_only' | 'month' | 'quarter' | 'half' | 'year' | 'relative' | 'day_span' | 'open_end' | 'same_period_last_year';
 type MentionDraft = Omit<Mention, 'start' | 'end'>;
 
 interface Mention {
@@ -190,6 +192,15 @@ function halfYearQualifier(word: string | undefined, context: ParseContext): num
 
 /** Priority order: earlier matchers own their span; later overlapping matches are ignored. */
 const MATCHERS: Matcher[] = [
+  {
+    // "Cùng kỳ (năm ngoái)", "same period last year", "year over year": the
+    // dates of the other period one year earlier, never the whole last year.
+    pattern: '\\bcung\\s+ky(?:\\s+(?:cua\\s+)?nam\\s+(?:ngoai|truoc|roi|vua\\s+qua|qua))?\\b'
+      + '|\\b(?:cung\\s+thoi\\s+(?:gian|diem)|(?:the\\s+)?same\\s+(?:period|time))\\s+(?:(?:cua|of|in)\\s+)?'
+      + '(?:nam\\s+(?:ngoai|truoc|roi|qua)|last\\s+year|a\\s+year\\s+(?:ago|earlier|before)|the\\s+(?:previous|prior)\\s+year|the\\s+year\\s+before)\\b'
+      + '|\\byear[\\s-]+(?:over|on)[\\s-]+year\\b|\\byoy\\b',
+    build: () => ({ kind: 'same_period_last_year', yearExplicit: false }),
+  },
   {
     pattern: `\\b(?:(nua\\s+dau|6\\s+thang\\s+dau|sau\\s+thang\\s+dau)|nua\\s+cuoi|6\\s+thang\\s+cuoi|sau\\s+thang\\s+cuoi)\\s+nam(?:\\s+(nay|ngoai|truoc|roi))?\\b(?:\\s*,?\\s*(?:nam\\s+)?${YEAR})?`,
     build: (match, context) => {
@@ -578,8 +589,12 @@ export function clampReportRangeToToday(range: ReportDateRangeYmd, today: string
   return clampToToday(range, today).range;
 }
 
-/** Deterministic validation shared by the parser, the model output and UI filters. */
-export function validateReportRange(range: ReportDateRangeYmd): {
+/**
+ * Deterministic validation shared by the parser, the model output and UI
+ * filters. With `today` (Asia/Ho_Chi_Minh), the ranges suggested for a
+ * too-long period never end after it: there is no data after today.
+ */
+export function validateReportRange(range: ReportDateRangeYmd, options: { today?: string } = {}): {
   issue: Extract<ReportTimeIssueCode, 'reversed_range' | 'range_too_long' | 'invalid_date'> | null;
   alternatives: ReportDateRangeYmd[];
 } {
@@ -589,12 +604,15 @@ export function validateReportRange(range: ReportDateRangeYmd): {
     return { issue: 'reversed_range', alternatives: dayCountBetween(swapped.date_from, swapped.date_to) <= MAX_REPORT_RANGE_DAYS ? [swapped] : [] };
   }
   if (dayCountBetween(range.date_from, range.date_to) > MAX_REPORT_RANGE_DAYS) {
+    const end = options.today && range.date_to > options.today ? options.today : range.date_to;
+    const latest = addDays(end, -(MAX_REPORT_RANGE_DAYS - 1));
+    const earliestEnd = addDays(range.date_from, MAX_REPORT_RANGE_DAYS - 1);
     return {
       issue: 'range_too_long',
-      alternatives: [
-        { date_from: addDays(range.date_to, -(MAX_REPORT_RANGE_DAYS - 1)), date_to: range.date_to },
-        { date_from: range.date_from, date_to: addDays(range.date_from, MAX_REPORT_RANGE_DAYS - 1) },
-      ],
+      alternatives: uniqueReportRanges([
+        { date_from: latest > range.date_from ? latest : range.date_from, date_to: end },
+        { date_from: range.date_from, date_to: earliestEnd < end ? earliestEnd : end },
+      ]).filter((candidate) => candidate.date_from <= candidate.date_to),
     };
   }
   return { issue: null, alternatives: [] };
@@ -614,6 +632,14 @@ function clarification(base: ParseBase, issue: ReportTimeIssueCode, alternatives
   return { ...base, status: 'needs_clarification', issue, alternatives: uniqueReportRanges(alternatives), range: null, confidence: 'medium' };
 }
 
+/** "Cùng kỳ năm ngoái" alone: this month so far or this year so far, one year earlier. */
+function samePeriodWithoutAnchor(today: string): ReportDateRangeYmd[] {
+  return [
+    shiftRangeYears({ date_from: `${today.slice(0, 8)}01`, date_to: today }, -1),
+    shiftRangeYears({ date_from: formatYmd(Number(today.slice(0, 4)), 1, 1), date_to: today }, -1),
+  ];
+}
+
 function openRangeAlternatives(today: string): ReportDateRangeYmd[] {
   return [
     { date_from: formatYmd(Number(today.slice(0, 4)), 1, 1), date_to: today },
@@ -628,8 +654,9 @@ export function parseReportTimeExpression(question: string, options: { today: st
   const context: ParseContext = { today: options.today, todayYear: todayParts.year, todayMonth: todayParts.month };
   const text = foldReportText(question);
   const granularity = detectGranularity(text);
-  const compare = hasReportCompareCue(question);
-  const mentions = collectMentions(text, context);
+  const all = collectMentions(text, context);
+  const samePeriodLastYear = all.some((mention) => mention.kind === 'same_period_last_year');
+  const mentions = all.filter((mention) => mention.kind !== 'same_period_last_year');
   const { periods: drafts, loneOpenEnd } = assemblePeriods(mentions, text);
   const base: ParseBase = {
     explicit_year: mentions.some((mention) => mention.yearExplicit),
@@ -637,10 +664,11 @@ export function parseReportTimeExpression(question: string, options: { today: st
     clamped_to_today: false,
     periods: [],
     granularity,
-    compare,
+    compare: hasReportCompareCue(question) || samePeriodLastYear,
   };
   if (loneOpenEnd) return clarification(base, 'open_range', openRangeAlternatives(options.today));
   if (drafts.length === 0) {
+    if (samePeriodLastYear) return clarification(base, 'ambiguous_period', samePeriodWithoutAnchor(options.today));
     return { ...base, status: 'none', range: null, confidence: 'none', issue: null, alternatives: [] };
   }
 
@@ -653,8 +681,10 @@ export function parseReportTimeExpression(question: string, options: { today: st
 
   let primary = resolved[0];
   if (base.periods.length > 1) {
+    // "Tháng 6 và tháng 7 so với cùng kỳ năm ngoái": no single period to shift.
+    if (samePeriodLastYear) return clarification(base, 'multiple_periods', base.periods);
     const [earlier, later] = [...base.periods].sort((left, right) => left.date_from.localeCompare(right.date_from));
-    const comparison = base.periods.length === 2 && compare && earlier.date_to < later.date_from
+    const comparison = base.periods.length === 2 && base.compare && earlier.date_to < later.date_from
       ? resolveComparableReportPeriod(later.date_from, later.date_to)
       : null;
     // The snapshot always compares with the period before it; a requested
@@ -672,7 +702,7 @@ export function parseReportTimeExpression(question: string, options: { today: st
   }
 
   const range = primary.range!;
-  const validation = validateReportRange(range);
+  const validation = validateReportRange(range, { today: options.today });
   if (validation.issue) return clarification(base, validation.issue, validation.alternatives);
 
   if (primary.yearInferred && range.date_from > options.today) {
@@ -680,6 +710,17 @@ export function parseReportTimeExpression(question: string, options: { today: st
   }
 
   const clamped = clampToToday(range, options.today);
+  if (samePeriodLastYear) {
+    // A report compares its period with the comparison period it derives
+    // itself. Only when that IS the same dates one year earlier (year to
+    // date, a calendar year) does the question fit one report; otherwise the
+    // user chooses between the period and the same dates last year.
+    const lastYear = shiftRangeYears(clamped.range, -1);
+    const comparison = resolveComparableReportPeriod(clamped.range.date_from, clamped.range.date_to);
+    if (!sameRange(comparison, lastYear)) {
+      return clarification({ ...base, periods: [clamped.range, lastYear] }, 'multiple_periods', [clamped.range, lastYear]);
+    }
+  }
   const alternative = primary.alternative ? clampToToday(primary.alternative, options.today).range : null;
   return {
     ...base,

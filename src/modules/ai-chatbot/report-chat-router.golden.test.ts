@@ -75,6 +75,13 @@ const CASES: GoldenCase[] = [
   { q: 'Báo cáo học viên tháng 5 và tháng 7', model: m('2026-05-01', '2026-07-31'), expect: { kind: 'clarification', reasons: ['date_multiple'], options: [r('2026-05-01', '2026-05-31'), r('2026-07-01', '2026-07-31'), r('2026-05-01', '2026-07-31')] } },
   { q: 'So sánh lượt ghi danh tháng 6 với tháng 5', model: m('2026-06-01', '2026-06-30', { compare: true }), expect: { kind: 'snapshot', filter: r('2026-06-01', '2026-06-30'), compare: true } },
   { q: 'Báo cáo học viên ngày 31/2', model: m(), expect: { kind: 'clarification', reasons: ['date_invalid'], options: [r('2026-02-28', '2026-02-28')] } },
+  // "Cùng kỳ năm ngoái" = the same dates one year earlier (never the whole of last year)
+  { q: 'Lượt ghi danh năm nay so với cùng kỳ năm ngoái', model: m('2026-01-01', '2026-10-08', { compare: true }), expect: { kind: 'snapshot', filter: r('2026-01-01', '2026-10-08'), compare: true } },
+  { q: 'Báo cáo học viên tháng 7 so với cùng kỳ năm ngoái', model: m('2025-07-01', '2025-07-31', { compare: true }), expect: { kind: 'clarification', reasons: ['date_multiple'], options: [r('2026-07-01', '2026-07-31'), r('2025-07-01', '2025-07-31')] } },
+  { q: 'Báo cáo học viên cùng kỳ năm ngoái', model: m('2025-01-01', '2025-12-31'), expect: { kind: 'clarification', reasons: ['date_conflict'], options: [r('2025-10-01', '2025-10-08'), r('2025-01-01', '2025-10-08')] } },
+  { q: 'Learner report for the same period last year', locale: 'en', model: m('2025-10-01', '2025-10-31'), expect: { kind: 'clarification', reasons: ['date_conflict'], options: [r('2025-10-01', '2025-10-08'), r('2025-01-01', '2025-10-08')] } },
+  // Suggestions for a too-long period end today at the latest
+  { q: 'Báo cáo học viên từ 1/1/2025 đến 31/12/2026', model: m('2025-01-01', '2026-12-31'), expect: { kind: 'clarification', reasons: ['date_too_long'], options: [r('2025-10-08', '2026-10-08'), r('2025-01-01', '2026-01-01')] } },
   // English dates
   { q: 'Report learners for July 2025', locale: 'en', model: m('2025-07-01', '2025-07-31'), expect: { kind: 'snapshot', filter: r('2025-07-01', '2025-07-31') } },
   { q: 'How many learners enrolled between July 1 and July 31, 2025?', locale: 'en', model: m('2025-07-01', '2025-07-31'), expect: { kind: 'snapshot', filter: r('2025-07-01', '2025-07-31') } },

@@ -170,11 +170,13 @@ const ISSUE_REASONS: Record<ReportTimeIssueCode, ReportClarificationReason> = {
   multiple_periods: 'date_multiple',
   future_without_year: 'date_future',
   open_range: 'date_open',
+  // "Cùng kỳ năm ngoái" without a period: two readings are offered.
+  ambiguous_period: 'date_conflict',
 };
 
-function validated(outcome: PeriodOutcome): PeriodOutcome {
+function validated(outcome: PeriodOutcome, today: string): PeriodOutcome {
   if (outcome.kind !== 'resolved' || !outcome.range) return outcome;
-  const validation = validateReportRange(outcome.range);
+  const validation = validateReportRange(outcome.range, { today });
   return validation.issue
     ? { kind: 'clarify', reason: ISSUE_REASONS[validation.issue], options: validation.alternatives }
     : outcome;
@@ -194,17 +196,17 @@ export function reconcileReportPeriod(parse: ReportTimeParseResult, model: Repor
       ? parse.alternatives.find((candidate) => candidate.date_from <= today
         && sameRange(candidate, clampReportRangeToToday(modelRange, today)))
       : null;
-    if (agreedAlternative) return validated({ kind: 'resolved', range: agreedAlternative, source: 'agreed', clamped: false });
+    if (agreedAlternative) return validated({ kind: 'resolved', range: agreedAlternative, source: 'agreed', clamped: false }, today);
     return { kind: 'clarify', reason: ISSUE_REASONS[parse.issue!], options: parse.alternatives };
   }
   if (parse.status === 'resolved' && parse.range) {
-    if (!modelRange) return validated({ kind: 'resolved', range: parse.range, source: 'parser', clamped: parse.clamped_to_today });
+    if (!modelRange) return validated({ kind: 'resolved', range: parse.range, source: 'parser', clamped: parse.clamped_to_today }, today);
     if (reportRangesAgree(parse.range, modelRange, today, parse.year_inferred && !parse.explicit_year)) {
-      return validated({ kind: 'resolved', range: parse.range, source: 'agreed', clamped: parse.clamped_to_today });
+      return validated({ kind: 'resolved', range: parse.range, source: 'agreed', clamped: parse.clamped_to_today }, today);
     }
     const modelClamped = clampReportRangeToToday(modelRange, today);
     const alternative = parse.alternatives.find((candidate) => sameRange(candidate, modelClamped));
-    if (alternative) return validated({ kind: 'resolved', range: alternative, source: 'agreed', clamped: false });
+    if (alternative) return validated({ kind: 'resolved', range: alternative, source: 'agreed', clamped: false }, today);
     return { kind: 'clarify', reason: 'date_conflict', options: [parse.range, modelClamped] };
   }
   if (!modelRange) return { kind: 'resolved', range: null, source: 'default', clamped: false };
@@ -221,7 +223,7 @@ export function reconcileReportPeriod(parse: ReportTimeParseResult, model: Repor
       : [clamped];
     return { kind: 'clarify', reason: 'date_conflict', options };
   }
-  return validated({ kind: 'resolved', range: clamped, source: 'model', clamped: !sameRange(clamped, modelRange) });
+  return validated({ kind: 'resolved', range: clamped, source: 'model', clamped: !sameRange(clamped, modelRange) }, today);
 }
 
 interface UnitChoice {
