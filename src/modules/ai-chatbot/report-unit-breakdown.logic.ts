@@ -359,7 +359,14 @@ export async function buildReportUnitBreakdownSection(input: {
   if (plan.kind === 'leaf_scope') return { unit_breakdown_status: 'leaf_scope' };
   if (plan.kind === 'not_permitted') return { unit_breakdown_status: 'not_computed' };
   const limit = clampReportUnitBreakdownLimit(input.limit);
-  const rows = await input.load({ tenantId: input.tenantId, plan, range: input.range, previousRange: input.previousRange, limit });
+  let rows: ReportUnitBreakdownQueryRow[];
+  try {
+    rows = await input.load({ tenantId: input.tenantId, plan, range: input.range, previousRange: input.previousRange, limit });
+  } catch (error) {
+    // The breakdown is optional: a failed or timed-out query must not take the whole report down.
+    console.warn('[ReportChat] unit breakdown not computed:', error instanceof Error ? error.message : String(error));
+    return { unit_breakdown_status: 'not_computed' };
+  }
   const breakdown = toReportUnitBreakdown(rows, plan.level, limit);
   return breakdown ? { unit_breakdown: breakdown, unit_breakdown_status: 'available' } : { unit_breakdown_status: 'no_child_units' };
 }

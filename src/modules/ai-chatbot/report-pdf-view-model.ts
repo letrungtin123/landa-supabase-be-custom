@@ -312,7 +312,10 @@ function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, 
       : insights.unitBreakdownState === 'no_child_units' ? o.noChildUnits : null;
     return { level: null, rows: [], unitCountLabel: null, note, footnotes: [] };
   }
-  const rates = units.rows.map((row) => row.completionRate);
+  // The colour scale spans real units only: an "others" or "not in any unit" row at 0 % must not
+  // wash out the differences between units.
+  const unitRates = units.rows.filter((row) => row.kind === 'unit').map((row) => row.completionRate);
+  const rates = unitRates.length > 0 ? unitRates : units.rows.map((row) => row.completionRate);
   const min = Math.min(...rates);
   const max = Math.max(...rates);
   const n = (value: number) => formatReportNumber(value, locale);
@@ -337,7 +340,7 @@ function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, 
       rateLabel: formatReportPercent(row.completionRate, locale),
       deltaLabel: row.deltaPp === null ? dict.courses.notAvailable : `${formatReportSignedNumber(row.deltaPp, locale, 1)} ${dict.units.pp}`,
       deltaTone: row.deltaPp === null || Math.abs(row.deltaPp) < REPORT_INSIGHT_THRESHOLDS.stableRateDeltaPp ? 'neutral' : row.deltaPp > 0 ? 'positive' : 'negative',
-      heat: max > min ? (row.completionRate - min) / (max - min) : 0.5,
+      heat: max > min ? Math.min(1, Math.max(0, (row.completionRate - min) / (max - min))) : 0.5,
       aggregate: row.kind !== 'unit',
     })),
   };

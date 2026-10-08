@@ -738,3 +738,17 @@ test('stores the breakdown and the comparison series as additive V2 snapshot fie
   const leaf = buildReportSnapshotExtensions({ unitBreakdown: { unit_breakdown_status: 'leaf_scope' } });
   assert.deepEqual(leaf, { unit_breakdown_status: 'leaf_scope' });
 });
+
+test('a failing breakdown query leaves the report without a breakdown instead of failing it', async () => {
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    const section = await buildReportUnitBreakdownSection({
+      tenantId: TENANT, range, previousRange, scope: scope({}),
+      load: async () => { throw new Error('canceling statement due to statement timeout'); },
+    });
+    assert.deepEqual(section, { unit_breakdown_status: 'not_computed' });
+  } finally {
+    console.warn = warn;
+  }
+});
