@@ -4,6 +4,7 @@ import { buildReportInsights } from './report-insights.logic.js';
 import {
   buildReportPdfAiNarrativeRequest,
   buildRuleBasedReportNarrative,
+  describeReportFact,
   extractReportNarrativeNumbers,
   mergeStoredChatNarrative,
   toReportPdfAiNarrative,
@@ -11,6 +12,7 @@ import {
   type ReportPdfNarrative,
 } from './report-pdf-narrative.logic.js';
 import { allReportPdfFixtures, englishReportFixture, vietnameseReportFixture } from './report-pdf.fixture.js';
+import { composeReportPdfDocument } from './report-pdf.service.js';
 
 const clone = (narrative: ReportPdfNarrative): ReportPdfNarrative => structuredClone(narrative);
 
@@ -23,6 +25,26 @@ test('rule-based narratives of every fixture pass the number validator in both l
       assert.deepEqual(validation.issues, [], `${fixture.name}/${locale}`);
       assert.ok(narrative.recommendations.length >= 1, `${fixture.name}/${locale} has recommendations`);
       if (insights.available) assert.ok(narrative.findings.length >= 3, `${fixture.name}/${locale} has 3+ findings`);
+    }
+  }
+});
+
+test('every fact statement sent to Gemini passes the validator when quoted verbatim', () => {
+  for (const fixture of allReportPdfFixtures()) {
+    for (const locale of ['vi', 'en'] as const) {
+      const insights = buildReportInsights(fixture.snapshot);
+      const rules = buildRuleBasedReportNarrative(insights, locale);
+      for (const fact of insights.facts.filter((candidate) => candidate.kind !== 'context')) {
+        const statement = describeReportFact(fact, insights, locale);
+        if (!statement) continue;
+        for (const section of ['findings', 'risks'] as const) {
+          const narrative = clone(rules);
+          const item = { text: statement, factIds: [fact.id], tone: fact.tone };
+          if (section === 'findings') narrative.findings[0] = item;
+          else narrative.risks = [item];
+          assert.deepEqual(validateReportPdfNarrative(narrative, insights, locale).issues, [], `${fixture.name}/${locale}/${fact.id}: ${statement}`);
+        }
+      }
     }
   }
 });
@@ -46,6 +68,98 @@ test('writes the English narrative with English number formats', () => {
 test('extracts numbers in the locale format', () => {
   assert.deepEqual(extractReportNarrativeNumbers('Đạt 1.234,5 lượt, 53,7% và năm 2026 ({{C12}})', 'vi').map((item) => [item.value, item.decimals]), [[1234.5, 1], [53.7, 1], [2026, 0]]);
   assert.deepEqual(extractReportNarrativeNumbers('Reached 1,234.5 and 53.7% in 2026', 'en').map((item) => item.value), [1234.5, 53.7, 2026]);
+});
+
+test('reads the sign and the unit written with each number', () => {
+  const read = (text: string, locale: 'vi' | 'en') => extractReportNarrativeNumbers(text, locale).map((item) => [item.raw, item.sign, item.unit]);
+  assert.deepEqual(read('giảm −3,7 điểm %, đạt 61,8% với (+53) lượt, 12 phần trăm', 'vi'), [['3,7', -1, 'pp'], ['61,8', null, 'percent'], ['53', 1, 'count'], ['12', null, 'percent']]);
+  assert.deepEqual(read('down -5.3 pp, 4 percentage points, 52.1 percent, 01/07/2026-31/07/2026', 'en'), [
+    ['5.3', -1, 'pp'], ['4', null, 'pp'], ['52.1', null, 'percent'], ['01', null, 'count'], ['07', null, 'count'], ['2026', null, 'count'], ['31', null, 'count'], ['07', null, 'count'], ['2026', null, 'count'],
+  ]);
+});
+
+/** Vietnamese fixture with the completion rate exactly 5 pp above the comparison period. */
+function fivePointRiseInsights() {
+  const snapshot = structuredClone(vietnameseReportFixture().snapshot);
+  if (snapshot.version !== 2) throw new Error('expected a v2 fixture');
+  snapshot.previous_summary.overview.completion_rate = snapshot.summary.overview.completion_rate - 5;
+  return buildReportInsights(snapshot);
+}
+
+function withFinding(narrative: ReportPdfNarrative, text: string, factIds: string[]): ReportPdfNarrative {
+  const copy = clone(narrative);
+  copy.findings[0] = { ...copy.findings[0], text, factIds };
+  return copy;
+}
+
+test('rejects a direction word that contradicts the sign of the cited change ("fell 5 pp" vs +5 pp)', () => {
+  const insights = fivePointRiseInsights();
+  assert.equal(insights.kpis.find((kpi) => kpi.id === 'completion_rate')?.delta, 5);
+  const cite = ['kpi.completion_rate'];
+  const en = buildRuleBasedReportNarrative(insights, 'en');
+  const enIssues = (text: string) => validateReportPdfNarrative(withFinding(en, text, cite), insights, 'en').issues;
+  assert.deepEqual(validateReportPdfNarrative(en, insights, 'en').issues, []);
+  assert.ok(enIssues('The completion rate fell 5 pp vs the previous month.').includes('findings[0]: direction_mismatch:5'));
+  assert.ok(enIssues('The completion rate dropped by 5 percentage points.').includes('findings[0]: direction_mismatch:5'));
+  assert.ok(enIssues('The completion rate was down 5 pp on the previous month.').includes('findings[0]: direction_mismatch:5'));
+  assert.ok(enIssues('The completion rate changed by −5 pp.').includes('findings[0]: number_sign_mismatch:5'));
+  assert.ok(enIssues('The completion rate fell compared with the previous month.').includes('findings[0]: direction_mismatch'), 'a direction without a number is checked too');
+  assert.deepEqual(enIssues('The completion rate rose 5 pp to 61.8%.'), []);
+  assert.deepEqual(enIssues('The completion rate reached 61.8%, +5 pp on the previous month.'), []);
+  assert.deepEqual(enIssues('The completion rate was 61.8%, 5 pp higher than in the previous month.'), []);
+
+  const vi = buildRuleBasedReportNarrative(insights, 'vi');
+  const viIssues = (text: string) => validateReportPdfNarrative(withFinding(vi, text, cite), insights, 'vi').issues;
+  assert.deepEqual(validateReportPdfNarrative(vi, insights, 'vi').issues, []);
+  assert.ok(viIssues('Tỉ lệ hoàn thành giảm 5 điểm % so với tháng trước.').includes('findings[0]: direction_mismatch:5'));
+  assert.ok(viIssues('Tỉ lệ hoàn thành giảm xuống 61,8%.').includes('findings[0]: direction_mismatch:61,8'), 'a level cannot be reached by the wrong direction');
+  assert.ok(viIssues('Tỉ lệ hoàn thành thấp hơn tháng trước.').includes('findings[0]: direction_mismatch'));
+  assert.deepEqual(viIssues('Tỉ lệ hoàn thành tăng 5 điểm %, lên 61,8%.'), []);
+  assert.deepEqual(viIssues('Tỉ lệ hoàn thành tăng từ 56,8% lên 61,8%.'), []);
+});
+
+test('checks each direction against its own change when a sentence cites a rise and a fall', () => {
+  const insights = buildReportInsights(englishReportFixture().snapshot);
+  const rules = buildRuleBasedReportNarrative(insights, 'en');
+  const cite = ['kpi.total_enrollments', 'kpi.completion_rate'];
+  const issues = (text: string) => validateReportPdfNarrative(withFinding(rules, text, cite), insights, 'en').issues;
+  // English fixture: enrollments +124 (+34.3%), completion -5.3 pp (57.4% -> 52.1%).
+  assert.deepEqual(issues('Enrollments rose 34.3% while the completion rate fell 5.3 pp to 52.1%.'), []);
+  assert.deepEqual(issues('Although enrollments rose by 124, completion fell to 52.1%.'), []);
+  assert.ok(issues('Enrollments fell 34.3% while the completion rate rose 5.3 pp.').includes('findings[0]: direction_mismatch:34.3'));
+  assert.ok(issues('Enrollments fell 34.3% while the completion rate rose 5.3 pp.').includes('findings[0]: direction_mismatch:5.3'));
+});
+
+test('rejects a count quoted as a percentage and a percentage quoted as a count', () => {
+  const insights = buildReportInsights(vietnameseReportFixture().snapshot);
+  const vi = buildRuleBasedReportNarrative(insights, 'vi');
+  const issues = (text: string, factIds: string[]) => validateReportPdfNarrative(withFinding(vi, text, factIds), insights, 'vi').issues;
+  assert.ok(issues('Lượt ghi danh đạt 315% trong kỳ.', ['kpi.total_enrollments']).includes('findings[0]: number_unit_mismatch:315'));
+  assert.ok(issues('Tỉ lệ hoàn thành đạt 61,8 lượt.', ['kpi.completion_rate']).includes('findings[0]: number_unit_mismatch:61,8'));
+  assert.ok(issues('Lượt ghi danh tăng 20,2 điểm %.', ['kpi.total_enrollments']).includes('findings[0]: number_unit_mismatch:20,2'), 'a relative change is not a percentage-point change');
+  assert.deepEqual(issues('Lượt ghi danh đạt 315, tăng 20,2% so với tháng trước.', ['kpi.total_enrollments']), []);
+  assert.deepEqual(issues('Tỉ lệ hoàn thành tăng 3,7% so với tháng trước.', ['kpi.completion_rate']), [], 'a "%" may quote a percentage-point field');
+  const en = buildRuleBasedReportNarrative(insights, 'en');
+  assert.ok(validateReportPdfNarrative(withFinding(en, 'Enrollments reached 315 percent.', ['kpi.total_enrollments']), insights, 'en').issues
+    .includes('findings[0]: number_unit_mismatch:315'));
+});
+
+test('a narrative that fails the sign or unit check falls back to the rule-based narrative', async () => {
+  const fixture = vietnameseReportFixture();
+  const insights = buildReportInsights(fixture.snapshot);
+  const rules = buildRuleBasedReportNarrative(insights, 'vi');
+  const wrong = withFinding({ ...rules, source: 'ai' }, 'Tỉ lệ hoàn thành giảm 3,7 điểm % so với tháng trước.', ['kpi.completion_rate']);
+  const composed = await composeReportPdfDocument({
+    snapshot: fixture.snapshot, snapshotHash: fixture.snapshotHash, locale: 'vi', tenant: { name: fixture.tenantName, logoDataUri: null },
+    writeAiNarrative: async () => wrong,
+  });
+  assert.equal(composed.narrative.source, 'rules');
+  const right = withFinding({ ...rules, source: 'ai' }, 'Tỉ lệ hoàn thành tăng 3,7 điểm % so với tháng trước.', ['kpi.completion_rate']);
+  const accepted = await composeReportPdfDocument({
+    snapshot: fixture.snapshot, snapshotHash: fixture.snapshotHash, locale: 'vi', tenant: { name: fixture.tenantName, logoDataUri: null },
+    writeAiNarrative: async () => right,
+  });
+  assert.equal(accepted.narrative.source, 'ai');
 });
 
 test('rejects a narrative with an invented or wrongly formatted number', () => {

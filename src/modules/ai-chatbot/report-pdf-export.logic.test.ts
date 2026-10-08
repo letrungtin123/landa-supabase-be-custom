@@ -358,6 +358,11 @@ test('the AI narrative writer accounts tokens and only returns validated narrati
   assert.equal(calls.finalize, 2, 'tokens are still accounted');
   assert.ok(logs.some((event) => event.outcome === 'rejected' && event.reason === 'validation'));
 
+  // The fixture's completion rate rose 3.7 pp: claiming a fall rejects the narrative (rule-based is used).
+  const contradicted = await createReportPdfAiNarrativeWriter(context, deps(async () => toAi('Kỳ báo cáo có 315 lượt ghi danh; tỉ lệ hoàn thành giảm 3,7 điểm %.')))(insights, 'vi');
+  assert.equal(contradicted, null);
+  assert.ok(logs.some((event) => event.reason === 'validation' && (event.issues as string[]).includes('headline: direction_mismatch')));
+
   const failed = await createReportPdfAiNarrativeWriter(context, deps(async () => { throw Object.assign(new Error('timeout'), { code: 'ABORT_ERR' }); }))(insights, 'vi');
   assert.equal(failed, null);
   assert.equal(calls.release, 1, 'the reservation is released when the provider call fails');
