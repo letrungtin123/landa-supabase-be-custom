@@ -5,6 +5,7 @@ import {
   WORKSPACE_CONTRACT_VERSION, WORKSPACE_EVENT_PAGE_SIZE, WorkspaceContractError,
 } from './lesson-author-workspace.logic.js';
 import { buildWorkspaceArchitecturePreview } from './lesson-author-workspace-preview.logic.js';
+import { readIdmAuthorGuidance } from './lesson-author-idm-guidance.logic.js';
 
 export interface WorkspaceReadOwner {
   tenantId: string;
@@ -350,7 +351,13 @@ export function createWorkspaceReadRepository(deps: {
           CASE WHEN n.kind='component' THEN n.protected_contract->'metadata'->'author_review' END AS author_review,
           CASE WHEN n.kind='media_brief' THEN n.protected_contract->>'media_type' END AS media_type,
           r.content,r.content_hash,r.user_modified,r.validation_contract,
-          quality.content_origin,quality.quality_state
+          quality.content_origin,quality.quality_state,
+          CASE WHEN n.kind='course' THEN (
+            SELECT a.payload->'idm' FROM lesson_author_workspace_v2_artifacts a
+            WHERE a.workspace_id=n.workspace_id AND a.tenant_id=n.tenant_id AND a.course_id=n.course_id
+              AND a.artifact_kind='course_skeleton'
+            ORDER BY a.created_at DESC,a.id DESC LIMIT 1
+          ) END AS idm_design
         FROM owned w LEFT JOIN lesson_author_workspace_nodes n ON n.workspace_id=w.id
           AND n.tenant_id=w.tenant_id AND n.course_id=w.course_id AND n.id=$6
         LEFT JOIN lesson_author_workspace_revisions r ON r.workspace_id=n.workspace_id
@@ -398,11 +405,15 @@ export function createWorkspaceReadRepository(deps: {
         }
         authorReview = output;
       }
+      const kind = enumeration(row.kind, KINDS);
       return { ...workspace(row), node_id: id(row.node_id), parent_id: row.parent_id === null ? null : id(row.parent_id),
-        kind: enumeration(row.kind, KINDS), content_state: state, current_revision: revision,
+        kind, content_state: state, current_revision: revision,
         content, component_type: componentType, media_type: mediaType, user_modified: revision !== null ? row.user_modified as boolean : false,
         validation_contract: revision !== null ? row.validation_contract as string : null,
-        author_review: authorReview, content_origin: contentOrigin, quality_state: qualityState };
+        author_review: authorReview, content_origin: contentOrigin, quality_state: qualityState,
+        // Additive (QC course 234653, R3/R4): Hold / pending objectives / Nice to know of an IDM run,
+        // derived from the stored course design; null for other nodes and legacy runs.
+        idm_guidance: kind === 'course' ? readIdmAuthorGuidance(row.idm_design) : null };
     },
   };
 }

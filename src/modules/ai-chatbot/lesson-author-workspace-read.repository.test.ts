@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
 import { createWorkspaceReadRepository, type WorkspaceReadOwner } from './lesson-author-workspace-read.repository.js';
+import { readIdmAuthorGuidance } from './lesson-author-idm-guidance.logic.js';
+import { idmFixture } from './lesson-author-idm.fixture.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const workspaceId = uuid(1), nodeId = uuid(2);
@@ -229,6 +231,27 @@ test('invalid event kind or revision identity fails closed', async () => {
     const f = fixture({ ...common, event_head: '1', first_sequence: '1', events: [{ ...event(1), ...change }] });
     await assert.rejects(f.repo.events(owner, workspaceId, 0), code('WORKSPACE_READ_CONTRACT_INVALID'));
   }
+});
+
+test('course detail of an IDM run carries the Hold / Nice to know guidance; other nodes and legacy runs do not', async () => {
+  // QC course 234653 (R3/R4): derived on read from the stored course design, never persisted or hashed.
+  const design = idmFixture().design;
+  const course = { ...detail(), kind: 'course', parent_id: null, idm_design: JSON.parse(JSON.stringify(design)) };
+  const f = fixture(course);
+  const view = await f.repo.detail(owner, workspaceId, nodeId, 1);
+  assert.deepEqual(view.idm_guidance, readIdmAuthorGuidance(design));
+  assert.equal(view.idm_guidance?.hold_items[0]?.sme_question, 'Quy định nào đang áp dụng?');
+  assert.equal(view.idm_guidance?.nice_to_know.length, 1);
+  assert.match(f.calls.at(-1)!.sql, /CASE WHEN n\.kind='course' THEN \(\s*SELECT a\.payload->'idm'/);
+  assert.match(f.calls.at(-1)!.sql, /a\.artifact_kind='course_skeleton'/);
+  f.row({ ...course, idm_design: null });
+  assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).idm_guidance, null);
+  f.row({ ...course, idm_design: { ...JSON.parse(JSON.stringify(design)), design_hash: '0'.repeat(64) } });
+  assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).idm_guidance, null);
+  f.row({ ...detail(), idm_design: JSON.parse(JSON.stringify(design)) });
+  assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).idm_guidance, null);
+  f.row(detail());
+  assert.equal((await f.repo.detail(owner, workspaceId, nodeId, 1)).idm_guidance, null);
 });
 
 test('detail is exact requested revision, hash checked, detached and without protected provenance', async () => {
