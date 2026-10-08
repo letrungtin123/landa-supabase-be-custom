@@ -72,22 +72,37 @@ function peakMarker(input: { x: number; y: number; label: string; width: number 
     + `<text class="peak-text" x="${num(boxX + boxWidth / 2)}" y="${num(boxY + 12)}" text-anchor="middle">${escapeHtml(input.label)}</text>`;
 }
 
+/**
+ * Comparison series aligned with the current one by bucket index (day 1 with
+ * day 1...): points past the current series' length are not drawn.
+ */
+function alignedPreviousValues(input: Pick<TrendChartInput, 'values' | 'previousValues'>): number[] {
+  return (input.previousValues ?? []).slice(0, input.values.length).map((value) => (Number.isFinite(value) ? value : 0));
+}
+
+/** Dashed comparison line: one point per bucket, or a level line for a single bucket. */
+function previousSeries(values: number[], xFor: (index: number) => number, yFor: (value: number) => number, width: number): string {
+  if (values.length === 1) return referenceLine({ value: values[0], width, yFor, className: 'line-previous' });
+  return values.length > 1
+    ? `<path class="line-previous" d="${values.map((value, index) => `${index ? 'L' : 'M'}${num(xFor(index))} ${num(yFor(value))}`).join(' ')}"/>` : '';
+}
+
 /** Area/line chart of the current period with the comparison series or average. */
 export function renderAreaTrendChart(input: TrendChartInput): SafeHtml {
   const width = input.width ?? 672;
   const height = input.height ?? 230;
   const plotWidth = width - PAD.left - PAD.right;
   const plotHeight = height - PAD.top - PAD.bottom;
-  const all = [...input.values, ...(input.previousValues ?? []), input.previousAverage ?? 0, input.average];
+  const previousValues = alignedPreviousValues(input);
+  const all = [...input.values, ...previousValues, input.previousAverage ?? 0, input.average];
   const scale = niceReportChartScale(Math.max(...all));
-  const xFor = (index: number, size = input.values.length) => PAD.left + (size <= 1 ? plotWidth / 2 : (index * plotWidth) / (size - 1));
+  const xFor = (index: number) => PAD.left + (input.values.length <= 1 ? plotWidth / 2 : (index * plotWidth) / (input.values.length - 1));
   const yFor = (value: number) => PAD.top + plotHeight - (value / scale.max) * plotHeight;
   const points = input.values.map((value, index) => [xFor(index), yFor(value)] as const);
   const line = points.map(([x, y], index) => `${index ? 'L' : 'M'}${num(x)} ${num(y)}`).join(' ');
   const area = points.length > 1
     ? `<path class="area" d="${line} L${num(points.at(-1)![0])} ${num(yFor(0))} L${num(points[0][0])} ${num(yFor(0))} Z"/>` : '';
-  const previous = input.previousValues && input.previousValues.length > 1
-    ? `<path class="line-previous" d="${input.previousValues.map((value, index) => `${index ? 'L' : 'M'}${num(xFor(index, input.previousValues!.length))} ${num(yFor(value))}`).join(' ')}"/>` : '';
+  const previous = previousSeries(previousValues, xFor, yFor, width);
   const previousAverage = input.previousAverage !== null ? referenceLine({ value: input.previousAverage, width, yFor, className: 'line-previous-average' }) : '';
   const average = referenceLine({ value: input.average, width, yFor, className: 'line-average' });
   const single = points.length === 1 ? `<circle class="point" cx="${num(points[0][0])}" cy="${num(points[0][1])}" r="3.6"/>` : '';
@@ -107,7 +122,8 @@ export function renderBarTrendChart(input: TrendChartInput): SafeHtml {
   const height = input.height ?? 200;
   const plotWidth = width - PAD.left - PAD.right;
   const plotHeight = height - PAD.top - PAD.bottom;
-  const scale = niceReportChartScale(Math.max(...input.values, input.average, input.previousAverage ?? 0));
+  const previousValues = alignedPreviousValues(input);
+  const scale = niceReportChartScale(Math.max(...input.values, ...previousValues, input.average, input.previousAverage ?? 0));
   const slot = plotWidth / Math.max(1, input.values.length);
   const barWidth = Math.max(2, Math.min(28, slot * 0.64));
   const xFor = (index: number) => PAD.left + slot * index + slot / 2;
@@ -118,11 +134,15 @@ export function renderBarTrendChart(input: TrendChartInput): SafeHtml {
     return `<rect class="bar${index === input.peakIndex ? ' bar-peak' : ''}" x="${num(xFor(index) - barWidth / 2)}" y="${num(yFor(0) - barHeight)}" width="${num(barWidth)}" height="${num(barHeight)}" rx="${num(Math.min(3, barWidth / 3))}"/>`;
   }).join('');
   const average = referenceLine({ value: input.average, width, yFor, className: 'line-average' });
+  // Comparison period over the bars, one point per bucket, or its average.
+  const previous = previousValues.length
+    ? previousSeries(previousValues, xFor, yFor, width)
+    : input.previousAverage !== null ? referenceLine({ value: input.previousAverage, width, yFor, className: 'line-previous-average' }) : '';
   const peak = input.peakIndex !== null && input.peakLabel
     ? peakMarker({ x: xFor(input.peakIndex), y: yFor(input.values[input.peakIndex]) - 2, label: input.peakLabel, width }).replace(/<circle[^>]*\/>/, '') : '';
   return trusted(`<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" xmlns="http://www.w3.org/2000/svg">`
     + axes({ width, height, scale, labels: input.labels, xFor, format: input.format })
-    + bars + average + peak + '</svg>');
+    + bars + average + previous + peak + '</svg>');
 }
 
 /** Small trend line for KPI cards. */

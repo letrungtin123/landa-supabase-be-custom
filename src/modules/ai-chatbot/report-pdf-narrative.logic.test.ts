@@ -11,7 +11,7 @@ import {
   validateReportPdfNarrative,
   type ReportPdfNarrative,
 } from './report-pdf-narrative.logic.js';
-import { allReportPdfFixtures, englishReportFixture, vietnameseReportFixture } from './report-pdf.fixture.js';
+import { allReportPdfFixtures, englishExtendedReportFixture, englishReportFixture, vietnameseReportFixture } from './report-pdf.fixture.js';
 import { composeReportPdfDocument } from './report-pdf.service.js';
 
 const clone = (narrative: ReportPdfNarrative): ReportPdfNarrative => structuredClone(narrative);
@@ -56,6 +56,34 @@ test('writes a fact-based Vietnamese executive narrative', () => {
   assert.ok(narrative.findings.some((item) => item.text.includes('61,6% đã hoàn thành')));
   assert.ok(narrative.risks.some((item) => item.factIds.includes('risk.watchlist')));
   assert.ok(narrative.recommendations.every((item) => item.priority));
+});
+
+test('puts the unit ranking in the summary and unit risks in the risks and actions', () => {
+  const insights = buildReportInsights(vietnameseReportFixture().snapshot);
+  const vi = buildRuleBasedReportNarrative(insights, 'vi');
+  const decline = insights.facts.find((fact) => fact.id === 'risk.unit_decline')!;
+  const unit = `{{${decline.entities[0]}}}`;
+  assert.ok(vi.findings.some((item) => item.factIds.includes('units.ranking')), 'best/worst unit in the executive summary');
+  assert.deepEqual(vi.risks.map((item) => item.factIds[0]), ['risk.watchlist', 'risk.unit_decline', 'risk.unit_low_completion', 'risk.unit_gap']);
+  assert.equal(vi.risks[1].text, `Tỉ lệ hoàn thành của ${unit} giảm 6,5 điểm % so với tháng trước, từ 63,8% xuống 57,3%.`);
+  assert.ok(vi.recommendations.some((item) => item.factIds.includes('risk.unit_decline') && item.priority === 'high' && item.text.includes(unit)));
+  assert.ok(!vi.recommendations.some((item) => item.factIds.includes('risk.unit_gap')), 'the lowest unit already has its low-completion action');
+  assert.deepEqual(validateReportPdfNarrative(vi, insights, 'vi').issues, []);
+  const en = buildRuleBasedReportNarrative(buildReportInsights(englishExtendedReportFixture().snapshot), 'en');
+  assert.match(en.risks.find((item) => item.factIds.includes('risk.unit_decline'))!.text, /^The completion rate of \{\{U\d+\}\} fell by 10\.3 pp vs the previous month, from 55\.1% to 44\.8%\.$/);
+});
+
+test('checks unit numbers like every other fact (sign, unit, source)', () => {
+  const insights = buildReportInsights(vietnameseReportFixture().snapshot);
+  const rules = buildRuleBasedReportNarrative(insights, 'vi');
+  const token = `{{${insights.facts.find((fact) => fact.id === 'risk.unit_decline')!.entities[0]}}}`;
+  const issues = (text: string, factIds: string[]) => validateReportPdfNarrative(withFinding(rules, text, factIds), insights, 'vi').issues;
+  assert.deepEqual(issues(`${token} giảm 6,5 điểm %, còn 57,3%.`, ['risk.unit_decline']), []);
+  assert.ok(issues(`${token} tăng 6,5 điểm % so với tháng trước.`, ['risk.unit_decline']).includes('findings[0]: direction_mismatch:6,5'));
+  assert.ok(issues(`${token} giảm 6,5 lượt so với tháng trước.`, ['risk.unit_decline']).includes('findings[0]: number_unit_mismatch:6,5'));
+  assert.ok(issues(`${token} giảm 8 điểm % so với tháng trước.`, ['risk.unit_decline']).includes('findings[0]: number_not_in_facts:8'));
+  assert.ok(issues(`${token} giảm 6,5 điểm % so với tháng trước.`, ['units.ranking']).includes('findings[0]: number_not_in_facts:6,5'), 'numbers come from the cited fact');
+  assert.deepEqual(issues('2 đơn vị có tỉ lệ hoàn thành không quá 50%, thấp nhất 39,5%.', ['risk.unit_low_completion']), []);
 });
 
 test('writes the English narrative with English number formats', () => {

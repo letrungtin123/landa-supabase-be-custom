@@ -142,14 +142,20 @@ export function describeReportFact(fact: ReportInsightFact, insights: ReportInsi
     case 'backlog_concentration':
       return t.backlog({ course: entity(), share: pct(v.share), count: n(v.count) });
     case 'unit_gap':
-      return t.unitRanking({ best: entity(1), bestRate: pct(v.best_rate), worst: entity(0), worstRate: pct(v.worst_rate), gap: pp(v.gap) });
+      return t.unitGap({ gap: pp(v.gap), best: entity(1), bestRate: pct(v.best_rate), worst: entity(0), worstRate: pct(v.worst_rate) });
+    case 'unit_decline':
+      return t.unitDecline({ unit: entity(), delta: pp(v.delta), previous: pct(v.previous), current: pct(v.current), suffix });
+    case 'unit_low_completion':
+      return v.count > 1
+        ? t.unitLowCompletion({ count: n(v.count), min: n(v.min), max: pct(v.max), unit: entity(), rate: pct(v.rate), enrollments: n(v.enrollments) })
+        : t.unitLowCompletionOne({ unit: entity(), rate: pct(v.rate), enrollments: n(v.enrollments), max: pct(v.max) });
     default:
       return null;
   }
 }
 
 const RISK_KINDS = new Set<ReportInsightFact['kind']>(['completion_decline', 'course_watchlist', 'activity_drop', 'activation_risk',
-  'backlog_concentration', 'enrollment_drop', 'active_learner_drop', 'unit_gap']);
+  'backlog_concentration', 'enrollment_drop', 'active_learner_drop', 'unit_gap', 'unit_decline', 'unit_low_completion']);
 
 function buildHeadline(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfNarrativeItem {
   const t = getReportPdfDictionary(locale).narrative;
@@ -187,10 +193,10 @@ function buildHeadline(insights: ReportInsights, locale: ReportPdfLocale): Repor
 function buildFindings(insights: ReportInsights, locale: ReportPdfLocale, headline: ReportPdfNarrativeItem): ReportPdfNarrativeItem[] {
   const limits = REPORT_PDF_NARRATIVE_LIMITS;
   if (!insights.available) return [{ text: getReportPdfDictionary(locale).narrative.emptyFinding, factIds: ['kpi.total_enrollments'], tone: 'neutral' }];
-  const riskIds = new Set(insights.facts.filter((fact) => RISK_KINDS.has(fact.kind)).map((fact) => fact.id));
   const watchTokens = new Set(insights.facts.find((fact) => fact.id === 'risk.watchlist')?.entities ?? []);
+  // The unit ranking stays in the summary even with a unit-gap risk: the risk
+  // card words the gap differently.
   const excluded = new Set(headline.factIds);
-  if (riskIds.has('risk.unit_gap')) excluded.add('units.ranking');
   const candidates = insights.facts
     .filter((fact) => fact.kind !== 'context' && !RISK_KINDS.has(fact.kind) && !excluded.has(fact.id))
     .filter((fact) => !(fact.kind === 'low_performer' && fact.entities.some((entity) => watchTokens.has(entity))))
@@ -247,7 +253,16 @@ function buildRecommendations(insights: ReportInsights, locale: ReportPdfLocale)
       case 'enrollment_drop': push(t.recEnrollmentDrop, [fact.id], 'medium'); break;
       case 'active_learner_drop': push(t.recActiveDrop, [fact.id], 'medium'); break;
       case 'backlog_concentration': push(t.recBacklog({ course: entity, share: pct(v.share) }), [fact.id], 'medium'); break;
-      case 'unit_gap': push(t.recUnitGap({ unit: entity }), [fact.id], 'medium'); break;
+      case 'unit_gap': {
+        // The lowest unit may already have its own low-completion action.
+        const lowUnit = insights.facts.find((candidate) => candidate.id === 'risk.unit_low_completion')?.entities[0];
+        if (fact.entities[0] !== lowUnit) push(t.recUnitGap({ unit: entity }), [fact.id], 'medium');
+        break;
+      }
+      case 'unit_decline': push(t.recUnitDecline({ unit: entity }), [fact.id], 'high'); break;
+      case 'unit_low_completion':
+        push(v.count > 1 ? t.recUnitLowCompletion({ unit: entity, count: n(v.count) }) : t.recUnitLowCompletionOne({ unit: entity }), [fact.id], 'medium');
+        break;
       default: break;
     }
   }
@@ -402,6 +417,8 @@ const FACT_VALUE_UNITS: Partial<Record<ReportInsightFact['kind'], Record<string,
   active_trend_momentum: { pct: 'percent' },
   unit_ranking: { best_rate: 'percent', worst_rate: 'percent', gap: 'pp' },
   unit_gap: { best_rate: 'percent', worst_rate: 'percent', gap: 'pp' },
+  unit_decline: { current: 'percent', previous: 'percent', delta: 'pp', threshold: 'pp' },
+  unit_low_completion: { max: 'percent', rate: 'percent' },
   completion_decline: { current: 'percent', previous: 'percent', delta: 'pp', threshold: 'pp' },
   course_watchlist: { max: 'percent', rate: 'percent' },
   activation_risk: { share: 'percent', threshold: 'percent' },
@@ -419,9 +436,10 @@ const SIGNED_FACT_VALUES: Partial<Record<ReportInsightFact['kind'], readonly str
   completion_decline: ['delta'],
   enrollment_drop: ['delta', 'pct'],
   active_learner_drop: ['delta', 'pct'],
+  unit_decline: ['delta'],
 };
 
-const DECLINE_KINDS = new Set<ReportInsightFact['kind']>(['completion_decline', 'enrollment_drop', 'active_learner_drop', 'activity_drop']);
+const DECLINE_KINDS = new Set<ReportInsightFact['kind']>(['completion_decline', 'enrollment_drop', 'active_learner_drop', 'activity_drop', 'unit_decline']);
 const SIGNED_TREND_KINDS = new Set<ReportInsightFact['kind']>(['trend_vs_previous', 'trend_momentum', 'active_trend_momentum']);
 
 const sign = (value: number): Direction => (value > 0 ? 1 : value < 0 ? -1 : 0);

@@ -44,7 +44,10 @@ export function estimateReportPdfLayout(model: LayoutModel): ReportPdfLayoutMeas
       + model.trends.observations.reduce((sum, item) => sum + 3 + lines(item.text, 95) * 5.2, 0),
     courses: 24 + 86 + 8 + 76 + (model.courses.backlog.length ? 8 + 22 + model.courses.backlog.length * 9 : 0) + 10,
     portfolio: 34 + 12 + portfolioRows.reduce((sum, height) => sum + height, 0) + (model.courses.coverageNote ? 9 : 0),
-    organization: 24 + 34 + (unitRows.length ? 26 + unitRows.reduce((sum, height) => sum + height, 0) + 9 : 26),
+    organization: 24 + 34 + (model.organization.note ? 4 + lines(model.organization.note, 95) * 5.2 : 0)
+      + (unitRows.length
+        ? 26 + unitRows.reduce((sum, height) => sum + height, 0) + 4 + model.organization.footnotes.reduce((sum, text) => sum + 1 + lines(text, 100) * 4.6, 0)
+        : 0),
     attention: 24 + (attentionRows ? attentionRows * 38 : 18) + (model.watchlist.rows.length ? 26 + model.watchlist.rows.length * 9 : 0),
     recommendations: 24 + model.recommendations.reduce((sum, item) => sum + 12 + lines(item.text, 85) * 5.4, 0),
     appendixDefinitions: 34 + model.appendix.definitions.reduce((sum, row) => sum + 5 + lines(row.text, 70) * 5.2, 0) + 128,

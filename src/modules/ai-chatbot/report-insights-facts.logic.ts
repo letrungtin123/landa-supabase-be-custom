@@ -36,6 +36,8 @@ const ATTENTION_SEVERITY: Record<ReportAttentionKind, ReportAttentionItem['sever
   enrollment_drop: 'attention',
   active_learner_drop: 'attention',
   unit_gap: 'attention',
+  unit_decline: 'warning',
+  unit_low_completion: 'attention',
 };
 
 /** Splits YYYY-MM[-DD] into numeric fact values, e.g. peak_day/peak_month/peak_year. */
@@ -219,6 +221,25 @@ function attentionFacts(input: FactsInput): ReportInsightFact[] {
       entities: [units.worst.token, units.best.token],
     }));
   }
+  const decline = units?.decline;
+  if (decline && decline.previousCompletionRate !== null && decline.deltaPp !== null) {
+    facts.push(fact({
+      id: 'risk.unit_decline', kind: 'unit_decline', tone: 'negative', priority: 72,
+      values: {
+        current: decline.completionRate, previous: decline.previousCompletionRate, delta: Math.abs(decline.deltaPp),
+        threshold: T.unitDeclinePp, enrollments: decline.enrollments,
+      },
+      entities: [decline.token],
+    }));
+  }
+  const low = units?.lowCompletion ?? [];
+  if (low.length) {
+    facts.push(fact({
+      id: 'risk.unit_low_completion', kind: 'unit_low_completion', tone: 'negative', priority: 66,
+      values: { count: low.length, min: T.minimumUnitSample, max: T.unitLowCompletionRate, rate: low[0].completionRate, enrollments: low[0].enrollments },
+      entities: low.map((row) => row.token),
+    }));
+  }
   return facts;
 }
 
@@ -227,7 +248,7 @@ function unitFacts(input: FactsInput): ReportInsightFact[] {
   if (!units?.best || !units.worst || units.gapPp === null) return [];
   return [fact({
     id: 'units.ranking', kind: 'unit_ranking', tone: 'neutral', priority: 60,
-    values: { best_rate: units.best.completionRate, worst_rate: units.worst.completionRate, gap: units.gapPp, count: units.rows.length },
+    values: { best_rate: units.best.completionRate, worst_rate: units.worst.completionRate, gap: units.gapPp, count: units.unitCount },
     entities: [units.best.token, units.worst.token],
   })];
 }

@@ -223,6 +223,9 @@ td.rate .label { text-align: right; font-weight: 700; color: var(--ink); white-s
 .scope-node.depth-1::before, .scope-node.depth-2::before { content: ''; position: absolute; left: -4.5mm; top: -2mm; width: 3.5mm; height: 6mm; border-left: 0.8pt solid var(--line-strong); border-bottom: 0.8pt solid var(--line-strong); border-bottom-left-radius: 1.6mm; }
 .scope-node .level { font-size: 7.8pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .scope-node .name { font-size: 10pt; font-weight: 700; color: var(--ink); word-break: break-word; }
+.heat tr.aggregate td { border-top: 0.8pt solid var(--line-strong); }
+.heat tr.aggregate td.name .clamp { font-weight: 600; font-style: italic; color: var(--muted); }
+.footnotes { margin-top: 2mm; display: flex; flex-direction: column; gap: 0.8mm; }
 
 
 /* ── Attention ── */

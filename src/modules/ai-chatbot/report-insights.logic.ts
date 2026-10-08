@@ -23,6 +23,7 @@ import {
   type ReportStatusMix,
   type ReportTrendInsight,
   type ReportTrendPoint,
+  type ReportUnitBreakdownState,
   type ReportUnitInsight,
   type ReportUnitInsights,
 } from './report-insights.types.js';
@@ -30,23 +31,29 @@ import {
 export * from './report-insights.types.js';
 
 const UnitRowSchema = z.object({
+  kind: z.enum(['unit', 'others', 'unassigned']).default('unit'),
   unit_id: z.string().trim().min(1).max(64),
   name: z.string().trim().min(1).max(300),
+  unit_count: z.number().int().positive().optional(),
   learners: z.number().int().nonnegative(),
   active_learners: z.number().int().nonnegative(),
   enrollments: z.number().int().nonnegative(),
   completed_enrollments: z.number().int().nonnegative(),
   completion_rate: z.number().min(0).max(100),
+  previous_enrollments: z.number().int().nonnegative().optional(),
   previous_completion_rate: z.number().min(0).max(100).nullable().optional(),
 });
 /**
- * Optional snapshot extension (not produced by the snapshot builder yet): one
- * row per child unit of the applied scope, computed with the same cohort rules.
+ * Optional snapshot extension (report-unit-breakdown.logic.ts): one row per
+ * child unit of the applied scope, computed with the main report's rules,
+ * then the aggregate "others" / "not in any unit" rows.
  */
 export const ReportUnitBreakdownSchema = z.object({
   level: z.enum(['group', 'subgroup', 'team']),
+  scope_learners: z.number().int().nonnegative().optional(),
   rows: z.array(UnitRowSchema).min(1).max(100),
 });
+const UNIT_BREAKDOWN_STATUSES = new Set<ReportUnitBreakdownState>(['available', 'leaf_scope', 'no_child_units', 'not_computed']);
 const TrendSeriesSchema = z.array(z.object({ bucket: z.string().min(7).max(32), value: z.number().nonnegative() })).max(62);
 
 const KPI_POLARITY: Record<ReportKpiId, 'higher_is_better' | 'neutral'> = {
@@ -251,37 +258,91 @@ function buildStatusMix(snapshot: StoredReportChatSnapshot): ReportStatusMix | n
   };
 }
 
-function buildUnits(snapshot: StoredReportChatSnapshot, limitations: ReportInsightLimitation[]): ReportUnitInsights | null {
-  const raw = (snapshot as unknown as Record<string, unknown>).unit_breakdown;
+function unitInsight(row: z.infer<typeof UnitRowSchema>, token: string): ReportUnitInsight {
+  const previousEnrollments = row.previous_enrollments ?? null;
+  const previousRate = row.previous_completion_rate ?? null;
+  return {
+    token,
+    unitId: row.unit_id,
+    name: row.name,
+    kind: row.kind,
+    unitCount: row.kind === 'others' ? row.unit_count ?? null : null,
+    learners: row.learners,
+    activeLearners: row.active_learners,
+    enrollments: row.enrollments,
+    completed: row.completed_enrollments,
+    completionRate: row.completion_rate,
+    previousCompletionRate: previousRate,
+    previousEnrollments,
+    deltaPp: previousRate === null ? null : round(row.completion_rate - previousRate, 2),
+    rankable: row.kind === 'unit' && row.enrollments >= REPORT_INSIGHT_THRESHOLDS.minimumUnitSample,
+  };
+}
+
+/**
+ * Units of the snapshot's breakdown. Without a breakdown the state says why:
+ * a team scope has nothing below it; a snapshot older than the breakdown is a
+ * limitation (only when it has data to break down).
+ */
+function buildUnits(snapshot: StoredReportChatSnapshot, limitations: ReportInsightLimitation[], available: boolean): { units: ReportUnitInsights | null; state: ReportUnitBreakdownState } {
+  const record = snapshot as unknown as Record<string, unknown>;
+  const raw = record.unit_breakdown;
+  const status = typeof record.unit_breakdown_status === 'string' && UNIT_BREAKDOWN_STATUSES.has(record.unit_breakdown_status as ReportUnitBreakdownState)
+    ? record.unit_breakdown_status as ReportUnitBreakdownState : null;
   if (raw === undefined) {
-    limitations.push('unit_breakdown_missing');
-    return null;
+    if (status && status !== 'available') return { units: null, state: status };
+    if (snapshot.scope.teamId) return { units: null, state: 'leaf_scope' };
+    if (!available) return { units: null, state: 'not_computed' };
+    limitations.push(status === 'available' ? 'unit_breakdown_invalid' : 'unit_breakdown_missing');
+    return { units: null, state: status === 'available' ? 'invalid' : 'missing' };
   }
   const parsed = ReportUnitBreakdownSchema.safeParse(raw);
-  if (!parsed.success) {
+  if (!parsed.success || !parsed.data.rows.some((row) => row.kind === 'unit')) {
     limitations.push('unit_breakdown_invalid');
-    return null;
+    return { units: null, state: 'invalid' };
   }
-  const rows: ReportUnitInsight[] = [...parsed.data.rows]
-    .sort((left, right) => right.completion_rate - left.completion_rate || right.enrollments - left.enrollments || left.name.localeCompare(right.name))
-    .map((row, index) => ({
-      token: `U${index + 1}`,
-      unitId: row.unit_id,
-      name: row.name,
-      learners: row.learners,
-      activeLearners: row.active_learners,
-      enrollments: row.enrollments,
-      completed: row.completed_enrollments,
-      completionRate: row.completion_rate,
-      previousCompletionRate: row.previous_completion_rate ?? null,
-      deltaPp: row.previous_completion_rate === undefined || row.previous_completion_rate === null
-        ? null : round(row.completion_rate - row.previous_completion_rate, 2),
-      rankable: row.enrollments >= REPORT_INSIGHT_THRESHOLDS.minimumCourseSample,
-    }));
-  const rankable = rows.filter((row) => row.rankable);
+  const thresholds = REPORT_INSIGHT_THRESHOLDS;
+  const unitRows = parsed.data.rows
+    .filter((row) => row.kind === 'unit')
+    .sort((left, right) => right.completion_rate - left.completion_rate || right.enrollments - left.enrollments || left.name.localeCompare(right.name));
+  const aggregates = (['others', 'unassigned'] as const).flatMap((kind) => parsed.data.rows.filter((row) => row.kind === kind).slice(0, 1));
+  const rows = [...unitRows, ...aggregates].map((row, index) => unitInsight(row, `U${index + 1}`));
+  const units = rows.filter((row) => row.kind === 'unit');
+  const rankable = units.filter((row) => row.rankable);
+  // With a single ranked unit the unit view adds nothing to the scope figures.
+  const comparable = rankable.length >= 2;
   const best = rankable[0] ?? null;
   const worst = rankable.length > 1 ? rankable.at(-1)! : null;
-  return { level: parsed.data.level, rows, best, worst, gapPp: best && worst ? round(best.completionRate - worst.completionRate, 2) : null };
+  const declines = comparable
+    ? rankable.filter((row) => row.deltaPp !== null
+      && (row.previousEnrollments ?? 0) >= thresholds.minimumUnitSample
+      && row.deltaPp <= -thresholds.unitDeclinePp)
+    : [];
+  const decline = declines.reduce<ReportUnitInsight | null>((largest, row) => (
+    !largest || row.deltaPp! < largest.deltaPp! || (row.deltaPp === largest.deltaPp && row.enrollments > largest.enrollments) ? row : largest
+  ), null);
+  const lowCompletion = comparable
+    ? rankable.filter((row) => row.completionRate <= thresholds.unitLowCompletionRate)
+      .sort((left, right) => left.completionRate - right.completionRate || right.enrollments - left.enrollments)
+    : [];
+  const others = rows.find((row) => row.kind === 'others');
+  const scopeLearners = parsed.data.scope_learners ?? null;
+  return {
+    state: 'available',
+    units: {
+      level: parsed.data.level,
+      rows,
+      best,
+      worst,
+      gapPp: best && worst ? round(best.completionRate - worst.completionRate, 2) : null,
+      decline,
+      lowCompletion,
+      unitCount: units.length + (others?.unitCount ?? 0),
+      scopeLearners,
+      overlapping: scopeLearners !== null && rows.reduce((sum, row) => sum + row.learners, 0) > scopeLearners,
+      truncated: Boolean(others),
+    },
+  };
 }
 
 /** Builds every deterministic insight of a stored report snapshot. */
@@ -302,9 +363,11 @@ export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportI
     ? snapshot.enrollment_trend_context.granularity : 'unknown';
   const partialLastBucket = localYmd(snapshot.generated_at) === snapshot.filter.date_to && granularity === 'day';
   if (partialLastBucket) limitations.push('partial_last_bucket');
+  const available = Object.values(overview).some((value) => Number(value) > 0)
+    && !(isV2 && snapshot.availability.state !== 'available');
   const previousEnrollments = readTrendExtension(snapshot, 'previous_enrollment_trend');
   const previousActive = readTrendExtension(snapshot, 'previous_active_learner_trend');
-  if (isV2 && !previousEnrollments) limitations.push('previous_trend_missing');
+  if (isV2 && available && snapshot.enrollment_trend.length > 0 && !previousEnrollments) limitations.push('previous_trend_missing');
   const enrollments = buildTrend({
     metric: 'enrollments', points: snapshot.enrollment_trend, previousPoints: previousEnrollments, granularity,
     previousTotal: isV2 ? snapshot.previous_summary.overview.total_enrollments : null, comparison, partialLastBucket,
@@ -315,7 +378,8 @@ export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportI
   }) : null;
   const courses = buildCourses(snapshot, overview.total_enrollments, overview.incomplete_enrollments);
   if (courses.truncated) limitations.push('portfolio_truncated');
-  const units = isV2 ? buildUnits(snapshot, limitations) : null;
+  const unitBreakdown = buildUnits(snapshot, limitations, available);
+  const units = unitBreakdown.units;
   const scopeDisplay = isV2 ? snapshot.scope_display : {};
   const scope: ReportScopeInsight = {
     tenantWide: !snapshot.scope.groupId && !snapshot.scope.subgroupId && !snapshot.scope.teamId,
@@ -323,8 +387,6 @@ export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportI
     subgroupName: scopeDisplay.subgroup_name ?? null,
     teamName: scopeDisplay.team_name ?? null,
   };
-  const available = Object.values(overview).some((value) => Number(value) > 0)
-    && !(isV2 && snapshot.availability.state !== 'available');
   const base: Omit<ReportInsights, 'attention' | 'facts' | 'entities' | 'limitations'> = {
     version: REPORT_INSIGHTS_VERSION,
     available,
@@ -336,11 +398,13 @@ export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportI
     statusMix: buildStatusMix(snapshot),
     courses,
     units,
+    unitBreakdownState: unitBreakdown.state,
     scope,
   };
   const entities: ReportEntity[] = [
     ...courses.rows.map((row) => ({ token: row.token, type: 'course' as const, name: row.name })),
-    ...(units?.rows ?? []).map((row) => ({ token: row.token, type: 'unit' as const, name: row.name })),
+    // Aggregate rows are never cited by a fact, so their tokens are not entities.
+    ...(units?.rows ?? []).filter((row) => row.kind === 'unit').map((row) => ({ token: row.token, type: 'unit' as const, name: row.name })),
   ];
   const contextValues = {
     ...reportDateParts('from', base.period.dateFrom),

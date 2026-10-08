@@ -7,6 +7,7 @@ import { reportPdfVi } from './report-pdf-i18n.vi.js';
 import { planReportPdfPages, estimateReportPdfLayout } from './report-pdf-layout.logic.js';
 import { buildRuleBasedReportNarrative } from './report-pdf-narrative.logic.js';
 import { renderReportPdfHtml, renderReportPdfMeasureHtml, REPORT_PDF_CONTENT_SECURITY_POLICY } from './report-pdf-template/document.js';
+import { renderAreaTrendChart, renderBarTrendChart } from './report-pdf-template/charts.js';
 import { escapeHtml, html, renderNarrativeText } from './report-pdf-template/html.js';
 import { buildReportPdfFileName, buildReportPdfViewModel, type ReportPdfViewModel } from './report-pdf-view-model.js';
 import { composeReportPdfDocument } from './report-pdf.service.js';
@@ -17,6 +18,8 @@ import {
   englishReportFixture,
   legacyReportFixture,
   longNamesReportFixture,
+  manyUnitsReportFixture,
+  tinyReportFixture,
   vietnameseReportFixture,
   type ReportPdfFixture,
 } from './report-pdf.fixture.js';
@@ -68,14 +71,76 @@ test('builds charts and course data from mutually exclusive snapshot counts', ()
   assert.equal(vi.courses.concentration[0].ratio, 1);
   assert.equal(vi.courses.rows.length, 14);
   assert.equal(vi.trends.enrollments?.values.length, 31);
-  assert.equal(vi.trends.enrollments?.previousAverage, 8.73);
+  assert.equal(vi.trends.enrollments?.previousValues?.length, 30, 'June series overlaid on July');
+  assert.equal(vi.trends.enrollments?.previousAverage, null, 'the real series replaces the average line');
   assert.equal(vi.trends.active?.kind, 'bars');
+  assert.equal(vi.trends.active?.previousValues?.length, 30);
+  assert.deepEqual(vi.trends.active?.legend.map((item) => item.key), ['current', 'previous', 'average']);
+  const older = model(englishReportFixture());
+  assert.equal(older.trends.enrollments?.previousValues, null);
+  assert.equal(older.trends.enrollments?.previousAverage, 11.68, 'without the series: comparison total / days (362 / 31)');
   const extended = model(englishExtendedReportFixture());
   assert.ok(extended.trends.enrollments?.previousValues?.length, 'comparison series overlay when the snapshot carries it');
   assert.equal(extended.organization.rows.length, 6);
   const legacy = model(legacyReportFixture());
   assert.equal(legacy.courses.status, null);
   assert.equal(legacy.trends.enrollments?.title, 'Lượt ghi danh trong kỳ');
+});
+
+test('renders the unit heat table with localized aggregate rows and notes', () => {
+  const vi = model(vietnameseReportFixture());
+  assert.equal(vi.organization.level, 'Phòng ban');
+  assert.equal(vi.organization.unitCountLabel, '9 đơn vị');
+  assert.equal(vi.organization.note, null);
+  assert.deepEqual(vi.organization.rows.slice(0, 2).map((row) => [row.name, row.rateLabel, row.deltaLabel]), [
+    ['Phòng Chăm sóc khách hàng', '77,4%', '+2,9 điểm %'], ['Cửa hàng Quận 1', '71,2%', '+6,3 điểm %'],
+  ]);
+  assert.equal(vi.organization.rows.find((row) => row.name === 'Cửa hàng Thủ Đức')?.deltaTone, 'negative');
+  assert.equal(vi.organization.rows.find((row) => row.name.includes('thí điểm'))?.deltaLabel, '—');
+  assert.equal(vi.organization.footnotes.length, 2, 'legend and learner definition; no overlap, nothing grouped');
+  const viDocument = renderReportPdfHtml(vi, NO_FONTS);
+  assert.ok(viDocument.includes('class="heat"') && viDocument.includes('Kho vận Hồ Chí Minh'));
+  assert.ok(!viDocument.includes(reportPdfVi.organization.breakdownMissing));
+  assert.ok(viDocument.includes(reportPdfVi.appendix.methodology.unitCounting), 'the appendix says how learners in several units are counted');
+
+  const many = model(manyUnitsReportFixture());
+  assert.equal(many.organization.rows.length, 32);
+  assert.deepEqual(many.organization.rows.slice(-2).map((row) => [row.name, row.aggregate]), [['Các đơn vị khác (4)', true], ['Chưa thuộc đơn vị', true]]);
+  assert.equal(many.organization.unitCountLabel, '34 đơn vị');
+  assert.ok(many.organization.footnotes.some((text) => text.startsWith('Bảng liệt kê 30 đơn vị')));
+  assert.ok(renderReportPdfHtml(many, NO_FONTS).includes('class="aggregate"'));
+  const en = model({ ...manyUnitsReportFixture(), locale: 'en' }, 'en');
+  assert.deepEqual(en.organization.rows.slice(-2).map((row) => row.name), ['Other units (4)', 'Other (not in any unit)']);
+
+  const overlapping = structuredClone(vietnameseReportFixture());
+  (overlapping.snapshot as unknown as { unit_breakdown: { scope_learners: number } }).unit_breakdown.scope_learners = 200;
+  assert.ok(model(overlapping).organization.footnotes.includes(reportPdfVi.organization.overlapNote({ sum: '230', total: '200' })));
+});
+
+test('shows the scope card alone for a team scope and explains other missing breakdowns', () => {
+  const team = model(longNamesReportFixture('vi'));
+  assert.deepEqual([team.organization.rows.length, team.organization.note], [0, null]);
+  const teamDocument = renderReportPdfHtml(team, NO_FONTS);
+  assert.ok(!teamDocument.includes(reportPdfVi.organization.breakdownMissing), 'nothing below a team: no "breakdown missing" text');
+  assert.ok(!teamDocument.includes(reportPdfVi.appendix.limitations.unit_breakdown_missing));
+  assert.equal(model(tinyReportFixture('en'), 'en').organization.note, reportPdfEn.organization.noChildUnits);
+  const older = model(englishReportFixture());
+  assert.equal(older.organization.note, reportPdfEn.organization.breakdownMissing);
+  assert.ok(older.appendix.limitations.includes(reportPdfEn.appendix.limitations.unit_breakdown_missing));
+});
+
+test('overlays the comparison series by bucket index on both charts', () => {
+  const format = (value: number) => String(value);
+  const area = renderAreaTrendChart({ values: [1, 2, 3], labels: ['a', 'b', 'c'], previousValues: [4, 5, 6, 7, 8], previousAverage: null, average: 2, peakIndex: 2, peakLabel: '3', format }).value;
+  const previousPath = /<path class="line-previous" d="([^"]+)"/.exec(area)?.[1] ?? '';
+  assert.equal(previousPath.split(/[ML]/).filter(Boolean).length, 3, 'points past the current period are not drawn');
+  const currentPath = /<path class="line-current" d="([^"]+)"/.exec(area)?.[1] ?? '';
+  const xs = (path: string) => path.split(/[ML]/).filter(Boolean).map((point) => point.trim().split(' ')[0]);
+  assert.deepEqual(xs(previousPath), xs(currentPath), 'day i of the comparison sits over day i of the period');
+  const bars = renderBarTrendChart({ values: [3, 4, 5], labels: ['a', 'b', 'c'], previousValues: [2, 6, 1], previousAverage: null, average: 4, peakIndex: 2, peakLabel: '5', format }).value;
+  assert.ok(bars.includes('class="line-previous"'));
+  const fallback = renderBarTrendChart({ values: [3, 4, 5], labels: ['a', 'b', 'c'], previousValues: null, previousAverage: 3.5, average: 4, peakIndex: 2, peakLabel: '5', format }).value;
+  assert.ok(fallback.includes('class="line-previous-average"'), 'average line without the series');
 });
 
 test('renders a self-contained, script-free document with escaped tenant data', () => {

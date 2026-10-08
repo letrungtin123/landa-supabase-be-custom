@@ -6,6 +6,8 @@ import {
   englishExtendedReportFixture,
   englishReportFixture,
   legacyReportFixture,
+  longNamesReportFixture,
+  manyUnitsReportFixture,
   tinyReportFixture,
   vietnameseReportFixture,
 } from './report-pdf.fixture.js';
@@ -120,6 +122,83 @@ test('reads the optional unit breakdown and previous-series extensions defensive
   const rejected = buildReportInsights(invalid as unknown as StoredReportChatSnapshot);
   assert.equal(rejected.units, null);
   assert.ok(rejected.limitations.includes('unit_breakdown_invalid'));
+});
+
+test('ranks units and flags the largest drop and the units below the threshold as facts', () => {
+  const insights = buildReportInsights(vietnameseReportFixture().snapshot);
+  const units = insights.units!;
+  assert.equal(insights.unitBreakdownState, 'available');
+  assert.equal(units.level, 'team');
+  assert.equal(units.best?.name, 'Phòng Chăm sóc khách hàng');
+  assert.equal(units.worst?.name, 'Kho vận Hồ Chí Minh');
+  assert.equal(units.gapPp, 37.9);
+  assert.equal(units.decline?.name, 'Cửa hàng Thủ Đức');
+  assert.equal(units.decline?.deltaPp, -6.5);
+  assert.deepEqual(units.lowCompletion.map((row) => row.name), ['Kho vận Hồ Chí Minh', 'Cửa hàng Gò Vấp']);
+  assert.equal(units.unitCount, 9);
+  assert.equal(units.overlapping, false, 'the fixture teams reconcile with the scope');
+  assert.equal(units.rows.find((row) => row.name.includes('thí điểm'))?.deltaPp, null, 'no comparison enrollments: not comparable');
+  const fact = (id: string) => insights.facts.find((item) => item.id === id);
+  assert.deepEqual(fact('risk.unit_decline')?.values, { current: 57.3, previous: 63.8, delta: 6.5, threshold: 3, enrollments: 44 });
+  assert.deepEqual(fact('risk.unit_low_completion')?.values, { count: 2, min: 5, max: 50, rate: 39.5, enrollments: 22 });
+  assert.deepEqual(fact('units.ranking')?.values, { best_rate: 77.4, worst_rate: 39.5, gap: 37.9, count: 9 });
+  assert.deepEqual(insights.attention.filter((item) => item.kind.startsWith('unit')).map((item) => [item.kind, item.severity]), [
+    ['unit_decline', 'warning'], ['unit_low_completion', 'attention'], ['unit_gap', 'attention'],
+  ]);
+  assert.ok(!JSON.stringify(insights.facts).includes('Thủ Đức'), 'facts cite units by token only');
+  assert.equal(insights.entities.find((entity) => entity.token === fact('risk.unit_decline')!.entities[0])?.name, 'Cửa hàng Thủ Đức');
+  assert.ok(!insights.limitations.includes('unit_breakdown_missing'));
+  assert.ok(!insights.limitations.includes('previous_trend_missing'));
+  assert.equal(insights.trends.activeLearners?.previousPoints?.length, 30, 'real comparison series for the active learners too');
+});
+
+test('keeps the others and no-unit rows out of rankings, facts and entities', () => {
+  const insights = buildReportInsights(manyUnitsReportFixture().snapshot);
+  const units = insights.units!;
+  assert.deepEqual(units.rows.slice(-2).map((row) => [row.kind, row.unitCount, row.rankable]), [['others', 4, false], ['unassigned', null, false]]);
+  assert.equal(units.unitCount, 34);
+  assert.equal(units.truncated, true);
+  assert.equal(insights.entities.filter((entity) => entity.type === 'unit').length, 30);
+  const aggregateTokens = new Set(units.rows.filter((row) => row.kind !== 'unit').map((row) => row.token));
+  assert.ok(insights.facts.every((item) => item.entities.every((token) => !aggregateTokens.has(token))));
+  assert.ok(units.best?.kind === 'unit' && units.worst?.kind === 'unit');
+});
+
+test('detects learners counted in several units', () => {
+  const snapshot = structuredClone(vietnameseReportFixture().snapshot) as unknown as { unit_breakdown: { scope_learners: number } };
+  snapshot.unit_breakdown.scope_learners = 200;
+  assert.equal(buildReportInsights(snapshot as unknown as StoredReportChatSnapshot).units?.overlapping, true);
+});
+
+test('draws no unit conclusion from a single ranked unit', () => {
+  const snapshot = structuredClone(vietnameseReportFixture().snapshot) as unknown as { unit_breakdown: { rows: Array<{ enrollments: number }> } };
+  snapshot.unit_breakdown.rows.forEach((row, index) => { if (index > 0) row.enrollments = 3; });
+  const insights = buildReportInsights(snapshot as unknown as StoredReportChatSnapshot);
+  assert.equal(insights.units?.rows.length, 9, 'the table still lists every unit');
+  assert.equal(insights.units?.worst, null);
+  assert.equal(insights.units?.decline, null);
+  assert.deepEqual(insights.units?.lowCompletion, []);
+  assert.ok(!insights.facts.some((item) => item.id.includes('unit')));
+});
+
+test('explains a missing breakdown: nothing below a team, no unit yet, an older snapshot', () => {
+  const team = buildReportInsights(longNamesReportFixture('vi').snapshot);
+  assert.equal(team.unitBreakdownState, 'leaf_scope');
+  assert.ok(!team.limitations.includes('unit_breakdown_missing'), 'a team scope has no child unit to miss');
+  assert.equal(buildReportInsights(emptyReportFixture().snapshot).unitBreakdownState, 'leaf_scope');
+  const young = buildReportInsights(tinyReportFixture().snapshot);
+  assert.equal(young.unitBreakdownState, 'no_child_units');
+  assert.ok(!young.limitations.includes('unit_breakdown_missing'));
+  const older = buildReportInsights(englishReportFixture().snapshot);
+  assert.equal(older.unitBreakdownState, 'missing');
+  assert.ok(older.limitations.includes('unit_breakdown_missing'));
+  const inconsistent = { ...englishReportFixture().snapshot, unit_breakdown_status: 'available' } as StoredReportChatSnapshot;
+  assert.equal(buildReportInsights(inconsistent).unitBreakdownState, 'invalid');
+  const emptyTenant = { ...emptyReportFixture().snapshot, scope: { groupId: undefined, subgroupId: undefined, teamId: undefined } } as StoredReportChatSnapshot;
+  const emptyInsights = buildReportInsights(emptyTenant);
+  assert.equal(emptyInsights.unitBreakdownState, 'not_computed');
+  assert.ok(!emptyInsights.limitations.includes('unit_breakdown_missing'), 'nothing to break down in an empty period');
+  assert.ok(!emptyInsights.limitations.includes('previous_trend_missing'));
 });
 
 test('handles empty, tiny and legacy snapshots without inventing comparisons', () => {

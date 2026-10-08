@@ -187,16 +187,17 @@ function renderOrganization(model: ReportPdfViewModel, slice: ReportPdfSectionSl
     ? html`<div>${range.first ? html`<div class="card-head"><h3>${o.breakdownTitle}</h3><span class="note">${organization.level ? o.levelLabel({ level: organization.level }) : ''} · ${organization.unitCountLabel ?? ''}</span></div>` : ''}
       <table class="heat"><colgroup><col><col style="width:20mm"><col style="width:22mm"><col style="width:20mm"><col style="width:30mm"><col style="width:24mm"></colgroup>
       <thead><tr><th>${o.columns.unit}</th><th class="num">${o.columns.learners}</th><th class="num">${o.columns.active}</th><th class="num">${o.columns.enrollments}</th><th class="num">${o.columns.completionRate}</th><th class="num">${o.columns.delta}</th></tr></thead>
-      <tbody>${organization.rows.slice(range.from, range.to).map((row, offset) => html`<tr data-measure="row:organization:${range.from + offset}"><td class="name"><div class="clamp">${row.name}</div></td><td class="num">${row.learners}</td><td class="num">${row.active}</td><td class="num">${row.enrollments}</td>
+      <tbody>${organization.rows.slice(range.from, range.to).map((row, offset) => html`<tr data-measure="row:organization:${range.from + offset}"${row.aggregate ? html` class="aggregate"` : ''}><td class="name"><div class="clamp">${row.name}</div></td><td class="num">${row.learners}</td><td class="num">${row.active}</td><td class="num">${row.enrollments}</td>
         <td class="rate-heat" style="background:rgba(47,91,234,${num(0.08 + row.heat * 0.42, 3)})">${row.rateLabel}</td><td class="num tone-text-${row.deltaTone}">${row.deltaLabel}</td></tr>`)}</tbody></table>
-      ${range.last ? html`<p class="note" style="margin-top:2mm">${o.heatLegend}</p>` : ''}</div>`
+      ${range.last && organization.footnotes.length ? html`<div class="footnotes">${organization.footnotes.map((text) => html`<p class="note">${text}</p>`)}</div>` : ''}</div>`
     : '';
   if (!range.first) {
     return html`<section class="section">${continuedHead(SECTION_NUMBERS.organization, dict.sections.organization, dict.meta.continued)}${breakdown}</section>`;
   }
-  const missing = organization.rows.length ? '' : html`<p class="note" style="margin-top:3mm">${o.breakdownMissing}</p>`;
+  // No note for a team scope: there is nothing below a team to break down.
+  const note = organization.note ? html`<p class="note" style="margin-top:3mm">${organization.note}</p>` : '';
   return html`<section class="section">${sectionHead(SECTION_NUMBERS.organization, dict.sections.organization)}
-  <div class="card soft"><div class="card-head"><h3>${o.scopeTitle}</h3></div>${path}${missing}</div>${breakdown}</section>`;
+  <div class="card soft"><div class="card-head"><h3>${o.scopeTitle}</h3></div>${path}${note}</div>${breakdown}</section>`;
 }
 
 function renderAttention(model: ReportPdfViewModel): SafeHtml {

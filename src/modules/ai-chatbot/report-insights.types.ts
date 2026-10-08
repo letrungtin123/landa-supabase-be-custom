@@ -1,8 +1,9 @@
 // Types and versioned thresholds of the deterministic report insights engine.
 import { REPORT_SIGNAL_THRESHOLDS, type ReportComparisonPeriod } from './report-chat.service.js';
 import type { ReportBucketGranularity } from './report-pdf-i18n.js';
+import type { ReportUnitRowKind } from './report-unit-breakdown.logic.js';
 
-export const REPORT_INSIGHTS_VERSION = 'insights-v1';
+export const REPORT_INSIGHTS_VERSION = 'insights-v2';
 /** Analysis heuristics. They only steer emphasis/narrative, never metric values. */
 export const REPORT_INSIGHT_THRESHOLDS = {
   stableCountDeltaPercent: 2,
@@ -21,6 +22,12 @@ export const REPORT_INSIGHT_THRESHOLDS = {
   momentumMinimumBuckets: 6,
   momentumChangePercent: 25,
   unitGapPp: 10,
+  /** Units are ranked (and flagged) only with at least this many enrollments. */
+  minimumUnitSample: REPORT_SIGNAL_THRESHOLDS.high_enrollment_low_completion.minimum_enrollments,
+  /** A unit whose rate fell by this many points (both periods sampled) is a risk. */
+  unitDeclinePp: Math.abs(REPORT_SIGNAL_THRESHOLDS.completion_decline.decline_percentage_points),
+  /** A unit at or below this completion rate is a risk. */
+  unitLowCompletionRate: REPORT_SIGNAL_THRESHOLDS.high_enrollment_low_completion.maximum_completion_rate,
   maxRankedCourses: 3,
   inProgressNudgeShare: 25,
 } as const;
@@ -29,7 +36,7 @@ export type ReportInsightTone = 'positive' | 'negative' | 'neutral' | 'attention
 export type ReportKpiId = 'total_learners' | 'active_learners' | 'completion_rate' | 'total_enrollments' | 'completed_enrollments' | 'incomplete_enrollments';
 export type ReportComparisonBasis = ReportComparisonPeriod['basis'] | 'none';
 export type ReportAttentionKind = 'completion_decline' | 'course_watchlist' | 'activity_drop' | 'activation_risk'
-  | 'backlog_concentration' | 'enrollment_drop' | 'active_learner_drop' | 'unit_gap';
+  | 'backlog_concentration' | 'enrollment_drop' | 'active_learner_drop' | 'unit_gap' | 'unit_decline' | 'unit_low_completion';
 export type ReportInsightFactKind = 'context' | 'kpi' | 'status_mix' | 'concentration' | 'top_performer' | 'low_performer'
   | 'spread' | 'trend_peak' | 'trend_momentum' | 'trend_vs_previous' | 'trend_spikes' | 'active_trend_momentum'
   | 'unit_ranking' | ReportAttentionKind;
@@ -102,17 +109,35 @@ export interface ReportStatusMix {
 
 export interface ReportUnitInsight {
   token: string; unitId: string; name: string;
+  /** 'others' aggregates the units past the listed ones; 'unassigned' the scope learners in no unit. */
+  kind: ReportUnitRowKind;
+  unitCount: number | null;
   learners: number; activeLearners: number; enrollments: number; completed: number;
-  completionRate: number; previousCompletionRate: number | null; deltaPp: number | null;
+  completionRate: number; previousCompletionRate: number | null; previousEnrollments: number | null; deltaPp: number | null;
   rankable: boolean;
 }
 export interface ReportUnitInsights {
   level: 'group' | 'subgroup' | 'team';
+  /** Units first (by completion rate), then the aggregate rows. */
   rows: ReportUnitInsight[];
   best: ReportUnitInsight | null;
   worst: ReportUnitInsight | null;
   gapPp: number | null;
+  /** Largest completion-rate drop vs the comparison period, beyond the threshold. */
+  decline: ReportUnitInsight | null;
+  /** Ranked units at or below the low-completion threshold, lowest first. */
+  lowCompletion: ReportUnitInsight[];
+  /** Child units of the scope with learners (listed + aggregated into "others"). */
+  unitCount: number;
+  /** Distinct learners of the scope, when the snapshot carries it. */
+  scopeLearners: number | null;
+  /** A learner counts in each of their units: the rows add up to more than the scope. */
+  overlapping: boolean;
+  /** Units past the listed ones were aggregated into an "others" row. */
+  truncated: boolean;
 }
+/** Why the units section has (or has no) rows. */
+export type ReportUnitBreakdownState = 'available' | 'leaf_scope' | 'no_child_units' | 'not_computed' | 'missing' | 'invalid';
 
 export interface ReportScopeInsight {
   tenantWide: boolean;
@@ -145,6 +170,7 @@ export interface ReportInsights {
   statusMix: ReportStatusMix | null;
   courses: ReportCourseInsights;
   units: ReportUnitInsights | null;
+  unitBreakdownState: ReportUnitBreakdownState;
   scope: ReportScopeInsight;
   attention: ReportAttentionItem[];
   facts: ReportInsightFact[];

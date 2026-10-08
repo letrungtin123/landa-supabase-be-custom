@@ -28,7 +28,7 @@ import { describeReportFact, type ReportPdfNarrative, type ReportPdfNarrativeIte
 import { REPORT_SIGNAL_THRESHOLDS } from './report-chat.service.js';
 
 /** Bump when the layout or wording changes: stored PDFs are keyed by this version. */
-export const REPORT_PDF_TEMPLATE_VERSION = '3.0.1';
+export const REPORT_PDF_TEMPLATE_VERSION = '3.1.0';
 
 export interface ReportPdfTenantBranding { name: string; logoDataUri: string | null }
 
@@ -89,7 +89,12 @@ export interface ReportPdfCourseRow {
 export interface ReportPdfStatusSegment { key: 'completed' | 'in_progress' | 'not_started'; label: string; count: number; countLabel: string; shareLabel: string; ratio: number }
 export interface ReportPdfRankedCourse { name: string; rate: number; rateLabel: string; detail: string }
 export interface ReportPdfConcentrationBar { name: string; ratio: number; shareLabel: string; valueLabel: string }
-export interface ReportPdfUnitRow { name: string; learners: string; active: string; enrollments: string; rate: number; rateLabel: string; deltaLabel: string; deltaTone: ReportInsightTone; heat: number }
+export interface ReportPdfUnitRow {
+  name: string; learners: string; active: string; enrollments: string; rate: number; rateLabel: string;
+  deltaLabel: string; deltaTone: ReportInsightTone; heat: number;
+  /** "Other units" / "not in any unit" rows: shown after the units, never ranked. */
+  aggregate: boolean;
+}
 export interface ReportPdfAttentionCard { severity: 'warning' | 'attention'; severityLabel: string; title: string; text: string }
 export interface ReportPdfRecommendation { text: string; priority: 'high' | 'medium' | 'low'; priorityLabel: string; fromChat: boolean }
 
@@ -141,6 +146,10 @@ export interface ReportPdfViewModel {
     level: string | null;
     rows: ReportPdfUnitRow[];
     unitCountLabel: string | null;
+    /** Shown in the scope card when there is no unit table (null for a team scope). */
+    note: string | null;
+    /** Notes under the unit table (legend, definitions, overlap, others row). */
+    footnotes: string[];
   };
   attention: ReportPdfAttentionCard[];
   watchlist: { lead: string; rows: ReportPdfWatchRow[] };
@@ -214,6 +223,7 @@ function trendChart(trend: ReportTrendInsight | null, kind: 'area' | 'bars', loc
       ...(periodActiveLearners !== null ? [{ label: dict.trends.activePeriodTotal, value: formatReportNumber(periodActiveLearners, locale), detail: null }] : []),
       { label: dict.trends.average[granularity], value: formatReportNumber(trend.mean, locale, 1), detail: null },
       { label: dict.trends.peak, value: trend.peak ? formatReportNumber(trend.peak.value, locale) : dict.courses.notAvailable, detail: peakDate },
+      ...(trend.previousAverage !== null ? [{ label: dict.trends.previousAverage, value: formatReportNumber(trend.previousAverage, locale, 1), detail: null }] : []),
     ];
   return {
     title: isEnrollments ? dict.trends.enrollmentsTitle[granularity] : dict.trends.activeTitle[granularity],
@@ -294,25 +304,41 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
   };
 }
 
-function unitRows(insights: ReportInsights, locale: ReportPdfLocale, dict: ReportPdfDictionary): ReportPdfViewModel['organization'] {
+function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, dict: ReportPdfDictionary): ReportPdfViewModel['organization'] {
+  const o = dict.organization;
   const units = insights.units;
-  if (!units) return { level: null, rows: [], unitCountLabel: null };
+  if (!units) {
+    const note = insights.unitBreakdownState === 'missing' || insights.unitBreakdownState === 'invalid' ? o.breakdownMissing
+      : insights.unitBreakdownState === 'no_child_units' ? o.noChildUnits : null;
+    return { level: null, rows: [], unitCountLabel: null, note, footnotes: [] };
+  }
   const rates = units.rows.map((row) => row.completionRate);
   const min = Math.min(...rates);
   const max = Math.max(...rates);
+  const n = (value: number) => formatReportNumber(value, locale);
+  const learnerSum = units.rows.reduce((sum, row) => sum + row.learners, 0);
+  const listed = units.rows.filter((row) => row.kind === 'unit').length;
   return {
     level: dict.scope[units.level],
-    unitCountLabel: dict.organization.unitCount({ n: formatReportNumber(units.rows.length, locale) }),
+    unitCountLabel: o.unitCount({ n: n(units.unitCount) }),
+    note: null,
+    footnotes: [
+      `${o.heatLegend} ${o.deltaNote}`,
+      o.learnersNote,
+      ...(units.overlapping && units.scopeLearners !== null ? [o.overlapNote({ sum: n(learnerSum), total: n(units.scopeLearners) })] : []),
+      ...(units.truncated ? [o.othersNote({ n: n(listed) })] : []),
+    ],
     rows: units.rows.map((row) => ({
-      name: row.name,
-      learners: formatReportNumber(row.learners, locale),
-      active: formatReportNumber(row.activeLearners, locale),
-      enrollments: formatReportNumber(row.enrollments, locale),
+      name: row.kind === 'others' ? o.othersRow({ n: n(row.unitCount ?? 0) }) : row.kind === 'unassigned' ? o.unassignedRow : row.name,
+      learners: n(row.learners),
+      active: n(row.activeLearners),
+      enrollments: n(row.enrollments),
       rate: row.completionRate,
       rateLabel: formatReportPercent(row.completionRate, locale),
       deltaLabel: row.deltaPp === null ? dict.courses.notAvailable : `${formatReportSignedNumber(row.deltaPp, locale, 1)} ${dict.units.pp}`,
       deltaTone: row.deltaPp === null || Math.abs(row.deltaPp) < REPORT_INSIGHT_THRESHOLDS.stableRateDeltaPp ? 'neutral' : row.deltaPp > 0 ? 'positive' : 'negative',
       heat: max > min ? (row.completionRate - min) / (max - min) : 0.5,
+      aggregate: row.kind !== 'unit',
     })),
   };
 }
@@ -358,6 +384,12 @@ function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; di
         courseMin: formatReportNumber(signals.high_enrollment_low_completion.minimum_enrollments, locale),
         courseMax: pct(signals.high_enrollment_low_completion.maximum_completion_rate),
       }),
+      ...(insights.units ? [a.methodology.unitCounting, a.methodology.units({
+        n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.minimumUnitSample, locale),
+        pp: formatReportPercentagePoints(REPORT_INSIGHT_THRESHOLDS.unitDeclinePp, locale),
+        max: pct(REPORT_INSIGHT_THRESHOLDS.unitLowCompletionRate),
+        gap: formatReportPercentagePoints(REPORT_INSIGHT_THRESHOLDS.unitGapPp, locale),
+      })] : []),
     ],
     limitations: insights.limitations.map((code) => a.limitations[code]),
   };
@@ -419,7 +451,7 @@ export function buildReportPdfViewModel(input: {
       observations,
     },
     courses: courseSection(insights, locale, dict, snapshot),
-    organization: unitRows(insights, locale, dict),
+    organization: organizationSection(insights, locale, dict),
     attention,
     watchlist: {
       lead: dict.attention.watchlistLead({
