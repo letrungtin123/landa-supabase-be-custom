@@ -5,7 +5,8 @@ import test from 'node:test';
 // Source-level boundary contract for AI ID author notes (QC 364564, N6). The
 // behavior of each helper is covered in course-author-notes.logic.test.ts;
 // this file pins that every non-editor read/copy path actually uses them.
-const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+// Checkouts may use CRLF (core.autocrlf); compare normalized source.
+const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const learner = read('../learner/learner.service.ts');
 const learnerRow = read('../learner/learner-block-row.logic.ts');
 const controller = read('./course-authoring.controller.ts');
