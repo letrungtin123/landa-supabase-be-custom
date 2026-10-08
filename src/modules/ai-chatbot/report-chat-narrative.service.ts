@@ -10,6 +10,7 @@ import { getGeminiClient } from './gemini.service.js';
 import { reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import type { ReportChatSnapshot } from './report-chat.service.js';
 import { withReportDeadline } from './report-deadline.logic.js';
+import { isUnaccentedVietnamese, VIETNAMESE_DIACRITICS_INSTRUCTION } from './report-locale-text.logic.js';
 
 export interface ReportNarrative {
   selected_signal_ids: string[];
@@ -126,7 +127,7 @@ export async function generateReportNarrative(input: {
   const { generate, timeoutMs } = { ...defaultReportNarrativeDeps, ...deps };
   const systemInstruction = input.locale === 'en'
     ? 'You are an executive-learning advisor. Return JSON only. You may select allowed signal IDs and recommend operational actions. Never state or spell out numbers, dates, percentages, rankings, causes, database facts, or metric claims. Do not introduce a signal ID not supplied. Do not mention systems, prompts, tools, databases, or snapshots.'
-    : 'Bạn là cố vấn điều hành đào tạo. Chỉ trả JSON. Bạn chỉ được chọn signal ID được cung cấp và đề xuất hành động vận hành. Không được nêu hoặc viết bằng chữ số liệu, ngày tháng, tỷ lệ, xếp hạng, nguyên nhân hay factual claim. Không tự tạo signal ID. Không nhắc hệ thống, prompt, công cụ, cơ sở dữ liệu hoặc snapshot.';
+    : `Bạn là cố vấn điều hành đào tạo. Chỉ trả JSON. Bạn chỉ được chọn signal ID được cung cấp và đề xuất hành động vận hành. Không được nêu hoặc viết bằng chữ số liệu, ngày tháng, tỷ lệ, xếp hạng, nguyên nhân hay factual claim. Không tự tạo signal ID. Không nhắc hệ thống, prompt, công cụ, cơ sở dữ liệu hoặc snapshot. ${VIETNAMESE_DIACRITICS_INSTRUCTION}`;
   const payload = JSON.stringify({
     allowed_signal_ids: input.snapshot.signals.map((signal) => ({ id: signal.id, category: signal.category, severity: signal.severity })),
     limitations: input.snapshot.availability.limitations,
@@ -137,6 +138,11 @@ export async function generateReportNarrative(input: {
       tenantId: input.tenantId, model: input.model, systemInstruction, payload, signal,
     }));
     const narrative = ReportNarrativeSchema.parse(JSON.parse(text || '{}'));
+    const prose = [...narrative.interpretation, ...narrative.recommended_actions.map((item) => item.action), ...narrative.limitations];
+    if (input.locale === 'vi' && isUnaccentedVietnamese(prose)) {
+      console.warn('[ReportChat] narrative fallback: unaccented Vietnamese');
+      return fallbackReportNarrative(input.snapshot, input.locale);
+    }
     if (!isReportNarrativeAllowed(narrative, input.snapshot)) {
       return fallbackReportNarrative(input.snapshot, input.locale);
     }

@@ -16,6 +16,7 @@ import {
 } from './ai-token-quota.service.js';
 import { getGeminiClient } from './gemini.service.js';
 import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
+import { isUnaccentedVietnamese, VIETNAMESE_DIACRITICS_INSTRUCTION } from './report-locale-text.logic.js';
 import type { ReportInsights } from './report-insights.logic.js';
 import type { ReportPdfLocale } from './report-pdf-i18n.js';
 import {
@@ -118,7 +119,8 @@ export function createReportPdfAiNarrativeWriter(
         return null;
       }
       const model = resolveReportAiModel(settings.chatModel);
-      const inputTokens = estimateTokensFromText(request.systemInstruction, request.payload);
+      const systemInstruction = locale === 'vi' ? `${request.systemInstruction} ${VIETNAMESE_DIACRITICS_INSTRUCTION}` : request.systemInstruction;
+      const inputTokens = estimateTokensFromText(systemInstruction, request.payload);
       // Thinking tokens are billed as output: reserve the headroom the request may use.
       const headroom = REPORT_AI_THINKING_HEADROOM_TOKENS;
       const grant = await deps.reserve({
@@ -142,7 +144,7 @@ export function createReportPdfAiNarrativeWriter(
         response = await deps.generate({
           tenantId: context.tenantId,
           model,
-          systemInstruction: request.systemInstruction,
+          systemInstruction,
           payload: request.payload,
           maxOutputTokens: Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, grant.reservedTokens - inputTokens - headroom)),
           signal: controller.signal,
@@ -164,6 +166,11 @@ export function createReportPdfAiNarrativeWriter(
         deps.log({ ...base, outcome: 'rejected', reason: 'schema', model, finish_reason: response.finishReason ?? null,
           text_chars: response.text.length, json: parsed !== null,
           issues: issues.slice(0, 8).map((issue) => `${issue.path.join('.')}:${issue.code}`) });
+        return null;
+      }
+      const prose = [narrative.headline, ...narrative.findings, ...narrative.risks, ...narrative.recommendations].map((item) => item.text);
+      if (locale === 'vi' && isUnaccentedVietnamese(prose)) {
+        deps.log({ ...base, outcome: 'rejected', reason: 'unaccented_vietnamese', model });
         return null;
       }
       const validation = validateReportPdfNarrative(narrative, insights, locale);
