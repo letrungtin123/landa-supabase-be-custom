@@ -35,7 +35,7 @@
     "test:lesson-author-chapter-checkpoints": "tsx --test src/modules/ai-chatbot/lesson-author-chapter-checkpoint.test.ts src/modules/ai-chatbot/lesson-author-chapter-checkpoint-schema.test.ts src/modules/ai-chatbot/lesson-author-chapter-rag-contract.test.ts src/modules/ai-chatbot/lesson-author-chapter-runner.test.ts src/modules/ai-chatbot/lesson-author-chapter-cross-language.test.ts",
     "test:lesson-author-generation-jobs": "tsx --test src/modules/ai-chatbot/lesson-author-generation-job.logic.test.ts src/modules/ai-chatbot/lesson-author-generation-status.controller.test.ts src/modules/ai-chatbot/lesson-author-generation-runner.logic.test.ts src/modules/ai-chatbot/lesson-author-generation-admission.logic.test.ts",
     "test:lesson-author-actions": "tsx --test src/modules/ai-chatbot/lesson-author-action.logic.test.ts",
-    "test:report-chat": "tsx --test --test-force-exit src/modules/ai-chatbot/report-chat.logic.test.ts src/modules/ai-chatbot/report-pdf-export.logic.test.ts src/modules/ai-chatbot/report-pdf-chart-view-model.logic.test.ts",
+    "test:report-chat": "tsx --test --test-force-exit src/modules/ai-chatbot/report-chat.logic.test.ts src/modules/ai-chatbot/report-time-expression.logic.test.ts src/modules/ai-chatbot/report-pdf-export.logic.test.ts src/modules/ai-chatbot/report-pdf-chart-view-model.logic.test.ts",
     "test:deletion": "tsx --test src/modules/deletion/storage-manifest.logic.test.ts",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
     "verify:audit-event-usage": "tsx src/scripts/verify-audit-event-usage.ts",
