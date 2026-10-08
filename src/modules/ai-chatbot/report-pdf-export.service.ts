@@ -251,14 +251,18 @@ export class ReportPdfExportService {
         actorId: actor.userId,
         actorUsername: context.username,
         action: 'CREATE',
-        entityType: 'report_pdf',
+        // audit_logs.entity_type is the DB enum audit_entity_type: 'report_pdf' is not a value (the
+        // insert failed and blocked every download). The export comes from a chatbot conversation.
+        entityType: 'chatbot',
         entityId: reference.assistantMessageId,
         entityName: fileName,
         ipAddress: context.ipAddress,
         event: { code: 'report.pdf.exported', context: { file_name: fileName, file_size_bytes: bytes } },
       });
     } catch (error) {
-      this.deps.log({ event: 'report_pdf_audit_failed', request_id: context.requestId, tenant_id: actor.tenantId, reason: error instanceof Error ? error.name : 'unknown' });
+      const code = (error as { code?: unknown })?.code;
+      this.deps.log({ event: 'report_pdf_audit_failed', request_id: context.requestId, tenant_id: actor.tenantId,
+        reason: error instanceof Error ? error.name : 'unknown', ...(typeof code === 'string' ? { db_code: code } : {}) });
       throw new ReportPdfExportError('Report PDF audit failed', 503, 'REPORT_PDF_AUDIT_FAILED');
     }
   }

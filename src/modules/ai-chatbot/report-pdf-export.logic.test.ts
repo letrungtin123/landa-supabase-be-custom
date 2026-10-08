@@ -132,7 +132,7 @@ test('renders, stores under the tenant prefix, and audits each delivered downloa
   assert.equal(download.pdf.toString(), '%PDF-1.7 test');
   assert.equal(state.audits.length, 1);
   assert.deepEqual({ ...state.audits[0], event: undefined }, {
-    tenantId: TENANT, actorId: USER, actorUsername: 'manager', action: 'CREATE', entityType: 'report_pdf', entityId: MESSAGE,
+    tenantId: TENANT, actorId: USER, actorUsername: 'manager', action: 'CREATE', entityType: 'chatbot', entityId: MESSAGE,
     entityName: download.fileName, ipAddress: '127.0.0.1', event: undefined,
   });
   assert.deepEqual(state.audits[0].event, { code: 'report.pdf.exported', context: { file_name: download.fileName, file_size_bytes: download.pdf.byteLength } });
