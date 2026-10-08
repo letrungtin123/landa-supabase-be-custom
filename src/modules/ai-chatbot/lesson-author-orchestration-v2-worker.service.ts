@@ -97,7 +97,22 @@ function safeExecutionMetadata(error: unknown): Readonly<Record<string, string>>
     && /^[A-Za-z0-9 _./:()'=-]{1,180}$/.test(error.message) ? error.message : null;
   return Object.freeze({ ...(sqlstate ? { sqlstate } : {}), ...(errorName ? { error_name: errorName } : {}),
     ...(stage ? { execution_stage: stage } : {}), ...(constraint ? { db_constraint: constraint } : {}),
-    ...(table ? { db_table: table } : {}), ...(databaseMessage ? { db_message: databaseMessage } : {}) });
+    ...(table ? { db_table: table } : {}), ...(databaseMessage ? { db_message: databaseMessage } : {}),
+    ...safeAcceptanceReason(error) });
+}
+
+/**
+ * Unit acceptance reason (`OrchestrationV2UnitError.acceptance`): which check,
+ * the validator code and the JSON path. Tokens only; never learner content.
+ */
+function safeAcceptanceReason(error: object): Record<string, string> {
+  const reason = (error as { acceptance?: unknown }).acceptance;
+  if (!reason || typeof reason !== 'object') return {};
+  const { check, code, path } = reason as { check?: unknown; code?: unknown; path?: unknown };
+  if (typeof check !== 'string' || !/^[a-z][a-z_]{0,39}$/.test(check)
+    || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{0,99}$/.test(code)) return {};
+  return { acceptance_check: check, acceptance_code: code,
+    ...(typeof path === 'string' && /^(?:unit|components\[\d{1,3}\])$/.test(path) ? { acceptance_path: path } : {}) };
 }
 
 function reportSafely(

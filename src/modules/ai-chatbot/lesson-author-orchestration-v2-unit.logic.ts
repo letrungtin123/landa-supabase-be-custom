@@ -1,11 +1,11 @@
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import type { LessonAuthorComponentPlan, LessonAuthorComponentProposal, LessonAuthorProposal } from '../course-authoring/course-authoring.service.js';
 import {
+  lessonAuthorGeneratedUnitCoverageFinding,
   sanitizeLessonAuthorHtml,
-  validateLessonAuthorGeneratedUnitCoverage,
   type LessonAuthorStructuredArtifactRequirement,
 } from './lesson-author-content-contract.logic.js';
-import { workspaceComponentContent } from './lesson-author-workspace-component.logic.js';
+import { WorkspaceComponentError, workspaceComponentContent } from './lesson-author-workspace-component.logic.js';
 import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { orchestrationV2ComponentPlanId } from './lesson-author-orchestration-v2-inventory.logic.js';
@@ -28,7 +28,7 @@ import {
   type IdmUnitQualityV1,
 } from './lesson-author-idm.contract.js';
 import { idmAuthorNote } from './lesson-author-idm-architecture.logic.js';
-import { buildIdmUnitBrief, exceedsIdmOutputBudget } from './lesson-author-idm-unit.logic.js';
+import { buildIdmUnitBrief, idmOutputBudgetFinding } from './lesson-author-idm-unit.logic.js';
 
 export const ORCHESTRATION_V2_UNIT_CONTRACT = 'orchestration-unit-baseline-v2';
 const UNIT_CONTENT_V3_DENSITY_POLICY = 'unit-content-v3-density-1';
@@ -122,13 +122,30 @@ export function orchestrationV2UnitArtifactHash(
   return orchestrationV2Hash(orchestrationV2UnitArtifactBase(payload));
 }
 
+/** Which revision-0 acceptance check rejected a unit (logged as `acceptance_check`). */
+export type OrchestrationV2UnitAcceptanceCheck =
+  | 'normalization' | 'response' | 'coverage' | 'idm_budget' | 'workspace_component' | 'publication';
+
+/**
+ * Safe reason of a unit_acceptance rejection: the check, a stable validator
+ * code and a JSON path (`components[i]` or `unit`); never learner content. The
+ * Python IDM writer applies the same checks before it returns a unit
+ * (`landa-ai-rag/app/idm/node_acceptance.py`) and logs the same codes.
+ */
+export interface OrchestrationV2UnitAcceptanceReason {
+  check: OrchestrationV2UnitAcceptanceCheck;
+  code: string;
+  path: string;
+}
+
 export class OrchestrationV2UnitError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_UNIT_CONTRACT_INVALID'
     | 'ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE'
     | 'ORCHESTRATION_V2_UNIT_RESPONSE_INVALID'
     | 'ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID'
-    | 'ORCHESTRATION_V2_UNIT_BASELINE_INVALID') {
+    | 'ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+  readonly acceptance?: Readonly<OrchestrationV2UnitAcceptanceReason>) {
     super(code);
     this.name = 'OrchestrationV2UnitError';
   }
@@ -140,7 +157,51 @@ const PATH = /^chapter_([1-9][0-9]*)\.lesson_([1-9][0-9]*)\.unit_([1-9][0-9]*)$/
 const MAX_FACTS = 32_768;
 const MAX_CONTEXT_CHARS = 400_000;
 const MAX_PUBLICATION_BYTES = 16 * 1024 * 1024;
-const fail = (code: OrchestrationV2UnitError['code']): never => { throw new OrchestrationV2UnitError(code); };
+const fail = (code: OrchestrationV2UnitError['code'], acceptance?: OrchestrationV2UnitAcceptanceReason): never => {
+  throw new OrchestrationV2UnitError(code, acceptance === undefined ? undefined : Object.freeze({ ...acceptance }));
+};
+const componentPath = (index: number | null | undefined) =>
+  (index === null || index === undefined ? 'unit' : `components[${index}]`);
+
+/**
+ * Stable code of a proposal-normalizer failure. The normalizer throws plain
+ * messages (some carry provider text), so only these fixed prefixes are mapped
+ * and the message itself is never logged.
+ */
+const NORMALIZATION_CODES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^Unsupported component type/, 'NORMALIZATION_COMPONENT_TYPE'],
+  [/^Semantic learning content is not lossless/, 'HTML_SEMANTIC_INVALID'],
+  [/^Deterministic semantic HTML is invalid/, 'HTML_SEMANTIC_RENDER_INVALID'],
+  [/^Unit HTML is invalid/, 'HTML_CONTRACT_INVALID'],
+  [/^Unit content is too thin/, 'HTML_TOO_THIN'],
+  [/^Unit content is too large/, 'HTML_TOO_LARGE'],
+  [/^Problem component requires a question/, 'PROBLEM_QUESTION_REQUIRED'],
+  [/^(?:Problem|Dropdown problem) component requires at least 2/, 'PROBLEM_CHOICE_COUNT'],
+  [/^PROBLEM_DUPLICATE_CHOICES$/, 'PROBLEM_DUPLICATE_CHOICES'],
+  [/^PROBLEM_CORRECT_ANSWER_INVALID$/, 'PROBLEM_CORRECT_ANSWER_INVALID'],
+  [/^(?:Numerical|String) problem component requires an answer/, 'PROBLEM_ANSWER_REQUIRED'],
+  [/^FAQ component requires/, 'FAQ_ITEM_COUNT'],
+  [/^Sortable component requires/, 'SORTABLE_ITEM_COUNT'],
+  [/^Crossword component requires/, 'CROSSWORD_WORD_COUNT'],
+  [/^Diagram component requires/, 'DIAGRAM_NODE_COUNT'],
+];
+
+function normalizationCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  return NORMALIZATION_CODES.find(([pattern]) => pattern.test(message))?.[1] ?? 'NORMALIZATION_FAILED';
+}
+
+/** Locate the component a whole-unit normalizer failure came from (diagnostics only). */
+function normalizationFailurePath(normalize: (raw: unknown) => LessonAuthorProposal,
+  contract: Readonly<OrchestrationV2UnitGenerationContract>, unit: Record<string, unknown>): string {
+  for (const [index, component] of (Array.isArray(unit.components) ? unit.components : []).entries()) {
+    try {
+      normalize({ chapters: [{ title: contract.chapter_title, lessons: [{ title: contract.lesson_title,
+        units: [{ ...unit, components: [component] }] }] }] });
+    } catch { return componentPath(index); }
+  }
+  return 'unit';
+}
 const record = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object'
   && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const exactIds = (value: unknown, expected: readonly string[]) => Array.isArray(value)
@@ -383,49 +444,62 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
   try {
     proposal = input.normalizeProposal({ chapters: [{ title: contract.chapter_title,
       lessons: [{ title: contract.lesson_title, units: [response.unit] }] }] });
-  } catch { return fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID'); }
+  } catch (error) {
+    return fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', { check: 'normalization', code: normalizationCode(error),
+      path: normalizationFailurePath(input.normalizeProposal, contract, response.unit) });
+  }
+  const normalizationShape = { check: 'normalization', code: 'NORMALIZATION_SHAPE', path: 'unit' } as const;
   const unit = proposal.chapters?.[0]?.lessons?.[0]?.units?.[0];
   if (proposal.chapters?.length !== 1 || proposal.chapters[0]?.lessons?.length !== 1
     || proposal.chapters[0]?.lessons?.[0]?.units?.length !== 1 || !unit?.components
-    || unit.components.length !== contract.component_plan.length) fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID');
+    || unit.components.length !== contract.component_plan.length) {
+    fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', normalizationShape);
+  }
   const normalizedComponents = unit!.components as LessonAuthorComponentProposal[];
   const normalizedById = new Map<string, LessonAuthorComponentProposal>();
   for (const component of normalizedComponents) {
     const planId = component.metadata?.component_plan_id;
     if (typeof planId !== 'string' || normalizedById.has(planId)) {
-      fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID');
+      fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', normalizationShape);
     }
     normalizedById.set(planId as string, component);
   }
   const rawById = new Map<string, Record<string, unknown>>();
-  for (const value of response.unit.components) {
+  for (const [index, value] of response.unit.components.entries()) {
     const raw = record(value), metadata = record(raw?.metadata);
     const planId = raw?.component_plan_id ?? metadata?.component_plan_id;
-    if (!raw || typeof planId !== 'string' || rawById.has(planId)) fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+    if (!raw || typeof planId !== 'string' || rawById.has(planId)) {
+      fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID',
+        { check: 'response', code: 'RESPONSE_COMPONENT_IDENTITY', path: componentPath(index) });
+    }
     rawById.set(planId as string, raw as Record<string, unknown>);
   }
   // The established course-outline normalizer groups component types for UI
   // consistency. Rebind by immutable instance ID, then restore the admitted
   // plan order; array position is never component identity.
-  const components: LessonAuthorComponentProposal[] = contract.component_plan.map(plan => {
+  const components: LessonAuthorComponentProposal[] = contract.component_plan.map((plan, index) => {
+    const shape = { check: 'normalization', code: 'NORMALIZATION_INSTANCE', path: componentPath(index) } as const;
     const component = normalizedById.get(plan.component_plan_id)
-      ?? fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID');
+      ?? fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', shape);
     const raw = rawById.get(plan.component_plan_id)
-      ?? fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID');
+      ?? fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', shape);
     if (component.type !== plan.type || component.metadata?.component_plan_id !== plan.component_plan_id) {
-      fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID');
+      fail('ORCHESTRATION_V2_UNIT_NORMALIZATION_INVALID', shape);
     }
     const acceptedRaw = raw as Record<string, unknown>;
     const rawMetadata = record(acceptedRaw.metadata);
+    const factIds = { check: 'response', code: 'RESPONSE_FACT_IDS', path: componentPath(index) } as const;
     for (const [field, expected] of [
       ['source_fact_ids', plan.source_fact_ids], ['covered_source_fact_ids', plan.source_fact_ids],
       ['supporting_evidence_fact_ids', plan.supporting_evidence_fact_ids],
       ['learning_objective_refs', plan.learning_objective_refs],
     ] as const) {
       const claimed = acceptedRaw[field] ?? rawMetadata?.[field] ?? component.metadata?.[field];
-      if (field !== 'learning_objective_refs' && !exactIds(claimed, expected)) fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+      if (field !== 'learning_objective_refs' && !exactIds(claimed, expected)) {
+        fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID', factIds);
+      }
       if (field === 'learning_objective_refs' && claimed !== undefined && !exactIds(claimed, expected)) {
-        fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID');
+        fail('ORCHESTRATION_V2_UNIT_RESPONSE_INVALID', factIds);
       }
     }
     return { ...component, metadata: { ...component.metadata, component_plan_id: plan.component_plan_id,
@@ -433,7 +507,12 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
       supporting_evidence_fact_ids: [...plan.supporting_evidence_fact_ids],
       learning_objective_refs: [...plan.learning_objective_refs] } } as LessonAuthorComponentProposal;
   });
-  const coverage = validateLessonAuthorGeneratedUnitCoverage({ source_fact_ids: contract.unit_source_fact_ids,
+  // A null brief (Python's dump of a legacy contract) is legacy.
+  const brief = contract.idm_unit_brief ?? undefined;
+  // An IDM worksheet (html slot with role practice) repeats its template's row labels in the worked example.
+  const worksheets = new Set((brief?.components ?? []).flatMap((slot, index) =>
+    slot.role === 'practice' && slot.type === 'html' ? [index] : []));
+  const coverage = lessonAuthorGeneratedUnitCoverageFinding({ source_fact_ids: contract.unit_source_fact_ids,
     supporting_evidence_fact_ids: [],
     component_plan: contract.component_plan }, components.map(component => ({
     type: component.type, data: component.data,
@@ -443,10 +522,11 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     supporting_evidence_fact_ids: component.metadata?.supporting_evidence_fact_ids as string[] | undefined,
   })), {
     exact_identifiers: contract.source_facts.flatMap(fact => [fact.fact_key, fact.source_ref ?? '']).filter(Boolean),
-  });
-  if (coverage) fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
-  // A null brief (Python's dump of a legacy contract) is legacy.
-  const brief = contract.idm_unit_brief ?? undefined;
+  }, { worksheet_component_indexes: worksheets });
+  if (coverage) {
+    fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+      { check: 'coverage', code: coverage.code, path: componentPath(coverage.component_index) });
+  }
   let quality: IdmUnitQualityV1 | null = null;
   if (brief !== undefined) {
     try { quality = readIdmUnitQuality(response.unit.idm_quality); }
@@ -455,14 +535,28 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
   // Legacy keeps the 1.75× source rule. IDM uses its segment budget, measured
   // like Python on each provider html component, and only on authored content:
   // Python validates source-locked fallback slots without it.
-  if (brief === undefined ? exceedsInstructionalOutputBudget(contract, components)
-    : response.content_origin === 'provider_validated' && exceedsIdmOutputBudget(brief, contract.component_plan
-      .filter(plan => plan.type === 'html').map(plan => rawById.get(plan.component_plan_id)!))) {
-    fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID');
+  if (brief === undefined) {
+    if (exceedsInstructionalOutputBudget(contract, components)) {
+      fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID', { check: 'idm_budget', code: 'HTML_INSTRUCTIONAL_DENSITY_EXCEEDED',
+        path: componentPath(contract.component_plan.findIndex(plan => plan.type === 'html')) });
+    }
+  } else if (response.content_origin === 'provider_validated') {
+    const htmlIndexes = contract.component_plan.flatMap((plan, index) => plan.type === 'html' ? [index] : []);
+    const budget = idmOutputBudgetFinding(brief,
+      htmlIndexes.map(index => rawById.get(contract.component_plan[index]!.component_plan_id)!));
+    if (budget) {
+      fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+        { check: 'idm_budget', code: budget.code, path: componentPath(htmlIndexes[budget.position]) });
+    }
   }
-  let componentContents: WorkspaceContent[];
-  try { componentContents = components.map(component => workspaceComponentContent(component, allowed)); }
-  catch { return fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID'); }
+  const componentContents: WorkspaceContent[] = components.map((component, index) => {
+    try { return workspaceComponentContent(component, allowed); }
+    catch (error) {
+      return fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID', { check: 'workspace_component',
+        code: error instanceof WorkspaceComponentError ? error.code : 'WORKSPACE_COMPONENT_ACCEPTANCE_FAILED',
+        path: componentPath(index) });
+    }
+  });
   const unitContent = readWorkspaceContent({ title: contract.unit_title, purpose: contract.unit_purpose,
     data: {}, implementation_notes: quality === null ? null : idmAuthorNote([quality.author_note], IDM_UNIT_NOTE_MAX_CHARS) });
   const nodes = [{ path: contract.unit_path, content: unitContent }, ...componentContents.map((content, index) => ({
@@ -475,7 +569,7 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     nodes, generated_unit: generatedUnit, content_origin: response.content_origin, quality_state: response.quality_state,
     ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) });
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_PUBLICATION_BYTES) {
-    fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE');
+    fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE', { check: 'publication', code: 'PUBLICATION_TOO_LARGE', path: 'unit' });
   }
   return Object.freeze({ ...base, result_hash: orchestrationV2UnitArtifactHash(base) }) as
     Readonly<OrchestrationV2UnitPublication>;

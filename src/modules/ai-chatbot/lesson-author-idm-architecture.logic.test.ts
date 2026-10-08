@@ -253,6 +253,43 @@ test('IDM unit acceptance keeps idm_quality, writes the unit note and applies th
     response: unitResponse(contract, long, QUALITY, 'structured_fallback') }));
 });
 
+test('every unit_acceptance rejection names its check, reason code and component path (never content)', () => {
+  const { contract } = idmUnit();
+  const reason = (run: () => unknown) => {
+    try { run(); } catch (error) { return (error as { code: string; acceptance?: unknown }).acceptance ?? (error as { code: string }).code; }
+    return null;
+  };
+  const accept = (html: string, options: { worksheet?: boolean; allowed?: Set<CourseComponentType>;
+    normalizeProposal?: (raw: unknown) => LessonAuthorProposal; origin?: 'provider_validated' | 'structured_fallback' } = {}) => {
+    const brief = contract.idm_unit_brief!;
+    const target = options.worksheet ? { ...contract, idm_unit_brief: { ...brief,
+      components: brief.components.map(slot => ({ ...slot, role: 'practice' as const })) } } : contract;
+    return reason(() => acceptOrchestrationV2GeneratedUnit({ contract: target,
+      normalizeProposal: options.normalizeProposal ?? normalize, allowed: options.allowed ?? allowed,
+      response: unitResponse(contract, html, QUALITY, options.origin ?? 'provider_validated') }));
+  };
+  const repeated = '<p>Quy trình mẫu được giải thích ngắn gọn cho người học.</p>';
+  assert.deepEqual(accept(repeated + repeated), { check: 'coverage', code: 'HTML_DUPLICATE_BLOCK', path: 'components[0]' });
+  // Run c2e5ac41: a worksheet repeats its template's row labels and blank-cell guidance in the worked example.
+  const worksheet = '<h2>Mẫu phiếu</h2><table><tbody>'
+    + '<tr><th>Tại sao thứ nhất</th><td>Ghi câu trả lời của bạn vào ô này.</td></tr>'
+    + '<tr><th>Tại sao thứ hai</th><td>Ghi câu trả lời của bạn vào ô này.</td></tr></tbody></table>'
+    + '<h2>Ví dụ đã điền</h2><table><tbody><tr><th>Tại sao thứ nhất</th><td>Công nhân lắp nhầm linh kiện.</td></tr>'
+    + '</tbody></table>';
+  assert.deepEqual(accept(worksheet), { check: 'coverage', code: 'HTML_DUPLICATE_BLOCK', path: 'components[0]' });
+  assert.equal(accept(worksheet, { worksheet: true }), null);
+  assert.deepEqual(accept(worksheet + repeated + repeated, { worksheet: true }),
+    { check: 'coverage', code: 'HTML_DUPLICATE_BLOCK', path: 'components[0]' });
+  assert.deepEqual(accept(`<p>${'Giải thích chi tiết quy trình '.repeat(160)}</p>`),
+    { check: 'idm_budget', code: 'IDM_HTML_DENSITY_EXCEEDED', path: 'components[0]' });
+  assert.deepEqual(accept(repeated, { allowed: new Set<CourseComponentType>(['problem']) }),
+    { check: 'workspace_component', code: 'WORKSPACE_COMPONENT_CAPABILITY_DENIED', path: 'components[0]' });
+  assert.deepEqual(accept(repeated, { normalizeProposal: () => { throw new Error('FAQ component requires at least 2 Q&A items'); } }),
+    { check: 'normalization', code: 'FAQ_ITEM_COUNT', path: 'components[0]' });
+  assert.deepEqual(accept(repeated, { normalizeProposal: () => { throw new Error('Provider said <p>secret</p>'); } }),
+    { check: 'normalization', code: 'NORMALIZATION_FAILED', path: 'components[0]' });
+});
+
 /** v2 semantic html: `words` distinct "mã_<n>" (one Python `\w+` word each) over paragraphs, under a long heading. */
 function semanticHtml(words: number) {
   const paragraphs = Array.from({ length: Math.ceil(words / 150) }, (_, index) =>

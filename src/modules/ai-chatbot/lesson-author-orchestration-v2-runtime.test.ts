@@ -174,6 +174,26 @@ test('worker failure telemetry exposes only bounded stage and PostgreSQL diagnos
   });
 });
 
+test('worker failure telemetry carries the unit acceptance reason (check, code, path) and never content', async () => {
+  const { OrchestrationV2UnitError } = await import('./lesson-author-orchestration-v2-unit.logic.js');
+  const rejection = Object.assign(new OrchestrationV2UnitError('ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+    { check: 'coverage', code: 'HTML_DUPLICATE_BLOCK', path: 'components[0]' }), { orchestration_stage: 'unit_acceptance' });
+  const failed = deps(async () => ({ disposition: 'claimed', lease }), async () => { throw rejection; });
+  await handleOrchestrationV2Delivery(raw, failed.value);
+  for (const name of ['worker_claim_failure_finalized', 'worker_task_failed']) {
+    const event = failed.events.find(candidate => candidate.event === name)!;
+    assert.deepEqual({ code: event.failure_code, stage: event.execution_stage, check: event.acceptance_check,
+      reason: event.acceptance_code, path: event.acceptance_path }, { code: 'ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+      stage: 'unit_acceptance', check: 'coverage', reason: 'HTML_DUPLICATE_BLOCK', path: 'components[0]' });
+  }
+  // Anything that is not a safe token (e.g. provider text smuggled into a reason) is dropped, not logged.
+  const smuggled = Object.assign(new Error('x'), { acceptance: { check: 'coverage', code: 'Generated HTML <p>', path: 'c' } });
+  const unsafe = deps(async () => ({ disposition: 'claimed', lease }), async () => { throw smuggled; });
+  await handleOrchestrationV2Delivery(raw, unsafe.value);
+  const event = unsafe.events.find(candidate => candidate.event === 'worker_task_failed')!;
+  assert.equal('acceptance_code' in event || 'acceptance_check' in event || 'acceptance_path' in event, false);
+});
+
 test('worker recovery cycle is bounded and counts durable outcomes', async () => {
   const states: Array<'requeued' | 'outcome_unknown' | 'failed' | 'reconciled' | null> =
     ['requeued', 'outcome_unknown', 'failed', 'reconciled', null];

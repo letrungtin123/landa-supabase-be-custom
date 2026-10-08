@@ -95,12 +95,25 @@ export function idmPythonHtmlVisibleText(component: Readonly<Record<string, unkn
  */
 export function exceedsIdmOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components'>,
   htmlComponents: ReadonlyArray<Readonly<Record<string, unknown>>>): boolean {
+  return idmOutputBudgetFinding(brief, htmlComponents) !== null;
+}
+
+/**
+ * The first html component (position in `htmlComponents`) that breaks the IDM
+ * W5 budget, with a safe reason code: `IDM_HTML_VISIBLE_TEXT_INVALID` when its
+ * semantic payload cannot be measured, else `IDM_HTML_DENSITY_EXCEEDED`.
+ */
+export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components'>,
+  htmlComponents: ReadonlyArray<Readonly<Record<string, unknown>>>): { position: number; code: string } | null {
   const budget = idmUnitOutputBudget(brief);
-  return htmlComponents.some(component => {
+  for (const [position, component] of htmlComponents.entries()) {
     const text = idmPythonHtmlVisibleText(component);
-    return text === null || idmTextLength(text) > budget.max_visible_chars
-      || idmPythonWordCount(text) > budget.max_words;
-  });
+    if (text === null) return { position, code: 'IDM_HTML_VISIBLE_TEXT_INVALID' };
+    if (idmTextLength(text) > budget.max_visible_chars || idmPythonWordCount(text) > budget.max_words) {
+      return { position, code: 'IDM_HTML_DENSITY_EXCEEDED' };
+    }
+  }
+  return null;
 }
 
 /**

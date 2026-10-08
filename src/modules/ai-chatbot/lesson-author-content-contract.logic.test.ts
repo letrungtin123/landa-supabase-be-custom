@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   completeLessonAuthorContentContract,
+  lessonAuthorGeneratedUnitCoverageFinding,
+  lessonAuthorHtmlContractFinding,
+  lessonAuthorHtmlInstructionalQualityFinding,
+  lessonAuthorSingleChoiceProblemFinding,
   sanitizeLessonAuthorHtml,
   shouldUseBoundedLessonAuthorGeneration,
   validateLessonAuthorContentContractUnit,
@@ -178,6 +182,44 @@ test('rejects source boilerplate, OCR noise and duplicate learner blocks', () =>
     '<p>Nội dung học tập p5-f2.</p>', { exact_identifiers: ['p5-f2'] },
   ) ?? '', /identifier/);
   assert.equal(validateLessonAuthorHtmlInstructionalQuality('<p>Kiểm tra trang thiết bị trước khi làm việc.</p>'), null);
+});
+
+test('content findings carry stable reason codes; worksheets may repeat table cells, never paragraphs', () => {
+  const finding = (html: string, worksheet = false) =>
+    lessonAuthorHtmlInstructionalQualityFinding(html, {}, { allow_repeated_table_cells: worksheet })?.code ?? null;
+  assert.equal(finding('<p>Kiểm tra điều kiện an toàn.</p><p>Kiểm tra điều kiện an toàn.</p>'), 'HTML_DUPLICATE_BLOCK');
+  assert.equal(finding('<p>Xem chi tiết tại trang 12.</p>'), 'HTML_SOURCE_LOCATOR');
+  // Run c2e5ac41: Vietnamese "trạng" folds to "trang"; a number right after it reads as a page locator.
+  assert.equal(finding('<table><tbody><tr><th>Hiện trạng</th><td>3 lần giao trễ trong tháng.</td></tr></tbody></table>'),
+    'HTML_SOURCE_LOCATOR');
+  assert.equal(finding('<p>Hiện trạng: có 3 lần giao trễ trong tháng.</p>'), null);
+  assert.equal(finding('<p>Nội dung từ playbook.pdf.</p>'), 'HTML_SOURCE_FILENAME');
+  assert.equal(finding('<p>vvvvvvvvvvvv</p>'), 'HTML_OCR_NOISE');
+  assert.equal(finding('<p>www.l-a.com.vn</p>'), 'HTML_BOILERPLATE');
+  // A worksheet's template and worked example share row labels and blank-cell guidance.
+  const worksheet = '<h2>Mẫu phiếu cần điền</h2><table><tbody>'
+    + '<tr><th>Tại sao thứ nhất</th><td>Ghi câu trả lời của bạn vào ô này.</td></tr>'
+    + '<tr><th>Tại sao thứ hai</th><td>Ghi câu trả lời của bạn vào ô này.</td></tr></tbody></table>'
+    + '<h2>Ví dụ đã điền</h2><table><tbody><tr><th>Tại sao thứ nhất</th><td>Công nhân lắp nhầm linh kiện.</td></tr>'
+    + '</tbody></table>';
+  assert.equal(finding(worksheet), 'HTML_DUPLICATE_BLOCK');
+  assert.equal(finding(worksheet, true), null);
+  assert.equal(finding(`${worksheet}<p>Đối chiếu từng dòng với tiêu chí.</p><p>Đối chiếu từng dòng với tiêu chí.</p>`, true),
+    'HTML_DUPLICATE_BLOCK');
+  assert.equal(validateLessonAuthorHtmlInstructionalQuality(worksheet, {}, { allow_repeated_table_cells: true }), null);
+  assert.equal(lessonAuthorHtmlContractFinding('<h2>Tiêu đề</h3>')?.code, 'HTML_INVALID_NESTING');
+  assert.equal(lessonAuthorSingleChoiceProblemFinding('')?.code, 'PROBLEM_XML_EMPTY');
+  const html = worksheet;
+  const coverage = (indexes: ReadonlySet<number>) => lessonAuthorGeneratedUnitCoverageFinding(
+    { source_fact_ids: ['p1-f1'], component_plan: [{ type: 'html', source_fact_ids: ['p1-f1'] }] },
+    [{ type: 'html', data: html, source_fact_ids: ['p1-f1'], covered_source_fact_ids: ['p1-f1'] }], {},
+    { worksheet_component_indexes: indexes });
+  const plain = coverage(new Set());
+  assert.deepEqual(plain && { code: plain.code, index: plain.component_index }, { code: 'HTML_DUPLICATE_BLOCK', index: 0 });
+  assert.equal(coverage(new Set([0])), null);
+  // The string API keeps its messages for the legacy callers.
+  assert.match(validateLessonAuthorGeneratedUnitCoverage({ source_fact_ids: ['p1-f1'], component_plan: [] }, []) ?? '',
+    /did not declare coverage/);
 });
 
 test('AI ID accepts only one-answer multiple-choice problem XML', () => {
