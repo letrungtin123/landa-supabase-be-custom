@@ -66,7 +66,7 @@ export async function refreshController(req: Request, res: Response, next: NextF
 
 /**
  * POST /api/auth/logout
- * Revoke refresh token.
+ * Revoke the refresh token from the body; works without a valid access token.
  */
 export async function logoutController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {

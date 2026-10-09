@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { Router } from 'express';
-import { authenticate } from '../../middleware/authenticate.js';
+import { authenticate, optionalAuth } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import {
   loginController,
@@ -25,8 +25,11 @@ router.post('/login', loginController);
 router.post('/refresh', refreshController);
 router.post('/ott/exchange', exchangeOTTController);
 
+// Logout revokes the refresh token in the body even when the access token is
+// missing or expired (a bearer, when valid, is still used for the audit row).
+router.post('/logout', optionalAuth, logoutController);
+
 // Protected endpoints
-router.post('/logout', authenticate, logoutController);
 router.get('/me', authenticate, getMeController);
 router.get('/role-labels', authenticate, tenantContext, getRoleLabelsController);
 router.get('/group-labels', authenticate, tenantContext, getGroupLabelsController);
