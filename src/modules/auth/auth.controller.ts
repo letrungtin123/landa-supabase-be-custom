@@ -238,6 +238,12 @@ export async function exchangeOTTController(req: Request, res: Response, next: N
     }
 
     const result = await authService.exchangeOTT(ott);
+    // Every one-time-link sign-in (admin <-> learner site) is recorded, whatever the role.
+    await appendBestEffortAuthAudit(req, result.user, {
+      action: 'LOGIN',
+      event: { code: 'auth.ott_login.succeeded' },
+      operatorsOnly: false,
+    });
     sendSuccess(res, result, 'Đăng nhập thành công');
   } catch (err) {
     next(err);

@@ -117,12 +117,17 @@ export async function updateController(req: Request, res: Response, next: NextFu
                 ...(before.username !== updated.username
                   ? [{ field: 'username', before: before.username, after: updated.username }]
                   : []),
+                ...((before.email ?? null) !== (updated.email ?? null)
+                  ? [{ field: 'email', before: before.email ?? null, after: updated.email ?? null }]
+                  : []),
                 ...(before.role !== updated.role
                   ? [{ field: 'role', before: before.role, after: updated.role }]
                   : []),
                 ...(before.is_active !== updated.is_active
                   ? [{ field: 'is_active', before: before.is_active, after: updated.is_active }]
                   : []),
+                // The new password itself is never recorded, only that it was reset.
+                ...(parsed.data.password ? [{ field: 'password_reset', before: false, after: true }] : []),
               ],
             },
             updated.id,

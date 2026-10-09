@@ -74,12 +74,13 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   'tenant.modules.updated': { context: ['affected_count'], changes: [] },
   'ai.pricing_rate_card.created': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
   'user.created': { context: [], changes: [] },
-  'user.updated': { context: [], changes: ['username', 'role', 'is_active', 'permission_groups'] },
+  'user.updated': { context: [], changes: ['username', 'email', 'role', 'is_active', 'permission_groups', 'password_reset'] },
   'user.deleted': { context: [], changes: [] },
   'user.deletion_job.retry_queued': { context: [], changes: [] },
   'auth.login.succeeded': { context: [], changes: [] },
   'auth.logout.succeeded': { context: [], changes: [] },
   'auth.sso_login.succeeded': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
+  'auth.ott_login.succeeded': { context: [], changes: [] },
   'auth.sso_identity.linked': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
 
   // Groups. Membership and assignments deliberately contain only the group
@@ -280,6 +281,7 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'auth.login.succeeded',
   'auth.logout.succeeded',
   'auth.sso_login.succeeded',
+  'auth.ott_login.succeeded',
   'auth.sso_identity.linked',
   'group.org.created',
   'group.org.updated',
