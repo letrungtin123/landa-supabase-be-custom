@@ -10,7 +10,8 @@ import { LESSON_AUTHOR_SOURCE_UPLOAD_ERRORS, uploadLessonAuthorSourceDocument } 
 // ai_chatbot module (chatbot configuration pages only); it needs the DATA
 // permission it touches. One table documents and pins every AI runtime path.
 
-const routes = readFileSync(new URL('./ai-chatbot.routes.ts', import.meta.url), 'utf8');
+// Line endings normalised: a Windows checkout (core.autocrlf) must read the same text.
+const routes = readFileSync(new URL('./ai-chatbot.routes.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const routeLine = (method: string, path: string): string => {
   const marker = `router.${method}('${path}'`;
   const start = routes.indexOf(marker);
