@@ -112,7 +112,9 @@ test('authenticate refuses an access token issued before the session end and acc
 
   const now = Math.floor(Date.now() / 1000);
   db.revocations.set(LEARNER, { reason: 'password_changed', revoked_at: new Date(now * 1000), expires_at: new Date(Date.now() + 86_400_000) });
-  const sign = (iat: number) => jwt.sign({ sub: LEARNER, tid: TENANT_A, role: 'learner', username: 'learner', iat }, env.JWT_SECRET, { expiresIn: 900 });
+  // No tenant claim: this test is about token age only, and must not depend on the
+  // runtime tenant fence configured in the local .env files.
+  const sign = (iat: number) => jwt.sign({ sub: LEARNER, role: 'learner', username: 'learner', iat }, env.JWT_SECRET, { expiresIn: 900 });
 
   const run = async (token: string) => {
     const out: { status?: number; next?: boolean } = {};
