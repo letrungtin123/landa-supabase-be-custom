@@ -224,7 +224,9 @@ export async function assignGroupsController(req: Request, res: Response, next: 
 /** GET /api/users/profile/:username */
 export async function getProfileController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const profile = await usersService.getProfile(req.params.username);
+    // The :username segment is kept for route compatibility only (the dashboard
+    // sends its own username); other users' profiles are never returned here.
+    const profile = await usersService.getProfile(req.user!.id);
     sendSuccess(res, profile);
   } catch (err) { next(err); }
 }

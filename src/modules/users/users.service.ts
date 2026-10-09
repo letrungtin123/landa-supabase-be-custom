@@ -500,17 +500,18 @@ async function assertUserIsNotPendingDeletion(userId: string, tenantScopeId: str
 // ══════════════════════════════════════════════════════════════
 
 /**
- * Get user's own profile by username.
+ * Get the caller's OWN profile. Looked up by the authenticated user id, never
+ * by a requested username: this returns email, phone, role and birth year.
  */
-export async function getProfile(username: string) {
+export async function getProfile(userId: string) {
   const profileResult = await query(
     `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id, u.created_at,
             u.bio, u.gender, u.country, u.language, u.level_of_education,
             u.year_of_birth, u.phone AS phone_number
      FROM users u
-     WHERE u.username = $1`,
-    [username],
+     WHERE u.id = $1`,
+    [userId],
   );
   if (profileResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
   return profileResult.rows[0];
