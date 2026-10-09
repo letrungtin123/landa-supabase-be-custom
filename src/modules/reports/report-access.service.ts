@@ -150,6 +150,34 @@ export async function loadReportAllowedGroupIds(actor: Pick<ReportScopeActor, 'u
 }
 
 /**
+ * Whether a report actor may see one learner's personal report data (detail,
+ * badges, study time). Everyone except learner_plus sees any learner of the
+ * tenant (as before); a learner_plus sees only learners who belong to a team
+ * of one of their own groups. Unknown and out-of-scope learners look the same.
+ */
+export async function canReportOnLearner(actor: ReportScopeActor, username: string): Promise<boolean> {
+  if (actor.role !== 'learner_plus') return true;
+  const allowedGroupIds = await loadReportAllowedGroupIds(actor);
+  if (allowedGroupIds.length === 0) return false;
+  const result = await query<{ visible: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1
+       FROM users u
+       JOIN team_members tm ON tm.user_id = u.id
+       JOIN teams t ON t.id = tm.team_id
+       JOIN sub_groups sg ON sg.id = t.sub_group_id
+       JOIN org_groups og ON og.id = sg.org_group_id
+       WHERE u.username = $1
+         AND u.tenant_id = $2::uuid
+         AND og.tenant_id = $2::uuid
+         AND og.id = ANY($3::uuid[])
+     ) AS visible`,
+    [username, actor.tenantId, allowedGroupIds],
+  );
+  return result.rows[0]?.visible === true;
+}
+
+/**
  * This preserves the existing Reports rule for learner_plus: they resolve to
  * one permitted group by default and every selected hierarchy remains inside
  * that group. It intentionally does not broaden their visible scope.

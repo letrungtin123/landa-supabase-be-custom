@@ -14,7 +14,12 @@ import {
   streamCourseLearnerExcel,
   streamReportExcel,
 } from './reports-export.service.js';
-import { enforceReportScope as enforceSharedReportScope, readReportScopeId, type ReportScope } from './report-access.service.js';
+import {
+  canReportOnLearner,
+  enforceReportScope as enforceSharedReportScope,
+  readReportScopeId,
+  type ReportScope,
+} from './report-access.service.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
@@ -87,6 +92,10 @@ function parseChartWindowOptions(req: Request): svc.ReportChartWindowOptions {
  * Nếu user không thuộc group nào → trả mảng rỗng → FE hiển thị "Không có dữ liệu".
  * Nếu user request group_id không thuộc về họ → reject 403.
  */
+function reportActor(req: Request) {
+  return { userId: req.user!.id, tenantId: req.user!.tenantId!, role: req.user!.role };
+}
+
 async function enforceReportScope(req: Request): Promise<ReportScope> {
   return enforceSharedReportScope(
     {
@@ -365,7 +374,8 @@ export async function getLearnerDetail(req: Request, res: Response) {
     return sendError(res, 'date_from và date_to là bắt buộc khi lọc theo bộ lọc báo cáo', 400);
   }
   const scope = await enforceReportScope(req);
-  if (scope.allowedGroupIds?.length === 0) {
+  // learner_plus: only learners of their own groups (an out-of-scope learner looks unknown).
+  if (scope.allowedGroupIds?.length === 0 || !await canReportOnLearner(reportActor(req), username)) {
     return sendSuccess(res, { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: page });
   }
 
@@ -391,6 +401,9 @@ export async function getUserBadges(req: Request, res: Response) {
   const username = req.query.username as string;
   if (!username) return sendError(res, 'username is required', 400);
 
+  if (!await canReportOnLearner(reportActor(req), username)) {
+    return sendSuccess(res, { username, badges: [] });
+  }
   const result = await svc.getUserBadges(username, tenantId);
   sendSuccess(res, result);
 }
@@ -406,11 +419,16 @@ export async function getUserStudyTime(req: Request, res: Response) {
     return sendError(res, 'granularity must be day, month, or year', 400);
   }
 
-  const result = await svc.getUserStudyTime(username, tenantId, {
+  const options = {
     from: req.query.from as string | undefined,
     to: req.query.to as string | undefined,
     granularity: granularity as StudyTimeGranularity | undefined,
-  });
+  };
+  // An out-of-scope learner answers like an unknown one (no entries).
+  if (!await canReportOnLearner(reportActor(req), username)) {
+    return sendSuccess(res, svc.emptyUserStudyTime(username, options));
+  }
+  const result = await svc.getUserStudyTime(username, tenantId, options);
   sendSuccess(res, result);
 }
 

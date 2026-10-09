@@ -2527,31 +2527,37 @@ export async function getUserBadges(
 // User Study Time
 // ═══════════════════════════════════════════════════════════════
 
+type UserStudyTimeOptions = { from?: string; to?: string; granularity?: StudyTimeGranularity };
+type UserStudyTimeResponse = { username: string; entries: Array<{ date: string; minutes: number }>; meta: StudyTimeSeriesResponse['meta'] };
+
+/** The answer for a learner that is unknown (or outside the caller's report scope). */
+export function emptyUserStudyTime(username: string, options: UserStudyTimeOptions = {}): UserStudyTimeResponse {
+  return {
+    username,
+    entries: [],
+    meta: {
+      from: options.from || '',
+      to: options.to || '',
+      granularity: options.granularity || 'day',
+      requested_granularity: options.granularity || 'day',
+      default_weekly: !options.from && !options.to && !options.granularity,
+      point_count: 0,
+      reduced_granularity: false,
+    },
+  };
+}
+
 export async function getUserStudyTime(
   username: string,
   tenantId: string,
-  options: { from?: string; to?: string; granularity?: StudyTimeGranularity } = {},
-): Promise<{ username: string; entries: Array<{ date: string; minutes: number }>; meta: StudyTimeSeriesResponse['meta'] }> {
+  options: UserStudyTimeOptions = {},
+): Promise<UserStudyTimeResponse> {
   const userResult = await query<{ id: string }>(
     `SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1`,
     [username, tenantId],
   );
 
-  if (userResult.rowCount === 0) {
-    return {
-      username,
-      entries: [],
-      meta: {
-        from: options.from || '',
-        to: options.to || '',
-        granularity: options.granularity || 'day',
-        requested_granularity: options.granularity || 'day',
-        default_weekly: !options.from && !options.to && !options.granularity,
-        point_count: 0,
-        reduced_granularity: false,
-      },
-    };
-  }
+  if (userResult.rowCount === 0) return emptyUserStudyTime(username, options);
 
   const series = await getStudyTimeSeries(userResult.rows[0].id, tenantId, options);
 
