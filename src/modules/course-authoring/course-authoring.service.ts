@@ -2016,6 +2016,9 @@ export async function deleteAssetByStoragePath(
   tenantId: string,
   storagePath: string,
 ): Promise<DeleteAssetByStoragePathResult> {
+  // Tenant first: the block-reference lookup below must never answer for a
+  // course of another tenant (it would reveal which files that course uses).
+  await assertCourseInTenant(courseId, tenantId);
   const referencingBlocks = await getBlocksReferencingStoragePath(courseId, storagePath);
   const publishedReferenceCount = countPublishedReferences(referencingBlocks, storagePath);
   if (referencingBlocks.length > 0) {
