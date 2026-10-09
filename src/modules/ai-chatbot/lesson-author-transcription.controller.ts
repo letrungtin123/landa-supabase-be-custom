@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import type { Request, Response } from 'express';
 import { fixMulterFilename } from '../../config/storage.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
+import { AppError } from '../../middleware/error-handler.js';
 import {
   commitLessonAuthorTranscriptToKnowledgebase,
   downloadLessonAuthorTranscriptFile,
@@ -17,14 +18,18 @@ function locale(value: unknown): 'vi' | 'en' {
   return value === 'en' ? 'en' : 'vi';
 }
 
+/** Only errors raised on purpose (AppError) carry their code to the client. */
 function errorCode(error: unknown): string | undefined {
-  return error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code || '') || undefined : undefined;
+  return error instanceof AppError ? error.code : undefined;
 }
 
 function errorStatus(error: unknown): number {
-  return error && typeof error === 'object' && 'statusCode' in error
-    ? Number((error as { statusCode?: unknown }).statusCode) || 400
-    : 400;
+  return error instanceof AppError ? error.statusCode : 500;
+}
+
+/** AppError text as is; anything else (database, storage) becomes the plain fallback. */
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof AppError ? error.message : fallback;
 }
 
 export async function createLessonAuthorTranscription(req: Request, res: Response): Promise<void> {
@@ -92,7 +97,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
       source_size_bytes: file.size,
       duration_ms: Date.now() - startedAt,
     });
-    sendError(res, error instanceof Error ? error.message : 'Không thể nhận video để tạo bản chép lời.', errorStatus(error), errorCode(error));
+    sendError(res, errorMessage(error, 'Không thể nhận video để tạo bản chép lời.'), errorStatus(error), errorCode(error));
   } finally {
     if (file.path) await fs.unlink(file.path).catch(() => undefined);
   }
@@ -113,7 +118,7 @@ export async function getLessonAuthorTranscription(req: Request, res: Response):
     });
     sendSuccess(res, job);
   } catch (error: unknown) {
-    sendError(res, error instanceof Error ? error.message : 'Không thể tải trạng thái transcript.', errorStatus(error), errorCode(error));
+    sendError(res, errorMessage(error, 'Không thể tải trạng thái bản chép lời.'), errorStatus(error), errorCode(error));
   }
 }
 
@@ -134,7 +139,7 @@ export async function downloadLessonAuthorTranscript(req: Request, res: Response
     res.type('text/plain; charset=utf-8');
     res.send(transcript.content);
   } catch (error: unknown) {
-    sendError(res, error instanceof Error ? error.message : 'Không thể tải bản chép lời.', errorStatus(error), errorCode(error));
+    sendError(res, errorMessage(error, 'Không thể tải bản chép lời.'), errorStatus(error), errorCode(error));
   }
 }
 
@@ -154,6 +159,6 @@ export async function commitLessonAuthorTranscript(req: Request, res: Response):
     });
     sendSuccess(res, result, undefined, result.created ? 202 : 200);
   } catch (error: unknown) {
-    sendError(res, error instanceof Error ? error.message : 'Không thể đưa transcript vào Kho tri thức.', errorStatus(error), errorCode(error));
+    sendError(res, errorMessage(error, 'Không thể đưa bản chép lời vào Kho tri thức.'), errorStatus(error), errorCode(error));
   }
 }

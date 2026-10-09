@@ -15,6 +15,7 @@ import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../con
 import { AppError } from '../../middleware/error-handler.js';
 import { hasPermission } from '../../middleware/authorize.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { isIsoTimestamp, sendClientError } from '../../utils/client-error.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
   buildReportPdfArtifact,
@@ -151,7 +152,7 @@ export async function getAssignments(req: Request, res: Response): Promise<void>
   try {
     const assignments = await chatService.getAssignments(tenantId);
     sendSuccess(res, assignments);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function assignBot(req: Request, res: Response): Promise<void> {
@@ -172,7 +173,7 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
       () => createTransactionalAuditEntry(req, 'UPDATE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: bot?.name || bot_id, related_entity_type: 'chatbot' } }, target, bot?.name || bot_id),
     );
     sendSuccess(res, { message: 'Đã gán bot' });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function unassignBot(req: Request, res: Response): Promise<void> {
@@ -191,7 +192,7 @@ export async function unassignBot(req: Request, res: Response): Promise<void> {
     );
     if (!deleted) { sendError(res, 'Không có bot nào được gán cho target này', 404); return; }
     sendSuccess(res, { message: 'Đã bỏ gán bot' });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 // ── Active Bot for Chat ──
@@ -201,7 +202,7 @@ export async function getLessonAuthorSettings(req: Request, res: Response): Prom
   try {
     const settings = await chatService.getLessonAuthorSettings(tenantId);
     sendSuccess(res, settings);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function getLessonAuthorChatSettings(req: Request, res: Response): Promise<void> {
@@ -212,7 +213,7 @@ export async function getLessonAuthorChatSettings(req: Request, res: Response): 
       ...settings,
       active_kb: settings.active_kb ? { ...settings.active_kb, store_name: null } : null,
     });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function assignLessonAuthorKb(req: Request, res: Response): Promise<void> {
@@ -230,7 +231,7 @@ export async function assignLessonAuthorKb(req: Request, res: Response): Promise
       () => createTransactionalAuditEntry(req, 'UPDATE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: kb?.name || kb_id, related_entity_type: 'knowledgebase' } }, tenantId, kb?.name || kb_id),
     );
     sendSuccess(res, { message: 'Đã gán KB chuyên gia bài học' });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function unassignLessonAuthorKb(req: Request, res: Response): Promise<void> {
@@ -243,7 +244,7 @@ export async function unassignLessonAuthorKb(req: Request, res: Response): Promi
     );
     if (!deleted) { sendError(res, 'Chưa có KB active', 404); return; }
     sendSuccess(res, { message: 'Đã bỏ gán KB chuyên gia bài học' });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function applyLessonAuthorJob(req: Request, res: Response): Promise<void> {
@@ -297,7 +298,7 @@ export async function getActiveBot(req: Request, res: Response): Promise<void> {
   try {
     const bot = await chatService.getActiveBot(tenantId, target);
     sendSuccess(res, bot);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function getActiveBotPersonas(req: Request, res: Response): Promise<void> {
@@ -313,7 +314,7 @@ export async function getActiveBotPersonas(req: Request, res: Response): Promise
 
     const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
     sendSuccess(res, personas.map(toPublicPersonaPreview));
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function listLessonAuthorSourceDocuments(req: Request, res: Response): Promise<void> {
@@ -325,7 +326,7 @@ export async function listLessonAuthorSourceDocuments(req: Request, res: Respons
   try {
     const documents = await chatService.listLessonAuthorSourceDocuments(tenantId, { search, limit });
     sendSuccess(res, documents);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function getDemoIframePreview(req: Request, res: Response): Promise<void> {
@@ -354,7 +355,7 @@ export async function getDemoIframePreview(req: Request, res: Response): Promise
       bot,
       personas: personas.map(toPublicPersonaPreview),
     });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 // ── Conversations ──
@@ -375,7 +376,7 @@ export async function listConversations(req: Request, res: Response): Promise<vo
 
     const conversations = await chatService.listConversations(userId, activeBot.bot_id, tenantId, target, courseId);
     sendSuccess(res, conversations);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function createConversation(req: Request, res: Response): Promise<void> {
@@ -407,7 +408,7 @@ export async function createConversation(req: Request, res: Response): Promise<v
       courseId,
     );
     sendSuccess(res, conversation);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function deleteConversation(req: Request, res: Response): Promise<void> {
@@ -425,7 +426,7 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
     const deleted = await chatService.deleteConversation(id, userId, tenantId, resolveExplicitTarget(req));
     if (!deleted) { sendError(res, 'Cuộc hội thoại không tồn tại', 404); return; }
     sendSuccess(res, { message: 'Đã xoá' });
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 // ── Messages — cursor-based pagination ──
@@ -434,18 +435,21 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
   const { id } = req.params;
-  const cursor = req.query.cursor as string | undefined;
+  const rawCursor = req.query.cursor;
+  const cursor = rawCursor === undefined ? undefined : typeof rawCursor === 'string' ? rawCursor : '';
   if (isDemoIframeSession(req.user)) {
     sendSuccess(res, { messages: [], has_more: false, next_cursor: null });
     return;
   }
 
   if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  // The cursor is the created_at of the oldest loaded message (ISO-8601).
+  if (cursor !== undefined && !isIsoTimestamp(cursor)) { sendError(res, 'Không tải thêm được tin nhắn. Vui lòng tải lại trang.', 400); return; }
 
   try {
     const result = await chatService.getConversationMessages(id, userId, tenantId, cursor, resolveExplicitTarget(req));
     sendSuccess(res, result);
-  } catch (err: any) { sendError(res, err.message, 400); }
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function exportReportPdf(req: Request, res: Response): Promise<void> {

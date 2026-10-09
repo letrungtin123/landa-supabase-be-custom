@@ -6,6 +6,7 @@ import type { Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { isUuid, sendClientError } from '../../utils/client-error.js';
 import * as svc from './course-authoring.service.js';
 import { getTenantCourseComponentPermissions } from '../tenants/tenant-course-components.service.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
@@ -449,8 +450,8 @@ export async function getOutline(req: Request, res: Response) {
     const tenantId = req.user!.tenantId!;
     const result = await svc.getCourseOutline(courseId, tenantId);
     sendSuccess(res, result);
-  } catch (err: any) {
-    sendError(res, err.message || 'Failed to load outline', 404);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -489,9 +490,8 @@ export async function getBlock(req: Request, res: Response) {
     // AI ID author notes are removed; editors read them via author-notes.
     const block = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
     sendSuccess(res, { ...block, metadata: withoutServerOwnedAuthorNotes(block.metadata) });
-  } catch (err: any) {
-    const statusCode = err instanceof AppError ? err.statusCode : 500;
-    sendError(res, err?.message || 'Không thể tải nội dung khóa học.', statusCode);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -503,8 +503,8 @@ export async function getComponentPermissions(req: Request, res: Response) {
 
     const permissions = await getTenantCourseComponentPermissions(tenantId);
     sendSuccess(res, permissions);
-  } catch (err: any) {
-    sendError(res, err.message || 'Failed to load component permissions', err.statusCode || 500);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -856,8 +856,7 @@ export async function updateBlock(req: Request, res: Response) {
       res.status(mapped.statusCode).json({ success: false, code: mapped.code, message: mapped.message });
       return;
     }
-    const statusCode = err instanceof AppError ? err.statusCode : 500;
-    sendError(res, err?.message || 'Không thể cập nhật nội dung khóa học.', statusCode);
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -881,8 +880,8 @@ export async function deleteBlock(req: Request, res: Response) {
       ),
     );
     sendSuccess(res, { success: true });
-  } catch (err: any) {
-    sendError(res, err.message, 404);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -953,8 +952,8 @@ export async function studioSubmit(req: Request, res: Response) {
       },
     );
     sendSuccess(res, result);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }
 
@@ -1231,6 +1230,7 @@ export async function updateAssetReference(req: Request, res: Response) {
     if (!tenantId) return sendError(res, 'tenant_id is required', 400);
     const { assetIds, is_reference } = req.body;
     if (!Array.isArray(assetIds)) return sendError(res, 'assetIds must be an array', 400);
+    if (assetIds.length > 500 || !assetIds.every(isUuid)) return sendError(res, 'Danh sách tệp không hợp lệ.', 400);
     
     if (assetIds.length > 0) {
       await runAuditedTransaction(
@@ -1252,7 +1252,7 @@ export async function updateAssetReference(req: Request, res: Response) {
       );
     }
     sendSuccess(res, { success: true });
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'CourseAuthoring');
   }
 }

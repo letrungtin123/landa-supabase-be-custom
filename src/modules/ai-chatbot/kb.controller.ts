@@ -4,6 +4,7 @@
 
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { clientErrorMessage, isUuid, requestUiLocaleOf, sendClientError } from '../../utils/client-error.js';
 import {
   createKbSchema, updateKbSchema, createArticleSchema, updateArticleSchema,
   ALLOWED_KB_EXTENSIONS, MAX_KB_FILE_SIZE,
@@ -39,6 +40,22 @@ async function synchronizeDetachedTranscriptCards(jobIds: readonly string[]): Pr
   }
 }
 
+/** Path ids are UUIDs: anything else is not found (never a database error). */
+function paramsValid(req: Request, res: Response, names: readonly string[]): boolean {
+  for (const name of names) {
+    if (isUuid(req.params[name])) continue;
+    sendError(res, name === 'docId' ? 'Tài liệu không tồn tại' : 'Knowledge Base không tồn tại', 404);
+    return false;
+  }
+  return true;
+}
+
+function docIdsValid(res: Response, docIds: unknown[]): boolean {
+  if (docIds.every(isUuid)) return true;
+  sendError(res, 'doc_ids phải là mảng UUID không rỗng', 400);
+  return false;
+}
+
 // ── KB CRUD ──
 
 export async function listKbs(req: Request, res: Response): Promise<void> {
@@ -52,6 +69,7 @@ export async function listKbs(req: Request, res: Response): Promise<void> {
 }
 
 export async function getKb(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['id'])) return;
   const tenantId = req.user!.tenantId!;
   const kb = await kbService.getKnowledgebase(req.params.id, tenantId);
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
@@ -71,6 +89,7 @@ export async function createKb(req: Request, res: Response): Promise<void> {
 }
 
 export async function updateKb(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['id'])) return;
   const tenantId = req.user!.tenantId!;
   const parsed = updateKbSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
@@ -93,6 +112,7 @@ export async function updateKb(req: Request, res: Response): Promise<void> {
 }
 
 export async function deleteKb(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['id'])) return;
   const tenantId = req.user!.tenantId!;
   try {
     // Fetch name before deleting for audit log
@@ -104,14 +124,15 @@ export async function deleteKb(req: Request, res: Response): Promise<void> {
     );
     if (!queued) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
     sendSuccess(res, { queued: true }, 'Đã đưa Kho tri thức vào hàng đợi xoá an toàn', 202);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'KnowledgeBase');
   }
 }
 
 // ── Document CRUD (Files tab) ──
 
 export async function restoreKb(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
 
@@ -128,12 +149,13 @@ export async function restoreKb(req: Request, res: Response): Promise<void> {
     await kbService.dispatchKnowledgebaseRestore({ jobId: result.job_id, kbId, tenantId });
     invalidateGeminiStoreNameCache(kbId);
     sendSuccess(res, result, 'Da dua kho tri thuc vao hang doi khoi phuc', 202);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'KnowledgeBase');
   }
 }
 
 export async function listDocuments(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = ([5, 10, 20].includes(parseInt(req.query.page_size as string)) ? parseInt(req.query.page_size as string) : 10);
@@ -154,13 +176,14 @@ export async function listDocuments(req: Request, res: Response): Promise<void> 
  * Multi-file upload (Files tab) — up to 20 files.
  */
 export async function uploadDocuments(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
   const files = req.files as Express.Multer.File[];
   if (!files || files.length === 0) { sendError(res, 'Không có file upload', 400); return; }
   if (files.length > 20) { sendError(res, 'Tối đa 20 file mỗi lần upload', 400); return; }
 
-  try { await getGeminiApiKey(tenantId); } catch (err: any) { sendError(res, err.message, 400); return; }
+  try { await getGeminiApiKey(tenantId); } catch (err) { sendClientError(req, res, err, 'KnowledgeBase'); return; }
 
   const kb = await kbService.getKnowledgebase(kbId, tenantId);
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
@@ -188,9 +211,9 @@ export async function uploadDocuments(req: Request, res: Response): Promise<void
         (created) => createTransactionalAuditEntry(req, 'CREATE', 'kb_document', { code: 'knowledgebase.document.created', context: { parent_name: kb.name, file_name: created.name, file_size_bytes: file.size } }, created.id, created.name),
       );
       results.push({ file: file.originalname, success: true, data: doc });
-    } catch (err: any) {
+    } catch (err) {
       await kbService.discardStagedKbSource(staged);
-      results.push({ file: file.originalname, success: false, error: err.message });
+      results.push({ file: file.originalname, success: false, error: clientErrorMessage(err, requestUiLocaleOf(req), 'KnowledgeBase') });
     }
   }
 
@@ -199,6 +222,7 @@ export async function uploadDocuments(req: Request, res: Response): Promise<void
 }
 
 export async function deleteDocument(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId','docId'])) return;
   const tenantId = req.user!.tenantId!;
   const { kbId, docId } = req.params;
   try {
@@ -226,12 +250,14 @@ export async function deleteDocument(req: Request, res: Response): Promise<void>
 }
 
 export async function bulkDeleteDocuments(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
   const docIds: string[] = req.body?.doc_ids;
 
   if (!Array.isArray(docIds) || docIds.length === 0) { sendError(res, 'doc_ids phải là mảng UUID không rỗng', 400); return; }
   if (docIds.length > 500) { sendError(res, 'Tối đa 500 tài liệu mỗi lần xoá', 400); return; }
+  if (!docIdsValid(res, docIds)) return;
 
   try {
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
@@ -250,12 +276,14 @@ export async function bulkDeleteDocuments(req: Request, res: Response): Promise<
 }
 
 export async function retryDocuments(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
   const docIds: string[] = req.body?.doc_ids;
 
   if (!Array.isArray(docIds) || docIds.length === 0) { sendError(res, 'doc_ids phải là mảng UUID không rỗng', 400); return; }
   if (docIds.length > 100) { sendError(res, 'Tối đa 100 tài liệu mỗi lần retry', 400); return; }
+  if (!docIdsValid(res, docIds)) return;
 
   try {
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
@@ -271,7 +299,7 @@ export async function retryDocuments(req: Request, res: Response): Promise<void>
       ) : null,
     );
     sendSuccess(res, result);
-  } catch (err: any) { sendError(res, err.message, 500); }
+  } catch (err) { sendClientError(req, res, err, 'KnowledgeBase'); }
 }
 
 // ── FAQ Upload ──
@@ -280,6 +308,7 @@ export async function retryDocuments(req: Request, res: Response): Promise<void>
  * Upload FAQ xlsx file — validate template → enqueue Gemini.
  */
 export async function uploadFaqDocument(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
 
@@ -298,7 +327,7 @@ export async function uploadFaqDocument(req: Request, res: Response): Promise<vo
     return;
   }
 
-  try { await getGeminiApiKey(tenantId); } catch (err: any) { sendError(res, err.message, 400); return; }
+  try { await getGeminiApiKey(tenantId); } catch (err) { sendClientError(req, res, err, 'KnowledgeBase'); return; }
 
   const kb = await kbService.getKnowledgebase(kbId, tenantId);
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
@@ -316,8 +345,8 @@ export async function uploadFaqDocument(req: Request, res: Response): Promise<vo
       await kbService.discardStagedKbSource(staged);
       throw err;
     }
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'KnowledgeBase');
   }
 }
 
@@ -338,12 +367,13 @@ export async function downloadFaqTemplate(_req: Request, res: Response): Promise
 // ── Article CRUD ──
 
 export async function createArticle(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
   const parsed = createArticleSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-  try { await getGeminiApiKey(tenantId); } catch (err: any) { sendError(res, err.message, 400); return; }
+  try { await getGeminiApiKey(tenantId); } catch (err) { sendClientError(req, res, err, 'KnowledgeBase'); return; }
 
   const kb = await kbService.getKnowledgebase(kbId, tenantId);
   if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
@@ -356,13 +386,14 @@ export async function createArticle(req: Request, res: Response): Promise<void> 
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'kb_document', { code: 'knowledgebase.document.created', context: { parent_name: kb.name } }, created.id, created.name),
     );
     sendSuccess(res, doc, undefined, 201);
-  } catch (err: any) {
+  } catch (err) {
     await kbService.discardStagedKbSource(staged);
-    sendError(res, err.message, 500);
+    sendClientError(req, res, err, 'KnowledgeBase');
   }
 }
 
 export async function updateArticle(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['kbId','docId'])) return;
   const tenantId = req.user!.tenantId!;
   const { kbId, docId } = req.params;
   const parsed = updateArticleSchema.safeParse(req.body);
@@ -391,13 +422,14 @@ export async function updateArticle(req: Request, res: Response): Promise<void> 
     if (!doc) { await kbService.discardStagedKbSource(staged); sendError(res, 'Article không tồn tại', 404); return; }
     committed = true;
     sendSuccess(res, doc.document);
-  } catch (err: any) {
+  } catch (err) {
     if (!committed) await kbService.discardStagedKbSource(staged);
-    sendError(res, err.message, 500);
+    sendClientError(req, res, err, 'KnowledgeBase');
   }
 }
 
 export async function getArticle(req: Request, res: Response): Promise<void> {
+  if (!paramsValid(req, res, ['docId'])) return;
   const tenantId = req.user!.tenantId!;
   const doc = await kbService.getDocument(req.params.docId, tenantId);
   if (!doc || doc.type !== 'article') { sendError(res, 'Article không tồn tại', 404); return; }

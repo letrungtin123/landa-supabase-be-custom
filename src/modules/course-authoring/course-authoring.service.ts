@@ -233,7 +233,7 @@ export async function getCourseOutline(
     `SELECT id, display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
     [courseId, tenantId],
   );
-  if (courseCheck.rowCount === 0) throw new Error('Course not found');
+  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
 
   // Get all blocks for this course in one query (avoid N+1)
   const blocksResult = await query<BlockInfo>(
@@ -895,7 +895,7 @@ export async function updateBlock(
     params,
   );
 
-  if (result.rowCount === 0) throw new Error('Block not found');
+  if (result.rowCount === 0) throw new AppError('Block not found', 404);
 
   const block = result.rows[0];
   let tenantCourseInvalidation: Promise<void> | null = null;
@@ -1613,7 +1613,7 @@ function decodeAssetCursor(cursor?: string | null): { created_at: string; id: st
       typeof parsed.id !== 'string' ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id)
     ) {
-      throw new Error('invalid cursor payload');
+      throw new AppError('invalid cursor payload', 400);
     }
     return { created_at: parsed.created_at, id: parsed.id };
   } catch {

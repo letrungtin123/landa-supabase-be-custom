@@ -4,6 +4,7 @@
 
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { sendClientError } from '../../utils/client-error.js';
 import { createTemplateSchema, updateTemplateSchema } from './prompt-templates.validator.js';
 import * as service from './prompt-templates.service.js';
 import { createPlatformTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
@@ -39,8 +40,8 @@ export async function createTemplate(req: Request, res: Response): Promise<void>
       (created) => createPlatformTransactionalAuditEntry(req, 'CREATE', 'prompt_template', { code: 'prompt_template.created' }, created.id, created.name),
     );
     sendSuccess(res, tpl, undefined, 201);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'PromptTemplates');
   }
 }
 
@@ -73,8 +74,8 @@ export async function updateTemplate(req: Request, res: Response): Promise<void>
     );
     if (!tpl) { sendError(res, 'Template không tồn tại', 404); return; }
     sendSuccess(res, tpl);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'PromptTemplates');
   }
 }
 
@@ -107,8 +108,8 @@ export async function uploadAvatar(req: Request, res: Response): Promise<void> {
     );
     if (!tpl) { sendError(res, 'Template không tồn tại', 404); return; }
     sendSuccess(res, tpl);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'PromptTemplates');
   }
 }
 
@@ -128,7 +129,7 @@ export async function uploadFullbody(req: Request, res: Response): Promise<void>
     );
     if (!tpl) { sendError(res, 'Template không tồn tại', 404); return; }
     sendSuccess(res, tpl);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'PromptTemplates');
   }
 }

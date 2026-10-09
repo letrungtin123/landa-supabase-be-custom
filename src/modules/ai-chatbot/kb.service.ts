@@ -338,12 +338,12 @@ async function assertKnowledgebaseMutable(
     [kbId, tenantId],
   );
   const row = result.rows[0];
-  if (!row) throw new Error('Knowledge Base khong ton tai');
+  if (!row) throw new AppError('Knowledge Base khong ton tai', 404);
   if (isRestoreActiveState(row.restore_state)) {
-    throw new Error(`Kho tri thuc dang khoi phuc, tam thoi khong the ${actionLabel}.`);
+    throw new AppError(`Kho tri thuc dang khoi phuc, tam thoi khong the ${actionLabel}.`, 409);
   }
   if (await hasQueuedKnowledgebaseDeletion(kbId, tenantId)) {
-    throw new Error(`Kho tri thuc dang duoc xoa, tam thoi khong the ${actionLabel}.`);
+    throw new AppError(`Kho tri thuc dang duoc xoa, tam thoi khong the ${actionLabel}.`, 409);
   }
   await assertNoActiveAiEngineTransition(tenantId, actionLabel);
   const reason = getRestoreReasonFromStore(
@@ -357,7 +357,7 @@ async function assertKnowledgebaseMutable(
     currentFingerprint,
   );
   if (reason) {
-    throw new Error(`Kho tri thuc can khoi phuc truoc khi ${actionLabel}. Ly do: ${reason}`);
+    throw new AppError(`Kho tri thuc can khoi phuc truoc khi ${actionLabel}. Ly do: ${reason}`, 409);
   }
 }
 
@@ -504,7 +504,7 @@ export async function deleteKnowledgebase(id: string, tenantId: string): Promise
     [id, tenantId],
   );
   if (botCheck.rows[0]?.cnt > 0) {
-    throw new Error(`Không thể xoá KB — đang có ${botCheck.rows[0].cnt} bot sử dụng`);
+    throw new AppError(`Không thể xoá KB — đang có ${botCheck.rows[0].cnt} bot sử dụng`, 409);
   }
 
   const assignmentCheck = await query<{ cnt: number }>(
@@ -512,7 +512,7 @@ export async function deleteKnowledgebase(id: string, tenantId: string): Promise
     [id, tenantId],
   );
   if ((assignmentCheck.rows[0]?.cnt ?? 0) > 0) {
-    throw new Error('Khong the xoa KB dang duoc gan cho chuyen gia bai hoc');
+    throw new AppError('Khong the xoa KB dang duoc gan cho chuyen gia bai hoc', 409);
   }
 
   // Get all document file paths to cleanup storage
@@ -672,7 +672,7 @@ export async function deleteDocument(docId: string, kbId: string, tenantId: stri
   if (!doc) return false;
   if (doc.kb_id !== kbId) return false;
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
-  if (doc.status === 'learning') throw new Error('Không thể xoá tài liệu đang được huấn luyện');
+  if (doc.status === 'learning') throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409);
 
   // 2. Delete from Gemini FIRST (synchronous, not queue)
   await deleteDocumentGeminiMappingsStrict([docId], tenantId);
@@ -714,7 +714,7 @@ export async function bulkDeleteDocuments(
   const foundIds = statusCheck.rows.map(r => r.id);
   const safeIds = foundIds.filter(id => !learningIds.includes(id));
   if (safeIds.length === 0) {
-    if (learningIds.length > 0) throw new Error('Tất cả tài liệu đang được huấn luyện, không thể xoá');
+    if (learningIds.length > 0) throw new AppError('Tất cả tài liệu đang được huấn luyện, không thể xoá', 409);
     return { deleted: 0 };
   }
 
@@ -1067,7 +1067,7 @@ async function restoreKnowledgebaseTracked(
       [jobId, kbId, tenantId],
     );
     const job = jobResult.rows[0];
-    if (!job) throw new Error('Restore job khong ton tai');
+    if (!job) throw new AppError('Restore job khong ton tai', 404);
     if (job.status === 'completed' || job.status === 'failed') {
       await client.query('COMMIT');
       return {
@@ -1112,7 +1112,7 @@ async function restoreKnowledgebaseTracked(
         [kbId, tenantId],
       );
       if ((busyDocs.rows[0]?.cnt ?? 0) > 0) {
-        throw new Error('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.');
+        throw new AppError('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.', 409);
       }
 
       const stores = await client.query<KbGeminiStore>(
@@ -1125,7 +1125,7 @@ async function restoreKnowledgebaseTracked(
       const primaryStore = stores.rows[0] ?? null;
       const restoreReason = getRestoreReasonFromStore(primaryStore, currentFingerprint);
       if (!restoreReason) {
-        throw new Error('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.');
+        throw new AppError('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.', 409);
       }
 
       const counts = await client.query<{ total_docs: number; restore_docs: number; skipped_docs: number }>(
@@ -1276,9 +1276,9 @@ export async function enqueueKnowledgebaseRestore(
         [kbId, tenantId],
       );
   const row = kbResult.rows[0];
-  if (!row) throw new Error('Knowledge Base khong ton tai');
+  if (!row) throw new AppError('Knowledge Base khong ton tai', 404);
   if (isRestoreActiveState(row.restore_state)) {
-    throw new Error('Kho tri thuc dang duoc khoi phuc. Vui long cho job hien tai hoan tat.');
+    throw new AppError('Kho tri thuc dang duoc khoi phuc. Vui long cho job hien tai hoan tat.', 409);
   }
 
   const restoreReason = getRestoreReasonFromStore(
@@ -1292,7 +1292,7 @@ export async function enqueueKnowledgebaseRestore(
         currentFingerprint,
   );
   if (!restoreReason) {
-    throw new Error('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.');
+    throw new AppError('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.', 409);
   }
 
   const activeDocs = await query<{ cnt: number }>(
@@ -1302,7 +1302,7 @@ export async function enqueueKnowledgebaseRestore(
         [kbId, tenantId],
   );
   if ((activeDocs.rows[0]?.cnt ?? 0) > 0) {
-    throw new Error('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.');
+    throw new AppError('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.', 409);
   }
 
   await query(
@@ -1509,13 +1509,13 @@ export async function uploadFaqDocument(
   // 1. Parse xlsx
   const workbook = XLSX.read(file.buffer, { type: 'buffer' });
   const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error('File xlsx không có sheet nào');
+  if (!sheetName) throw new AppError('File xlsx không có sheet nào', 400);
 
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet);
 
   // 2. Validate headers
-  if (rows.length === 0) throw new Error('File xlsx trống, không có dữ liệu');
+  if (rows.length === 0) throw new AppError('File xlsx trống, không có dữ liệu', 400);
 
   const firstRow = rows[0];
   const headers = Object.keys(firstRow);
@@ -1523,9 +1523,10 @@ export async function uploadFaqDocument(
   const hasAnswer = headers.some(h => h.trim().toLowerCase() === 'answer');
 
   if (!hasQuestion || !hasAnswer) {
-    throw new Error(
+    throw new AppError(
       `File không đúng template. Cần có 2 cột "Question" và "Answer". ` +
-      `Cột hiện tại: ${headers.join(', ')}. Vui lòng tải template mẫu.`
+      `Cột hiện tại: ${headers.join(', ')}. Vui lòng tải template mẫu.`,
+      400,
     );
   }
 
@@ -1709,14 +1710,14 @@ export async function updateArticle(
   const existing = await getDocument(docId, tenantId);
   if (!existing || existing.type !== 'article' || existing.kb_id !== kbId) return null;
   await assertKnowledgebaseMutable(kbId, tenantId, 'sua bai viet');
-  if (existing.status === 'learning') throw new Error('Không thể sửa bài viết đang được huấn luyện');
+  if (existing.status === 'learning') throw new AppError('Không thể sửa bài viết đang được huấn luyện', 409);
 
   // Optimistic locking: reject if another admin has modified this doc since it was loaded
   if (input.expected_updated_at && existing.updated_at) {
     const expected = new Date(input.expected_updated_at).getTime();
     const actual = new Date(existing.updated_at).getTime();
     if (expected !== actual) {
-      throw new Error('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.');
+      throw new AppError('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.', 409);
     }
   }
 
@@ -1897,14 +1898,14 @@ export async function stageFaqSource(
   const displayName = normalizeKbDocumentDisplayName(file.originalname);
   const workbook = XLSX.read(file.buffer, { type: 'buffer' });
   const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error('File xlsx không có sheet nào');
+  if (!sheetName) throw new AppError('File xlsx không có sheet nào', 400);
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]);
-  if (rows.length === 0) throw new Error('File xlsx trống, không có dữ liệu');
+  if (rows.length === 0) throw new AppError('File xlsx trống, không có dữ liệu', 400);
   const headers = Object.keys(rows[0]);
   const qKey = headers.find(h => h.trim().toLowerCase() === 'question');
   const aKey = headers.find(h => h.trim().toLowerCase() === 'answer');
   if (!qKey || !aKey) {
-    throw new Error(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${headers.join(', ')}`);
+    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${headers.join(', ')}`, 400);
   }
   const emptyRows = rows.filter(row => !String(row[qKey] || '').trim() || !String(row[aKey] || '').trim()).length;
   return stageKbSource(
@@ -2161,7 +2162,7 @@ export async function queueBulkDocumentDeletion(
       `DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
       [document.id, kbId, tenantId],
     );
-    if ((removed.rowCount || 0) !== 1) throw new Error('Không thể đưa tài liệu vào hàng đợi xoá');
+    if ((removed.rowCount || 0) !== 1) throw new AppError('Không thể đưa tài liệu vào hàng đợi xoá', 409);
     await enqueueKbOperation({
       tenantId,
       kbId,
@@ -2217,7 +2218,7 @@ export async function queueKnowledgebaseDeletion(id: string, tenantId: string): 
   if (!kb.rows[0]) return false;
   await assertNoActiveAiEngineTransition(tenantId, 'xoa Kho tri thuc');
   if (isRestoreActiveState(kb.rows[0].restore_state)) {
-    throw new Error('Không thể xoá Kho tri thức đang được khôi phục');
+    throw new AppError('Không thể xoá Kho tri thức đang được khôi phục', 409);
   }
   const bots = await query<{ cnt: number }>(
     `SELECT COUNT(*)::int AS cnt FROM chatbots WHERE kb_id = $1 AND tenant_id = $2`,
@@ -2227,8 +2228,8 @@ export async function queueKnowledgebaseDeletion(id: string, tenantId: string): 
     `SELECT COUNT(*)::int AS cnt FROM tenant_kb_assignments WHERE kb_id = $1 AND tenant_id = $2`,
     [id, tenantId],
   );
-  if ((bots.rows[0]?.cnt || 0) > 0) throw new Error(`Không thể xoá KB — đang có ${bots.rows[0].cnt} bot sử dụng`);
-  if ((assignments.rows[0]?.cnt || 0) > 0) throw new Error('Không thể xoá KB đang được gán cho chuyên gia bài học');
+  if ((bots.rows[0]?.cnt || 0) > 0) throw new AppError(`Không thể xoá KB — đang có ${bots.rows[0].cnt} bot sử dụng`, 409);
+  if ((assignments.rows[0]?.cnt || 0) > 0) throw new AppError('Không thể xoá KB đang được gán cho chuyên gia bài học', 409);
   await supersedeLessonAuthorBlueprintsForKnowledgebase(tenantId, id);
   await enqueueKbOperation({ tenantId, kbId: id, operation: 'knowledgebase_delete' });
   return true;
@@ -2251,11 +2252,11 @@ export async function updateArticleFromStagedSource(
   const existing = current.rows[0];
   if (!existing) return null;
   if (existing.status === 'learning' || existing.status === 'deleting') {
-    throw new Error('Không thể sửa bài viết đang được xử lý');
+    throw new AppError('Không thể sửa bài viết đang được xử lý', 409);
   }
   if (input.expected_updated_at && existing.updated_at
       && new Date(input.expected_updated_at).getTime() !== new Date(existing.updated_at).getTime()) {
-    throw new Error('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.');
+    throw new AppError('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.', 409);
   }
   const updated = await query<KbDocument>(
     `UPDATE kb_documents

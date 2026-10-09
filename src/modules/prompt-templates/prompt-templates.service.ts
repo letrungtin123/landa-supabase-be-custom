@@ -7,6 +7,7 @@ import { getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
+import { AppError } from '../../middleware/error-handler.js';
 
 const MAX_ACTIVE = 6;
 
@@ -156,7 +157,7 @@ export async function createTemplate(input: CreateTemplateInput, userId: string)
     await lockPromptTemplateCapacity();
     const activeCount = await getActiveCount();
     if (activeCount >= MAX_ACTIVE) {
-      throw new Error(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`);
+      throw new AppError(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`, 409);
     }
   }
 
@@ -190,7 +191,7 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
   if (!current) return null;
 
   if (input.is_active === true && (current.is_lesson_author || input.is_lesson_author === true)) {
-    throw new Error('Mascot chuyên gia bài học không hiển thị trong AI Chatbot. Hãy tắt cờ chuyên gia trước khi bật mascot thường.');
+    throw new AppError('Mascot chuyên gia bài học không hiển thị trong AI Chatbot. Hãy tắt cờ chuyên gia trước khi bật mascot thường.', 409);
   }
 
   // Enforce max active when toggling on
@@ -198,7 +199,7 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
     if (current && !current.is_active) {
       const activeCount = await getActiveCount();
       if (activeCount >= MAX_ACTIVE) {
-        throw new Error(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`);
+        throw new AppError(`Tối đa ${MAX_ACTIVE} mascot được bật cùng lúc. Hãy tắt 1 mascot trước.`, 409);
       }
     }
   }
@@ -262,10 +263,10 @@ const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
 function validateImage(file: { mimetype: string; size: number }): void {
   if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype)) {
-    throw new Error('Chỉ hỗ trợ JPEG, PNG, WebP, GIF');
+    throw new AppError('Chỉ hỗ trợ JPEG, PNG, WebP, GIF', 400);
   }
   if (file.size > MAX_IMAGE_SIZE) {
-    throw new Error('File ảnh tối đa 5MB');
+    throw new AppError('File ảnh tối đa 5MB', 400);
   }
 }
 
@@ -294,7 +295,7 @@ export async function uploadAvatar(
       [storagePath, id],
     );
     updated = result.rows[0] || null;
-    if (!updated) throw new Error('Không thể cập nhật ảnh đại diện');
+    if (!updated) throw new AppError('Không thể cập nhật ảnh đại diện', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {
@@ -333,7 +334,7 @@ export async function uploadFullbody(
       [storagePath, id],
     );
     updated = result.rows[0] || null;
-    if (!updated) throw new Error('Không thể cập nhật ảnh toàn thân');
+    if (!updated) throw new AppError('Không thể cập nhật ảnh toàn thân', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {

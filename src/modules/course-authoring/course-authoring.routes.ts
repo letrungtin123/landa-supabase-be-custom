@@ -12,10 +12,18 @@ import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission } from '../../middleware/authorize.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { sendError } from '../../utils/response.js';
+import { isUuid } from '../../utils/client-error.js';
 import * as ctrl from './course-authoring.controller.js';
 import * as publishGovernance from './course-publish-governance.controller.js';
 
 const router = Router();
+
+// Course block ids are UUIDs; anything else is simply not found (never a raw
+// database error).
+router.param('blockId', (req: Request, res: Response, next: NextFunction, value: string) => {
+  if (!isUuid(value)) { sendError(res, 'Không tìm thấy nội dung khóa học này.', 404); return; }
+  next();
+});
 const courseAssetTempDir = path.join(process.cwd(), 'tmp', 'course-assets');
 
 function cleanupStaleCourseAssetTempFiles(): void {

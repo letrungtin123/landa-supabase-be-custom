@@ -9,6 +9,7 @@ import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js'
 import { invalidateBotCaches, invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import type { CreateBotInput, UpdateBotInput } from './bot.validator.js';
+import { AppError } from '../../middleware/error-handler.js';
 import {
   INPUT_FILTER_CONFIG_KEY,
   ensureInputFilterInBotConfig,
@@ -138,7 +139,7 @@ export async function createBot(tenantId: string, input: CreateBotInput, userId:
       [input.kb_id, tenantId],
     );
     if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
-      throw new Error('Knowledge Base không tồn tại hoặc không thuộc tenant này');
+      throw new AppError('Knowledge Base không tồn tại hoặc không thuộc tenant này', 404);
     }
   }
 
@@ -171,7 +172,7 @@ export async function updateBot(id: string, tenantId: string, input: UpdateBotIn
       [input.kb_id, tenantId],
     );
     if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
-      throw new Error('Knowledge Base không tồn tại hoặc không thuộc tenant này');
+      throw new AppError('Knowledge Base không tồn tại hoặc không thuộc tenant này', 404);
     }
   }
 
@@ -276,7 +277,7 @@ export async function uploadBotAvatar(
       [storagePath, botId, tenantId],
     );
     updated = result.rows[0] || null;
-    if (!updated) throw new Error('Không thể cập nhật ảnh đại diện trợ lý AI');
+    if (!updated) throw new AppError('Không thể cập nhật ảnh đại diện trợ lý AI', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {
@@ -377,7 +378,7 @@ async function assertMutableBotPersona(botId: string, personaId: string): Promis
   );
   if (!result.rows[0]) return false;
   if (result.rows[0].is_lesson_author) {
-    throw new Error('Nhân cách chuyên gia bài học chỉ được chỉnh trong Prompt hệ thống bởi superadmin.');
+    throw new AppError('Nhân cách chuyên gia bài học chỉ được chỉnh trong Prompt hệ thống bởi superadmin.', 403);
   }
   return true;
 }
@@ -464,12 +465,12 @@ export async function addBotPersona(
   // Check max
   const existing = await listBotPersonas(botId, tenantId);
   if (existing.length >= MAX_PERSONAS_PER_BOT) {
-    throw new Error(`Tối đa ${MAX_PERSONAS_PER_BOT} nhân cách cho mỗi bot`);
+    throw new AppError(`Tối đa ${MAX_PERSONAS_PER_BOT} nhân cách cho mỗi bot`, 409);
   }
 
   // Check duplicate
   if (existing.some(p => p.template_id === templateId)) {
-    throw new Error('Nhân cách này đã được gán cho bot');
+    throw new AppError('Nhân cách này đã được gán cho bot', 409);
   }
 
   // Verify template exists
@@ -477,9 +478,9 @@ export async function addBotPersona(
     `SELECT id, sort_order, is_lesson_author FROM system_prompt_templates WHERE id = $1`,
     [templateId],
   );
-  if (!tplCheck.rows[0]) throw new Error('Template không tồn tại');
+  if (!tplCheck.rows[0]) throw new AppError('Template không tồn tại', 404);
   if (tplCheck.rows[0].is_lesson_author) {
-    throw new Error('Nhân cách chuyên gia bài học được quản lý trong Prompt hệ thống, không thể thêm thủ công vào AI Chatbot.');
+    throw new AppError('Nhân cách chuyên gia bài học được quản lý trong Prompt hệ thống, không thể thêm thủ công vào AI Chatbot.', 400);
   }
 
   await query(

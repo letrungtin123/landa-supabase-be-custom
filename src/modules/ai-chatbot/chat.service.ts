@@ -234,7 +234,7 @@ setInterval(() => {
 function checkRateLimit(userId: string): void {
   const lastSent = rateLimitMap.get(userId);
   if (lastSent && Date.now() - lastSent < RATE_LIMIT_MS) {
-    throw new Error('Bạn gửi tin nhắn quá nhanh. Vui lòng đợi vài giây.');
+    throw new AppError('Bạn gửi tin nhắn quá nhanh. Vui lòng đợi vài giây.', 429);
   }
 }
 function markRateLimit(userId: string): void {
@@ -327,11 +327,12 @@ async function getCachedStoreName(kbId: string, tenantId: string): Promise<strin
 
   const row = result.rows[0];
   if (ACTIVE_KB_RESTORE_STATES.has(row.restore_state || '')) {
-    throw new Error('Kho tri thuc dang khoi phuc. Vui long cho hoan tat roi chat lai.');
+    throw new AppError('Kho tri thuc dang khoi phuc. Vui long cho hoan tat roi chat lai.', 409);
   }
   if (!row.store_name) return null;
   if (RESTORE_REQUIRED_STORE_STATUSES.has(row.remote_status || '')) {
-    throw new Error(row.remote_error_reason || 'Kho tri thuc can khoi phuc lai truoc khi chat.');
+    // The stored remote reason is provider text; the chat answer stays plain.
+    throw new AppError('Kho tri thuc can khoi phuc lai truoc khi chat.', 409);
   }
   if (row.remote_status && row.remote_status !== 'active') return null;
   if (row.api_key_fingerprint && currentFingerprint && row.api_key_fingerprint !== currentFingerprint) {
@@ -342,7 +343,7 @@ async function getCachedStoreName(kbId: string, tenantId: string): Promise<strin
       'Gemini API key changed; restore this KB to rebuild File Search store for the current key.',
     );
     invalidateGeminiStoreNameCache(kbId);
-    throw new Error('Kho tri thuc can khoi phuc lai truoc khi chat vi Google/Gemini key da thay doi.');
+    throw new AppError('Kho tri thuc can khoi phuc lai truoc khi chat vi Google/Gemini key da thay doi.', 409);
   }
 
   storeNameCache.set(cacheKey, { name: row.store_name, ts: Date.now() });
@@ -750,14 +751,14 @@ async function getActiveBotFromDb(tenantId: string, target: ChatTarget): Promise
 }
 
 export async function assignBot(tenantId: string, target: ChatTarget, botId: string): Promise<void> {
-  if (!isValidUUID(botId)) throw new Error('bot_id không hợp lệ');
+  if (!isValidUUID(botId)) throw new AppError('bot_id không hợp lệ', 400);
 
   const botCheck = await query<{ id: string }>(
     `SELECT id FROM chatbots WHERE id = $1 AND tenant_id = $2`,
     [botId, tenantId],
   );
   if (!botCheck.rowCount || botCheck.rowCount === 0) {
-    throw new Error('Bot không tồn tại, không thuộc tenant, hoặc đã bị tắt');
+    throw new AppError('Bot không tồn tại, không thuộc tenant, hoặc đã bị tắt', 404);
   }
 
   await query(
@@ -836,7 +837,7 @@ async function resolveLessonAuthorPersonaForBot(
   botId: string,
   opts: { strict?: boolean } = {},
 ): Promise<PersonaAssignment | null> {
-  if (!isValidUUID(botId)) throw new Error('bot_id không hợp lệ');
+  if (!isValidUUID(botId)) throw new AppError('bot_id không hợp lệ', 400);
 
   const result = await query<PersonaAssignment>(
     `WITH bot_check AS (
@@ -892,10 +893,10 @@ async function resolveLessonAuthorPersonaForBot(
   );
 
   if (!check.rows[0]?.has_bot) {
-    throw new Error('Bot không tồn tại hoặc không thuộc tenant');
+    throw new AppError('Bot không tồn tại hoặc không thuộc tenant', 404);
   }
   if (!check.rows[0]?.has_template) {
-    throw new Error('Chưa cấu hình nhân cách chuyên gia bài học trong Prompt hệ thống');
+    throw new AppError('Chưa cấu hình nhân cách chuyên gia bài học trong Prompt hệ thống', 409);
   }
   return null;
 }
@@ -971,14 +972,14 @@ export async function listLessonAuthorSourceDocuments(
 }
 
 export async function assignLessonAuthorKb(tenantId: string, kbId: string): Promise<void> {
-  if (!isValidUUID(kbId)) throw new Error('kb_id không hợp lệ');
+  if (!isValidUUID(kbId)) throw new AppError('kb_id không hợp lệ', 400);
 
   const kbCheck = await query<{ id: string }>(
     `SELECT id FROM knowledgebases WHERE id = $1 AND tenant_id = $2`,
     [kbId, tenantId],
   );
   if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
-    throw new Error('KB không tồn tại hoặc không thuộc tenant');
+    throw new AppError('KB không tồn tại hoặc không thuộc tenant', 404);
   }
 
   await query(
@@ -1014,7 +1015,7 @@ export async function listConversations(
   courseId?: string,
 ): Promise<ChatConversation[]> {
   if (target === LESSON_AUTHOR_TARGET && !courseId) {
-    throw new Error('courseId is required for lesson_author conversations');
+    throw new AppError('courseId is required for lesson_author conversations', 400);
   }
   const result = await query<ChatConversation>(
     `SELECT cc.*,
@@ -1055,7 +1056,7 @@ export async function createConversation(
   courseId?: string,
 ): Promise<ChatConversation> {
   if (target === LESSON_AUTHOR_TARGET && !courseId) {
-    throw new Error('courseId is required for lesson_author conversations');
+    throw new AppError('courseId is required for lesson_author conversations', 400);
   }
 
   if (target === LESSON_AUTHOR_TARGET) {
@@ -1063,7 +1064,7 @@ export async function createConversation(
     personaId = activePersona?.persona_id ?? null;
   }
 
-  if (!personaId || !isValidUUID(personaId)) throw new Error('persona_id không hợp lệ');
+  if (!personaId || !isValidUUID(personaId)) throw new AppError('persona_id không hợp lệ', 400);
 
   return withDatabaseTransaction(async () => {
     // Serializes the per-user/course cap across every backend instance. The
@@ -1102,11 +1103,11 @@ export async function createConversation(
     );
 
     const { conv_count, persona_valid, assignment_valid } = result.rows[0];
-    if (!assignment_valid) throw new Error('Chưa có bot nào được triển khai cho khu vực này');
+    if (!assignment_valid) throw new AppError('Chưa có bot nào được triển khai cho khu vực này', 409);
     if (conv_count >= MAX_CONVERSATIONS_PER_USER) {
-      throw new Error(`Tối đa ${MAX_CONVERSATIONS_PER_USER} cuộc hội thoại. Vui lòng xoá bớt.`);
+      throw new AppError(`Tối đa ${MAX_CONVERSATIONS_PER_USER} cuộc hội thoại. Vui lòng xoá bớt.`, 409);
     }
-    if (!persona_valid) throw new Error('Nhân cách không hợp lệ cho bot này');
+    if (!persona_valid) throw new AppError('Nhân cách không hợp lệ cho bot này', 400);
 
     const insertResult = await query<ChatConversation>(
       `INSERT INTO chat_conversations (tenant_id, bot_id, persona_id, user_id, target, course_id, metadata)
@@ -1123,9 +1124,9 @@ export async function deleteConversation(
   tenantId: string,
   expectedTarget?: ChatTarget,
 ): Promise<boolean> {
-  if (!isValidUUID(conversationId)) throw new Error('ID không hợp lệ');
+  if (!isValidUUID(conversationId)) throw new AppError('ID không hợp lệ', 400);
   if (expectedTarget === LESSON_AUTHOR_TARGET) {
-    throw new Error('Phiên AI Instructional Design phải được xóa từ danh sách bản thảo.');
+    throw new AppError('Phiên AI Instructional Design phải được xóa từ danh sách bản thảo.', 409);
   }
 
   const result = await query(
@@ -1454,7 +1455,7 @@ export async function getConversationMessages(
   cursor?: string,
   expectedTarget?: ChatTarget,
 ): Promise<PaginatedMessages> {
-  if (!isValidUUID(conversationId)) throw new Error('ID không hợp lệ');
+  if (!isValidUUID(conversationId)) throw new AppError('ID không hợp lệ', 400);
 
   // Validate ownership + tenant in one query
   const convCheck = await query<{ id: string }>(
@@ -1471,7 +1472,7 @@ export async function getConversationMessages(
     [conversationId, userId, tenantId, expectedTarget ?? null],
   );
   if (!convCheck.rowCount || convCheck.rowCount === 0) {
-    throw new Error('Cuộc hội thoại không tồn tại');
+    throw new AppError('Cuộc hội thoại không tồn tại', 404);
   }
 
   // Cursor-based: load N+1 messages BEFORE cursor (newest first), then reverse
@@ -1591,7 +1592,7 @@ async function loadConversationContext(
   );
 
   if (!result.rowCount || result.rowCount === 0) {
-    throw new Error('Cuộc hội thoại không tồn tại');
+    throw new AppError('Cuộc hội thoại không tồn tại', 404);
   }
 
   const row = result.rows[0];
@@ -1599,7 +1600,7 @@ async function loadConversationContext(
   if (row.target === LESSON_AUTHOR_TARGET) {
     if (!row.course_id) throw new Error('Lesson author conversation is missing course_id');
     const activeKb = await getActiveKbAssignment(tenantId);
-    if (!activeKb) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
+    if (!activeKb) throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học', 409);
     botKbId = activeKb.kb_id;
   }
 
@@ -1724,12 +1725,11 @@ function sanitizeGeminiError(err: any): Error {
   if (status === 403 || msg.includes('PERMISSION_DENIED')) {
     return new Error('API key không hợp lệ hoặc đã hết hạn. Vui lòng liên hệ quản trị viên.');
   }
-  // Generic — don't leak raw error
-  if (msg.length > 200 || msg.includes('{')) {
-    return new Error('Đã xảy ra lỗi khi xử lý tin nhắn. Vui lòng thử lại.');
-  }
-  if (msg !== rawMsg) return new Error(msg);
-  return err;
+  // Anything else was not written for the user (database, storage, network,
+  // provider or internal validation text): the detail goes to the server log,
+  // the user gets one plain message.
+  console.warn('[AI Chatbot] Unexpected error shown as a generic message:', msg.slice(0, 500));
+  return new Error('Đã xảy ra lỗi khi xử lý tin nhắn. Vui lòng thử lại.');
 }
 
 /** Helper: sleep for retry */
@@ -2534,10 +2534,10 @@ async function validateLessonAuthorSourceDocuments(
   const ids = normalizeSourceDocumentIds(inputs);
   if (ids.length === 0) return [];
   if (ctx.target !== LESSON_AUTHOR_TARGET) {
-    throw new Error('Chỉ có Chuyên gia bài học mới được chọn file nguồn.');
+    throw new AppError('Chỉ có Chuyên gia bài học mới được chọn file nguồn.', 400);
   }
   if (!kbId) {
-    throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học.');
+    throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học.', 409);
   }
 
   const result = await query<{
@@ -2573,15 +2573,15 @@ async function validateLessonAuthorSourceDocuments(
   const foundIds = new Set(result.rows.map(row => row.document_id));
   const missingIds = ids.filter(id => !foundIds.has(id));
   if (missingIds.length > 0) {
-    throw new Error('Một số file nguồn không tồn tại, không thuộc KB active, hoặc không thuộc tenant hiện tại.');
+    throw new AppError('Một số file nguồn không tồn tại, không thuộc KB active, hoặc không thuộc tenant hiện tại.', 400);
   }
 
   return result.rows.map((row) => {
     if (row.status !== 'learned') {
-      throw new Error(`File "${row.name}" chưa học xong. Vui lòng chờ trạng thái Đã học rồi thử lại.`);
+      throw new AppError(`File "${row.name}" chưa học xong. Vui lòng chờ trạng thái Đã học rồi thử lại.`, 409);
     }
     if (options.requireGeminiMapping !== false && !row.gemini_path) {
-      throw new Error(`File "${row.name}" chưa có mapping Gemini File Search. Vui lòng retry tài liệu này trong KB.`);
+      throw new AppError(`File "${row.name}" chưa có mapping Gemini File Search. Vui lòng retry tài liệu này trong KB.`, 409);
     }
     const contentText = row.content ? stripHtml(row.content).replace(/\s+/g, ' ').trim() : '';
     return {
@@ -2908,7 +2908,7 @@ async function validateLessonAuthorEditorContext(
   value: unknown,
 ): Promise<ValidatedLessonAuthorEditorContextState | null> {
   if (ctx.target !== LESSON_AUTHOR_TARGET || value === undefined || value === null) return null;
-  if (!ctx.courseId) throw new Error('editor_context chỉ hợp lệ trong khóa học đang mở.');
+  if (!ctx.courseId) throw new AppError('editor_context chỉ hợp lệ trong khóa học đang mở.', 400);
 
   const normalized = normalizeLessonAuthorEditorContext(value);
   if (!normalized) return null;
@@ -2923,7 +2923,7 @@ async function validateLessonAuthorEditorContext(
   const loaded = await Promise.all(uniqueIds.map(async (id) => [id, await loadLessonAuthorTargetById(ctx, id)] as const));
   const targets = new Map<string, CanonicalLessonAuthorTarget>();
   for (const [id, target] of loaded) {
-    if (!target) throw new Error('editor_context chứa target không thuộc tenant hoặc khóa học hiện tại.');
+    if (!target) throw new AppError('editor_context chứa target không thuộc tenant hoặc khóa học hiện tại.', 400);
     targets.set(id, target);
   }
 
@@ -4769,7 +4769,7 @@ export function normalizeLessonAuthorProposal(rawValue: unknown): LessonAuthorPr
 
   if (rawChapters.length === 0) throw new Error('AI proposal must contain at least one chapter');
   if (rawChapters.length > MAX_PROPOSAL_CHAPTERS) {
-    throw new Error(`AI proposal vượt quá giới hạn ${MAX_PROPOSAL_CHAPTERS} section/chapter. Chỉ được tạo nội dung đầy đủ trong một section cho mỗi lần approve.`);
+    throw new AppError(`AI proposal vượt quá giới hạn ${MAX_PROPOSAL_CHAPTERS} section/chapter. Chỉ được tạo nội dung đầy đủ trong một section cho mỗi lần approve.`, 400);
   }
 
   let lessonCount = 0;
@@ -5233,7 +5233,7 @@ export function normalizeLessonAuthorBlueprint(
   const rawChapters = Array.isArray(raw.chapters) ? raw.chapters : [];
   if (rawChapters.length === 0) throw new Error('AI blueprint must contain at least one chapter');
   if (rawChapters.length > MAX_BLUEPRINT_CHAPTERS) {
-    throw new Error(`AI blueprint vượt quá giới hạn ${MAX_BLUEPRINT_CHAPTERS} chương. Hãy thu gọn cấu trúc khóa học trước khi duyệt.`);
+    throw new AppError(`AI blueprint vượt quá giới hạn ${MAX_BLUEPRINT_CHAPTERS} chương. Hãy thu gọn cấu trúc khóa học trước khi duyệt.`, 400);
   }
 
   const chapters = rawChapters.map((chapterValue, chapterIndex): LessonAuthorBlueprintChapter => {
@@ -6327,7 +6327,7 @@ async function convertLessonAuthorChatJsonToProposalMessage(
   if (ctx.target !== LESSON_AUTHOR_TARGET || !looksLikeLessonAuthorProposalJsonResponse(rawResponse)) return null;
 
   try {
-    if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
+    if (!ctx.botKbId) throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học', 409);
     const proposal = normalizeLessonAuthorProposal(extractJsonObject(rawResponse));
     assertLessonAuthorProposalComponentsValid(
       proposal,
@@ -6469,7 +6469,7 @@ async function generateLessonAuthorBlueprint(
   const storeName = await getCachedStoreName(kbId, ctx.tenantId);
   const allowedComponentTypes = await getTenantAllowedCourseComponentTypeSet(ctx.tenantId);
   if (!storeName) {
-    throw new Error('KB active chưa có Gemini File Search store. Hãy upload tài liệu và chờ KB học xong trước.');
+    throw new AppError('KB active chưa có Gemini File Search store. Hãy upload tài liệu và chờ KB học xong trước.', 409);
   }
 
   const sourceDocumentContext = formatSourceDocumentsForPrompt(sourceDocuments);
@@ -6571,7 +6571,7 @@ async function generateLessonAuthorProposal(
     store_name: storeName ?? null,
   });
   if (!storeName) {
-    throw new Error('KB active chưa có Gemini File Search store. Hãy upload tài liệu và chờ KB học xong trước.');
+    throw new AppError('KB active chưa có Gemini File Search store. Hãy upload tài liệu và chờ KB học xong trước.', 409);
   }
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
 
@@ -6710,7 +6710,7 @@ async function generateProposalSkeleton(
 ): Promise<LessonAuthorProposal> {
   const aiClient = await getGeminiClient(ctx.tenantId);
   const storeName = await getCachedStoreName(kbId, ctx.tenantId);
-  if (!storeName) throw new Error('KB active chưa có Gemini File Search store.');
+  if (!storeName) throw new AppError('KB active chưa có Gemini File Search store.', 409);
 
   const scopedOutlineMentions = outlineMentions.slice(0, 1);
   const skeletonPrompt = [
@@ -7260,8 +7260,8 @@ async function loadLessonAuthorBlueprintForDraft(
   locale: 'vi' | 'en',
 ): Promise<BlueprintDraftContext> {
   if (!ctx.courseId) throw new Error('courseId is required for lesson author');
-  if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học.');
-  if (!isValidUUID(blueprintId)) throw new Error('Blueprint ID không hợp lệ.');
+  if (!ctx.botKbId) throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học.', 409);
+  if (!isValidUUID(blueprintId)) throw new AppError('Blueprint ID không hợp lệ.', 400);
   const result = await query<LessonAuthorBlueprintRow>(
     `SELECT id, tenant_id, course_id, status, blueprint, quality_report,
             (SELECT message.metadata ->> 'locale'
@@ -7283,7 +7283,7 @@ async function loadLessonAuthorBlueprintForDraft(
     [blueprintId, ctx.tenantId, ctx.courseId, ctx.botKbId],
   );
   if (!result.rowCount) {
-    throw new Error('Bản thiết kế khóa học không còn khả dụng, không thuộc KB hiện tại, hoặc không thuộc khóa học hiện tại.');
+    throw new AppError('Bản thiết kế khóa học không còn khả dụng, không thuộc KB hiện tại, hoặc không thuộc khóa học hiện tại.', 409);
   }
   const stored = result.rows[0];
   let sourceDocuments: LessonAuthorSourceDocument[];
@@ -7297,7 +7297,7 @@ async function loadLessonAuthorBlueprintForDraft(
   } catch {
     const reason = 'Tài liệu nguồn của bản thiết kế đã thay đổi, bị xóa, hoặc chưa sẵn sàng. Vui lòng tạo lại bản thiết kế khóa học.';
     await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason).catch(() => undefined);
-    throw new Error(reason);
+    throw new AppError(reason, 409);
   }
 
   const storedRevisions = getStoredSourceUpdatedAtByDocument(stored.source_documents);
@@ -7308,7 +7308,7 @@ async function loadLessonAuthorBlueprintForDraft(
   if (hasChangedSource) {
     const reason = 'Tài liệu nguồn của bản thiết kế đã được cập nhật. Vui lòng tạo lại bản thiết kế khóa học trước khi soạn chi tiết.';
     await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason);
-    throw new Error(reason);
+    throw new AppError(reason, 409);
   }
 
   const courseResult = await query<{ display_name: string }>(
@@ -7349,7 +7349,7 @@ async function loadLessonAuthorBlueprintForDraft(
     || requestedChapterIndex < 0
     || requestedChapterIndex >= blueprint.chapters.length
   ) {
-    throw new Error('Chương trong bản thiết kế không còn hợp lệ. Vui lòng mở lại bản thiết kế và thử lại.');
+    throw new AppError('Chương trong bản thiết kế không còn hợp lệ. Vui lòng mở lại bản thiết kế và thử lại.', 409);
   }
 
   const draftProgress = await getBlueprintChapterDraftProgress(ctx, stored.id);
@@ -8095,7 +8095,7 @@ export async function applyLessonAuthorJob(
           tenant_id: tenantId,
           blueprint_status: blueprint.rows[0]?.status ?? null,
         });
-        throw new Error(`${sourceChangeReason} Vui lòng tạo lại Bản thiết kế khóa học trước khi áp dụng.`);
+        throw new AppError(`${sourceChangeReason} Vui lòng tạo lại Bản thiết kế khóa học trước khi áp dụng.`, 409);
       }
     }
 
@@ -8119,8 +8119,9 @@ export async function applyLessonAuthorJob(
           course_id: job.course_id,
           age_minutes: Math.round(jobAge / 60_000),
         });
-        throw new Error(
-          `Proposal đã tạo ${Math.round(jobAge / 60_000)} phút trước và outline đã thay đổi. Tạo proposal mới để tránh conflict.`
+        throw new AppError(
+          `Proposal đã tạo ${Math.round(jobAge / 60_000)} phút trước và outline đã thay đổi. Tạo proposal mới để tránh conflict.`,
+          409,
         );
       }
     }
@@ -8477,7 +8478,7 @@ export async function sendMessageStream(
       ? validatedEditorContext?.targets.get(editorTarget.id)
       : null;
     if (editorTarget && !editorMention) {
-      throw new Error('Không xác định được target editor context trong khóa học hiện tại.');
+      throw new AppError('Không xác định được target editor context trong khóa học hiện tại.', 400);
     }
     const currentOutlineMentions = requestedOutlineMentions.length > 0
       ? requestedOutlineMentions
@@ -8519,7 +8520,7 @@ export async function sendMessageStream(
     let blueprintDraftSource: 'explicit' | 'auto_matched' | 'none' = 'none';
     if (ctx.target === LESSON_AUTHOR_TARGET && options.blueprintId) {
       if (preClassify?.intent !== 'draft_lesson') {
-        throw new Error('Blueprint chỉ được dùng khi soạn chi tiết một chương.');
+        throw new AppError('Blueprint chỉ được dùng khi soạn chi tiết một chương.', 400);
       }
       blueprintDraftContext = await loadLessonAuthorBlueprintForDraft(
         ctx,
@@ -8925,9 +8926,9 @@ export async function sendMessageStream(
       });
       try {
         if (isDeleteRequest) {
-          throw new Error('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.');
+          throw new AppError('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.', 400);
         }
-        if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
+        if (!ctx.botKbId) throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học', 409);
         course = await getDraftCourseOutlineForPrompt(ctx.courseId!, ctx.tenantId);
         const allowedComponentTypes = await getTenantAllowedCourseComponentTypeSet(ctx.tenantId);
         onSideEvent?.({ type: 'progress', stage: 'ANALYZING_SOURCE', detail: 'Đang phân tích phạm vi tài liệu nguồn' });
@@ -9170,9 +9171,9 @@ export async function sendMessageStream(
       try {
         // Delete guard: NEVER allow draft_lesson when delete intent detected
         if (isDeleteRequest) {
-          throw new Error('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.');
+          throw new AppError('Thao tác xóa không được hỗ trợ qua Chuyên gia bài học. Vui lòng xóa trực tiếp trong outline/editor.', 400);
         }
-        if (!ctx.botKbId) throw new Error('Chưa cấu hình KB active cho chuyên gia tạo bài học');
+        if (!ctx.botKbId) throw new AppError('Chưa cấu hình KB active cho chuyên gia tạo bài học', 409);
         if (aiSettings.activeEngine === 'self_built_rag') {
           onSideEvent?.({ type: 'progress', stage: 'RETRIEVING_EVIDENCE', detail: 'Đang truy xuất bằng chứng cho bài học' });
           const course = await getDraftCourseOutlineForPrompt(ctx.courseId!, ctx.tenantId);

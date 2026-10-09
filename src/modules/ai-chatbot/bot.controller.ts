@@ -5,9 +5,24 @@
 import type { Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { isUuid, sendClientError } from '../../utils/client-error.js';
 import { createBotSchema, updateBotSchema } from './bot.validator.js';
 import * as botService from './bot.service.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+
+/** Ids are UUIDs: anything else is simply not found (never a database error). */
+function botIdValid(req: Request, res: Response): boolean {
+  if (isUuid(req.params.id)) return true;
+  sendError(res, 'Bot không tồn tại', 404);
+  return false;
+}
+
+function personaIdValid(req: Request, res: Response): boolean {
+  if (!botIdValid(req, res)) return false;
+  if (isUuid(req.params.personaId)) return true;
+  sendError(res, 'Persona không tồn tại', 404);
+  return false;
+}
 
 export async function listBots(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
@@ -20,6 +35,7 @@ export async function listBots(req: Request, res: Response): Promise<void> {
 }
 
 export async function getBot(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const bot = await botService.getBot(req.params.id, tenantId);
   if (!bot) { sendError(res, 'Bot không tồn tại', 404); return; }
@@ -37,12 +53,13 @@ export async function createBot(req: Request, res: Response): Promise<void> {
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'chatbot', { code: 'chatbot.created' }, created.id, created.name),
     );
     sendSuccess(res, bot, undefined, 201);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function updateBot(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const parsed = updateBotSchema.safeParse(req.body);
   if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
@@ -60,12 +77,13 @@ export async function updateBot(req: Request, res: Response): Promise<void> {
     );
     if (!bot) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, bot);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function deleteBot(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   // Fetch name before deleting for audit log
   const bot = await botService.getBot(req.params.id, tenantId);
@@ -79,6 +97,7 @@ export async function deleteBot(req: Request, res: Response): Promise<void> {
 }
 
 export async function uploadAvatar(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const file = req.file as Express.Multer.File | undefined;
   if (!file) { sendError(res, 'Chưa upload file ảnh', 400); return; }
@@ -95,24 +114,26 @@ export async function uploadAvatar(req: Request, res: Response): Promise<void> {
     );
     if (!bot) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, bot);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function getInputFilterConfig(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
 
   try {
     const config = await botService.getBotInputFilterConfig(req.params.id, tenantId);
     if (!config) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, config);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function updateInputFilterConfig(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const rawInput = req.body?.input_filter ?? req.body;
 
@@ -124,24 +145,26 @@ export async function updateInputFilterConfig(req: Request, res: Response): Prom
     );
     if (!config) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, config);
-  } catch (err: any) {
+  } catch (err) {
     if (err instanceof ZodError) {
       sendError(res, err.errors[0]?.message || 'Cấu hình bộ lọc không hợp lệ', 400);
       return;
     }
-    sendError(res, err.message, 400);
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 // ── Bot Personas ──
 
 export async function listPersonas(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const personas = await botService.listBotPersonas(req.params.id, tenantId);
   sendSuccess(res, personas);
 }
 
 export async function updatePersona(req: Request, res: Response): Promise<void> {
+  if (!personaIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const { id: botId, personaId } = req.params;
   const { custom_name, custom_description, custom_prompt } = req.body ?? {};
@@ -171,12 +194,13 @@ export async function updatePersona(req: Request, res: Response): Promise<void> 
     );
     if (!persona) { sendError(res, 'Persona không tồn tại', 404); return; }
     sendSuccess(res, persona);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function resetPersona(req: Request, res: Response): Promise<void> {
+  if (!personaIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const { id: botId, personaId } = req.params;
 
@@ -188,12 +212,13 @@ export async function resetPersona(req: Request, res: Response): Promise<void> {
     );
     if (!persona) { sendError(res, 'Persona không tồn tại', 404); return; }
     sendSuccess(res, persona);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function addPersona(req: Request, res: Response): Promise<void> {
+  if (!botIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const { id: botId } = req.params;
   const { template_id } = req.body;
@@ -202,6 +227,7 @@ export async function addPersona(req: Request, res: Response): Promise<void> {
     sendError(res, 'template_id là bắt buộc', 400);
     return;
   }
+  if (!isUuid(template_id)) { sendError(res, 'Template không tồn tại', 404); return; }
 
   try {
     const bot = await botService.getBot(botId, tenantId);
@@ -211,12 +237,13 @@ export async function addPersona(req: Request, res: Response): Promise<void> {
     );
     if (!persona) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, persona, undefined, 201);
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }
 
 export async function removePersona(req: Request, res: Response): Promise<void> {
+  if (!personaIdValid(req, res)) return;
   const tenantId = req.user!.tenantId!;
   const { id: botId, personaId } = req.params;
 
@@ -231,7 +258,7 @@ export async function removePersona(req: Request, res: Response): Promise<void> 
     );
     if (!deleted) { sendError(res, 'Persona không tồn tại', 404); return; }
     sendSuccess(res, { deleted: true });
-  } catch (err: any) {
-    sendError(res, err.message, 400);
+  } catch (err) {
+    sendClientError(req, res, err, 'Chatbot');
   }
 }

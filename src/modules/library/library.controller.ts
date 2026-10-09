@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import type { Request, Response, NextFunction } from 'express';
 import * as libService from './library.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { clientErrorMessage, requestUiLocaleOf } from '../../utils/client-error.js';
 import {
   createTransactionalAuditEntry,
   runAuditedTransaction,
@@ -26,8 +27,9 @@ function formatUploadSizeMb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
-function getErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : 'Unknown error';
+/** AppError text as is; storage/database errors become a plain message (detail logged). */
+function getErrorMessage(err: unknown, req: Request): string {
+  return clientErrorMessage(err, requestUiLocaleOf(req), 'Library');
 }
 
 async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
@@ -324,7 +326,7 @@ export async function uploadDocumentController(req: Request, res: Response, next
         if (storageUploaded && storagePath) {
           await deleteFile(storagePath).catch(() => {});
         }
-        errors.push(`${originalName}: ${getErrorMessage(err)}`);
+        errors.push(`${originalName}: ${getErrorMessage(err, req)}`);
       } finally {
         await cleanupTempUpload(file);
       }
