@@ -17,6 +17,41 @@ const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const PIXEL_WIDTH_PATTERN = /^(?:[1-9]\d{1,3}|[1-9]\d?)px$/;
 const ROW_HEIGHT_PATTERN = /^(?:[3-9]\d|[1-3]\d{2}|4[0-8]\d)px$/;
 
+/** One allowlist for every course rich-text field (text blocks and quiz HTML). */
+const COURSE_HTML_SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: COURSE_HTML_ALLOWED_TAGS,
+  allowedAttributes: {
+    '*': ['class'],
+    a: ['href', 'target', 'rel', 'title'],
+    img: ['src', 'alt', 'width', 'height', 'data-landa-image-mode'],
+    table: ['class', 'style'],
+    col: ['width', 'style'],
+    tr: ['class', 'style', 'data-landa-row-height'],
+    th: ['class', 'style', 'align', 'colspan', 'rowspan', 'colwidth', 'data-landa-cell-bg'],
+    td: ['class', 'style', 'align', 'colspan', 'rowspan', 'colwidth', 'data-landa-cell-bg'],
+    span: ['class', 'style'],
+  },
+  allowedClasses: {
+    '*': [/^[A-Za-z0-9_-]{1,64}$/],
+  },
+  allowedStyles: {
+    table: {
+      width: [PIXEL_WIDTH_PATTERN],
+      'min-width': [PIXEL_WIDTH_PATTERN],
+    },
+    col: { width: [PIXEL_WIDTH_PATTERN] },
+    tr: { height: [ROW_HEIGHT_PATTERN] },
+    th: { 'background-color': [HEX_COLOR_PATTERN] },
+    td: { 'background-color': [HEX_COLOR_PATTERN] },
+    span: { color: [HEX_COLOR_PATTERN] },
+  },
+  allowedSchemes: ['http', 'https', 'mailto', 'tel'],
+  allowedSchemesByTag: {
+    img: ['http', 'https'],
+  },
+  allowProtocolRelative: false,
+};
+
 /**
  * Canonical HTML boundary shared by Course Outline and the AI workspace.
  *
@@ -32,39 +67,7 @@ export function sanitizeCourseHtmlData(raw: unknown): string {
     throw new AppError('Nội dung văn bản vượt quá dung lượng cho phép.', 400);
   }
 
-  const sanitized = sanitizeHtml(raw, {
-    allowedTags: COURSE_HTML_ALLOWED_TAGS,
-    allowedAttributes: {
-      '*': ['class'],
-      a: ['href', 'target', 'rel', 'title'],
-      img: ['src', 'alt', 'width', 'height', 'data-landa-image-mode'],
-      table: ['class', 'style'],
-      col: ['width', 'style'],
-      tr: ['class', 'style', 'data-landa-row-height'],
-      th: ['class', 'style', 'align', 'colspan', 'rowspan', 'colwidth', 'data-landa-cell-bg'],
-      td: ['class', 'style', 'align', 'colspan', 'rowspan', 'colwidth', 'data-landa-cell-bg'],
-      span: ['class', 'style'],
-    },
-    allowedClasses: {
-      '*': [/^[A-Za-z0-9_-]{1,64}$/],
-    },
-    allowedStyles: {
-      table: {
-        width: [PIXEL_WIDTH_PATTERN],
-        'min-width': [PIXEL_WIDTH_PATTERN],
-      },
-      col: { width: [PIXEL_WIDTH_PATTERN] },
-      tr: { height: [ROW_HEIGHT_PATTERN] },
-      th: { 'background-color': [HEX_COLOR_PATTERN] },
-      td: { 'background-color': [HEX_COLOR_PATTERN] },
-      span: { color: [HEX_COLOR_PATTERN] },
-    },
-    allowedSchemes: ['http', 'https', 'mailto', 'tel'],
-    allowedSchemesByTag: {
-      img: ['http', 'https'],
-    },
-    allowProtocolRelative: false,
-  });
+  const sanitized = sanitizeHtml(raw, COURSE_HTML_SANITIZE_OPTIONS);
 
   const tables = sanitized.match(/<table\b[^>]*>[\s\S]*?<\/table>/gi) || [];
   let cellCount = 0;
@@ -87,4 +90,16 @@ export function sanitizeCourseHtmlData(raw: unknown): string {
   }
 
   return sanitized;
+}
+
+/**
+ * Rich-text fields inside quiz components (prompt, choice, hint, explanation).
+ * Same allowlist as text blocks; the result is cut to `maxLength` and
+ * sanitized again so a cut never leaves a broken tag behind.
+ */
+export function sanitizeCourseRichText(raw: unknown, fallback: string, maxLength: number): string {
+  const value = typeof raw === 'string' ? raw : fallback;
+  let sanitized = sanitizeHtml(value, COURSE_HTML_SANITIZE_OPTIONS);
+  if (sanitized.length > maxLength) sanitized = sanitizeHtml(sanitized.slice(0, maxLength), COURSE_HTML_SANITIZE_OPTIONS);
+  return sanitized.trim();
 }

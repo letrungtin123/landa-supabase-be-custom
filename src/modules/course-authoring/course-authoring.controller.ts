@@ -35,7 +35,8 @@ import {
   requestCourseOutlineTransfer,
   type CourseOutlineTransferOperation,
 } from './course-outline-transfer.service.js';
-import { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
+import { sanitizeCourseHtmlData, sanitizeCourseRichText } from './course-html-sanitizer.logic.js';
+import { scrubMarkupDeep } from './course-markup-scrubber.logic.js';
 import { withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import { env } from '../../config/env.js';
 import {
@@ -189,17 +190,9 @@ function sanitizeHtmlMedia(raw: any) {
   return { images };
 }
 
+/** Quiz rich text uses the same allowlist sanitizer as text blocks. */
 function sanitizeMediaQuizHtml(raw: unknown, fallback: string, maxLength: number): string {
-  const value = typeof raw === 'string' ? raw : fallback;
-  return value
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
-    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '')
-    .replace(/<embed\b[^>]*>[\s\S]*?<\/embed>/gi, '')
-    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-    .slice(0, maxLength)
-    .trim();
+  return sanitizeCourseRichText(raw, fallback, maxLength);
 }
 
 function sanitizeMediaQuizId(raw: unknown, fallback: string): string {
@@ -660,7 +653,8 @@ export async function createBlock(req: Request, res: Response) {
       ? sanitizeScenarioChatData(data)
       : resolvedType === 'html' && data !== undefined
         ? sanitizeCourseHtmlData(data)
-      : data;
+      // Problem OLX and other component JSON: executable markup is removed.
+      : scrubMarkupDeep(data, { xml: resolvedType === 'problem' });
   const mediaQuizMetadataMode = resolvedType === 'la_media_quiz'
     ? data !== undefined
       ? getMediaQuizMetadataMode(sanitizedCreateData)
@@ -681,8 +675,8 @@ export async function createBlock(req: Request, res: Response) {
       display_name,
       sanitizedCreateData,
       resolvedType === 'la_media_quiz'
-        ? { ...(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
-        : metadata,
+        ? { ...scrubMarkupDeep(metadata ?? {}), media_quiz_mode: mediaQuizMetadataMode }
+        : scrubMarkupDeep(metadata),
       boilerplate,
       req.user!.tenantId,
       requestComponentLocale(req),
@@ -806,7 +800,7 @@ export async function updateBlock(req: Request, res: Response) {
     const resolvedName = display_name ?? metadata?.display_name;
 
     let sanitizedData = data;
-    let sanitizedMetadata = sanitizeMetadata(metadata);
+    let sanitizedMetadata = scrubMarkupDeep(sanitizeMetadata(metadata));
     if (data !== undefined) {
       const currentBlock = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
       if (currentBlock.block_type === 'la_media_quiz') {
@@ -824,6 +818,9 @@ export async function updateBlock(req: Request, res: Response) {
         sanitizedData = sanitizeScenarioChatData(data);
       } else if (currentBlock.block_type === 'html') {
         sanitizedData = sanitizeCourseHtmlData(data);
+      } else {
+        // Problem OLX and other component JSON: executable markup is removed.
+        sanitizedData = scrubMarkupDeep(data, { xml: currentBlock.block_type === 'problem' });
       }
     }
 
@@ -933,7 +930,8 @@ export async function studioSubmit(req: Request, res: Response) {
     const result = await runAuditedTransaction(
       async () => {
         before = await svc.getBlockInfo(req.params.blockId, req.user!.tenantId);
-        return svc.studioSubmit(req.params.blockId, req.body, req.user!.tenantId);
+        // Component JSON from the editors: executable markup is removed from every string.
+        return svc.studioSubmit(req.params.blockId, scrubMarkupDeep(req.body), req.user!.tenantId);
       },
       (submitted) => {
         const block = submitted.block;
