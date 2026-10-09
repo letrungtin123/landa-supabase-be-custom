@@ -29,6 +29,7 @@
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",
     "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts",
     "test:users": "tsx --test --test-force-exit src/modules/users/user-authority.logic.test.ts src/modules/users/users-authority.service.test.ts src/modules/users/user-profile-scope.test.ts",
+    "test:auth-sessions": "tsx --test --test-force-exit src/modules/auth/session-revocation.test.ts",
     "test:sso": "tsx --test --test-force-exit src/modules/sso/sso.service.test.ts",
     "test:tenant-isolation": "tsx --test --test-force-exit src/config/storage-tenant-path.test.ts src/modules/course-authoring/course-asset-tenant.test.ts src/modules/groups/groups-tenant.test.ts src/modules/ai-chatbot/chat-course-scope.test.ts",
     "test:permission-groups": "tsx --test src/modules/permissions/permissions.validator.test.ts src/modules/permissions/permission-group-history.search.test.ts src/modules/permissions/permission-group-history.serialization.test.ts",

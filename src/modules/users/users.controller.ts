@@ -10,6 +10,7 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
+import { syncUserAccessRevocationCache } from '../auth/auth-revocation.service.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
   getUserDeletionJobStatus,
@@ -131,6 +132,12 @@ export async function updateController(req: Request, res: Response, next: NextFu
         };
       },
     );
+    // After COMMIT: sessions ended by a reset/deactivation/role change are
+    // refused through the Redis fast path too; the old role's permissions go.
+    if (usersService.adminUpdateEndsSessions(parsed.data, before?.role)) {
+      await syncUserAccessRevocationCache(req.params.id);
+      invalidatePermissionCache(req.params.id);
+    }
     sendSuccess(res, user, 'Cập nhật thành công');
   } catch (err) { forwardUserWriteError(req, res, next, err); }
 }
@@ -307,7 +314,8 @@ export async function changePasswordController(req: Request, res: Response, next
       return;
     }
 
-    await usersService.changePassword(userId, current_password, new_password);
-    sendSuccess(res, null, 'Đổi mật khẩu thành công');
+    // Other sessions end; the caller receives a fresh session (old clients ignore it).
+    const session = await usersService.changePassword(userId, current_password, new_password);
+    sendSuccess(res, session, 'Đổi mật khẩu thành công');
   } catch (err) { next(err); }
 }

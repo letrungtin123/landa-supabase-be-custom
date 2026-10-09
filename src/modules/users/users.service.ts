@@ -9,6 +9,8 @@ import { AppError } from '../../middleware/error-handler.js';
 import { normalizeEmail } from '../../utils/email.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { blacklistUser } from '../../middleware/authenticate.js';
+import { recordUserSessionRevocation } from '../auth/auth-revocation.service.js';
+import { replacePasswordAndEndSessions } from '../auth/auth.service.js';
 import type { CreateUserInput, UpdateUserInput } from './users.validator.js';
 import { isLearnerRole } from '../../types/index.js';
 import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
@@ -472,13 +474,28 @@ async function updateUserInTransaction(
     await removeUserFromDemoLogin(userId);
   }
 
-  if (input.role !== undefined && oldRole && input.role !== oldRole) {
-    await query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [userId]);
-    // Blacklist user ngay lập tức — access token cũ bị reject TỨC THÌ
-    blacklistUser(userId);
-  }
+  // A password reset, a deactivation or a role change ends every session:
+  // refresh tokens are revoked (with revoked_at) and access tokens issued
+  // before now are refused durably (Redis + auth_revocations), so a later
+  // re-activation cannot revive them. The controller syncs the Redis cache
+  // after COMMIT.
+  const roleChanged = input.role !== undefined && oldRole !== null && input.role !== oldRole;
+  const sessionEndReason = input.password
+    ? 'password_reset_by_admin'
+    : input.is_active === false
+      ? 'account_deactivated'
+      : roleChanged ? 'role_changed' : null;
+  if (sessionEndReason) await recordUserSessionRevocation(userId, sessionEndReason);
+  // In-process fast path kept for role changes (same instant semantics).
+  if (roleChanged) blacklistUser(userId);
 
   return result.rows[0];
+}
+
+/** Whether an admin update ends the target's sessions (see updateUserInTransaction). */
+export function adminUpdateEndsSessions(input: UpdateUserInput, previousRole: string | null | undefined): boolean {
+  return Boolean(input.password) || input.is_active === false
+    || (input.role !== undefined && previousRole !== undefined && previousRole !== null && input.role !== previousRole);
 }
 
 async function assertUserIsNotPendingDeletion(userId: string, tenantScopeId: string | null = null): Promise<void> {
@@ -619,5 +636,6 @@ export async function changePassword(userId: string, currentPassword: string, ne
   if (!isValid) throw new AppError('Mật khẩu hiện tại không đúng', 400);
 
   const newHash = await hashPassword(newPassword);
-  await query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+  // Ends every other session and returns a fresh one for this device.
+  return replacePasswordAndEndSessions(userId, newHash);
 }

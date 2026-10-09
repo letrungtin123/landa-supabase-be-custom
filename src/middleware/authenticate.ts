@@ -7,7 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { sendError } from '../utils/response.js';
 import type { AuthUser } from '../types/express.js';
-import { isUserAccessRevoked } from '../modules/auth/auth-revocation.service.js';
+import { isAccessTokenRevoked } from '../modules/auth/auth-revocation.service.js';
 import { isRuntimeTenantAllowed } from '../config/runtime-tenant-fence.js';
 
 // ── In-memory blacklist: users cần force re-auth (role đã thay đổi) ──
@@ -73,10 +73,9 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
   try {
     const payload = verifyAccessToken(token);
 
-    // Durable revocation is written before a permanent user deletion is queued.
-    // This closes the gap where an otherwise valid JWT could remain usable until
-    // its normal expiry while the background purge is still running.
-    if (await isUserAccessRevoked(payload.sub)) {
+    // Durable revocation: a permanent deletion refuses every token; a password
+    // change/reset, deactivation or role change refuses tokens issued before it.
+    if (await isAccessTokenRevoked(payload.sub, payload.iat)) {
       sendError(res, 'Phiên đăng nhập đã bị thu hồi', 401);
       return;
     }
@@ -138,7 +137,7 @@ export async function optionalAuth(req: Request, _res: Response, next: NextFunct
     try {
       const payload = verifyAccessToken(authHeader.slice(7));
 
-      if (await isUserAccessRevoked(payload.sub)) {
+      if (await isAccessTokenRevoked(payload.sub, payload.iat)) {
         next();
         return;
       }

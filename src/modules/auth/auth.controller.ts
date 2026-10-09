@@ -164,8 +164,9 @@ export async function changePasswordController(req: Request, res: Response, next
       return;
     }
 
-    await authService.changePassword(req.user.id, current_password, new_password);
-    sendSuccess(res, null, 'Đổi mật khẩu thành công');
+    // Other sessions end; the caller receives a fresh session (old clients ignore it).
+    const session = await authService.changePassword(req.user.id, current_password, new_password);
+    sendSuccess(res, session, 'Đổi mật khẩu thành công');
   } catch (err) {
     next(err);
   }

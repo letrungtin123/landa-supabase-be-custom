@@ -14,6 +14,7 @@ import { looksLikeEmailIdentifier, normalizeEmail } from '../../utils/email.js';
 import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
+import { recordUserSessionRevocation, syncUserAccessRevocationCache } from './auth-revocation.service.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
 import {
   isActiveDemoIframeAccount,
@@ -276,10 +277,12 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
             COALESCE(rt.session_mode, 'normal') AS session_mode,
             u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
             u.role, u.is_active, u.tenant_id,
-            t.name AS tenant_name, t.is_active AS tenant_active
+            t.name AS tenant_name, t.is_active AS tenant_active,
+            ar.revoked_at AS session_revoked_at
      FROM refresh_tokens rt
      JOIN users u ON u.id = rt.user_id
      LEFT JOIN tenants t ON t.id = u.tenant_id
+     LEFT JOIN auth_revocations ar ON ar.user_id = rt.user_id AND ar.expires_at > now()
      WHERE rt.token_hash = $1
      LIMIT 1
      FOR UPDATE OF rt`,
@@ -296,6 +299,15 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   if (row.revoked) {
     const revokedAt = row.revoked_at ? new Date(row.revoked_at).getTime() : 0;
     const elapsed = Date.now() - revokedAt;
+
+    // Revoked when every session of the user ended (password change/reset,
+    // deactivation, role change): refuse it, but it is not a stolen-token
+    // reuse, so newer sessions (e.g. the one issued after a password change)
+    // are not revoked.
+    const sessionRevokedAt = row.session_revoked_at ? new Date(row.session_revoked_at).getTime() : 0;
+    if (sessionRevokedAt && revokedAt && revokedAt <= sessionRevokedAt) {
+      throw new AppError('Phiên đăng nhập đã kết thúc — vui lòng đăng nhập lại', 401);
+    }
 
     if (!row.revoked_at || elapsed > RACE_CONDITION_GRACE_MS) {
       // Superadmin sessions are isolated by login/device. A suspected reuse
@@ -905,7 +917,22 @@ export async function changePassword(userId: string, currentPassword: string, ne
 
   const { hashPassword } = await import('../../utils/password.js');
   const hash = await hashPassword(newPassword);
-  await query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, userId]);
+  return replacePasswordAndEndSessions(userId, hash);
+}
+
+/**
+ * Self-service password change: stores the new hash and ends EVERY session of
+ * the user in one transaction (refresh tokens + access tokens issued before
+ * now), then returns a fresh session for the caller so the device that made
+ * the change stays signed in.
+ */
+export async function replacePasswordAndEndSessions(userId: string, passwordHash: string) {
+  await withDatabaseTransaction(async () => {
+    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+    await recordUserSessionRevocation(userId, 'password_changed');
+  });
+  await syncUserAccessRevocationCache(userId);
+  return issueSessionForUserId(userId, { updateLastLogin: false });
 }
 
 /**

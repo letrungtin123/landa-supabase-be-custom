@@ -12,6 +12,8 @@ export interface JwtPayload {
   role: string;       // user.role
   username: string;
   session_mode?: 'normal' | 'demo_iframe';
+  /** Issued-at (seconds), set by jsonwebtoken when signing. */
+  iat?: number;
 }
 
 /**
