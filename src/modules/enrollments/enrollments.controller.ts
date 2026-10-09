@@ -5,7 +5,7 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
-import { bulkEnrollSchema } from './enrollments.validator.js';
+import { bulkEnrollSchema, singleEnrollUserIdSchema } from './enrollments.validator.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
   createTransactionalAuditEntry,
@@ -50,6 +50,7 @@ export async function enroll(req: Request, res: Response) {
 
   // Single enroll
   if (!user_id) return sendError(res, 'user_id or user_ids is required', 400);
+  if (!singleEnrollUserIdSchema.safeParse(user_id).success) return sendError(res, 'user_id không hợp lệ', 400);
 
   const result = await runAuditedTransaction(
     async () => {

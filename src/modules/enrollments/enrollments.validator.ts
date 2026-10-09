@@ -10,6 +10,9 @@ export const bulkEnrollSchema = z.object({
   course_id: z.string().min(1, 'course_id là bắt buộc'),
 });
 
+/** Single enroll: the learner id */
+export const singleEnrollUserIdSchema = z.string().uuid();
+
 /** Schema bulk unenroll */
 export const bulkUnenrollSchema = z.object({
   user_ids: z.array(z.string().uuid()).min(1).max(500),

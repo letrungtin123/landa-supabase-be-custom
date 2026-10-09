@@ -184,11 +184,31 @@ export async function getCourseAuditName(courseId: string, tenantId: string): Pr
 }
 // ── Enroll / Unenroll ──
 
+/** Only learner accounts of the course's own tenant can be enrolled (`u` = users). */
+function enrollableLearnerSql(tenantParam: '$2' | '$3'): string {
+  return `u.tenant_id = ${tenantParam}::uuid
+         AND u.role IN ('learner', 'learner_plus')
+         AND u.deletion_requested_at IS NULL`;
+}
+
+async function assertEnrollableLearner(userId: string, tenantId: string): Promise<void> {
+  const result = await query(
+    `SELECT 1
+     FROM users u
+     WHERE u.id = $1::uuid
+       AND ${enrollableLearnerSql('$2')}`,
+    [userId, tenantId],
+  );
+  // Another tenant's user (or a staff account) is reported as not found.
+  if (result.rowCount === 0) throw new AppError('Không tìm thấy học viên này trong doanh nghiệp.', 404);
+}
+
 export async function enrollUser(
   userId: string,
   courseId: string,
   tenantId: string,
 ): Promise<{ enrollment_id: string; already_enrolled: boolean }> {
+  await assertEnrollableLearner(userId, tenantId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể ghi danh learner demo iframe đang hoạt động');
 
   // Guard: course must exist and not be soft-deleted
@@ -253,8 +273,11 @@ export async function bulkEnroll(
 
   const result = await query<{ inserted_count: number; reactivated_count: number }>(
     `WITH requested_users AS (
-       SELECT DISTINCT uid
-       FROM unnest($1::uuid[]) AS uid
+       -- Users of another tenant and non-learner accounts are skipped.
+       SELECT DISTINCT r.uid
+       FROM unnest($1::uuid[]) AS r(uid)
+       JOIN users u ON u.id = r.uid
+       WHERE ${enrollableLearnerSql('$3')}
      ),
      reactivated AS (
        UPDATE enrollments e
@@ -611,6 +634,8 @@ export async function getCourseEnrollments(
   const conditions: string[] = [
     'e.course_id = $1',
     'e.tenant_id = $2',
+    // Older rows may point at a user of another tenant; never list them.
+    'u.tenant_id = $2',
     'e.is_active = true',
     'c.deleted_at IS NULL',
   ];
