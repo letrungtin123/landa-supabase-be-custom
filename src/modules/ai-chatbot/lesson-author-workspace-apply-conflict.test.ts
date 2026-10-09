@@ -279,3 +279,16 @@ test('applying someone else\'s session is audited in the same transaction with t
   assert.equal(normalized.viewerScope, 'tenant');
   assert.deepEqual(normalized.metadata, { course_id: COURSE, course_name: 'Khoá học', related_entity_name: 'Người Tạo', related_entity_type: 'lesson_author_session_creator', affected_count: 4 });
 });
+
+test('the receipt names who pressed Apply while actor_id stays the session creator (6a)', () => {
+  const repository = readFileSync(new URL('./lesson-author-workspace-apply.repository.ts', import.meta.url), 'utf8');
+  const insert = repository.slice(repository.indexOf('INSERT INTO lesson_author_workspace_apply_receipts('));
+  assert.match(insert, /mapping_delta,checks,applied_by\)/);
+  assert.match(insert, /\$19::jsonb,\$20\)`/);
+  assert.match(insert, /target\.nodeId,session\.userId,/, 'actor_id is still the session creator');
+  assert.match(insert, /JSON\.stringify\(compiled\.acceptance\.checks\),target\.userId\]\);/, 'applied_by is the caller');
+  const read = readFileSync(new URL('./lesson-author-workspace-read.repository.ts', import.meta.url), 'utf8');
+  assert.match(read, /LEFT JOIN users applier ON applier\.id=COALESCE\(receipt\.applied_by,receipt\.actor_id\)/);
+  assert.match(read, /CASE WHEN applier\.tenant_id=receipt\.tenant_id/, 'names only people of the same tenant');
+  assert.match(read, /applied_info: row\.applied_at == null \? null :/);
+});

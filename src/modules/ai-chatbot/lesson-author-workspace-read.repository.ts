@@ -347,6 +347,7 @@ export function createWorkspaceReadRepository(deps: {
       if (expectedRevision !== null && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) invalid();
       const row = await read(owner, workspaceId, `
         SELECT w.*, n.id AS node_id,n.parent_id,n.kind,n.content_state,n.current_revision,
+          applied.applied_at,applied.applied_by_name,applied.applied_by_platform_admin,
           CASE WHEN n.kind='component' THEN n.protected_contract->>'component_type' END AS component_type,
           CASE WHEN n.kind='component' THEN n.protected_contract->'metadata'->'author_review' END AS author_review,
           CASE WHEN n.kind='media_brief' THEN n.protected_contract->>'media_type' END AS media_type,
@@ -370,7 +371,18 @@ export function createWorkspaceReadRepository(deps: {
             AND a.payload->>'unit_path'=CASE WHEN n.kind='component'
               THEN regexp_replace(n.canonical_path,'\.component_[1-9][0-9]*$','') ELSE n.canonical_path END
           ORDER BY a.created_at DESC,a.id DESC LIMIT 1
-        ) quality ON n.kind IN ('unit','component')`, [nodeId]);
+        ) quality ON n.kind IN ('unit','component')
+        LEFT JOIN LATERAL (
+          SELECT receipt.created_at AS applied_at,
+            CASE WHEN applier.tenant_id=receipt.tenant_id
+              THEN COALESCE(NULLIF(btrim(applier.full_name),''),applier.username) END AS applied_by_name,
+            (applier.role='superadmin' AND applier.tenant_id IS DISTINCT FROM receipt.tenant_id) AS applied_by_platform_admin
+          FROM lesson_author_workspace_apply_mappings m
+          JOIN lesson_author_workspace_apply_receipts receipt ON receipt.id=m.receipt_id AND receipt.workspace_id=m.workspace_id
+          LEFT JOIN users applier ON applier.id=COALESCE(receipt.applied_by,receipt.actor_id)
+          WHERE m.workspace_id=n.workspace_id AND m.node_id=n.id AND m.tenant_id=n.tenant_id AND m.course_id=n.course_id
+          LIMIT 1
+        ) applied ON true`, [nodeId]);
       if (row.node_id === null) throw new WorkspaceReadError('WORKSPACE_NODE_NOT_FOUND');
       const revision = row.current_revision === null ? null : integer(row.current_revision);
       if (revision !== expectedRevision) throw new WorkspaceContractError('WORKSPACE_REVISION_CONFLICT');
@@ -413,7 +425,13 @@ export function createWorkspaceReadRepository(deps: {
         author_review: authorReview, content_origin: contentOrigin, quality_state: qualityState,
         // Additive (QC course 234653, R3/R4): Hold / pending objectives / Nice to know of an IDM run,
         // derived from the stored course design; null for other nodes and legacy runs.
-        idm_guidance: kind === 'course' ? readIdmAuthorGuidance(row.idm_design) : null };
+        idm_guidance: kind === 'course' ? readIdmAuthorGuidance(row.idm_design) : null,
+        // Additive (owner 2026-10-09, 6a): when and by whom this node was added to the course. The
+        // name is shown only for a user of the same tenant (a platform admin stays unnamed).
+        applied_info: row.applied_at == null ? null : {
+          applied_at: new Date(row.applied_at as string).toISOString(),
+          applied_by_name: typeof row.applied_by_name === 'string' && row.applied_by_name.trim() ? row.applied_by_name.trim().slice(0, 200) : null,
+          applied_by_platform_admin: row.applied_by_platform_admin === true } };
     },
   };
 }

@@ -404,8 +404,10 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
             JSON.stringify(quality.findings)]);
           if (qualityInserted.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         }
-        await tx.query(`INSERT INTO lesson_author_workspace_apply_receipts(id,workspace_id,tenant_id,course_id,scope_node_id,actor_id,idempotency_key,request_hash,expected_workspace_revision,revision_set_hash,source_snapshot_hash,runtime_config_hash,target_before_hash,target_after_hash,quality_receipt_id,validation_contract,revision_manifest,mapping_delta,checks)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,session.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,qualityReceiptId,compiled.validation_contract,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks)]);
+        // actor_id stays the session creator (receipt guard); applied_by names the editor who pressed Apply
+        // (20261009_1500_lesson_author_apply_receipt_applied_by.sql).
+        await tx.query(`INSERT INTO lesson_author_workspace_apply_receipts(id,workspace_id,tenant_id,course_id,scope_node_id,actor_id,idempotency_key,request_hash,expected_workspace_revision,revision_set_hash,source_snapshot_hash,runtime_config_hash,target_before_hash,target_after_hash,quality_receipt_id,validation_contract,revision_manifest,mapping_delta,checks,applied_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb,$20)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,session.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,qualityReceiptId,compiled.validation_contract,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks),target.userId]);
         failureStage = 'persist_mappings';
         for (const entry of delta) {
           failureStage = `persist_mapping:${String(entry.node_id)}`;
