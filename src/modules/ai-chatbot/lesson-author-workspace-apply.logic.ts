@@ -60,6 +60,10 @@ export interface WorkspaceApplyCompileInput {
   accepted_baselines: readonly { chapter_path: string; proposal: LessonAuthorProposal; content_hash: string }[];
   allowed: ReadonlySet<CourseComponentType>;
   targets: WorkspaceApplyTargets;
+  /** Mapped nodes whose course block changed after Apply and that the
+   * repository classified as content-only drift (apply-conflict.logic). Only
+   * their recorded/live hashes may differ; every other target check stays. */
+  tolerated_target_drift?: readonly string[];
   request: {
     scope_node_id: string; expected_workspace_revision: number;
     expected_revision_manifest: readonly WorkspaceApplyRevision[];
@@ -353,9 +357,10 @@ function compile(input: WorkspaceApplyCompileInput) {
   const mappings = new Map(targets.mappings.map(m => [m.node_id, m]));
   if (mappings.size !== targets.mappings.length || new Set(targets.mappings.map(m => m.target_block_id)).size !== mappings.size) fail('WORKSPACE_APPLY_TARGET_CHANGED');
   const offsets = new Map<string, number>();
+  const tolerated = new Set(input.tolerated_target_drift ?? []);
   for (const m of targets.mappings) {
     const n = byId.get(m.node_id);
-    if (!n || n.kind === 'media_brief' || m.target_hash !== m.actual_target_hash || m.target_block_type !== blockType(n)
+    if (!n || n.kind === 'media_brief' || (m.target_hash !== m.actual_target_hash && !tolerated.has(m.node_id)) || m.target_block_type !== blockType(n)
       || m.target_block_id === targets.course_root_id || m.applied_revision > n.current_revision!
       || m.applied_revision === n.current_revision && m.applied_content_hash !== n.current!.content_hash
       || m.target_parent_id !== (n.kind === 'chapter' ? targets.course_root_id : mappings.get(n.parent_id)?.target_block_id)) fail('WORKSPACE_APPLY_TARGET_CHANGED');

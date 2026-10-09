@@ -11,7 +11,8 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { acceptOrchestrationV2GeneratedUnit, prepareOrchestrationV2UnitGenerationContract,
   readOrchestrationV2UnitProviderResponse, orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
-import { workspaceApplyTargetHash, type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
+import { workspaceApplyMaterializationPlan, workspaceApplyTargetHash, type WorkspaceApplyMapping,
+  type WorkspaceApplyNode } from './lesson-author-workspace-apply.logic.js';
 import { workspaceApplyBlockMetadata } from './lesson-author-workspace-author-notes.logic.js';
 import { COURSE_AUTHOR_NOTES_KEY, readCourseAuthorNotes } from '../course-authoring/course-author-notes.logic.js';
 
@@ -144,6 +145,39 @@ test('V2 Apply compiles a validated chapter into exact draft hierarchy writes', 
   assert.equal(result.validation_contract, 'workspace-scoped-apply-2');
   assert.equal(result.quality_receipt.origin_summary.counts.provider, 1);
   assert.equal(result.quality_receipt.origin_summary.legacy_quality_status, 'NOT_RUN');
+});
+
+test('V2 Apply rewrites a course block edited after Apply only when the repository tolerates that exact drift', () => {
+  const input: Parameters<typeof compileOrchestrationV2WorkspaceApply>[0] = fixture().input;
+  const first = compileOrchestrationV2WorkspaceApply(input);
+  const blockIds = new Map(first.writes.map((write, index) => [write.node_id, uuid(100 + index)]));
+  const mappings: WorkspaceApplyMapping[] = first.writes.map((write, index) => ({ node_id: write.node_id,
+    target_block_id: blockIds.get(write.node_id)!,
+    target_parent_id: write.kind === 'chapter' ? input.targets.course_root_id : blockIds.get(write.parent_node_id)!,
+    target_block_type: write.block_type, target_sort_order: write.sort_order, applied_revision: write.revision,
+    applied_content_hash: write.content_hash, target_hash: hash(`applied-${index}`), actual_target_hash: hash(`applied-${index}`),
+    receipt_revision_manifest: input.request.expected_revision_manifest.map(entry => ({ ...entry })) }));
+  const useTargets = (next: WorkspaceApplyMapping[]) => {
+    input.targets = { ...input.targets, mappings: next };
+    input.request.expected_target_snapshot_hash = workspaceApplyTargetHash(input.targets);
+  };
+  useTargets(mappings);
+  const unchanged = compileOrchestrationV2WorkspaceApply(input);
+  assert.equal(workspaceApplyMaterializationPlan(unchanged.writes, mappings, input.request.scope_node_id).writes.length, 0);
+
+  // The author renamed the chapter in the course after it was applied.
+  const chapter = first.writes.find(write => write.kind === 'chapter')!;
+  const edited = mappings.map(entry => entry.node_id === chapter.node_id ? { ...entry, actual_target_hash: hash('author-edit') } : entry);
+  useTargets(edited);
+  assert.throws(() => compileOrchestrationV2WorkspaceApply(input), { code: 'WORKSPACE_APPLY_TARGET_CHANGED' });
+  const confirmed = compileOrchestrationV2WorkspaceApply({ ...input, tolerated_target_drift: [chapter.node_id] });
+  const plan = workspaceApplyMaterializationPlan(confirmed.writes, edited, input.request.scope_node_id);
+  assert.deepEqual(plan.writes.map(write => write.node_id), [chapter.node_id], 'only the edited block is rewritten');
+  assert.equal(plan.writes[0]!.mapped_target?.before_hash, mappings[0]!.target_hash, 'receipt delta keeps the recorded hash');
+  // Tolerating content drift never widens the identity fences.
+  useTargets(edited.map(entry => entry.node_id === chapter.node_id ? { ...entry, target_parent_id: uuid(999) } : entry));
+  assert.throws(() => compileOrchestrationV2WorkspaceApply({ ...input, tolerated_target_drift: [chapter.node_id] }),
+    { code: 'WORKSPACE_APPLY_TARGET_CHANGED' });
 });
 
 test('V2 author review and storyboard reach only the author notes key, never the learner component (N6)', () => {

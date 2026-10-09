@@ -17,15 +17,31 @@ import { compileOrchestrationV2WorkspaceApply, type OrchestrationV2ApplyArtifact
 import { workspaceApplyBlockMetadata, type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
 import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes, readWorkspaceAssessmentReviews,
   WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
+import { classifyWorkspaceApplyDrift, WorkspaceApplyConflictError, workspaceApplyConflictDetails, workspaceApplyOverwriteDecision,
+  type WorkspaceApplyBlockEvidence, type WorkspaceApplyMappingEvidence } from './lesson-author-workspace-apply-conflict.logic.js';
+import { lessonAuthorSessionOwnerName } from './lesson-author-session-access.logic.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 export type WorkspaceApplyCode = 'WORKSPACE_APPLY_FORBIDDEN' | 'WORKSPACE_APPLY_NOT_FOUND' | 'WORKSPACE_APPLY_STATE_INVALID'
   | 'WORKSPACE_APPLY_SOURCE_CHANGED' | 'WORKSPACE_APPLY_REVISION_CONFLICT' | 'WORKSPACE_APPLY_TARGET_CHANGED'
   | 'WORKSPACE_APPLY_NOT_READY' | 'WORKSPACE_APPLY_DEPENDENCY_REQUIRED' | 'WORKSPACE_APPLY_VALIDATION_FAILED'
-  | 'WORKSPACE_APPLY_UNAVAILABLE';
+  | 'WORKSPACE_APPLY_UNAVAILABLE' | 'WORKSPACE_APPLY_COURSE_BUSY';
 export class WorkspaceApplyError extends Error { constructor(readonly code: WorkspaceApplyCode) { super(code); this.name = 'WorkspaceApplyError'; } }
+/** `userId` is the authenticated actor; the session creator is resolved inside the transaction. */
 export interface WorkspaceApplyTarget { tenantId: string; userId: string; courseId: string; conversationId: string; workspaceId: string; nodeId: string; operationId: string; }
+export interface WorkspaceApplyOptions {
+  /** Echo of the conflict response token: the author confirmed overwriting exactly that drift set. */
+  overwriteConfirmation?: string | null;
+}
+/** Written in the Apply transaction when a course editor applies someone else's session. */
+export interface WorkspaceApplySharedAuditEvent {
+  tenantId: string; actorId: string; actorUsername: string; ownerId: string; ownerName: string;
+  courseId: string; courseName: string; conversationId: string; sessionTitle: string;
+  receiptId: string; affectedCount: number;
+}
+/** Per-course Apply lock key, shared with workspace admission/creation. */
+export const workspaceCourseLockKey = (tenantId: string, courseId: string) => `course:${tenantId}:${courseId}`;
 type Row = Record<string, any>;
 const integer = (v: unknown): number => {
   const n = typeof v === 'number' ? v : typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v) ? Number(v) : NaN;
@@ -38,29 +54,46 @@ const isHash = (v: unknown): v is string => typeof v === 'string' && HASH.test(v
  * by title, never accepts browser content, and writes draft blocks only. SQL
  * guards prove the receipt, mapping delta, revision manifest and scope event
  * are committed together. */
-export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase; }) {
+export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase;
+  /** Same-transaction audit for applying another creator's shared session. */
+  audit?: (event: WorkspaceApplySharedAuditEvent) => Promise<void>; }) {
   async function blockHash(tx: GenerationJobSql, blockId: string, courseId: string, tenantId: string): Promise<string> {
     const result = await tx.query(`SELECT workspace_course_block_hash($1::uuid,$2::varchar,$3::uuid) AS hash`, [blockId, courseId, tenantId]);
     const value = result.rows[0]?.hash; if (result.rows.length !== 1 || !isHash(value)) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED'); return value;
   }
-  async function apply(user: AuthUser, target: WorkspaceApplyTarget, expectedWorkspaceRevision: number): Promise<WorkspaceApplyReceipt> {
+  async function apply(user: AuthUser, target: WorkspaceApplyTarget, expectedWorkspaceRevision: number, options: WorkspaceApplyOptions = {}): Promise<WorkspaceApplyReceipt> {
     if (!Number.isSafeInteger(expectedWorkspaceRevision) || expectedWorkspaceRevision < 0 || ![target.tenantId, target.userId, target.workspaceId, target.conversationId, target.nodeId, target.operationId].every(v => UUID.test(v))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_READY');
+    if (target.userId !== user.id) throw new WorkspaceApplyError('WORKSPACE_APPLY_FORBIDDEN');
+    const overwriteConfirmation = typeof options.overwriteConfirmation === 'string' && isHash(options.overwriteConfirmation) ? options.overwriteConfirmation : null;
     let cacheIds: string[] = [];
     let failureStage = 'transaction_open';
     try {
       const receipt = await deps.db.transaction(async tx => {
         failureStage = 'authorization';
-        const authority = createWorkspaceAuthority(user);
-        if (!await authority.canEdit(tx, target)) throw new WorkspaceApplyError('WORKSPACE_APPLY_FORBIDDEN');
+        // Fresh course-editor authority of the ACTOR (target.userId === user.id).
+        if (!await createWorkspaceAuthority(user).canEdit(tx, target)) throw new WorkspaceApplyError('WORKSPACE_APPLY_FORBIDDEN');
         await tx.query("SET LOCAL lock_timeout = '3000ms'");
-        const locked = await tx.query(`SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`, [`course:${target.tenantId}:${target.courseId}`]);
-        if (locked.rows[0]?.acquired !== true) throw new WorkspaceApplyError('WORKSPACE_APPLY_REVISION_CONFLICT');
+        // Layer 1: one Apply per course at a time; a concurrent Apply gets a clear busy answer.
+        const locked = await tx.query(`SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`, [workspaceCourseLockKey(target.tenantId, target.courseId)]);
+        if (locked.rows[0]?.acquired !== true) throw new WorkspaceApplyError('WORKSPACE_APPLY_COURSE_BUSY');
         const course = await tx.query(`SELECT id,display_name FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
         if (course.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
+        // Shared sessions: any course editor of the tenant may Apply; workspace
+        // evidence, fences and the receipt stay bound to the session creator
+        // (the receipt guard requires actor_id = workspace requested_by). The
+        // applying editor is recorded by the audit entry below.
+        const creatorRow = await tx.query(`SELECT c.user_id::text AS creator_id,c.title,u.full_name,u.username
+          FROM chat_conversations c LEFT JOIN users u ON u.id=c.user_id
+          WHERE c.id=$1 AND c.tenant_id=$2 AND c.course_id=$3 AND c.target='lesson_author' FOR SHARE OF c`,
+        [target.conversationId, target.tenantId, target.courseId]);
+        if (creatorRow.rows.length !== 1 || !UUID.test(String(creatorRow.rows[0]?.creator_id))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
+        const creator = creatorRow.rows[0] as Row;
+        const session: WorkspaceApplyTarget = { ...target, userId: text(creator.creator_id) };
+        const authority = createWorkspaceAuthority(user, { sessionOwnerId: session.userId });
         const deleting = await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs
-          WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND conversation_id=$4
+          WHERE tenant_id=$1 AND course_id=$2 AND conversation_id=$3
             AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
-        [target.tenantId, target.courseId, target.userId, target.conversationId]);
+        [target.tenantId, target.courseId, target.conversationId]);
         if (deleting.rows.length) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         failureStage = 'workspace_authority';
         const workspace = await tx.query(`SELECT w.id,w.status,w.event_head,w.content_locale,w.correlation_id,w.source_snapshot_hash,
@@ -72,7 +105,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           LEFT JOIN lesson_author_workspace_v2_runs v2 ON v2.workspace_id=w.id AND v2.tenant_id=w.tenant_id AND v2.course_id=w.course_id
           JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.user_id=w.requested_by AND c.course_id=w.course_id AND c.target='lesson_author'
           WHERE w.id=$1 AND w.tenant_id=$2 AND w.course_id=$3 AND w.conversation_id=$4 AND w.requested_by=$5 AND w.contract_version=1 AND w.engine='self_built_rag'
-          FOR UPDATE OF w`, [target.workspaceId, target.tenantId, target.courseId, target.conversationId, target.userId]);
+          FOR UPDATE OF w`, [target.workspaceId, target.tenantId, target.courseId, target.conversationId, session.userId]);
         const w = workspace.rows[0] as Row | undefined;
         if (!w || workspace.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
         const isV2 = w.blueprint_id === null && typeof w.v2_run_id === 'string';
@@ -107,9 +140,9 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const chapterCount = scopeRow && typeof scopeRow.canonical_path === 'string'
           ? workspaceApplyScopeChapter(scopeRow.kind, scopeRow.canonical_path) : null;
         if (!scopeRow || scope.rows.length !== 1 || chapterCount === null) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_READY');
-        const freshSource = await authority.currentSourceHash(tx, { target, source_snapshot_hash: w.source_snapshot_hash });
+        const freshSource = await authority.currentSourceHash(tx, { target: session, source_snapshot_hash: w.source_snapshot_hash });
         if (freshSource !== w.source_snapshot_hash) throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
-        const allowed = await authority.allowedComponents(tx, target);
+        const allowed = await authority.allowedComponents(tx, session);
         const courseNode = await tx.query(`SELECT id FROM lesson_author_workspace_nodes WHERE workspace_id=$1 AND tenant_id=$2 AND course_id=$3 AND kind='course' AND canonical_path='course' FOR UPDATE`, [target.workspaceId, target.tenantId, target.courseId]);
         const courseNodeId = text(courseNode.rows[0]?.id);
         if (courseNode.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_READY');
@@ -187,6 +220,13 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         if (root.rows.length > 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED');
         if (!root.rows.length) root = await tx.query(`INSERT INTO course_blocks(course_id,block_type,display_name,is_published,has_draft_changes) VALUES($1,'course',$2,true,true) RETURNING id`, [target.courseId, text(course.rows[0].display_name)]);
         const rootId = text(root.rows[0]?.id), rootHash = await blockHash(tx, rootId, target.courseId, target.tenantId);
+        // Lock every block this workspace ever wrote BEFORE reading live hashes:
+        // an author save can no longer land between the drift check and an
+        // overwrite (course row → root → mapped blocks, the existing lock order).
+        await tx.query(`SELECT b.id FROM course_blocks b
+          JOIN lesson_author_workspace_apply_mappings m ON m.target_block_id=b.id AND m.course_id=b.course_id
+          WHERE m.workspace_id=$1 AND m.tenant_id=$2 AND m.course_id=$3 ORDER BY b.id FOR UPDATE OF b`,
+        [target.workspaceId, target.tenantId, target.courseId]);
         const mapRows = await tx.query(`SELECT m.node_id,m.target_block_id,m.target_parent_id,m.target_block_type,m.target_sort_order,m.applied_revision,m.applied_content_hash,m.target_hash,r.revision_manifest,
             workspace_course_block_hash(m.target_block_id,m.course_id,m.tenant_id) AS actual_target_hash
           FROM lesson_author_workspace_apply_mappings m
@@ -196,6 +236,30 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           WHERE m.workspace_id=$1 AND m.tenant_id=$2 AND m.course_id=$3
             AND (substring(mapped_node.canonical_path from '^chapter_([0-9]+)'))::integer <= $4
           FOR UPDATE OF m,r,mapped_node`, [target.workspaceId, target.tenantId, target.courseId, chapterCount]);
+        // Layer 2: blocks changed in the course after they were Applied.
+        // Structural changes (deleted/moved) can never be overwritten; content
+        // changes are tolerated by the compiler and overwritten only after the
+        // author confirms them (decision after compile, below).
+        failureStage = 'target_drift';
+        const evidence: WorkspaceApplyMappingEvidence[] = mapRows.rows.map((m: Row) => ({ node_id: text(m.node_id),
+          target_block_id: text(m.target_block_id), target_parent_id: text(m.target_parent_id), target_block_type: text(m.target_block_type),
+          target_sort_order: integer(m.target_sort_order), target_hash: text(m.target_hash),
+          actual_target_hash: isHash(m.actual_target_hash) ? m.actual_target_hash : null }));
+        const driftedBlockIds = evidence.filter(m => m.actual_target_hash !== m.target_hash).map(m => m.target_block_id);
+        const driftedBlocks = driftedBlockIds.length ? await tx.query(`SELECT b.id::text AS id,b.display_name,b.block_type::text AS block_type,
+            b.parent_id::text AS parent_id,b.sort_order,b.deleted_at IS NOT NULL AS deleted,b.metadata->>'workspace_id' AS workspace_id,
+            b.metadata->>'workspace_node_id' AS workspace_node_id,b.metadata->>'generated_by' AS generated_by
+          FROM course_blocks b WHERE b.course_id=$1 AND b.id=ANY($2::uuid[])`, [target.courseId, driftedBlockIds]) : { rows: [] };
+        const drift = classifyWorkspaceApplyDrift({ workspace_id: target.workspaceId,
+          nodes: nodes.map(n => ({ node_id: n.node_id, kind: n.kind, canonical_path: n.canonical_path })), mappings: evidence,
+          blocks: (driftedBlocks.rows as Row[]).map((b): WorkspaceApplyBlockEvidence => ({ id: text(b.id), display_name: typeof b.display_name === 'string' ? b.display_name : null,
+            block_type: String(b.block_type), parent_id: typeof b.parent_id === 'string' ? b.parent_id : null, sort_order: Number(b.sort_order),
+            deleted: b.deleted === true, workspace_id: typeof b.workspace_id === 'string' ? b.workspace_id : null,
+            workspace_node_id: typeof b.workspace_node_id === 'string' ? b.workspace_node_id : null,
+            generated_by: typeof b.generated_by === 'string' ? b.generated_by : null })) });
+        if (drift.structural.length) {
+          throw new WorkspaceApplyConflictError('WORKSPACE_APPLY_COURSE_STRUCTURE_CHANGED', workspaceApplyConflictDetails(drift.structural, null));
+        }
         const mappings: WorkspaceApplyMapping[] = mapRows.rows.map((m: Row) => ({ node_id: text(m.node_id), target_block_id: text(m.target_block_id), target_parent_id: text(m.target_parent_id), target_block_type: text(m.target_block_type), target_sort_order: integer(m.target_sort_order), applied_revision: integer(m.applied_revision), applied_content_hash: text(m.applied_content_hash), target_hash: text(m.target_hash), actual_target_hash: text(m.actual_target_hash), receipt_revision_manifest: m.revision_manifest }));
         const manifest = nodes.map(n => ({ node_id: n.node_id, revision: n.current_revision!, content_hash: n.current!.content_hash }));
         const targets = { course_root_id: rootId, course_root_hash: rootHash, mappings };
@@ -205,13 +269,15 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const compiled = isV1 ? compileWorkspaceApply({ workspace_id: target.workspaceId, course_node_id: courseNodeId,
           content_locale: workspaceLocale(w.content_locale), event_head: expectedWorkspaceRevision,
           source_snapshot_hash: w.source_snapshot_hash, runtime_config_hash: w.runtime_config_hash,
-          blueprint: blueprint!, blueprint_hash: hash(blueprint), nodes, accepted_baselines: accepted, allowed, targets, request })
+          blueprint: blueprint!, blueprint_hash: hash(blueprint), nodes, accepted_baselines: accepted, allowed, targets, request,
+          tolerated_target_drift: drift.content.map(entry => entry.node_id) })
           : compileOrchestrationV2WorkspaceApply({ workspace_id: target.workspaceId, course_node_id: courseNodeId,
             run_id: text(w.v2_run_id), content_locale: workspaceLocale(w.content_locale), event_head: expectedWorkspaceRevision,
             source_snapshot_hash: w.source_snapshot_hash, runtime_config_hash: w.runtime_config_hash,
             architecture: v2Evidence!.architecture.payload, architecture_hash: text(v2Evidence!.architecture.artifact_hash),
              inventory_hash: text((v2Evidence!.inventory.payload as Row)?.inventory_hash), nodes,
-             unit_artifacts: v2Evidence!.units, chapter_receipts: v2Evidence!.chapters, allowed, targets, request });
+             unit_artifacts: v2Evidence!.units, chapter_receipts: v2Evidence!.chapters, allowed, targets, request,
+             tolerated_target_drift: drift.content.map(entry => entry.node_id) });
         const v2Compiled = isV2
           ? compiled as ReturnType<typeof compileOrchestrationV2WorkspaceApply>
           : null;
@@ -242,7 +308,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           const touched = await persistCourseAuthorNotes(tx, { tenantId: target.tenantId, courseId: target.courseId,
             workspaceId: target.workspaceId, courseNodeId, isV2, rootId, context: notesContext });
           if (touched.length && (!await authority.canEdit(tx, target)
-            || await authority.currentSourceHash(tx, { target, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash)) {
+            || await authority.currentSourceHash(tx, { target: session, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash)) {
             throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
           }
           cacheIds.push(...touched);
@@ -250,6 +316,13 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
             correlation_id: text(w.correlation_id), revision_set_hash: text(priorReceipt.revision_set_hash),
             created_block_count: 0, updated_block_count: 0, replayed: true };
         }
+        // Never silently overwrite author edits: a block changed in the course
+        // after it was Applied is rewritten only when the author confirmed
+        // exactly this set (token bound to the blocks' live hashes).
+        failureStage = 'overwrite_confirmation';
+        const overwriteConflict = workspaceApplyOverwriteDecision({ workspace_id: target.workspaceId, drift,
+          write_node_ids: new Set(compiled.writes.map(write => write.node_id)), overwrite_confirmation: overwriteConfirmation });
+        if (overwriteConflict) throw overwriteConflict;
         const mappingsByNode = new Map(mappings.map(mapping => [mapping.node_id, mapping]));
         const materialization = workspaceApplyMaterializationPlan(compiled.writes, mappings, target.nodeId);
         const targetIds = new Map(mappings.map(m => [m.node_id, m.target_block_id])); const targetHashes = new Map(mappings.map(m => [m.node_id, m.target_hash]));
@@ -332,7 +405,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           if (qualityInserted.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         }
         await tx.query(`INSERT INTO lesson_author_workspace_apply_receipts(id,workspace_id,tenant_id,course_id,scope_node_id,actor_id,idempotency_key,request_hash,expected_workspace_revision,revision_set_hash,source_snapshot_hash,runtime_config_hash,target_before_hash,target_after_hash,quality_receipt_id,validation_contract,revision_manifest,mapping_delta,checks)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,target.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,qualityReceiptId,compiled.validation_contract,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks)]);
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb)`, [receiptId,target.workspaceId,target.tenantId,target.courseId,target.nodeId,session.userId,target.operationId,requestHash,expectedWorkspaceRevision,compiled.revision_set_hash,w.source_snapshot_hash,w.runtime_config_hash,compiled.acceptance.target_snapshot_hash,afterHash,qualityReceiptId,compiled.validation_contract,JSON.stringify(compiled.revision_manifest),JSON.stringify(delta),JSON.stringify(compiled.acceptance.checks)]);
         failureStage = 'persist_mappings';
         for (const entry of delta) {
           failureStage = `persist_mapping:${String(entry.node_id)}`;
@@ -348,14 +421,22 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const event = await tx.query(`INSERT INTO lesson_author_workspace_events(workspace_id,tenant_id,course_id,event_kind,node_id,operation_id) VALUES($1,$2,$3,'scope_applied',$4,$5) RETURNING sequence`, [target.workspaceId,target.tenantId,target.courseId,target.nodeId,receiptId]);
         if (event.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_UNAVAILABLE');
         failureStage = 'final_authority_fence';
-        if (!await authority.canEdit(tx, target) || await authority.currentSourceHash(tx, { target, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash) throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
+        if (!await authority.canEdit(tx, target) || await authority.currentSourceHash(tx, { target: session, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash) throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
+        if (session.userId !== user.id && deps.audit) {
+          failureStage = 'shared_session_audit';
+          await deps.audit({ tenantId: target.tenantId, actorId: user.id, actorUsername: user.username, ownerId: session.userId,
+            ownerName: lessonAuthorSessionOwnerName(creator.full_name, creator.username),
+            courseId: target.courseId, courseName: text(course.rows[0].display_name),
+            conversationId: target.conversationId, sessionTitle: typeof creator.title === 'string' ? creator.title : '',
+            receiptId, affectedCount: created + updated });
+        }
         failureStage = 'transaction_commit';
         return { receipt_id: receiptId, workspace_id: target.workspaceId, node_id: target.nodeId, correlation_id: text(w.correlation_id), revision_set_hash: compiled.revision_set_hash, created_block_count: created, updated_block_count: updated, replayed: false };
       });
       failureStage = 'cache_invalidation';
       await invalidateBlockReadCaches(cacheIds); await invalidateCourseReadCaches(target.courseId, target.tenantId); return receipt;
     } catch (error) {
-      if (error instanceof WorkspaceApplyError) throw error;
+      if (error instanceof WorkspaceApplyError || error instanceof WorkspaceApplyConflictError) throw error;
       if (error instanceof WorkspaceAuthorNotesTargetChanged) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED');
       if (error instanceof WorkspaceApplyCompileError) {
         console.warn('[LessonAuthorWorkspaceApply] compile rejected', {

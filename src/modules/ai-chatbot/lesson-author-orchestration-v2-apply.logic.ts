@@ -64,6 +64,8 @@ export interface OrchestrationV2ApplyInput {
   chapter_receipts: readonly OrchestrationV2ApplyChapterReceipt[];
   allowed: ReadonlySet<CourseComponentType>;
   targets: { course_root_id: string; course_root_hash: string; mappings: WorkspaceApplyMapping[] };
+  /** Content-only course drift classified by the repository (apply-conflict.logic). */
+  tolerated_target_drift?: readonly string[];
   request: {
     scope_node_id: string;
     expected_workspace_revision: number;
@@ -270,11 +272,12 @@ function compile(input: OrchestrationV2ApplyInput) {
     fail('WORKSPACE_APPLY_TARGET_CHANGED');
   }
   const offsets = new Map<string, number>();
+  const tolerated = new Set(input.tolerated_target_drift ?? []);
   for (const mapping of input.targets.mappings) {
     const node = byId.get(mapping.node_id);
     if (!node) fail('WORKSPACE_APPLY_TARGET_CHANGED');
     const mappedNode = node!;
-    if (mappedNode.kind === 'media_brief' || mapping.target_hash !== mapping.actual_target_hash
+    if (mappedNode.kind === 'media_brief' || (mapping.target_hash !== mapping.actual_target_hash && !tolerated.has(mapping.node_id))
       || mapping.target_block_type !== blockType(mappedNode) || mapping.target_block_id === input.targets.course_root_id
       || mapping.applied_revision > mappedNode.current_revision!
       || mapping.applied_revision === mappedNode.current_revision && mapping.applied_content_hash !== mappedNode.current!.content_hash

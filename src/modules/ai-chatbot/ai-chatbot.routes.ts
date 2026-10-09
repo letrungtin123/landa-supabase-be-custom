@@ -41,6 +41,14 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { appendAuditLog } from '../../middleware/audit-log.js';
+import {
+  createLessonAuthorActiveRunsHandler,
+  createLessonAuthorCourseEditorGuard,
+  createLessonAuthorSessionOwnerGuard,
+} from './lesson-author-session-access.controller.js';
+import { findLessonAuthorSessionOwner } from './lesson-author-session-access.repository.js';
+import { parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument } from './lesson-author-source-upload.controller.js';
 import {
   deleteLessonAuthorSessionController,
   getLessonAuthorSessionDeleteImpactController,
@@ -177,6 +185,16 @@ function observeLessonAuthorTranscriptionRequest(req: Request, res: Response, ne
 router.use(authenticate);
 router.use(tenantContext);
 
+// ── AI course design (lesson author) access ──
+// Using AI never requires the ai_chatbot module (configuration pages only):
+// lesson-author runtime needs the course data permission. Sessions are shared
+// per course; only the creator continues one (localized 403 for other editors).
+const lessonAuthorAccess = { db: { query }, canEditCourses: (user: NonNullable<Request['user']>) => hasPermission(user, 'courses', 'can_edit') };
+const lessonAuthorSessionOwnerOnly = createLessonAuthorSessionOwnerGuard(lessonAuthorAccess);
+const lessonAuthorCourseEditor = createLessonAuthorCourseEditorGuard(lessonAuthorAccess, getRuntimeChatTarget);
+const resolveLessonAuthorSessionOwner = async (input: { tenantId: string; courseId: string; conversationId: string }) =>
+  (await findLessonAuthorSessionOwner({ query }, input))?.owner_id ?? null;
+
 // ── Knowledge Base CRUD ──
 router.get('/kb', checkPermission('ai_chatbot', 'can_view'), kbCtrl.listKbs);
 router.get('/reports/overview', checkPermission('ai_chatbot', 'can_view'), getAiOverviewController);
@@ -235,11 +253,15 @@ router.delete('/bots/:id/personas/:personaId', checkPermission('ai_chatbot', 'ca
 router.get('/chat/demo-iframe-preview', chatCtrl.getDemoIframePreview);
 router.get('/chat/active-bot', allowRuntimeChatTarget, chatCtrl.getActiveBot);
 router.get('/chat/active-bot/personas', allowRuntimeChatTarget, chatCtrl.getActiveBotPersonas);
-router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, chatCtrl.getLessonAuthorChatSettings);
-router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, chatCtrl.listLessonAuthorSourceDocuments);
+router.get('/chat/lesson-author/settings', allowRuntimeChatTarget, checkPermission('courses', 'can_edit'), chatCtrl.getLessonAuthorChatSettings);
+router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, checkPermission('courses', 'can_edit'), chatCtrl.listLessonAuthorSourceDocuments);
+// AI course design source upload: course editors upload into the tenant's
+// server-resolved lesson-author knowledge base. KB management uploads above
+// keep requiring ai_chatbot rights.
+router.post('/chat/lesson-author/source-documents', checkPermission('courses', 'can_edit'), parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument);
 router.get('/chat/lesson-author/source-documents/:documentId/stream', allowRuntimeChatTarget, createSourceDocumentStreamHandler({
   db: { query },
-  canRead: async user => await hasPermission(user, 'courses', 'can_edit') && await hasPermission(user, 'ai_chatbot', 'can_view'),
+  canRead: user => hasPermission(user, 'courses', 'can_edit'),
   subscribe: (documentId, listener) => sourceDocumentHub.subscribe(documentId, listener),
   report: event => {
     const line = '[LessonAuthorSourceStream] ' + JSON.stringify(event);
@@ -287,11 +309,13 @@ const workspaceLaunch = createWorkspaceLaunchHandlers({ readEnabled:()=>env.LESS
   report:event=>console.info('[LessonAuthorWorkspace]',JSON.stringify(event)) });
 router.get('/chat/lesson-author/courses/:courseId/workspaces/latest',workspaceLaunch.latest);
 router.get('/chat/lesson-author/courses/:courseId/sessions', checkPermission('courses', 'can_edit'), listLessonAuthorSessionController);
+router.get('/chat/lesson-author/courses/:courseId/sessions/active-runs', checkPermission('courses', 'can_edit'), createLessonAuthorActiveRunsHandler(lessonAuthorAccess));
 router.patch('/chat/lesson-author/courses/:courseId/sessions/:conversationId', checkPermission('courses', 'can_edit'), renameLessonAuthorSessionController);
 router.get('/chat/lesson-author/courses/:courseId/sessions/:conversationId/delete-impact', checkPermission('courses', 'can_edit'), getLessonAuthorSessionDeleteImpactController);
 router.delete('/chat/lesson-author/courses/:courseId/sessions/:conversationId', checkPermission('courses', 'can_edit'), deleteLessonAuthorSessionController);
 router.get('/chat/lesson-author/courses/:courseId/session-deletions/:jobId', checkPermission('courses', 'can_edit'), getLessonAuthorSessionDeletionStatusController);
-router.post('/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces',workspaceLaunch.create);
+router.post('/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces',
+  lessonAuthorSessionOwnerOnly('conversationId', { courseParam: 'courseId' }), workspaceLaunch.create);
 // Additive read-only workspace boundary; never falls back to generation on error.
 // V2 admission is internal to the single workspace Create transaction; no second
 // browser mutation route exists, so V1 and V2 cannot be launched together.
@@ -299,6 +323,7 @@ const workspaceReads = createWorkspaceReadHandlers({
   enabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
   db: { query },
   canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  resolveSessionOwner: resolveLessonAuthorSessionOwner,
   report: record => {
     // Successful polling is intentionally quiet; failures retain safe typed metadata.
     if (record.event === 'workspace_read_failed') console.warn('[LessonAuthorWorkspace] ' + JSON.stringify(record));
@@ -316,6 +341,7 @@ router.get(`${workspaceReadPath}/stream`, createWorkspaceStreamHandler({
   enabled: () => env.LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED,
   db: { query },
   canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  resolveSessionOwner: resolveLessonAuthorSessionOwner,
   subscribe: (workspaceId, listener) => workspaceCommitHub.subscribe(workspaceId, listener),
   report: record => {
     const line = '[LessonAuthorWorkspaceStream] ' + JSON.stringify(record);
@@ -336,15 +362,22 @@ const workspaceEdits = createWorkspaceEditHandlers({
     if (record.event === 'workspace_edit_failed') console.warn(line); else console.info(line);
   },
 });
-router.post(`${workspaceReadPath}/nodes/:nodeId/save`, workspaceEdits.save);
-router.post(`${workspaceReadPath}/nodes/:nodeId/reset`, workspaceEdits.reset);
+router.post(`${workspaceReadPath}/nodes/:nodeId/save`, lessonAuthorSessionOwnerOnly('conversationId', { courseParam: 'courseId' }), workspaceEdits.save);
+router.post(`${workspaceReadPath}/nodes/:nodeId/reset`, lessonAuthorSessionOwnerOnly('conversationId', { courseParam: 'courseId' }), workspaceEdits.reset);
 // Apply has a separate hard gate from reads/editing/execution. The repository is
 // the only owner of draft course-block writes and the SQL receipt/mapping proof.
-const workspaceApplyRepository = createWorkspaceApplyRepository({ db: { transaction: withDatabaseTransaction } });
+const workspaceApplyRepository = createWorkspaceApplyRepository({ db: { transaction: withDatabaseTransaction },
+  // Nested withDatabaseTransaction reuses the Apply transaction's client.
+  audit: event => withDatabaseTransaction(client => appendAuditLog(client, {
+    tenantId: event.tenantId, actorId: event.actorId, actorUsername: event.actorUsername, action: 'UPDATE',
+    entityType: 'lesson_author_session', entityId: event.conversationId, entityName: event.sessionTitle || event.courseName,
+    event: { code: 'lesson_author.workspace.applied_shared', context: { course_id: event.courseId, course_name: event.courseName,
+      related_entity_name: event.ownerName, related_entity_type: 'lesson_author_session_creator', affected_count: event.affectedCount } },
+  })) });
 const workspaceApply = createWorkspaceApplyHandler({
   enabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED && env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED
     && env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED && env.LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED,
-  apply: (user, target, expectedWorkspaceRevision) => workspaceApplyRepository.apply(user, target, expectedWorkspaceRevision),
+  apply: (user, target, expectedWorkspaceRevision, options) => workspaceApplyRepository.apply(user, target, expectedWorkspaceRevision, options),
   report: event => console.info('[LessonAuthorWorkspace] ' + JSON.stringify(event)),
 });
 router.post(`${workspaceReadPath}/nodes/:nodeId/apply`, workspaceApply);
@@ -355,18 +388,18 @@ router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:j
   findOwned: (owner, jobId) => generationJobRepository.findOwned(owner, jobId),
   reportFailure: record => console.warn('[LessonAuthorGeneration] ' + JSON.stringify(record)),
 }));
-router.post('/chat/lesson-author/conversations/:conversationId/transcriptions', observeLessonAuthorTranscriptionRequest, checkPermission('courses', 'can_edit'), parseLessonAuthorVideoUpload, transcriptCtrl.createLessonAuthorTranscription);
+router.post('/chat/lesson-author/conversations/:conversationId/transcriptions', observeLessonAuthorTranscriptionRequest, checkPermission('courses', 'can_edit'), lessonAuthorSessionOwnerOnly('conversationId'), parseLessonAuthorVideoUpload, transcriptCtrl.createLessonAuthorTranscription);
 router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId', checkPermission('courses', 'can_edit'), transcriptCtrl.getLessonAuthorTranscription);
 router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/download', checkPermission('courses', 'can_edit'), transcriptCtrl.downloadLessonAuthorTranscript);
-router.post('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit', checkPermission('courses', 'can_edit'), transcriptCtrl.commitLessonAuthorTranscript);
-router.get('/chat/conversations', allowRuntimeChatTarget, chatCtrl.listConversations);
-router.post('/chat/conversations', allowRuntimeChatTarget, chatCtrl.createConversation);
+router.post('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit', checkPermission('courses', 'can_edit'), lessonAuthorSessionOwnerOnly('conversationId'), transcriptCtrl.commitLessonAuthorTranscript);
+router.get('/chat/conversations', allowRuntimeChatTarget, lessonAuthorCourseEditor, chatCtrl.listConversations);
+router.post('/chat/conversations', allowRuntimeChatTarget, lessonAuthorCourseEditor, chatCtrl.createConversation);
 router.delete('/chat/conversations/:id', allowRuntimeChatTarget, chatCtrl.deleteConversation);
-router.get('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.getMessages);
+router.get('/chat/conversations/:id/messages', allowRuntimeChatTarget, lessonAuthorCourseEditor, chatCtrl.getMessages);
 router.post('/chat/conversations/:id/report-pdf', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.exportReportPdf);
 router.post('/chat/conversations/:id/report-pdf/jobs', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.startReportPdfJob);
 router.get('/chat/conversations/:id/report-pdf/jobs/:jobId', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.getReportPdfJob);
 router.get('/chat/conversations/:id/report-pdf/jobs/:jobId/download', allowRuntimeChatTarget, checkPermission('report_summary', 'can_view'), reportPdfHandlers.downloadReportPdfJob);
-router.post('/chat/conversations/:id/messages', allowRuntimeChatTarget, chatCtrl.sendMessage);
+router.post('/chat/conversations/:id/messages', allowRuntimeChatTarget, lessonAuthorCourseEditor, lessonAuthorSessionOwnerOnly('id'), chatCtrl.sendMessage);
 
 export default router;

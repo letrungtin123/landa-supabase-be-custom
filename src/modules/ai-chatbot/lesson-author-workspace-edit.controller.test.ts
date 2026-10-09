@@ -168,8 +168,9 @@ test('runtime Save/Reset requires real persisted acceptance and separate default
   assert.match(routes, /enabled: \(\) => env\.LESSON_AUTHOR_WORKSPACE_READ_ENABLED && env\.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED/);
   assert.match(routes, /validate: createWorkspaceAcceptance\(/);
   assert.match(routes, /db: \{ transaction: withDatabaseTransaction \}/);
-  assert.match(routes, /router\.post\(`\$\{workspaceReadPath\}\/nodes\/:nodeId\/save`, workspaceEdits\.save\)/);
-  assert.match(routes, /router\.post\(`\$\{workspaceReadPath\}\/nodes\/:nodeId\/reset`, workspaceEdits\.reset\)/);
+  // Shared sessions: only the creator saves/resets (owner guard runs before the handler).
+  assert.match(routes, /router\.post\(`\$\{workspaceReadPath\}\/nodes\/:nodeId\/save`, lessonAuthorSessionOwnerOnly\('conversationId', \{ courseParam: 'courseId' \}\), workspaceEdits\.save\)/);
+  assert.match(routes, /router\.post\(`\$\{workspaceReadPath\}\/nodes\/:nodeId\/reset`, lessonAuthorSessionOwnerOnly\('conversationId', \{ courseParam: 'courseId' \}\), workspaceEdits\.reset\)/);
   assert.ok(routes.indexOf('router.use(authenticate)') < routes.indexOf('const workspaceEdits'));
   assert.ok(routes.indexOf('router.use(tenantContext)') < routes.indexOf('const workspaceEdits'));
   const env = readFileSync(new URL('../../config/env.ts', import.meta.url), 'utf8');
