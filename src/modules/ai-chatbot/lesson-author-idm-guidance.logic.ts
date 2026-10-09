@@ -84,3 +84,41 @@ export function readIdmAuthorGuidance(storedDesign: unknown): IdmAuthorGuidanceV
     return null;
   }
 }
+
+/** Bound of the author-notes SME list (the course note itself shows only 10). */
+export const IDM_GUIDANCE_MAX_SME_QUESTIONS = 300;
+/** Internal identifiers never shown to authors (mirror of Python `notes._INTERNAL_ID_RE`). */
+const INTERNAL_ID = /\[?\b(?:cb_\d{4}|sec_\d{3}|lo_\d{1,2}|md_\d{1,2}|lsn_\d{3}|mod_\d{2}|pt_\d|idmcb_[0-9a-f]{32}|cp2_[0-9a-f]{32}|ao2_[0-9a-f]{32}|scope3_[0-9a-z_]+)\b\]?/g;
+
+/**
+ * The complete "other questions for the SME" list (QLT-3), in the order of the
+ * Python course note (`architecture._build_notes`): blocks with a conflict or
+ * outdated issue first, then the rest; Hold blocks are left out (their
+ * question is on the Hold item); duplicates once. The free-text note truncates
+ * this list after ten questions ("và N mục khác"); author notes keep it whole.
+ */
+export function idmAuthorSmeQuestions(design: Pick<IdmCourseDesignV1, 'blocks' | 'hold_items'>): string[] {
+  const held = new Set(design.hold_items.map(item => item.block_id));
+  const urgent = (block: IdmCourseDesignV1['blocks'][number]) => block.issues.some(issue => issue.type === 'conflict' || issue.type === 'outdated');
+  const ordered = [...design.blocks.filter(urgent), ...design.blocks.filter(block => !urgent(block))];
+  const questions = ordered.filter(block => !held.has(block.block_id)).flatMap(block => block.sme_questions)
+    .map(question => authorText(question.replace(INTERNAL_ID, '').replace(/(?<=\S)[ \t]{2,}/g, ' ')))
+    .filter((question): question is string => !!question);
+  return [...new Set(questions)].slice(0, IDM_GUIDANCE_MAX_SME_QUESTIONS);
+}
+
+/**
+ * Guidance persisted in the course-root author notes at Apply: the workspace
+ * guidance plus the complete SME question list. The workspace read keeps its
+ * exact three-key contract (`readIdmAuthorGuidance`), so the dashboard's
+ * strict workspace parser is unaffected. Never throws.
+ */
+export function readIdmAuthorNotesGuidance(storedDesign: unknown): (IdmAuthorGuidanceV1 & { sme_questions: string[] }) | null {
+  if (storedDesign === null || storedDesign === undefined) return null;
+  try {
+    const design = readIdmCourseDesign(storedDesign);
+    return { ...buildIdmAuthorGuidance(design), sme_questions: idmAuthorSmeQuestions(design) };
+  } catch {
+    return null;
+  }
+}
