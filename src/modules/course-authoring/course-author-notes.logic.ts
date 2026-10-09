@@ -57,7 +57,38 @@ export interface CourseAuthorGuidanceV1 {
   hold_items: Array<{ name: string; reason: string | null; sme_question: string | null; blocked_must_dos: string[] }>;
   pending_objectives: string[];
   nice_to_know: Array<{ name: string; summary: string }>;
+  /** Every other question for the SME (QLT-3): the free-text course note
+   * only shows the first ten ("và N mục khác"). Absent in notes applied
+   * before QLT-3. */
+  sme_questions?: string[];
 }
+
+/**
+ * One open assessment obligation of the run at Apply time (QLT-3): a planned
+ * check question the AI could not produce from verified source evidence, so
+ * the author must write or verify it. Codes stay machine codes here; Studio
+ * explains them in the author's language.
+ */
+export interface CourseAuthorAssessmentReviewV1 {
+  obligation_id: string;
+  /** Workspace unit node the obligation belongs to (null when not found). */
+  unit_node_id: string | null;
+  unit_path: string;
+  /** AI unit title at Apply time; the block may have been renamed since. */
+  unit_title: string | null;
+  /** Planned component slot inside the unit (1-based). */
+  component_index: number;
+  required_kind: string;
+  /** Lesson-local objective refs (`lo_<n>` = the lesson's n-th objective). */
+  learning_objective_refs: string[];
+  /** The referenced lesson objectives as text, when they could be resolved. */
+  learning_objectives: string[];
+  unresolved_reason: string;
+  evidence_fact_count: number;
+}
+export const COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX = 200;
+export const COURSE_AUTHOR_UNIT_ASSESSMENT_REVIEWS_MAX = 24;
+export const COURSE_AUTHOR_SME_QUESTIONS_MAX = 300;
 
 export interface CourseAuthorNotesV1 {
   version: 1;
@@ -80,6 +111,14 @@ export interface CourseAuthorNotesV1 {
   media_briefs: CourseAuthorMediaBriefV1[];
   /** Course node of an IDM run only: Hold items, pending objectives, nice-to-know. */
   idm_guidance: CourseAuthorGuidanceV1 | null;
+  /**
+   * Open assessment obligations ("needs your review"), V2 runs only. A unit
+   * carries its own (omitted when it has none); the course root carries the
+   * run-wide list (present, possibly empty, for every V2 Apply). The root is
+   * refreshed by every Apply, including a semantic replay, so it is the
+   * current list; mapped unit blocks are refreshed by the next non-replay Apply.
+   */
+  assessment_reviews?: CourseAuthorAssessmentReviewV1[];
 }
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
@@ -88,6 +127,18 @@ const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const text = (max: number) => z.string().max(max);
 const optionalText = (max: number) => text(max).nullable();
 const lines = (count: number, max: number) => z.array(text(max)).max(count);
+const assessmentReview = z.object({
+  obligation_id: uuid,
+  unit_node_id: uuid.nullable(),
+  unit_path: text(240),
+  unit_title: optionalText(500),
+  component_index: z.number().int().min(1).max(99),
+  required_kind: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+  learning_objective_refs: lines(24, 32),
+  learning_objectives: lines(24, 2000),
+  unresolved_reason: z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/),
+  evidence_fact_count: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
 const notesSchema = z.object({
   version: z.literal(COURSE_AUTHOR_NOTES_VERSION),
   origin: z.literal('ai_instructional_design'),
@@ -113,7 +164,9 @@ const notesSchema = z.object({
       blocked_must_dos: lines(64, 2000) }).strict()).max(200),
     pending_objectives: lines(200, 2000),
     nice_to_know: z.array(z.object({ name: text(2000), summary: text(4000) }).strict()).max(400),
+    sme_questions: lines(COURSE_AUTHOR_SME_QUESTIONS_MAX, 2000).optional(),
   }).strict().nullable(),
+  assessment_reviews: z.array(assessmentReview).max(COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX).optional(),
 }).strict();
 
 function plainObject(value: unknown): value is Record<string, unknown> {
@@ -129,6 +182,12 @@ export function readCourseAuthorNotes(value: unknown): CourseAuthorNotesV1 | nul
   } catch { return null; }
   const parsed = notesSchema.safeParse(value);
   return parsed.success ? parsed.data as CourseAuthorNotesV1 : null;
+}
+
+/** Strict read of one assessment review entry (null when invalid). */
+export function readCourseAuthorAssessmentReview(value: unknown): CourseAuthorAssessmentReviewV1 | null {
+  const parsed = assessmentReview.safeParse(value);
+  return parsed.success ? parsed.data as CourseAuthorAssessmentReviewV1 : null;
 }
 
 /** Fail-closed write-side check used by Apply before a value is persisted. */

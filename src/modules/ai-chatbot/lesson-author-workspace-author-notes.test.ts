@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { COURSE_AUTHOR_NOTES_KEY, readCourseAuthorNotes } from '../course-authoring/course-author-notes.logic.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
-import { idmFixture } from './lesson-author-idm.fixture.js';
+import { idmFixture, rehashIdmDesign } from './lesson-author-idm.fixture.js';
 import type { WorkspaceApplyMapping, WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
-import { workspaceApplyBlockMetadata, workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes, workspaceBlockAuthorNotes,
-  workspaceCourseAuthorNotes } from './lesson-author-workspace-author-notes.logic.js';
-import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes,
+import { workspaceApplyBlockMetadata, workspaceAssessmentReviews, workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes,
+  workspaceBlockAuthorNotes, workspaceCourseAuthorNotes, type WorkspaceAssessmentObligationInput,
+  type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
+import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes, readWorkspaceAssessmentReviews,
   WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
 
 const uuid = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -88,10 +90,11 @@ test('only content-current blocks with stale notes are refreshed (edited brief o
 
 type Call = { sql: string; params: unknown[] };
 function fakeTx(responses: { storedBlockNotes?: unknown; refreshRows?: number; courseNode?: Record<string, unknown> | null;
-  storedRootNotes?: unknown; idm?: unknown }) {
+  storedRootNotes?: unknown; idm?: unknown; obligations?: Array<Record<string, unknown>> }) {
   const calls: Call[] = [];
   const tx = { async query(sql: string, params: unknown[] = []) {
     calls.push({ sql, params });
+    if (/FROM lesson_author_workspace_v2_assessment_obligations o/.test(sql)) return { rows: responses.obligations ?? [] };
     if (/^SELECT id::text AS id,metadata->'ai_id_author_notes'/.test(sql)) {
       return { rows: (params[1] as string[]).map(id => ({ id, notes: responses.storedBlockNotes ?? null })) };
     }
@@ -172,7 +175,11 @@ test('semantic replay: only the unmapped course root notes may be written, once'
 });
 
 test('persist: V2 course notes carry the IDM Hold items, SME questions and nice-to-know', async () => {
-  const design = JSON.parse(JSON.stringify(idmFixture().design));
+  const fixtureDesign = structuredClone(idmFixture().design);
+  // QLT-3: 12 questions on one block; the free-text course note would show 10 and "và 2 mục khác".
+  fixtureDesign.blocks[0]!.sme_questions = Array.from({ length: 8 }, (_, index) => `Câu hỏi A${index + 1} cho chuyên gia?`);
+  fixtureDesign.blocks[1]!.sme_questions = Array.from({ length: 4 }, (_, index) => `Câu hỏi B${index + 1} cho chuyên gia?`);
+  const design = JSON.parse(JSON.stringify(rehashIdmDesign(fixtureDesign)));
   const { tx, calls } = fakeTx({ courseNode: courseNodeRow, idm: design });
   await persistWorkspaceAuthorNotes(tx, { ...base, isV2: true, materialized: [], mappings: [], blockHash: async () => hash('x') });
   const root = calls.find(call => /^UPDATE/.test(call.sql))!;
@@ -180,6 +187,128 @@ test('persist: V2 course notes carry the IDM Hold items, SME questions and nice-
   assert.ok(notes.idm_guidance);
   assert.equal(notes.idm_guidance!.hold_items.length, design.hold_items.length);
   assert.ok(notes.idm_guidance!.hold_items.every(item => typeof item.name === 'string'));
+  assert.equal(notes.idm_guidance!.sme_questions!.length, 12, 'the complete SME list, not the truncated note');
   assert.ok(calls.some(call => /artifact_kind='course_skeleton'/.test(call.sql) && call.params[0] === base.workspaceId
     && call.params[1] === base.tenantId && call.params[2] === base.courseId), 'tenant/course/workspace-bound design read');
+});
+
+// --- QLT-3: open assessment obligations reach the author notes -------------------------------
+const lessonContent = { title: 'Nhận diện thói quen cũ', purpose: null, implementation_notes: null,
+  data: { objective: 'Đối chiếu 4 trục', learning_objectives: ['Đánh giá hiện trạng theo 4 trục BiC', 'Lập lộ trình chuyển đổi'] } };
+const unitContent = { title: 'Ma trận 4 trục', purpose: 'Người học đối chiếu', implementation_notes: null, data: {} };
+function obligation(overrides: Partial<WorkspaceAssessmentObligationInput> = {}): WorkspaceAssessmentObligationInput {
+  return { obligation_id: uuid(60), unit_node_id: uuid(10), unit_path: 'chapter_1.lesson_1.unit_1', component_index: 2,
+    required_kind: 'single_choice', learning_objective_refs: ['lo_1'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+    evidence_fact_count: 9, unit: unitContent, lesson: lessonContent, ...overrides };
+}
+const openReviews = () => workspaceAssessmentReviews([
+  obligation(),
+  obligation({ obligation_id: uuid(61), unit_node_id: uuid(20), unit_path: 'chapter_4.lesson_2.unit_1', learning_objective_refs: ['lo_2', 'lo_9'],
+    evidence_fact_count: 13 }),
+]);
+const v2Context = (reviews = openReviews()): WorkspaceAuthorNotesContext => ({ ...context, assessment_reviews: reviews });
+
+test('obligations map to author reviews: lesson-local objective refs resolve, unknown refs stay codes, bad rows are skipped', () => {
+  const reviews = workspaceAssessmentReviews([
+    obligation(),
+    obligation({ obligation_id: uuid(61), learning_objective_refs: ['lo_2', 'lo_9'] }),
+    obligation({ obligation_id: uuid(62), lesson: null, unit: null, unit_node_id: null }),
+    obligation({ obligation_id: 'not-an-id' }),
+    obligation({ obligation_id: uuid(63), unresolved_reason: 'free text' }),
+  ]);
+  assert.deepEqual(reviews[0], { obligation_id: uuid(60), unit_node_id: uuid(10), unit_path: 'chapter_1.lesson_1.unit_1',
+    unit_title: 'Ma trận 4 trục', component_index: 2, required_kind: 'single_choice', learning_objective_refs: ['lo_1'],
+    learning_objectives: ['Đánh giá hiện trạng theo 4 trục BiC'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+    evidence_fact_count: 9 });
+  assert.deepEqual(reviews[1]!.learning_objectives, ['Lập lộ trình chuyển đổi'], 'lo_2 is the 2nd lesson objective; lo_9 is unresolved');
+  assert.deepEqual([reviews[2]!.unit_title, reviews[2]!.learning_objectives, reviews[2]!.unit_node_id], [null, [], null],
+    'an unverified revision never supplies text');
+  assert.deepEqual(reviews.map(review => review.obligation_id), [uuid(60), uuid(61), uuid(62)]);
+});
+
+test('a unit carries only its own open obligations; other blocks and obligation-free units are unchanged', () => {
+  const unit = readCourseAuthorNotes(workspaceApplyBlockMetadata(unitWrite(), v2Context())[COURSE_AUTHOR_NOTES_KEY])!;
+  assert.deepEqual(unit.assessment_reviews!.map(review => review.obligation_id), [uuid(60)]);
+  const other = workspaceBlockAuthorNotes(unitWrite({ node_id: uuid(12) }), v2Context());
+  assert.equal('assessment_reviews' in other, false, 'no empty key: notes stay byte-identical to pre-QLT-3 notes');
+  assert.equal(workspaceAuthorNotesHash(other), workspaceAuthorNotesHash(workspaceBlockAuthorNotes(unitWrite({ node_id: uuid(12) }), context)));
+  const component = workspaceBlockAuthorNotes({ ...componentWrite(), node_id: uuid(10) }, v2Context());
+  assert.equal('assessment_reviews' in component, false, 'only unit nodes own obligations');
+  // Learner payload of the unit block is untouched by obligations.
+  const { [COURSE_AUTHOR_NOTES_KEY]: _notes, ...learner } = workspaceApplyBlockMetadata(unitWrite(), v2Context());
+  assert.equal(JSON.stringify(learner).includes('ASSESSMENT_SOURCE_CHECK_REQUIRED'), false);
+});
+
+test('course root: a V2 Apply always records the run-wide list (even empty); V1 never adds the key', () => {
+  const course = (ctx: WorkspaceAuthorNotesContext) => workspaceCourseAuthorNotes({ ...ctx, node_id: base.courseNodeId, revision: 0,
+    content_hash: courseNodeRow.content_hash, content: courseContent, idm_guidance: null });
+  assert.deepEqual(course(v2Context()).assessment_reviews!.map(review => review.unit_path),
+    ['chapter_1.lesson_1.unit_1', 'chapter_4.lesson_2.unit_1']);
+  assert.deepEqual(course(v2Context([])).assessment_reviews, []);
+  assert.equal('assessment_reviews' in course(context), false);
+});
+
+test('re-Apply: a resolved obligation disappears from the unit (notes-only refresh) and from the root (also on replay)', async () => {
+  const write = unitWrite(), mapping = mappingFor(write, uuid(50));
+  const storedWithOpen = structuredClone(workspaceBlockAuthorNotes(write, v2Context()));
+  assert.equal(storedWithOpen.assessment_reviews!.length, 1);
+  const resolved = v2Context(openReviews().filter(review => review.obligation_id !== uuid(60)));
+  const plan = workspaceAuthorNotesRefreshes({ materialized: [write], mappings: [mapping], stored_notes: new Map([[uuid(50), storedWithOpen]]),
+    context: resolved });
+  assert.equal(plan.length, 1, 'content-current unit gets a notes-only refresh');
+  assert.equal('assessment_reviews' in plan[0]!.notes, false);
+  assert.deepEqual(workspaceAuthorNotesRefreshes({ materialized: [write], mappings: [mapping],
+    stored_notes: new Map([[uuid(50), storedWithOpen]]), context: v2Context() }), [], 'unchanged obligations write nothing');
+
+  const v2Base = { ...base, isV2: true };
+  const first = fakeTx({ courseNode: courseNodeRow });
+  assert.deepEqual(await persistCourseAuthorNotes(first.tx, { ...v2Base, context: v2Context() }), [base.rootId]);
+  const written = JSON.parse(first.calls.find(call => /^UPDATE/.test(call.sql))!.params[1] as string);
+  assert.equal(readCourseAuthorNotes(written)!.assessment_reviews!.length, 2);
+  const replay = fakeTx({ courseNode: courseNodeRow, storedRootNotes: written });
+  assert.deepEqual(await persistCourseAuthorNotes(replay.tx, { ...v2Base, context: resolved }), [base.rootId]);
+  const refreshed = readCourseAuthorNotes(JSON.parse(replay.calls.find(call => /^UPDATE/.test(call.sql))!.params[1] as string))!;
+  assert.deepEqual(refreshed.assessment_reviews!.map(review => review.obligation_id), [uuid(61)]);
+  assert.ok(replay.calls.every(call => !/^UPDATE/.test(call.sql) || /parent_id IS NULL AND block_type='course'/.test(call.sql)),
+    'a replay never touches a mapped block');
+  const again = fakeTx({ courseNode: courseNodeRow, storedRootNotes: JSON.parse(JSON.stringify(refreshed)) });
+  assert.deepEqual(await persistCourseAuthorNotes(again.tx, { ...v2Base, context: resolved }), [], 'idempotent');
+});
+
+test('obligations are read only, open only and bound to the run, workspace, tenant and course', async () => {
+  const run = uuid(70);
+  const { tx, calls } = fakeTx({ obligations: [
+    { obligation_id: uuid(60), unit_path: 'chapter_1.lesson_1.unit_1', planned_component_index: 2, learning_objective_refs: ['lo_1'],
+      required_assessment_kind: 'single_choice', evidence_fact_count: 9, unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+      unit_node_id: uuid(10), unit_content: unitContent, unit_content_hash: hash(unitContent),
+      lesson_content: lessonContent, lesson_content_hash: hash(lessonContent) },
+    { obligation_id: uuid(61), unit_path: 'chapter_4.lesson_2.unit_1', planned_component_index: '2', learning_objective_refs: ['lo_1'],
+      required_assessment_kind: 'single_choice', evidence_fact_count: '13', unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+      unit_node_id: uuid(20), unit_content: unitContent, unit_content_hash: hash('other'),
+      lesson_content: lessonContent, lesson_content_hash: hash('tampered') },
+  ] });
+  const reviews = await readWorkspaceAssessmentReviews(tx, { tenantId: base.tenantId, courseId: base.courseId, workspaceId: base.workspaceId, runId: run });
+  assert.equal(calls.length, 1);
+  const { sql, params } = calls[0]!;
+  assert.match(sql, /^SELECT /); assert.doesNotMatch(sql, /\b(UPDATE|INSERT|DELETE|FOR UPDATE|FOR SHARE)\b/);
+  assert.deepEqual(params, [run, base.workspaceId, base.tenantId, base.courseId]);
+  assert.match(sql, /WHERE o\.run_id=\$1 AND o\.workspace_id=\$2 AND o\.tenant_id=\$3 AND o\.course_id=\$4 AND o\.status='open'/);
+  assert.equal((sql.match(/AND u\.tenant_id=|AND ur\.tenant_id=|AND l\.tenant_id=|AND lr\.tenant_id=/g) ?? []).length, 4,
+    'every join stays inside the tenant');
+  assert.match(sql, /LIMIT 200$/);
+  assert.deepEqual(reviews.map(review => [review.obligation_id, review.unit_title, review.learning_objectives, review.evidence_fact_count]), [
+    [uuid(60), 'Ma trận 4 trục', ['Đánh giá hiện trạng theo 4 trục BiC'], 9],
+    [uuid(61), null, [], 13],
+  ], 'hash-verified revisions only supply titles and objectives');
+});
+
+test('Apply wiring: V2 obligations are read once, before the replay branch, and reach units, refreshes and the root', () => {
+  const source = readFileSync(new URL('./lesson-author-workspace-apply.repository.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const read = source.indexOf('readWorkspaceAssessmentReviews(tx, {');
+  assert.ok(read > 0 && read < source.indexOf('const semanticPrior = await tx.query('), 'read before the semantic replay check');
+  assert.equal((source.match(/readWorkspaceAssessmentReviews\(tx,/g) ?? []).length, 1);
+  assert.match(source, /\.\.\.\(isV2 \? \{ assessment_reviews: await readWorkspaceAssessmentReviews\(tx, \{ tenantId: target\.tenantId,\n\s+courseId: target\.courseId, workspaceId: target\.workspaceId, runId: text\(w\.v2_run_id\) \}\) \} : \{\}\)/);
+  assert.match(source, /persistCourseAuthorNotes\(tx, \{[^}]*context: notesContext \}\)/, 'replay refreshes the root list');
+  assert.match(source, /const metadata = workspaceApplyBlockMetadata\(write, notesContext\);/);
+  assert.match(source, /persistWorkspaceAuthorNotes\(tx, \{[^}]*context: notesContext,/);
 });

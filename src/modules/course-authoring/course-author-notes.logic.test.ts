@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AUTHOR_ONLY_METADATA_KEYS, COURSE_AUTHOR_NOTES_KEY, preserveAuthorNotesSql, readCourseAuthorNotes,
-  withoutAuthorOnlyBlockMetadata, withoutAuthorOnlyMetadata, withoutServerOwnedAuthorNotes,
-  type CourseAuthorNotesV1 } from './course-author-notes.logic.js';
+import { AUTHOR_ONLY_METADATA_KEYS, COURSE_AUTHOR_NOTES_KEY, preserveAuthorNotesSql, readCourseAuthorAssessmentReview,
+  readCourseAuthorNotes, withoutAuthorOnlyBlockMetadata, withoutAuthorOnlyMetadata, withoutServerOwnedAuthorNotes,
+  type CourseAuthorAssessmentReviewV1, type CourseAuthorNotesV1 } from './course-author-notes.logic.js';
 import { buildCourseMarkdown } from '../courses/course-markdown-exporter.js';
 import { toLearnerBlockRow } from '../learner/learner-block-row.logic.js';
 
@@ -33,6 +33,45 @@ test('strict versioned reader accepts v1 and rejects unknown versions, extra key
   assert.equal(readCourseAuthorNotes({ ...notes, implementation_notes: 'x'.repeat(8001) }), null);
   assert.equal(readCourseAuthorNotes({ ...notes, workspace_id: 'not-a-uuid' }), null);
   for (const value of [null, undefined, 'notes', [], 7]) assert.equal(readCourseAuthorNotes(value), null);
+});
+
+export function reviewFixture(overrides: Partial<CourseAuthorAssessmentReviewV1> = {}): CourseAuthorAssessmentReviewV1 {
+  return { obligation_id: uuid(40), unit_node_id: uuid(2), unit_path: 'chapter_1.lesson_2.unit_7', unit_title: 'Ma trận 4 trục',
+    component_index: 2, required_kind: 'single_choice', learning_objective_refs: ['lo_1'],
+    learning_objectives: ['Đánh giá hiện trạng theo 4 trục'], unresolved_reason: 'ASSESSMENT_SOURCE_CHECK_REQUIRED',
+    evidence_fact_count: 9, ...overrides };
+}
+
+test('QLT-3 fields: open obligations and the full SME list are optional v1 fields, strictly validated', () => {
+  const legacy = notesFixture();
+  assert.equal('assessment_reviews' in legacy, false);
+  assert.deepEqual(readCourseAuthorNotes(structuredClone(legacy)), legacy, 'notes applied before QLT-3 stay readable');
+  const unit = notesFixture({ assessment_reviews: [reviewFixture()] });
+  assert.deepEqual(readCourseAuthorNotes(structuredClone(unit)), unit);
+  const course = notesFixture({ node_kind: 'course', canonical_path: 'course', assessment_reviews: [],
+    idm_guidance: { hold_items: [], pending_objectives: [], nice_to_know: [], sme_questions: ['Q1?', 'Q2?'] } });
+  assert.deepEqual(readCourseAuthorNotes(structuredClone(course)), course);
+  const oldGuidance = notesFixture({ idm_guidance: { hold_items: [], pending_objectives: [], nice_to_know: [] } });
+  assert.deepEqual(readCourseAuthorNotes(structuredClone(oldGuidance)), oldGuidance, 'guidance without sme_questions');
+  for (const bad of [{ obligation_id: 'x' }, { unit_node_id: 'not-a-uuid' }, { component_index: 0 }, { required_kind: 'Single Choice' },
+    { unresolved_reason: 'free text reason' }, { evidence_fact_count: -1 }, { learning_objective_refs: ['x'.repeat(33)] }]) {
+    assert.equal(readCourseAuthorAssessmentReview(reviewFixture(bad as Partial<CourseAuthorAssessmentReviewV1>)), null, JSON.stringify(bad));
+    assert.equal(readCourseAuthorNotes({ ...unit, assessment_reviews: [{ ...reviewFixture(), ...bad }] }), null);
+  }
+  assert.equal(readCourseAuthorNotes({ ...unit, assessment_reviews: [{ ...reviewFixture(), extra: true }] }), null);
+  assert.equal(readCourseAuthorNotes({ ...course, idm_guidance: { ...course.idm_guidance, sme_questions: [7] } }), null);
+});
+
+test('learner rows never carry open obligations or SME questions from the notes key', () => {
+  const metadata = { display_name: 'Unit 7', [COURSE_AUTHOR_NOTES_KEY]: notesFixture({ assessment_reviews: [reviewFixture({ unit_title: SECRET })],
+    idm_guidance: { hold_items: [], pending_objectives: [], nice_to_know: [], sme_questions: [SECRET] } }) };
+  for (const block_type of ['course', 'vertical', 'html', 'problem']) {
+    const row = toLearnerBlockRow({ id: uuid(20), block_type, display_name: 'X', data: '<p>Học</p>', metadata: structuredClone(metadata),
+      sort_order: 0, is_published: true, completed: false });
+    assert.equal(JSON.stringify(row).includes(SECRET), false, block_type);
+    assert.equal(JSON.stringify(row).includes('ASSESSMENT_SOURCE_CHECK_REQUIRED'), false, block_type);
+    assert.deepEqual(row.metadata, { display_name: 'Unit 7' });
+  }
 });
 
 test('author-only metadata keys are removed without touching learner metadata', () => {

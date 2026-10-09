@@ -15,7 +15,7 @@ import type { WorkspaceApplyReceipt } from './lesson-author-workspace-apply.cont
 import { compileOrchestrationV2WorkspaceApply, type OrchestrationV2ApplyArtifact,
   type OrchestrationV2ApplyChapterReceipt } from './lesson-author-orchestration-v2-apply.logic.js';
 import { workspaceApplyBlockMetadata, type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
-import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes,
+import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes, readWorkspaceAssessmentReviews,
   WorkspaceAuthorNotesTargetChanged } from './lesson-author-workspace-author-notes.repository.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -215,6 +215,15 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const v2Compiled = isV2
           ? compiled as ReturnType<typeof compileOrchestrationV2WorkspaceApply>
           : null;
+        // Author-only notes (QA notes, Hold/SME, nice-to-know, media briefs,
+        // course summary, open assessment obligations) travel under the
+        // reserved metadata key; learner payloads (data, component metadata)
+        // are compiled exactly as before. Obligations are read-only evidence of
+        // this run, read now so a later resolution drops them on the next Apply.
+        failureStage = 'author_notes_obligations';
+        const notesContext: WorkspaceAuthorNotesContext = { workspace_id: target.workspaceId, content_locale: compiled.content_locale,
+          ...(isV2 ? { assessment_reviews: await readWorkspaceAssessmentReviews(tx, { tenantId: target.tenantId,
+            courseId: target.courseId, workspaceId: target.workspaceId, runId: text(w.v2_run_id) }) } : {}) };
         // A retry with a fresh HTTP idempotency key is still a semantic replay
         // when the exact scope and effective revisions were already committed.
         // Return the durable receipt instead of colliding with its unique proof.
@@ -226,11 +235,12 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           const priorReceipt = semanticPrior.rows[0] as Row;
           // Blocks stay untouched (the receipt already proves them). Only the
           // course-level author notes on the unmapped root may be refreshed, so
-          // a course applied before notes existed gets them on a re-Apply.
+          // a course applied before notes existed gets them on a re-Apply, and
+          // the root's run-wide obligation list stays current (Studio treats it
+          // as authoritative over a mapped unit's copy).
           failureStage = 'course_author_notes_replay';
           const touched = await persistCourseAuthorNotes(tx, { tenantId: target.tenantId, courseId: target.courseId,
-            workspaceId: target.workspaceId, courseNodeId, isV2, rootId,
-            context: { workspace_id: target.workspaceId, content_locale: compiled.content_locale } });
+            workspaceId: target.workspaceId, courseNodeId, isV2, rootId, context: notesContext });
           if (touched.length && (!await authority.canEdit(tx, target)
             || await authority.currentSourceHash(tx, { target, source_snapshot_hash: w.source_snapshot_hash }) !== w.source_snapshot_hash)) {
             throw new WorkspaceApplyError('WORKSPACE_APPLY_SOURCE_CHANGED');
@@ -260,10 +270,6 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           target_sort_order: integer(row.target_sort_order),
         })));
         const delta: Array<Record<string, unknown>> = []; let created = 0, updated = 0;
-        // Author-only notes (QA notes, Hold/SME, nice-to-know, media briefs,
-        // course summary) travel under the reserved metadata key; learner
-        // payloads (data, component metadata) are compiled exactly as before.
-        const notesContext: WorkspaceAuthorNotesContext = { workspace_id: target.workspaceId, content_locale: compiled.content_locale };
         failureStage = 'materialize_blocks';
         for (const write of materialization.writes) {
           failureStage = `materialize_block:${write.node_id}`;

@@ -1,15 +1,69 @@
-import { COURSE_AUTHOR_NOTES_KEY, type CourseAuthorNotesV1 } from '../course-authoring/course-author-notes.logic.js';
+import { COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX, COURSE_AUTHOR_NOTES_KEY, type CourseAuthorAssessmentReviewV1,
+  type CourseAuthorNotesV1 } from '../course-authoring/course-author-notes.logic.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
-import { readIdmAuthorGuidance } from './lesson-author-idm-guidance.logic.js';
+import { readIdmAuthorNotesGuidance } from './lesson-author-idm-guidance.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { WorkspaceApplyMapping, WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
-import { workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes, workspaceCourseAuthorNotes,
+import { workspaceAssessmentReviews, workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes, workspaceCourseAuthorNotes,
   type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
-import { readWorkspaceContent } from './lesson-author-workspace.logic.js';
+import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
 
 type Row = Record<string, any>;
 const HASH = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A stored revision's content only when its hash verifies (V1 generation
+ * snapshot hash or V2 orchestration hash); otherwise null, never a throw. */
+function verifiedWorkspaceContent(content: unknown, contentHash: unknown): WorkspaceContent | null {
+  if (content === null || content === undefined || typeof contentHash !== 'string' || !HASH.test(contentHash)) return null;
+  try {
+    const parsed = readWorkspaceContent(content);
+    return generationSnapshotHash(parsed) === contentHash || orchestrationV2Hash(parsed) === contentHash ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Open assessment obligations of a V2 run (QLT-3), read-only and bound to the
+ * run, workspace, tenant and course. Each is joined to its unit node by exact
+ * canonical path (same workspace/tenant/course) and to the unit's lesson, whose
+ * current revision resolves the lesson-local `lo_<n>` refs. Course order,
+ * bounded; a row that does not validate is skipped (advisory notes).
+ */
+export async function readWorkspaceAssessmentReviews(tx: GenerationJobSql, input: {
+  tenantId: string; courseId: string; workspaceId: string; runId: string;
+}): Promise<CourseAuthorAssessmentReviewV1[]> {
+  const rows = (await tx.query(`SELECT o.id::text AS obligation_id,o.unit_path,o.planned_component_index,o.learning_objective_refs,
+      o.required_assessment_kind,cardinality(o.relevant_evidence_fact_ids) AS evidence_fact_count,o.unresolved_reason,
+      u.id::text AS unit_node_id,ur.content AS unit_content,ur.content_hash AS unit_content_hash,
+      lr.content AS lesson_content,lr.content_hash AS lesson_content_hash
+    FROM lesson_author_workspace_v2_assessment_obligations o
+    LEFT JOIN lesson_author_workspace_nodes u ON u.workspace_id=o.workspace_id AND u.tenant_id=o.tenant_id
+      AND u.course_id=o.course_id AND u.kind='unit' AND u.canonical_path=o.unit_path
+    LEFT JOIN lesson_author_workspace_revisions ur ON ur.workspace_id=u.workspace_id AND ur.node_id=u.id
+      AND ur.tenant_id=u.tenant_id AND ur.course_id=u.course_id AND ur.revision=u.current_revision
+    LEFT JOIN lesson_author_workspace_nodes l ON l.workspace_id=u.workspace_id AND l.id=u.parent_id
+      AND l.tenant_id=u.tenant_id AND l.course_id=u.course_id AND l.kind='lesson'
+    LEFT JOIN lesson_author_workspace_revisions lr ON lr.workspace_id=l.workspace_id AND lr.node_id=l.id
+      AND lr.tenant_id=l.tenant_id AND lr.course_id=l.course_id AND lr.revision=l.current_revision
+    WHERE o.run_id=$1 AND o.workspace_id=$2 AND o.tenant_id=$3 AND o.course_id=$4 AND o.status='open'
+    ORDER BY (substring(o.unit_path from '^chapter_([0-9]+)'))::integer,(substring(o.unit_path from '\\.lesson_([0-9]+)'))::integer,
+      (substring(o.unit_path from '\\.unit_([0-9]+)$'))::integer,o.planned_component_index,o.id
+    LIMIT ${COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX}`,
+  [input.runId, input.workspaceId, input.tenantId, input.courseId])).rows as Row[];
+  const count = (value: unknown): number => typeof value === 'number' ? value
+    : typeof value === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(value) ? Number(value) : -1;
+  return workspaceAssessmentReviews(rows.map(row => ({
+    obligation_id: String(row.obligation_id), unit_node_id: typeof row.unit_node_id === 'string' && UUID.test(row.unit_node_id) ? row.unit_node_id : null,
+    unit_path: String(row.unit_path), component_index: count(row.planned_component_index), required_kind: String(row.required_assessment_kind),
+    learning_objective_refs: Array.isArray(row.learning_objective_refs) ? row.learning_objective_refs.map(String) : [],
+    unresolved_reason: String(row.unresolved_reason), evidence_fact_count: count(row.evidence_fact_count),
+    unit: verifiedWorkspaceContent(row.unit_content, row.unit_content_hash),
+    lesson: verifiedWorkspaceContent(row.lesson_content, row.lesson_content_hash),
+  })));
+}
 
 /** jsonb_set of the reserved notes key only; every other metadata key, the
  * learner payload (`data`) and the publish state of the block stay untouched. */
@@ -46,11 +100,11 @@ export async function readWorkspaceCourseAuthorNotes(tx: GenerationJobSql, input
       WHERE a.workspace_id=$1 AND a.tenant_id=$2 AND a.course_id=$3 AND a.artifact_kind='course_skeleton'
       ORDER BY a.created_at DESC,a.id DESC LIMIT 1`, [input.workspaceId, input.tenantId, input.courseId]) : null;
   try {
-    const content = readWorkspaceContent(row.content);
     // V1 revisions use the generation snapshot hash, V2 the orchestration hash.
-    if (generationSnapshotHash(content) !== row.content_hash && orchestrationV2Hash(content) !== row.content_hash) return null;
+    const content = verifiedWorkspaceContent(row.content, row.content_hash);
+    if (!content) return null;
     return workspaceCourseAuthorNotes({ ...input.context, node_id: input.courseNodeId, revision,
-      content_hash: row.content_hash, content, idm_guidance: readIdmAuthorGuidance(design?.rows[0]?.idm ?? null) });
+      content_hash: row.content_hash, content, idm_guidance: readIdmAuthorNotesGuidance(design?.rows[0]?.idm ?? null) });
   } catch {
     console.warn('[LessonAuthorWorkspaceApply] course author notes skipped', { workspace_id: input.workspaceId, node_id: input.courseNodeId });
     return null;

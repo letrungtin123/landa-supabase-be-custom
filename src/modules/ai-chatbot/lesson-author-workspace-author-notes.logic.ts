@@ -1,5 +1,7 @@
-import { assertCourseAuthorNotes, COURSE_AUTHOR_NOTES_KEY, COURSE_AUTHOR_NOTES_VERSION, type CourseAuthorGuidanceV1,
-  type CourseAuthorMediaBriefV1, type CourseAuthorNotesV1, type CourseAuthorReviewV1 } from '../course-authoring/course-author-notes.logic.js';
+import { assertCourseAuthorNotes, COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX, COURSE_AUTHOR_NOTES_KEY, COURSE_AUTHOR_NOTES_VERSION,
+  COURSE_AUTHOR_UNIT_ASSESSMENT_REVIEWS_MAX, readCourseAuthorAssessmentReview, type CourseAuthorAssessmentReviewV1,
+  type CourseAuthorGuidanceV1, type CourseAuthorMediaBriefV1, type CourseAuthorNotesV1,
+  type CourseAuthorReviewV1 } from '../course-authoring/course-author-notes.logic.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
 import type { WorkspaceApplyMapping, WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import type { WorkspaceContent } from './lesson-author-workspace.logic.js';
@@ -8,12 +10,32 @@ import type { WorkspaceContent } from './lesson-author-workspace.logic.js';
  * Pure projection of the author-only part of an applied workspace node into
  * `course_blocks.metadata.ai_id_author_notes` (QC 364564, defect N6). The
  * value is deterministic for one exact node revision (plus its media-brief
- * revisions and the run's IDM guidance), so re-applying the same revision
- * yields byte-identical notes and never appends duplicates.
+ * revisions, the run's IDM guidance and the run's open assessment
+ * obligations), so re-applying the same state yields byte-identical notes and
+ * never appends duplicates.
  */
 export interface WorkspaceAuthorNotesContext {
   workspace_id: string;
   content_locale: 'vi' | 'en';
+  /** Open assessment obligations of a V2 run read at Apply time (QLT-3);
+   * absent for V1 workspaces, which have no obligations. */
+  assessment_reviews?: readonly CourseAuthorAssessmentReviewV1[];
+}
+
+/** One open obligation row joined to its verified unit/lesson revisions. */
+export interface WorkspaceAssessmentObligationInput {
+  obligation_id: string;
+  unit_node_id: string | null;
+  unit_path: string;
+  component_index: number;
+  required_kind: string;
+  learning_objective_refs: readonly string[];
+  unresolved_reason: string;
+  evidence_fact_count: number;
+  /** Current unit revision content when its hash verified, else null. */
+  unit: WorkspaceContent | null;
+  /** Current revision content of the unit's lesson when verified, else null. */
+  lesson: WorkspaceContent | null;
 }
 
 const REVIEW_KEYS = ['purpose', 'example_scenario', 'visual_asset', 'user_behavior_navigation'] as const;
@@ -57,9 +79,44 @@ function mediaBrief(brief: WorkspaceApplyWrite['author_metadata']['media_briefs'
   };
 }
 
+const OBJECTIVE_REF = /^lo_([1-9][0-9]*)$/;
+
+/**
+ * Author-facing projection of a run's open assessment obligations (QLT-3).
+ * `lo_<n>` refs are lesson-local (the lesson's n-th objective, see Python
+ * `module_layout`), so they resolve against the unit's lesson revision. Rows
+ * that would not validate are skipped: the list is advisory and must never
+ * fail an Apply. Order is the caller's (course order).
+ */
+export function workspaceAssessmentReviews(rows: readonly WorkspaceAssessmentObligationInput[]): CourseAuthorAssessmentReviewV1[] {
+  return rows.flatMap(row => {
+    const objectives = stringList(record(row.lesson?.data)?.learning_objectives);
+    const refs = row.learning_objective_refs.slice(0, 24);
+    const resolved = refs.map(ref => OBJECTIVE_REF.exec(ref)).map(match => match ? objectives[Number(match[1]) - 1] : undefined)
+      .map(value => value?.trim() ? value.trim().slice(0, 2000) : null).filter((value): value is string => !!value);
+    const title = nullableText(row.unit?.title);
+    const review = readCourseAuthorAssessmentReview({
+      obligation_id: row.obligation_id, unit_node_id: row.unit_node_id, unit_path: row.unit_path,
+      unit_title: title ? title.slice(0, 500) : null, component_index: row.component_index,
+      required_kind: row.required_kind, learning_objective_refs: [...refs], learning_objectives: [...new Set(resolved)],
+      unresolved_reason: row.unresolved_reason, evidence_fact_count: row.evidence_fact_count,
+    });
+    return review ? [review] : [];
+  }).slice(0, COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX);
+}
+
+/** The open obligations of one unit node (never of another unit). */
+export function workspaceUnitAssessmentReviews(context: WorkspaceAuthorNotesContext, unitNodeId: string): CourseAuthorAssessmentReviewV1[] {
+  return (context.assessment_reviews ?? []).filter(review => review.unit_node_id === unitNodeId)
+    .slice(0, COURSE_AUTHOR_UNIT_ASSESSMENT_REVIEWS_MAX);
+}
+
 /** Notes for one chapter/lesson/unit/component write of a compiled Apply. */
 export function workspaceBlockAuthorNotes(write: WorkspaceApplyWrite, context: WorkspaceAuthorNotesContext): CourseAuthorNotesV1 {
   const meta = write.author_metadata;
+  // Only a unit with open obligations carries the key, so the notes of every
+  // other block stay byte-identical to notes written before QLT-3.
+  const reviews = write.kind === 'unit' ? workspaceUnitAssessmentReviews(context, write.node_id) : [];
   return assertCourseAuthorNotes({
     version: COURSE_AUTHOR_NOTES_VERSION, origin: 'ai_instructional_design',
     workspace_id: context.workspace_id, node_id: write.node_id, node_kind: write.kind,
@@ -70,10 +127,13 @@ export function workspaceBlockAuthorNotes(write: WorkspaceApplyWrite, context: W
     author_review: write.kind === 'component' ? workspaceAuthorReview(meta.author_review) : null,
     media_briefs: meta.media_briefs.map(mediaBrief),
     idm_guidance: null,
+    ...(reviews.length ? { assessment_reviews: reviews } : {}),
   });
 }
 
-/** Notes for the workspace course node, written to the course root block. */
+/** Notes for the workspace course node, written to the course root block.
+ * A V2 Apply always records the run-wide obligation list (possibly empty), so
+ * an obligation resolved since the last Apply disappears from the root. */
 export function workspaceCourseAuthorNotes(input: WorkspaceAuthorNotesContext & {
   node_id: string; revision: number; content_hash: string; content: WorkspaceContent;
   idm_guidance: CourseAuthorGuidanceV1 | null;
@@ -86,6 +146,7 @@ export function workspaceCourseAuthorNotes(input: WorkspaceAuthorNotesContext & 
     implementation_notes: nullableText(input.content.implementation_notes),
     storyboard: storyboard(input.content.data), author_review: null, media_briefs: [],
     idm_guidance: input.idm_guidance,
+    ...(input.assessment_reviews ? { assessment_reviews: input.assessment_reviews.slice(0, COURSE_AUTHOR_ASSESSMENT_REVIEWS_MAX) } : {}),
   });
 }
 
