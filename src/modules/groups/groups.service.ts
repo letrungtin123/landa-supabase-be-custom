@@ -129,15 +129,18 @@ export async function deleteOrgGroup(id: string, tenantId: string) {
 
 // ═══ Sub Groups (level 2) ═══
 
-export async function listSubGroups(orgGroupId: string, queryParams: Record<string, unknown>) {
+export async function listSubGroups(orgGroupId: string, tenantId: string, queryParams: Record<string, unknown>) {
   const search = queryParams.search as string;
-  const params: unknown[] = [orgGroupId];
+  const params: unknown[] = [orgGroupId, tenantId];
   let searchWhere = '';
-  if (search) { params.push(`%${search}%`); searchWhere = ` AND sg.name ILIKE $2`; }
+  if (search) { params.push(`%${search}%`); searchWhere = ` AND sg.name ILIKE $3`; }
 
+  // A group of another tenant yields an empty list, never its subgroups.
   const result = await query(
     `SELECT sg.*, (SELECT COUNT(*) FROM teams t WHERE t.sub_group_id = sg.id) AS team_count
-     FROM sub_groups sg WHERE sg.org_group_id = $1${searchWhere}
+     FROM sub_groups sg
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE sg.org_group_id = $1 AND og.tenant_id = $2::uuid${searchWhere}
      ORDER BY sg.name`,
     params,
   );
@@ -155,13 +158,17 @@ export async function createSubGroup(orgGroupId: string, tenantId: string, input
   return result.rows[0];
 }
 
-export async function getSubGroupDetail(sgId: string) {
-  const [sgR, teamsR, membersR, coursesR, categoriesR, courseCatsR] = await Promise.all([
-    query(
-      `SELECT sg.*, og.name AS org_group_name, og.id AS org_group_id
-       FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id WHERE sg.id = $1`,
-      [sgId],
-    ),
+export async function getSubGroupDetail(sgId: string, tenantId: string) {
+  // Tenant check first: nothing below is read for another tenant's subgroup.
+  const sgR = await query(
+    `SELECT sg.*, og.name AS org_group_name, og.id AS org_group_id
+     FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE sg.id = $1 AND og.tenant_id = $2::uuid`,
+    [sgId, tenantId],
+  );
+  if (sgR.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
+
+  const [teamsR, membersR, coursesR, categoriesR, courseCatsR] = await Promise.all([
     query('SELECT t.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id = t.id) AS member_count FROM teams t WHERE t.sub_group_id = $1 ORDER BY t.name', [sgId]),
     query(
       `SELECT DISTINCT u.id, u.username, u.email, u.avatar_url AS avatar, tm.added_at
@@ -188,8 +195,6 @@ export async function getSubGroupDetail(sgId: string) {
       [sgId],
     ),
   ]);
-
-  if (sgR.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
 
   return {
     ...sgR.rows[0],
@@ -239,18 +244,21 @@ export async function deleteSubGroup(id: string, tenantId: string) {
 
 // ═══ Teams (level 3) ═══
 
-export async function listTeams(subgroupId: string, queryParams: Record<string, unknown>) {
+export async function listTeams(subgroupId: string, tenantId: string, queryParams: Record<string, unknown>) {
   const search = queryParams.search as string;
-  const params: unknown[] = [subgroupId];
+  const params: unknown[] = [subgroupId, tenantId];
   let searchWhere = '';
-  if (search) { params.push(`%${search}%`); searchWhere = ` AND t.name ILIKE $2`; }
+  if (search) { params.push(`%${search}%`); searchWhere = ` AND t.name ILIKE $3`; }
 
   const result = await query(
     `SELECT t.*,
             (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id = t.id) AS member_count,
             (SELECT COUNT(*) FROM team_courses tc WHERE tc.team_id = t.id) AS course_count,
             (SELECT COUNT(*) FROM team_course_categories tcc WHERE tcc.team_id = t.id) AS course_category_count
-     FROM teams t WHERE t.sub_group_id = $1${searchWhere}
+     FROM teams t
+     JOIN sub_groups sg ON sg.id = t.sub_group_id
+     JOIN org_groups og ON og.id = sg.org_group_id
+     WHERE t.sub_group_id = $1 AND og.tenant_id = $2::uuid${searchWhere}
      ORDER BY t.name`,
     params,
   );
@@ -271,7 +279,7 @@ export async function createTeam(subgroupId: string, tenantId: string, input: { 
   return result.rows[0];
 }
 
-export async function getTeamDetail(teamId: string) {
+export async function getTeamDetail(teamId: string, tenantId: string) {
   const teamR = await query(
     `SELECT t.*,
             sg.name AS subgroup_name,
@@ -284,8 +292,8 @@ export async function getTeamDetail(teamId: string) {
      FROM teams t
      JOIN sub_groups sg ON sg.id = t.sub_group_id
      JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $1`,
-    [teamId],
+     WHERE t.id = $1 AND og.tenant_id = $2::uuid`,
+    [teamId, tenantId],
   );
 
   if (teamR.rowCount === 0) throw new AppError('Team không tồn tại', 404);
@@ -306,7 +314,7 @@ export async function getTeamDetail(teamId: string) {
 
 export async function listTeamMembers(
   teamId: string,
-  tenantId: string | null,
+  tenantId: string,
   queryParams: Record<string, unknown>,
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
@@ -314,10 +322,8 @@ export async function listTeamMembers(
   const params: unknown[] = [teamId];
   const conditions = ['tm.team_id = $1::uuid'];
 
-  if (tenantId) {
-    params.push(tenantId);
-    conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  }
+  params.push(tenantId);
+  conditions.push(`og.tenant_id = $${params.length}::uuid`);
   if (search) {
     params.push(`%${search}%`);
     conditions.push(`(
@@ -363,7 +369,7 @@ export async function listTeamMembers(
 
 export async function listTeamDocCategories(
   teamId: string,
-  tenantId: string | null,
+  tenantId: string,
   queryParams: Record<string, unknown>,
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
@@ -371,10 +377,8 @@ export async function listTeamDocCategories(
   const params: unknown[] = [teamId];
   const conditions = ['tdc.team_id = $1::uuid'];
 
-  if (tenantId) {
-    params.push(tenantId);
-    conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  }
+  params.push(tenantId);
+  conditions.push(`og.tenant_id = $${params.length}::uuid`);
   if (search) {
     params.push(`%${search}%`);
     conditions.push(`unaccent(dc.name) ILIKE unaccent($${params.length})`);
@@ -413,7 +417,7 @@ export async function listTeamDocCategories(
 
 export async function listTeamCourseCategories(
   teamId: string,
-  tenantId: string | null,
+  tenantId: string,
   queryParams: Record<string, unknown>,
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
@@ -421,10 +425,8 @@ export async function listTeamCourseCategories(
   const params: unknown[] = [teamId];
   const conditions = ['tcc.team_id = $1::uuid'];
 
-  if (tenantId) {
-    params.push(tenantId);
-    conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  }
+  params.push(tenantId);
+  conditions.push(`og.tenant_id = $${params.length}::uuid`);
   if (search) {
     params.push(`%${search}%`);
     conditions.push(`unaccent(cc.name) ILIKE unaccent($${params.length})`);

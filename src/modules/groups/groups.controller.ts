@@ -79,8 +79,11 @@ export async function deleteOrgGroupController(req: Request, res: Response, next
 // ═══ Sub Groups ═══
 
 export async function listSubGroupsController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.listSubGroups(req.params.groupId, req.query as Record<string, unknown>)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.listSubGroups(req.params.groupId, tenantId, req.query as Record<string, unknown>));
+  } catch (err) { next(err); }
 }
 
 export async function createSubGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -99,8 +102,11 @@ export async function createSubGroupController(req: Request, res: Response, next
 }
 
 export async function getSubGroupDetailController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.getSubGroupDetail(req.params.id)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.getSubGroupDetail(req.params.id, tenantId));
+  } catch (err) { next(err); }
 }
 
 export async function updateSubGroupController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -144,8 +150,11 @@ export async function deleteSubGroupController(req: Request, res: Response, next
 // ═══ Teams ═══
 
 export async function listTeamsController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.listTeams(req.params.subgroupId, req.query as Record<string, unknown>)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.listTeams(req.params.subgroupId, tenantId, req.query as Record<string, unknown>));
+  } catch (err) { next(err); }
 }
 
 export async function createTeamController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -164,13 +173,17 @@ export async function createTeamController(req: Request, res: Response, next: Ne
 }
 
 export async function getTeamDetailController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.getTeamDetail(req.params.id)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    sendSuccess(res, await svc.getTeamDetail(req.params.id, tenantId));
+  } catch (err) { next(err); }
 }
 
 export async function listTeamMembersController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     sendSuccess(res, await svc.listTeamMembers(req.params.teamId, tenantId, req.query as Record<string, unknown>));
   } catch (err) { next(err); }
 }
@@ -178,6 +191,7 @@ export async function listTeamMembersController(req: Request, res: Response, nex
 export async function listTeamDocCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     sendSuccess(res, await svc.listTeamDocCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
   } catch (err) { next(err); }
 }
@@ -185,6 +199,7 @@ export async function listTeamDocCategoriesController(req: Request, res: Respons
 export async function listTeamCourseCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     sendSuccess(res, await svc.listTeamCourseCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
   } catch (err) { next(err); }
 }
