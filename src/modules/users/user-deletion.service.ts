@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import { getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
@@ -12,6 +13,14 @@ import {
 import { extractStoragePath } from '../../config/storage.js';
 import { cacheUserAccessRevocation } from '../auth/auth-revocation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
+import {
+  ACTIVE_SUPERADMIN_COUNT_SQL,
+  SUPERADMIN_SET_LOCK_SQL,
+  assertCanDeleteUser,
+  removesActiveSuperadmin,
+  type UserAuthorityActor,
+  type UserAuthorityTarget,
+} from './user-authority.logic.js';
 
 const DELETE_BATCH_SIZE = 500;
 const USER_JOB_LEASE_SECONDS = 15 * 60;
@@ -33,33 +42,58 @@ type TargetUserRow = {
   role: string;
   tenant_id: string | null;
   avatar_url: string | null;
+  is_active: boolean;
 };
 
 /** Narrow snapshot passed to the audit writer while the target row is locked. */
 export type UserDeletionAuditTarget = Pick<TargetUserRow, 'username' | 'email' | 'full_name' | 'role'>;
 
-const ROLE_LEVEL: Record<string, number> = {
-  learner: 0,
-  learner_plus: 0,
-  staff: 1,
-  superuser: 2,
-  superadmin: 3,
-};
+type AuthorityRow = Pick<TargetUserRow, 'id' | 'role' | 'tenant_id' | 'is_active'>;
 
-function assertDeletionAuthority(target: TargetUserRow, callerId: string, callerRole: string, callerTenantId: string | null): void {
-  if (target.id === callerId) throw new AppError('Không thể xóa chính mình', 403);
-  if (callerRole !== 'superadmin' && callerTenantId && target.tenant_id !== callerTenantId) {
-    throw new AppError('Không có quyền xóa user ngoài tenant', 403);
+function toAuthorityTarget(row: AuthorityRow): UserAuthorityTarget {
+  return { id: row.id, role: row.role, tenantId: row.tenant_id, isActive: row.is_active };
+}
+
+/**
+ * Locks and returns the target after the shared authority policy accepted the
+ * deletion (self, superadmin-only, role level, tenant, last active superadmin
+ * — the same rules as create/update/deactivate). Deleting an active superadmin
+ * takes the superadmin-set lock BEFORE the row lock (the order updateUser
+ * uses) and counts on post-lock state.
+ */
+async function lockDeletionTarget(client: PoolClient, targetId: string, actor: UserAuthorityActor): Promise<TargetUserRow> {
+  const preview = await client.query<AuthorityRow>(
+    'SELECT id, role, tenant_id, is_active FROM users WHERE id = $1',
+    [targetId],
+  );
+  let superadminSetLocked = false;
+  if (preview.rows[0] && removesActiveSuperadmin(toAuthorityTarget(preview.rows[0]), 'delete')) {
+    await client.query(SUPERADMIN_SET_LOCK_SQL);
+    superadminSetLocked = true;
   }
 
-  const callerLevel = ROLE_LEVEL[callerRole] ?? 0;
-  const targetLevel = ROLE_LEVEL[target.role] ?? 0;
-  if (callerLevel <= targetLevel && callerRole !== 'superadmin') {
-    throw new AppError(`Không có quyền xóa ${target.role}`, 403);
+  const targetResult = await client.query<TargetUserRow>(
+    `SELECT id,
+            NULLIF(btrim(username), '') AS username,
+            NULLIF(lower(btrim(email)), '') AS email,
+            NULLIF(btrim(full_name), '') AS full_name,
+            role, tenant_id, avatar_url, is_active
+     FROM users
+     WHERE id = $1
+     FOR UPDATE`,
+    [targetId],
+  );
+  if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  const target = targetResult.rows[0];
+
+  let activeSuperadminCount: number | undefined;
+  if (removesActiveSuperadmin(toAuthorityTarget(target), 'delete')) {
+    if (!superadminSetLocked) await client.query(SUPERADMIN_SET_LOCK_SQL);
+    const counted = await client.query<{ count: number | string }>(ACTIVE_SUPERADMIN_COUNT_SQL);
+    activeSuperadminCount = Number(counted.rows[0]?.count ?? 0);
   }
-  if (target.role === 'superadmin' && callerRole !== 'superadmin') {
-    throw new AppError('Chỉ superadmin mới xóa được superadmin', 403);
-  }
+  assertCanDeleteUser(actor, toAuthorityTarget(target), activeSuperadminCount);
+  return target;
 }
 
 async function publishUserDeletionJob(jobId: string): Promise<void> {
@@ -75,9 +109,7 @@ async function publishUserDeletionJob(jobId: string): Promise<void> {
 /** Queue a durable, idempotent permanent deletion. It does not delete inline. */
 export async function requestUserDeletion(
   targetId: string,
-  callerId: string,
-  callerRole: string,
-  callerTenantId: string | null,
+  actor: UserAuthorityActor,
   auditEntry?: (
     jobId: string,
     targetTenantId: string | null,
@@ -90,20 +122,7 @@ export async function requestUserDeletion(
 
   try {
     await client.query('BEGIN');
-    const targetResult = await client.query<TargetUserRow>(
-      `SELECT id,
-              NULLIF(btrim(username), '') AS username,
-              NULLIF(lower(btrim(email)), '') AS email,
-              NULLIF(btrim(full_name), '') AS full_name,
-              role, tenant_id, avatar_url
-       FROM users
-       WHERE id = $1
-       FOR UPDATE`,
-      [targetId],
-    );
-    if (targetResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
-    const target = targetResult.rows[0];
-    assertDeletionAuthority(target, callerId, callerRole, callerTenantId);
+    const target = await lockDeletionTarget(client, targetId, actor);
     await assertUserNotActiveDemoIframeAccount(targetId, 'Tài khoản learner demo iframe đang được khóa, không thể xóa');
 
     const existing = await client.query<{ id: string; is_terminal: boolean }>(
@@ -156,7 +175,7 @@ export async function requestUserDeletion(
       `INSERT INTO user_deletion_jobs (user_id, tenant_id, requested_by)
        VALUES ($1::uuid, $2::uuid, $3::uuid)
        RETURNING id`,
-      [targetId, target.tenant_id, callerId],
+      [targetId, target.tenant_id, actor.id],
     );
     const jobId = jobResult.rows[0].id;
     await client.query(

@@ -3,7 +3,7 @@
 // Tối ưu: parameterized queries, index trên tenant_id + role
 // ═══════════════════════════════════════════════════════════════
 
-import { query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { normalizeEmail } from '../../utils/email.js';
@@ -15,6 +15,21 @@ import { removeUserFromDemoLogin } from '../demo-login/demo-login.service.js';
 import { assertUserNotActiveDemoIframeAccount, getActiveDemoIframeUserIds } from '../demo-login/demo-iframe.service.js';
 import { replaceUserPermissionGroup } from '../permissions/permissions.service.js';
 import type { PermissionGroupHistoryActor } from '../permissions/permission-group-history.service.js';
+import {
+  ACTIVE_SUPERADMIN_COUNT_SQL,
+  SUPERADMIN_SET_LOCK_SQL,
+  UserAuthorityError,
+  assertCanAssignPermissionGroup,
+  assertCanCreateUser,
+  assertCanUpdateUser,
+  removesActiveSuperadmin,
+  type UserAuthorityActor,
+  type UserAuthorityChange,
+  type UserAuthorityTarget,
+} from './user-authority.logic.js';
+
+/** The caller of an admin user write: authority subject + permission-history actor. */
+export type UserAdminActor = UserAuthorityActor & PermissionGroupHistoryActor;
 
 function isPgUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === '23505';
@@ -261,10 +276,11 @@ export async function getUserById(userId: string, tenantScopeId: string | null =
 
 /**
  * Tạo user mới — hash password + kiểm tra unique + kiểm tra quota.
+ * The authority policy decides both the role and the tenant: only superadmin
+ * may choose a tenant, everyone else creates inside their own tenant.
  */
-export async function createUser(input: CreateUserInput, callerTenantId: string | null) {
-  // Determine tenant: superadmin có thể chỉ định, user khác dùng tenant mình
-  const tenantId = input.tenant_id || callerTenantId;
+export async function createUser(input: CreateUserInput, actor: UserAuthorityActor) {
+  const tenantId = assertCanCreateUser(actor, { role: input.role, tenantId: input.tenant_id ?? null });
 
   // ── Kiểm tra quota user cho tenant ──
   if (tenantId) {
@@ -294,55 +310,101 @@ export async function createUser(input: CreateUserInput, callerTenantId: string 
 
 /**
  * Cập nhật user — partial update.
+ *
+ * Authority (self, superadmin-only, role level, tenant, last active
+ * superadmin) is decided by user-authority.logic on a snapshot of the target.
+ * The UPDATE then applies only while the target still has the role and status
+ * that decision saw, so a concurrent promotion cannot widen what was allowed.
  */
 export async function updateUser(
   userId: string,
   input: UpdateUserInput,
-  permissionHistoryActor?: PermissionGroupHistoryActor,
+  actor: UserAdminActor,
   tenantScopeId: string | null = null,
 ) {
+  // The advisory locks below must live until commit; reuse the caller's
+  // transaction (runAuditedTransaction) or own one.
+  return withDatabaseTransaction(() => updateUserInTransaction(userId, input, actor, tenantScopeId));
+}
+
+type UserAuthoritySnapshot = { id: string; role: string; tenant_id: string | null; is_active: boolean };
+
+async function loadUserAuthoritySnapshot(userId: string, tenantScopeId: string | null): Promise<UserAuthoritySnapshot> {
+  const result = await query<UserAuthoritySnapshot>(
+    `SELECT id, role, tenant_id, is_active
+     FROM users
+     WHERE id = $1
+       AND deletion_requested_at IS NULL
+       AND ($2::uuid IS NULL OR tenant_id = $2::uuid)`,
+    [userId, tenantScopeId],
+  );
+  if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  return result.rows[0];
+}
+
+function toAuthorityTarget(row: UserAuthoritySnapshot): UserAuthorityTarget {
+  return { id: row.id, role: row.role, tenantId: row.tenant_id, isActive: row.is_active };
+}
+
+/**
+ * Permission-group membership changes from the Users screen use the same
+ * authority policy as account writes (no self change, manageable target).
+ */
+export async function assertCanAssignUserPermissionGroups(
+  userId: string,
+  actor: UserAuthorityActor,
+  tenantScopeId: string | null,
+): Promise<void> {
+  const target = await loadUserAuthoritySnapshot(userId, tenantScopeId);
+  assertCanAssignPermissionGroup(actor, toAuthorityTarget(target));
+}
+
+async function countActiveSuperadmins(): Promise<number> {
+  const result = await query<{ count: number | string }>(ACTIVE_SUPERADMIN_COUNT_SQL);
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+async function updateUserInTransaction(
+  userId: string,
+  input: UpdateUserInput,
+  actor: UserAdminActor,
+  tenantScopeId: string | null,
+) {
   await assertUserIsNotPendingDeletion(userId, tenantScopeId);
+
+  const change: UserAuthorityChange = {
+    role: input.role,
+    isActive: input.is_active,
+    password: Boolean(input.password),
+  };
+  let target = await loadUserAuthoritySnapshot(userId, tenantScopeId);
+  let activeSuperadminCount: number | undefined;
+  if (removesActiveSuperadmin(toAuthorityTarget(target), change)) {
+    // Every write that can shrink the active superadmin set is serialized and
+    // decides on state read after the lock (READ COMMITTED: new snapshot).
+    await query(SUPERADMIN_SET_LOCK_SQL);
+    target = await loadUserAuthoritySnapshot(userId, tenantScopeId);
+    activeSuperadminCount = await countActiveSuperadmins();
+  }
+  assertCanUpdateUser(actor, toAuthorityTarget(target), change, activeSuperadminCount);
+
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản learner demo iframe đang được khóa, không thể cập nhật');
 
-  // Check if role is changing FROM learner → remove from teams
-  let oldRole: string | null = null;
-  let userTenantId: string | null = null;
-  if (input.role !== undefined) {
-    const current = await query<{ role: string; tenant_id: string | null }>(
-      `SELECT role, tenant_id
-       FROM users
-       WHERE id = $1
-         AND deletion_requested_at IS NULL
-         AND ($2::uuid IS NULL OR tenant_id = $2::uuid)`,
-      [userId, tenantScopeId],
-    );
-    if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
-    oldRole = current.rows[0].role;
-    userTenantId = current.rows[0].tenant_id;
+  // Role bookkeeping below only runs when the request carries a role.
+  const oldRole: string | null = input.role !== undefined ? target.role : null;
+  const userTenantId: string | null = input.role !== undefined ? target.tenant_id : null;
 
-    // Permission-group writes acquire this lock before the user row. Take it
-    // before UPDATE as well when a role change will remove group membership,
-    // otherwise a simultaneous matrix save can deadlock on the same user.
-    if (isLearnerRole(input.role) && !isLearnerRole(oldRole)) {
-      await query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 20260911))`,
-        [userId],
-      );
-    }
+  // Permission-group writes acquire this lock before the user row. Take it
+  // before UPDATE as well when a role change will remove group membership,
+  // otherwise a simultaneous matrix save can deadlock on the same user.
+  if (input.role !== undefined && oldRole && isLearnerRole(input.role) && !isLearnerRole(oldRole)) {
+    await query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 20260911))`,
+      [userId],
+    );
   }
 
   const normalizedEmail = input.email !== undefined ? normalizeEmail(input.email) : undefined;
-  if ((input.username !== undefined || normalizedEmail !== undefined) && input.role === undefined) {
-    const current = await query<{ id: string }>(
-      `SELECT id FROM users
-       WHERE id = $1
-         AND deletion_requested_at IS NULL
-         AND ($2::uuid IS NULL OR tenant_id = $2::uuid)
-       LIMIT 1`,
-      [userId, tenantScopeId],
-    );
-    if (current.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  }
   await assertUsernameOrEmailAvailable(input.username, normalizedEmail, userId);
 
   const sets: string[] = [];
@@ -366,13 +428,16 @@ export async function updateUser(
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
-  params.push(userId, tenantScopeId);
+  params.push(userId, tenantScopeId, target.role, target.is_active);
   let result;
   try {
     result = await query(
       `UPDATE users SET ${sets.join(', ')}
        WHERE id = $${idx}
          AND ($${idx + 1}::uuid IS NULL OR tenant_id = $${idx + 1}::uuid)
+         AND role = $${idx + 2}
+         AND is_active = $${idx + 3}
+         AND deletion_requested_at IS NULL
        RETURNING id, username, email, full_name, role, is_active`,
       params,
     );
@@ -381,15 +446,16 @@ export async function updateUser(
     throw err;
   }
 
-  if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  // Role/status changed (or deletion started) after the authority decision.
+  if (result.rowCount === 0) throw new UserAuthorityError('TARGET_CHANGED');
 
   // A staff member moving to a learner role must lose their group immediately.
-  // The removal is recorded in the independent Permission Group history when
-  // the caller supplied an actor; older internal callers retain safe cleanup.
+  // The removal is recorded in the independent Permission Group history; a
+  // tenant-less legacy row keeps the plain cleanup.
   if (isLearnerRole(input.role!) && oldRole && !isLearnerRole(oldRole)) {
     await query('DELETE FROM team_members WHERE user_id = $1', [userId]);
-    if (permissionHistoryActor && userTenantId) {
-      await replaceUserPermissionGroup(userId, null, userTenantId, permissionHistoryActor);
+    if (userTenantId) {
+      await replaceUserPermissionGroup(userId, null, userTenantId, { id: actor.id, username: actor.username, role: actor.role });
     } else {
       await query('DELETE FROM user_permission_groups WHERE user_id = $1', [userId]);
     }

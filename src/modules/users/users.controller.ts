@@ -17,12 +17,36 @@ import {
   retryTerminalUserDeletionJob,
   type UserDeletionAuditTarget,
 } from './user-deletion.service.js';
+import { UserAuthorityError, requestUiLocale } from './user-authority.logic.js';
 
 function userDeletionAuditLabel(target: UserDeletionAuditTarget): string {
   const displayName = target.full_name?.trim();
   const username = target.username?.trim();
   if (displayName && username) return `${displayName} (@${username})`;
   return displayName || (username ? `@${username}` : 'Tài khoản đã xóa');
+}
+
+/** The authenticated caller as the subject of the user authority policy. */
+function adminActor(req: Request): usersService.UserAdminActor {
+  return {
+    id: req.user!.id,
+    username: req.user!.username,
+    role: req.user!.role,
+    tenantId: req.user!.tenantId ?? null,
+  };
+}
+
+/** Authority refusals answer with a stable code in the request locale (X-UI-Locale). */
+function forwardUserWriteError(req: Request, res: Response, next: NextFunction, err: unknown): void {
+  if (err instanceof UserAuthorityError) {
+    res.status(err.statusCode).json({
+      success: false,
+      code: err.code,
+      message: err.localizedMessage(requestUiLocale(req.get('X-UI-Locale'))),
+    });
+    return;
+  }
+  next(err);
 }
 
 /** GET /api/users */
@@ -48,9 +72,9 @@ export async function createController(req: Request, res: Response, next: NextFu
     const parsed = createUserSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
 
-    const callerTenantId = req.user!.tenantId;
+    const actor = adminActor(req);
     const user = await runAuditedTransaction(
-      () => usersService.createUser(parsed.data, callerTenantId),
+      () => usersService.createUser(parsed.data, actor),
       (created) => ({
         ...createTransactionalAuditEntry(
           req,
@@ -64,7 +88,7 @@ export async function createController(req: Request, res: Response, next: NextFu
       }),
     );
     sendSuccess(res, user, 'Tạo user thành công', 201);
-  } catch (err) { next(err); }
+  } catch (err) { forwardUserWriteError(req, res, next, err); }
 }
 
 /** PUT /api/users/:id */
@@ -77,11 +101,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
     const user = await runAuditedTransaction(
       async () => {
         before = await usersService.getUserById(req.params.id, req.user!.tenantId);
-        return usersService.updateUser(req.params.id, parsed.data, {
-          id: req.user!.id,
-          username: req.user!.username,
-          role: req.user!.role,
-        }, req.user!.tenantId);
+        return usersService.updateUser(req.params.id, parsed.data, adminActor(req), req.user!.tenantId);
       },
       (updated) => {
         if (!before) throw new Error('Missing user snapshot for audit');
@@ -112,7 +132,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
       },
     );
     sendSuccess(res, user, 'Cập nhật thành công');
-  } catch (err) { next(err); }
+  } catch (err) { forwardUserWriteError(req, res, next, err); }
 }
 
 /** DELETE /api/users/:id — Queue a durable permanent deletion. */
@@ -120,9 +140,7 @@ export async function deleteController(req: Request, res: Response, next: NextFu
   try {
     const { jobId } = await requestUserDeletion(
       req.params.id,
-      req.user!.id,
-      req.user!.role,
-      req.user!.tenantId || null,
+      adminActor(req),
       (jobId, targetTenantId, target) => ({
         ...createTransactionalAuditEntry(
           req,
@@ -146,7 +164,7 @@ export async function deleteController(req: Request, res: Response, next: NextFu
     invalidatePermissionCache(req.params.id);
 
     sendSuccess(res, { job_id: jobId, status: 'queued' }, 'Đã đưa user vào hàng đợi xóa vĩnh viễn', 202);
-  } catch (err) { next(err); }
+  } catch (err) { forwardUserWriteError(req, res, next, err); }
 }
 
 /** GET /api/users/deletion-jobs/:jobId — status for a queued permanent deletion. */
@@ -180,15 +198,13 @@ export async function assignGroupsController(req: Request, res: Response, next: 
   try {
     const parsed = assignGroupsSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
-    if (req.params.id === req.user!.id) {
-      sendError(res, 'Không thể tự thay đổi nhóm quyền của chính bạn', 403);
-      return;
-    }
     const tenantId = req.user!.tenantId;
     if (!tenantId) {
       sendError(res, 'Vui lòng chọn doanh nghiệp trước khi cập nhật nhóm quyền', 400);
       return;
     }
+    // Self and target-role rules are the shared user authority policy.
+    await usersService.assertCanAssignUserPermissionGroups(req.params.id, adminActor(req), tenantId);
     const groupId = parsed.data.permission_group_ids[0] || null;
     const result = await permissionGroupsService.replaceUserPermissionGroup(
       req.params.id,
@@ -198,7 +214,7 @@ export async function assignGroupsController(req: Request, res: Response, next: 
     );
     for (const userId of result.affectedUserIds) invalidatePermissionCache(userId);
     sendSuccess(res, { changed: result.changed }, result.changed ? 'Đã cập nhật nhóm quyền' : 'Nhóm quyền không thay đổi');
-  } catch (err) { next(err); }
+  } catch (err) { forwardUserWriteError(req, res, next, err); }
 }
 
 // ══════════════════════════════════════════════════════════════
