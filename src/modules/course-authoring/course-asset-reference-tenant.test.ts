@@ -26,7 +26,7 @@ test('delete-by-path checks the course tenant before looking at course blocks', 
   assert.equal(sqls.some((sql) => sql.includes('course_blocks')), false);
 });
 
-test('the delete-by-path route requires courses.can_delete', async (t) => {
+test('the delete-by-path route lets a course editor clean up (courses.can_edit)', async (t) => {
   const pg = await import('pg');
   const asked: string[] = [];
   t.mock.method(pg.default.Pool.prototype, 'query', async (text: string, params: unknown[] = []) => {
@@ -44,5 +44,5 @@ test('the delete-by-path route requires courses.can_delete', async (t) => {
   const req = { user: { id: 'b0000000-0000-4000-8000-0000000000e1', role: 'staff', tenantId: TENANT_A, username: 's', sessionMode: 'normal' } } as unknown as Request;
   await layer.route.stack[0].handle(req, res, () => { throw new Error('must not pass'); });
   assert.equal(status, 403);
-  assert.deepEqual(asked, ['courses.can_delete']);
+  assert.deepEqual(asked, ['courses.can_edit']);
 });

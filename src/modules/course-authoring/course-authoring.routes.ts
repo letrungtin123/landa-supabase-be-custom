@@ -179,7 +179,9 @@ router.post('/blocks/:blockId/handler/studio_submit', checkPermission('courses',
 // Assets
 router.get('/assets/:courseId', checkPermission('courses', 'can_view'), ctrl.getAssets);
 router.post('/assets/:courseId', checkPermission('courses', 'can_edit'), uploadSingleCourseAsset, ctrl.uploadAsset);
-router.post('/assets/:courseId/delete-by-path', checkPermission('courses', 'can_delete'), ctrl.deleteAssetByPath);
+// Owner decision 2026-10-09: a course editor cleans up the files they removed from a lesson
+// (course tenant is checked first; files still used by published content are kept).
+router.post('/assets/:courseId/delete-by-path', checkPermission('courses', 'can_edit'), ctrl.deleteAssetByPath);
 router.patch('/assets/:courseId/reference', checkPermission('courses', 'can_edit'), ctrl.updateAssetReference);
 router.delete('/assets/:courseId/:assetId', checkPermission('courses', 'can_delete'), ctrl.deleteAsset);
 
