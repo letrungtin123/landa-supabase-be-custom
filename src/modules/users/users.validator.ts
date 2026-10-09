@@ -20,7 +20,8 @@ export const updateUserSchema = z.object({
   password: z.string().min(6).optional(),
   full_name: z.string().max(255).optional(),
   phone: z.string().max(20).optional(),
-  avatar_url: z.string().url().nullable().optional(),
+  // Avatars are set only by the avatar upload (server-generated path); null clears it.
+  avatar_url: z.null({ invalid_type_error: 'Ảnh đại diện chỉ được thay bằng cách tải ảnh lên' }).optional(),
   role: z.enum(['learner', 'learner_plus', 'staff', 'superuser', 'superadmin']).optional(),
   is_active: z.boolean().optional(),
 });

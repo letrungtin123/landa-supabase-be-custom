@@ -915,13 +915,19 @@ export async function updateProfile(userId: string, input: {
   full_name?: string;
   phone?: string;
   bio?: string;
-  avatar_url?: string;
+  avatar_url?: string | null;
   gender?: string;
   country?: string;
   language?: string;
   level_of_education?: string;
   year_of_birth?: number;
 }) {
+  // Avatars are set only by POST /api/users/profile/avatar (server-generated
+  // path). A client-chosen path would later be deleted as "the old avatar".
+  if (input.avatar_url !== undefined && input.avatar_url !== null) {
+    throw new AppError('Ảnh đại diện chỉ được thay bằng cách tải ảnh lên', 400);
+  }
+
   const sets: string[] = [];
   const params: unknown[] = [];
   let idx = 1;

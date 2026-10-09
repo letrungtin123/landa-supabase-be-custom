@@ -16,8 +16,9 @@ import {
   buildFileName,
   buildStoragePath,
   deleteFile,
-  deleteFileByUrl,
+  deleteTenantFileByUrl,
   fixMulterFilename,
+  resolveTenantStoragePath,
 } from '../../config/storage.js';
 import { LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 
@@ -139,7 +140,13 @@ export async function createDocumentController(req: Request, res: Response, next
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const doc = await libService.createDocument(tenantId, req.body, req.user!.id, {}, (created) =>
+    // A JSON-registered file must already be in this tenant's library folder:
+    // deleting the document later deletes this object with the service key.
+    const fileUrl = typeof req.body?.file_url === 'string'
+      ? resolveTenantStoragePath(req.body.file_url, tenantId, 'library')
+      : null;
+    if (!fileUrl) { sendError(res, 'Tệp không thuộc thư viện của doanh nghiệp', 400); return; }
+    const doc = await libService.createDocument(tenantId, { ...req.body, file_url: fileUrl }, req.user!.id, {}, (created) =>
       createTransactionalAuditEntry(
         req,
         'CREATE',
@@ -192,7 +199,7 @@ export async function deleteDocumentController(req: Request, res: Response, next
       ),
     );
     // Cleanup storage
-    await deleteFileByUrl(doc.file_url).catch(() => {});
+    await deleteTenantFileByUrl(doc.file_url, tenantId).catch(() => false);
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
@@ -220,7 +227,7 @@ export async function bulkDocumentActionController(req: Request, res: Response, 
       );
       const deletePromises = result.rows
         .filter(r => r.file_url)
-        .map(r => deleteFileByUrl(r.file_url).catch(() => {}));
+        .map(r => deleteTenantFileByUrl(r.file_url, tenantId).catch(() => false));
       await Promise.all(deletePromises);
       sendSuccess(res, { deleted: result.deleted });
       return;

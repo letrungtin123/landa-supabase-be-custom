@@ -449,14 +449,72 @@ export function extractStoragePath(value: string): string | null {
 
 /**
  * Delete a file from storage using its path or public URL.
- * Safe to call — silently ignores if value is invalid or file doesn't exist.
  * Handles both old full URLs and new path-only values.
+ * Only for paths the server generated itself: it deletes ANY object with the
+ * service key. A value a request could have set must go through
+ * deleteTenantFileByUrl().
  */
 export async function deleteFileByUrl(value: string | null | undefined): Promise<void> {
   if (!value) return;
   const path = extractStoragePath(value);
   if (!path) return;
   await deleteFile(path);
+}
+
+const MAX_TENANT_STORAGE_PATH_LENGTH = 1200;
+
+/**
+ * Object key of a stored path or public URL, accepted only when it lies inside
+ * `${tenantId}/` (optionally inside one category folder). Returns null for
+ * anything else: another tenant's prefix, `.`/`..` or empty segments,
+ * backslashes, control characters, leading `/`, or a key that still contains
+ * `%` after the public-URL decode (an encoded traversal or an ambiguous key).
+ */
+export function resolveTenantStoragePath(
+  value: string | null | undefined,
+  tenantId: string | null | undefined,
+  category?: string,
+): string | null {
+  if (typeof value !== 'string' || typeof tenantId !== 'string') return null;
+  const tenant = tenantId.trim();
+  if (!tenant || tenant.includes('/') || tenant === '.' || tenant === '..') return null;
+  const raw = value.trim();
+  if (!raw) return null;
+
+  let path: string | null;
+  try {
+    path = extractStoragePath(raw);
+  } catch {
+    return null; // malformed percent-encoding in a public URL
+  }
+  if (!path || path.length > MAX_TENANT_STORAGE_PATH_LENGTH) return null;
+  if (path.startsWith('/') || /[\\%\u0000-\u001f\u007f]/.test(path)) return null;
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return null;
+
+  const prefix = category ? [tenant, category] : [tenant];
+  if (segments.length <= prefix.length) return null;
+  return prefix.every((part, index) => segments[index] === part) ? path : null;
+}
+
+/**
+ * Delete a request-influenced storage value (e.g. a previous avatar or a
+ * document file_url) only when it belongs to the tenant. Anything outside
+ * the tenant prefix is never deleted; the refusal is logged and `false` is
+ * returned. Provider errors still propagate.
+ */
+export async function deleteTenantFileByUrl(
+  value: string | null | undefined,
+  tenantId: string | null | undefined,
+): Promise<boolean> {
+  if (!value) return false;
+  const path = resolveTenantStoragePath(value, tenantId);
+  if (!path) {
+    console.warn(JSON.stringify({ event: 'storage_delete_refused', reason: 'outside_tenant_prefix', tenant_id: tenantId ?? null }));
+    return false;
+  }
+  await deleteFile(path);
+  return true;
 }
 
 /**

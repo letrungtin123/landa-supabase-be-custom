@@ -8,7 +8,7 @@ import * as permissionGroupsService from '../permissions/permissions.service.js'
 import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
-import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl } from '../../config/storage.js';
+import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
@@ -256,8 +256,9 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
 
     // Delete old avatar from storage (if exists, may have different extension)
     const oldUser = await usersService.getUserById(userId);
+    // avatar_url may predate the schema lockdown: delete only inside the caller's tenant.
     if (oldUser?.avatar_url) {
-      await deleteFileByUrl(oldUser.avatar_url).catch(() => {});
+      await deleteTenantFileByUrl(oldUser.avatar_url, tenantId).catch(() => false);
     }
 
     const file = req.file;

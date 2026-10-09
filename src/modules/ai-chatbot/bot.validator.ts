@@ -15,7 +15,8 @@ export const updateBotSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   kb_id: z.string().uuid().nullable().optional(),
   config: z.record(z.unknown()).optional(),
-  avatar_url: z.string().nullable().optional(),
+  // Avatars are set only by POST /bots/:id/avatar (server-generated path); null clears it.
+  avatar_url: z.null({ invalid_type_error: 'Ảnh đại diện chỉ được thay bằng cách tải ảnh lên' }).optional(),
 });
 
 export type CreateBotInput = z.infer<typeof createBotSchema>;

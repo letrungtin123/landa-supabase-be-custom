@@ -7,7 +7,7 @@ import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/a
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateBotCaches, invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
-import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl } from '../../config/storage.js';
+import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import type { CreateBotInput, UpdateBotInput } from './bot.validator.js';
 import {
   INPUT_FILTER_CONFIG_KEY,
@@ -286,7 +286,8 @@ export async function uploadBotAvatar(
   } finally {
     client.release();
   }
-  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  // The previous value may predate the avatar_url lockdown: delete it only inside this tenant.
+  if (oldPath && oldPath !== storagePath) await deleteTenantFileByUrl(oldPath, tenantId).catch(() => undefined);
   await invalidateBotConfigCaches(tenantId, botId);
   return updated;
 }
