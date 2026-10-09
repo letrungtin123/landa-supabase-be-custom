@@ -33,6 +33,7 @@
     "test:sso": "tsx --test --test-force-exit src/modules/sso/sso.service.test.ts",
     "test:access-control": "tsx --test --test-force-exit src/modules/branding/branding-permission.test.ts src/modules/enrollments/enrollments-tenant.test.ts src/modules/course-authoring/course-asset-reference-tenant.test.ts src/middleware/tenant-module-permission.test.ts src/modules/reports/report-learner-scope.test.ts",
     "test:client-errors": "tsx --test --test-force-exit src/utils/client-error.test.ts src/modules/ai-chatbot/chatbot-client-errors.test.ts",
+    "test:learner-answers": "tsx --test --test-force-exit src/modules/learner/learner-answer-key.test.ts",
     "test:auth-security": "tsx --test --test-force-exit src/middleware/rate-limit-key.test.ts src/middleware/rate-limit-store.test.ts src/middleware/auth-rate-limit.test.ts src/modules/auth/login-enumeration.test.ts src/modules/auth/auth-audit-events.test.ts",
     "test:tenant-isolation": "tsx --test --test-force-exit src/config/storage-tenant-path.test.ts src/modules/course-authoring/course-asset-tenant.test.ts src/modules/groups/groups-tenant.test.ts src/modules/ai-chatbot/chat-course-scope.test.ts",
     "test:permission-groups": "tsx --test src/modules/permissions/permissions.validator.test.ts src/modules/permissions/permission-group-history.search.test.ts src/modules/permissions/permission-group-history.serialization.test.ts",

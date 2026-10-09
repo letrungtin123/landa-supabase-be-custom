@@ -13,6 +13,7 @@ import { recalculateEnrollmentProgress } from './progress-calculation.service.js
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
 import { mediaQuizModeValue, safeJsonParse, scenarioChatString, toLearnerBlockRow } from './learner-block-row.logic.js';
+import { LEARNER_BLOCK_SERIALIZATION_VERSION, problemExplanationHtml, resolveSortableSubmission } from './learner-answer-key.logic.js';
 import {
   evaluateUserBadges,
   getEffectiveBadgeDefinitions,
@@ -285,7 +286,7 @@ export async function getCourseBlocks(
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
   return cacheJson(
-    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe }),
+    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe, shape: LEARNER_BLOCK_SERIALIZATION_VERSION }),
     CACHE_TTL.courseBlocks,
     () => getCourseBlocksFromDb(courseId, userId, role, tenantId, isDemoIframe),
   );
@@ -398,7 +399,7 @@ export async function getBlockDetail(
 ) {
   const version = await getCacheVersion(...cacheVersions.blockContent(blockId));
   return cacheJson(
-    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}`),
+    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}:${LEARNER_BLOCK_SERIALIZATION_VERSION}`),
     CACHE_TTL.blockDetail,
     () => getBlockDetailFromDb(blockId, userId, role, tenantId),
   );
@@ -499,7 +500,7 @@ export async function submitBlockAnswer(
       return gradeCrossword(block, body.answers || {});
 
     case 'la_sortable':
-      return gradeSortable(block, body.answer || []);
+      return gradeSortable(block, Array.isArray(body.answer) ? body.answer : []);
 
     default:
       return {
@@ -664,8 +665,22 @@ function gradeScenarioChat(block: any, body: any) {
   };
 }
 
+/** Correct answers and the explanation are disclosed only after a correct answer. */
+function withAnswerDisclosure<T extends { status?: string; correct_answers?: unknown }>(result: T, data: string): T & { explanation_html?: string } {
+  if (result.status !== 'correct') {
+    const { correct_answers: _hidden, ...rest } = result;
+    return rest as T;
+  }
+  const explanation = problemExplanationHtml(data);
+  return explanation ? { ...result, explanation_html: explanation } : result;
+}
+
 function gradeProblem(block: any, userAnswers: Record<string, string | string[]>) {
   const data = typeof block.data === 'string' ? block.data : '';
+  return withAnswerDisclosure(gradeProblemOlx(data, userAnswers), data);
+}
+
+function gradeProblemOlx(data: string, userAnswers: Record<string, string | string[]>) {
   if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', feedback: submitFeedback('content_unavailable'), correctness: {} };
 
 
@@ -877,7 +892,7 @@ function gradeCrossword(block: any, userAnswers: Record<string, string>) {
 }
 
 /** Grade sortable block — check thứ tự */
-function gradeSortable(block: any, userOrder: number[]) {
+function gradeSortable(block: any, submittedOrder: unknown[]) {
   const meta = block.metadata || {};
   const sd = meta.sortable_data || {};
   const items: any[] = sd.items || [];
@@ -886,8 +901,10 @@ function gradeSortable(block: any, userOrder: number[]) {
     return { status: 'error', message: 'Không có dữ liệu sắp xếp', feedback: submitFeedback('content_unavailable'), score: 0 };
   }
 
-  // Correct order = thứ tự id trong items array (1,2,3,4,5)
+  // Correct order = thứ tự id trong items array (1,2,3,4,5). Learners receive
+  // opaque ids in a shuffled order (learner-answer-key.logic.ts).
   const correctOrder = items.map((item: any) => item.id);
+  const userOrder = resolveSortableSubmission(String(block.id), correctOrder, submittedOrder);
   const isCorrect = JSON.stringify(userOrder) === JSON.stringify(correctOrder);
 
   // Count how many are in correct position
@@ -905,7 +922,6 @@ function gradeSortable(block: any, userOrder: number[]) {
       : `Đúng ${correctPositions}/${correctOrder.length} vị trí`,
     feedback: submitFeedback(isCorrect ? 'correct' : 'partial_positions', isCorrect ? undefined : { correct: correctPositions, total: correctOrder.length }),
     score,
-    correct_order: correctOrder,
   };
 }
 

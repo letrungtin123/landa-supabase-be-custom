@@ -1,11 +1,14 @@
 import { withoutAuthorOnlyBlockMetadata } from '../course-authoring/course-author-notes.logic.js';
+import { toLearnerCrosswordData, toLearnerProblemOlx, toLearnerSortableData } from './learner-answer-key.logic.js';
 
 // Pure learner block serialization (moved verbatim from learner.service.ts so
 // the learner boundary is testable without opening database/cache handles).
 
 /** Every learner block response passes through here (course tree and block
  * detail, including anonymous demo learners). Publishing copies the draft
- * metadata verbatim, so AI ID author-only keys are removed at this boundary. */
+ * metadata verbatim, so AI ID author-only keys are removed at this boundary.
+ * Answer keys never leave the server (see learner-answer-key.logic.ts): the
+ * submit endpoint grades against the published block. */
 export function toLearnerBlockRow(input: any) {
   const row = input && typeof input === 'object' ? withoutAuthorOnlyBlockMetadata(input) : input;
   if (row?.block_type === 'la_media_quiz') {
@@ -26,7 +29,37 @@ export function toLearnerBlockRow(input: any) {
       data: toLearnerScenarioChatData(row.data),
     };
   }
+  if (row?.block_type === 'problem' && typeof row.data === 'string') {
+    return { ...row, data: toLearnerProblemOlx(row.data) };
+  }
+  if (row?.block_type === 'la_crossword') {
+    return {
+      ...row,
+      data: withKey(row.data, 'crossword_data', toLearnerCrosswordData),
+      metadata: withKey(withKey(row.metadata, 'crossword_data', toLearnerCrosswordData), 'words',
+        (words) => (Array.isArray(words) ? (toLearnerCrosswordData({ words }) as { words: unknown[] }).words : words)),
+    };
+  }
+  if (row?.block_type === 'la_sortable') {
+    const blockId = String(row.id ?? '');
+    const sortable = (value: unknown) => toLearnerSortableData(value, blockId);
+    return {
+      ...row,
+      data: withKey(row.data, 'sortable_data', sortable),
+      metadata: withKey(withKey(row.metadata, 'sortable_data', sortable), 'items',
+        (items) => (Array.isArray(items) ? (toLearnerSortableData({ items }, blockId) as { items: unknown[] }).items : items)),
+    };
+  }
   return row;
+}
+
+/** Replaces one key of a (possibly JSON-string) object, keeping the encoding. */
+function withKey(container: unknown, key: string, transform: (value: unknown) => unknown): unknown {
+  const wasString = typeof container === 'string';
+  const parsed = wasString ? safeJsonParse(container as string) : container;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !(key in parsed)) return container;
+  const next = { ...(parsed as Record<string, unknown>), [key]: transform((parsed as Record<string, unknown>)[key]) };
+  return wasString ? JSON.stringify(next) : next;
 }
 
 export function safeJsonParse(value: string): any {
@@ -46,7 +79,7 @@ export function toLearnerMediaQuizData(raw: any) {
         id: typeof question?.id === 'string' ? question.id : `q_${questionIndex + 1}`,
         mode: mediaQuizModeValue(question?.mode, mode),
         prompt_html: typeof question?.prompt_html === 'string' ? question.prompt_html : '',
-        explanation_html: typeof question?.explanation_html === 'string' ? question.explanation_html : '',
+        // The explanation is returned by the submit endpoint after a correct answer.
         hints: Array.isArray(question?.hints)
           ? question.hints
               .filter((hint: unknown): hint is string => typeof hint === 'string' && hint.trim().length > 0)
