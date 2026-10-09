@@ -935,7 +935,14 @@ async function getCourseFilesFromDb(courseId: string, userId: string, role = 'le
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
      FROM course_assets
      WHERE course_id = $1
-       AND EXISTS (SELECT 1 FROM courses c WHERE c.id = course_assets.course_id AND c.deleted_at IS NULL)
+       -- The asset must belong to the course's own tenant (rows injected from
+       -- another tenant before the upload check existed stay hidden).
+       AND EXISTS (
+         SELECT 1 FROM courses c
+         WHERE c.id = course_assets.course_id
+           AND c.tenant_id = course_assets.tenant_id
+           AND c.deleted_at IS NULL
+       )
        AND is_reference = true
        ${lockedFilter}
      ORDER BY created_at DESC`,

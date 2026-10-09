@@ -998,6 +998,9 @@ export async function uploadAsset(req: Request, res: Response) {
       return sendError(res, `File quá lớn (${(file.size / 1024 / 1024).toFixed(1)}MB). Giới hạn tối đa ${COURSE_ASSET_MAX_UPLOAD_LABEL}.`, 413);
     }
 
+    // Nothing is stored for a course outside the caller's tenant.
+    await svc.assertCourseInTenant(courseId, tenantId);
+
     const originalName = fixMulterFilename(file.originalname);
     const fileName = buildFileName(originalName);
     storagePath = buildStoragePath(tenantId, 'courses', fileName, courseId);

@@ -1662,6 +1662,16 @@ async function annotateAssetRowsWithOutlineReferences(courseId: string, rows: an
     };
   });
 }
+/** 404 unless the course exists, is not deleted and belongs to the tenant. */
+export async function assertCourseInTenant(courseId: string, tenantId: string | null | undefined): Promise<void> {
+  if (!tenantId) throw new AppError('Course not found', 404);
+  const result = await query<{ id: string }>(
+    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL`,
+    [courseId, tenantId],
+  );
+  if (result.rowCount === 0) throw new AppError('Course not found', 404);
+}
+
 export async function createAssetRecord(
   courseId: string,
   tenantId: string,
@@ -1672,12 +1682,15 @@ export async function createAssetRecord(
   url: string,
   uploadedBy: string,
 ): Promise<AssetRecord> {
+  // The course must belong to the asset's tenant; otherwise nothing is inserted.
   const result = await query<AssetRecord>(
     `INSERT INTO course_assets (course_id, tenant_id, display_name, content_type, file_size, storage_path, url, uploaded_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     SELECT $1, $2, $3, $4, $5, $6, $7, $8
+     WHERE EXISTS (SELECT 1 FROM courses c WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL)
      RETURNING id, course_id, display_name, content_type, file_size, storage_path, url, thumbnail_url, is_locked, created_at AS date_added`,
     [courseId, tenantId, displayName, contentType, fileSize, storagePath, url, uploadedBy],
   );
+  if (result.rowCount === 0) throw new AppError('Course not found', 404);
   await invalidateCourseReadCaches(courseId, tenantId);
   return result.rows[0];
 }
