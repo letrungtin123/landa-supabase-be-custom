@@ -156,7 +156,20 @@ export const env = {
   TRUST_PROXY_HOPS: optionalNonNegativeInt('TRUST_PROXY_HOPS', 0),
   // Exact proxy CIDR allowlist. When configured it takes precedence over the
   // legacy hop count so a direct caller cannot spoof X-Forwarded-For.
+  // Entries: IPs/CIDRs or the keywords loopback, linklocal, uniquelocal.
+  // Production: loopback + the Cloudflare ranges (+ the gateway's own address).
   TRUSTED_PROXY_CIDRS: optionalCsv('TRUSTED_PROXY_CIDRS'),
+
+  // Auth rate limits, per 15-minute window. Counters are shared through Redis
+  // when it is available. The per-IP sign-in limit keeps the historical 20.
+  AUTH_LOGIN_IP_MAX_ATTEMPTS: optionalBoundedInt('AUTH_LOGIN_IP_MAX_ATTEMPTS', 20, 1, 10_000),
+  // Failed sign-ins per typed account (successful sign-ins are not counted).
+  AUTH_LOGIN_ACCOUNT_MAX_FAILURES: optionalBoundedInt('AUTH_LOGIN_ACCOUNT_MAX_FAILURES', 10, 1, 1_000),
+  // Session refreshes per refresh token (each token is valid for one use).
+  AUTH_REFRESH_TOKEN_MAX_ATTEMPTS: optionalBoundedInt('AUTH_REFRESH_TOKEN_MAX_ATTEMPTS', 10, 1, 1_000),
+  AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS: optionalBoundedInt('AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS', 10, 1, 1_000),
+  // One-time sign-in links (create + use) and profile updates, per user or IP.
+  AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS: optionalBoundedInt('AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS', 30, 1, 10_000),
 
   // Database
   DATABASE_URL: required('DATABASE_URL'),

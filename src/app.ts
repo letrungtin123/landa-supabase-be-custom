@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
+import { apiLimiter } from './middleware/auth-rate-limit.js';
 
 // Routes
 import authRoutes from './modules/auth/auth.routes.js';
@@ -87,23 +88,8 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // ── Rate Limiting — brute-force protection ──
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 phút
-  max: 20,                   // tối đa 20 requests login/refresh per IP
-  message: { success: false, message: 'Quá nhiều lần thử, vui lòng đợi 15 phút' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,  // 1 phút
-  max: 200,                  // 200 requests per authenticated user or public client IP
-  keyGenerator: authenticatedUserOrIpRateLimitKey,
-  message: { success: false, message: 'Quá nhiều request, vui lòng thử lại sau' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
+// Sign-in, refresh, password change, one-time links and profile updates have
+// their own limits in modules/auth/auth.routes.ts (middleware/auth-rate-limit.ts).
 const demoLoginLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 120,
@@ -128,10 +114,10 @@ app.get('/api/health', async function healthCheck(_req, res) {
 });
 
 // ── API Routes ──
-// authLimiter CHỈ áp cho login/refresh (brute-force protection)
-// Các auth endpoint khác (me, profile, change-password) dùng apiLimiter chung
-app.use('/api/auth/login', authLimiter);
-app.use('/api/auth/refresh', authLimiter);
+// The general limit applies to every auth endpoint too (me, profile,
+// change-password, one-time links); auth.routes.ts adds the stricter
+// per-endpoint limits. The '/api' mount below skips '/auth/*'.
+app.use('/api/auth', apiLimiter);
 app.use('/api/auth', authRoutes);
 
 // Storage proxy — TRƯỚC apiLimiter, không cần auth (img tag không gửi Bearer)
