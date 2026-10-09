@@ -8,6 +8,7 @@ import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
+import { accountActionLimiter, passwordChangeLimiter } from '../../middleware/auth-rate-limit.js';
 import { sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
@@ -42,9 +43,10 @@ function blockDemoIframeAvatarUpload(req: Request, res: Response, next: NextFunc
 }
 
 router.get('/profile/:username', authenticate, getProfileController);
-router.patch('/profile', authenticate, updateProfileController);
-router.post('/profile/avatar', authenticate, blockDemoIframeAvatarUpload, upload.single('file'), uploadAvatarController);
-router.post('/profile/change-password', authenticate, changePasswordController);
+// Same strict limits as /api/auth/profile and /api/auth/change-password.
+router.patch('/profile', authenticate, accountActionLimiter, updateProfileController);
+router.post('/profile/avatar', authenticate, accountActionLimiter, blockDemoIframeAvatarUpload, upload.single('file'), uploadAvatarController);
+router.post('/profile/change-password', authenticate, passwordChangeLimiter, changePasswordController);
 
 // ── Admin CRUD (staff+ with tenant scope + permission check) ──
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));
