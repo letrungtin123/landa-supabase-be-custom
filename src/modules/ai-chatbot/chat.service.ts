@@ -150,6 +150,7 @@ import type { ReportChatFilterInput } from './report-chat.service.js';
 import { handleAdminReportTurn, type ReportChatSideEvent } from './report-chat-turn.service.js';
 import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
 import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-notes.logic.js';
+import { assertChatCourseAccess } from './chat-course-scope.service.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -402,8 +403,8 @@ function stripHtml(html: string): string {
  * Single indexed query → cached 5 minutes.
  * Only fetches structural blocks (course/chapter/sequential) — O(1) per message after cache.
  */
-async function getCachedCourseOutline(courseId: string, includeDraft = false): Promise<CourseOutlineCache | null> {
-  const cacheKey = `${courseId}:${includeDraft ? 'draft' : 'published'}`;
+async function getCachedCourseOutline(courseId: string, tenantId: string, includeDraft = false): Promise<CourseOutlineCache | null> {
+  const cacheKey = `${tenantId}:${courseId}:${includeDraft ? 'draft' : 'published'}`;
   const cached = courseOutlineCache.get(cacheKey);
   if (!includeDraft && cached && Date.now() - cached.ts < COURSE_CACHE_TTL) return cached;
 
@@ -415,8 +416,9 @@ async function getCachedCourseOutline(courseId: string, includeDraft = false): P
        AND block_type IN ('course', 'chapter', 'sequential')
        AND deleted_at IS NULL
        AND ($2::boolean = true OR is_published = true)
+       AND EXISTS (SELECT 1 FROM courses c WHERE c.id = $1 AND c.tenant_id = $3::uuid AND c.deleted_at IS NULL)
      ORDER BY sort_order ASC, created_at ASC`,
-    [courseId, includeDraft],
+    [courseId, includeDraft, tenantId],
   );
 
   if (!result.rowCount || result.rowCount === 0) return null;
@@ -460,7 +462,7 @@ async function getCachedCourseOutline(courseId: string, includeDraft = false): P
  * Strips HTML, truncates to MAX_LESSON_CONTENT_CHARS.
  * Not cached — only called when Gemini requests via function calling.
  */
-async function fetchLessonContent(courseId: string, lessonId: string, includeDraft = false): Promise<string> {
+async function fetchLessonContent(courseId: string, lessonId: string, tenantId: string, includeDraft = false): Promise<string> {
   // CTE: get all descendant blocks of this sequential
   const result = await query<{ display_name: string; block_type: string; data: any }>(
     `WITH RECURSIVE descendants AS (
@@ -474,6 +476,7 @@ async function fetchLessonContent(courseId: string, lessonId: string, includeDra
          AND course_id = $2
          AND deleted_at IS NULL
          AND ($3::boolean = true OR is_published = true)
+         AND EXISTS (SELECT 1 FROM courses c WHERE c.id = $2 AND c.tenant_id = $4::uuid AND c.deleted_at IS NULL)
        UNION ALL
        SELECT cb.id,
               cb.display_name,
@@ -489,7 +492,7 @@ async function fetchLessonContent(courseId: string, lessonId: string, includeDra
      FROM descendants
      WHERE block_type NOT IN ('sequential', 'vertical')
      ORDER BY sort_order`,
-    [lessonId, courseId, includeDraft],
+    [lessonId, courseId, includeDraft, tenantId],
   );
 
   if (!result.rowCount || result.rowCount === 0) {
@@ -2965,9 +2968,10 @@ async function loadLessonAuthorTargetCandidates(
      WHERE course_id = $1
        AND deleted_at IS NULL
        AND ${blockTypeFilter}
+       AND EXISTS (SELECT 1 FROM courses c WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL)
      ORDER BY sort_order ASC, id ASC
      LIMIT 10000`,
-    [ctx.courseId],
+    [ctx.courseId, ctx.tenantId],
   );
   return buildCanonicalTargetRows(result.rows);
 }
@@ -8376,6 +8380,8 @@ export async function sendMessageStream(
       throw new Error('Conversation course mismatch');
     }
     const courseId = options.courseId ?? ctx.courseId ?? undefined;
+    // Client value or stored row alike: only a course this actor may use in chat.
+    if (courseId) await assertChatCourseAccess(courseId, { tenantId: ctx.tenantId, userId, role: options.reportActorRole });
 
     try {
       const filterOutcome = await runStoredInputFilter({
@@ -9470,7 +9476,7 @@ export async function sendMessageStream(
     if (courseId && typeof courseId === 'string' && courseId.length > 0) {
       try {
         const includeDraftCourseContext = ctx.target === LESSON_AUTHOR_TARGET;
-        const courseOutline = await getCachedCourseOutline(courseId, includeDraftCourseContext);
+        const courseOutline = await getCachedCourseOutline(courseId, ctx.tenantId, includeDraftCourseContext);
         logChatCourseFlow('course_outline_loaded', {
           conversation_id: conversationId,
           target: ctx.target,
@@ -9614,6 +9620,7 @@ export async function sendMessageStream(
               const lessonContent = await fetchLessonContent(
                 courseId!,
                 fnCall.args.lesson_id as string,
+                ctx.tenantId,
                 ctx.target === LESSON_AUTHOR_TARGET,
               );
               logChatCourseFlow('lesson_content_fetched', {

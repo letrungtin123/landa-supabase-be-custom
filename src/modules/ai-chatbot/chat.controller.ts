@@ -26,6 +26,7 @@ import {
 import { parseReportFilters } from './report-chat-filter.logic.js';
 import { REPORT_PERMISSION_CHECK_FAILED_CODE, reportChatErrorBody, type ReportChatErrorCode } from './report-chat-error.logic.js';
 import * as chatService from './chat.service.js';
+import { assertChatCourseAccess, ChatCourseScopeError } from './chat-course-scope.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
 
@@ -39,6 +40,27 @@ const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
 function readReportRequestLocale(req: Request, bodyLocale: unknown): 'vi' | 'en' {
   if (bodyLocale === 'en' || bodyLocale === 'vi') return bodyLocale;
   return req.get('X-UI-Locale')?.trim().toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+/**
+ * A client-supplied courseId must be a live course of the caller's tenant (and
+ * one a learner may open) before any outline or lesson text reaches the model.
+ * Answers the refusal itself and returns false.
+ */
+async function checkChatCourse(req: Request, res: Response, courseId: string | undefined, bodyLocale?: unknown): Promise<boolean> {
+  if (!courseId) return true;
+  try {
+    await assertChatCourseAccess(courseId, { tenantId: req.user!.tenantId, userId: req.user!.id, role: req.user!.role });
+    return true;
+  } catch (error) {
+    if (!(error instanceof ChatCourseScopeError)) throw error;
+    res.status(error.statusCode).json({
+      success: false,
+      code: error.code,
+      message: error.localizedMessage(readReportRequestLocale(req, bodyLocale)),
+    });
+    return false;
+  }
 }
 
 function sendReportChatError(res: Response, code: ReportChatErrorCode, locale: 'vi' | 'en'): void {
@@ -372,6 +394,7 @@ export async function createConversation(req: Request, res: Response): Promise<v
 
   try {
     const courseId = resolveCourseId(req);
+    if (!await checkChatCourse(req, res, courseId)) return;
     const activeBot = await chatService.getActiveBot(tenantId, target);
     if (!activeBot) { sendError(res, 'Chưa có bot nào được kích hoạt', 400); return; }
 
@@ -608,6 +631,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       || !checkpointKey || target!=='lesson_author'))) {
     sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
   }
+  if (!await checkChatCourse(req, res, courseId, locale)) return;
   const reportLocale = readReportRequestLocale(req, locale);
   const reportFiltersResult = parseReportFilters(report_filters);
   if (!reportFiltersResult.ok) {
