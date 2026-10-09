@@ -93,9 +93,14 @@ export async function getActiveCount(): Promise<number> {
   return parseInt(r.rows[0]?.cnt || '0');
 }
 
-export async function listActiveTemplates(): Promise<PromptTemplate[]> {
-  const result = await query<PromptTemplate>(
-    `SELECT *
+/** What any signed-in user may see of an active mascot (no prompts). */
+export type PromptTemplateCard = Pick<PromptTemplate, 'id' | 'name' | 'description' | 'avatar_url' | 'fullbody_url' | 'sort_order'>;
+
+/** Active mascots for the bot persona picker: display fields only — the
+ * system prompts stay with the superadmin endpoints. */
+export async function listActiveTemplates(): Promise<PromptTemplateCard[]> {
+  const result = await query<PromptTemplateCard>(
+    `SELECT id, name, description, avatar_url, fullbody_url, sort_order
      FROM system_prompt_templates
      WHERE is_active = true AND is_lesson_author = false
      ORDER BY sort_order ASC, created_at ASC
