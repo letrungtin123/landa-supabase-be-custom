@@ -55,18 +55,27 @@ export function createWorkspaceStreamHandler(deps: {
         failure_stage: external ? stage : null, internal_failure_code: internal, external_failure_code: external,
         duration_ms: Math.max(0, Math.round(performance.now() - started)), delivered_events: delivered }); } catch { /* log safe metadata only */ }
     };
+    // Every exit path (refusal, repository failure, hub failure, client
+    // disconnect during setup, lease, slow consumer) goes through release(), so
+    // no listener, buffer or timer outlives the request.
+    const release = () => {
+      if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease); heartbeat = null; lease = null;
+      const stop = unsubscribe; unsubscribe = null; stop?.();
+    };
     const close = (reason: string | null = null) => {
       if (closed) return;
       closed = true;
-      if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease); heartbeat = null; lease = null;
-      unsubscribe?.(); unsubscribe = null;
+      release();
       summary(reason ? 'workspace_stream_failed' : 'workspace_stream_closed', reason, reason ? 'WORKSPACE_STREAM_UNAVAILABLE' : null);
       if (!res.writableEnded) res.end();
     };
     const reject = (status: number, code: string) => {
+      if (closed) return;
+      closed = true;
+      release();
       const text = locale === 'en' ? 'The workspace stream is unavailable.' : 'Chưa thể kết nối luồng cập nhật bản thảo.';
       summary('workspace_stream_failed', code, code);
-      res.status(status).json({ success: false, code, message: text, request_id: requestId });
+      if (!res.headersSent && !res.writableEnded) res.status(status).json({ success: false, code, message: text, request_id: requestId });
     };
     const user = req.user ? Object.freeze({ ...req.user }) : null;
     if (!user || !user.tenantId || !UUID.test(user.tenantId) || !UUID.test(user.id) || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
@@ -80,20 +89,28 @@ export function createWorkspaceStreamHandler(deps: {
       || (req.query.ui_locale !== undefined && req.query.ui_locale !== 'vi' && req.query.ui_locale !== 'en')) {
       reject(deps.enabled() ? 400 : 503, deps.enabled() ? 'WORKSPACE_READ_INPUT_INVALID' : 'WORKSPACE_READ_DISABLED'); return;
     }
+    // A client that leaves while the stream is being set up must still release it.
+    req.on('close', () => close());
     try {
       stage = 'workspace_stream_repository';
       if (!await deps.canRead(user)) { reject(403, 'WORKSPACE_READ_FORBIDDEN'); return; }
+      if (closed) return;
       const creatorId = deps.resolveSessionOwner
         ? await deps.resolveSessionOwner({ tenantId: user.tenantId, courseId, conversationId }) : null;
+      if (closed) return;
       const owner = { tenantId: user.tenantId, userId: creatorId ?? user.id, conversationId, courseId };
       const repository = createWorkspaceReadRepository({ db: deps.db, canRead: () => deps.canRead(user) });
       const buffered: WorkspaceCommitHint[] = [];
       let liveWrite: ((hint: WorkspaceCommitHint) => void) | null = null;
-      unsubscribe = await deps.subscribe(workspaceId, hint => {
+      const stop = await deps.subscribe(workspaceId, hint => {
+        if (closed) return;
         if (!hint) { close('WORKSPACE_STREAM_UNAVAILABLE'); return; }
         if (liveWrite) liveWrite(hint); else buffered.push(hint);
       });
+      if (closed) { stop(); return; }
+      unsubscribe = stop;
       const status = await repository.status(owner, workspaceId);
+      if (closed) return; // close() already released the subscription
       correlationId = status.correlation_id;
       res.status(200);
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -111,12 +128,12 @@ export function createWorkspaceStreamHandler(deps: {
       if (after! > status.last_event_sequence) message(res, 'resync_required', { delivery_contract_version: 1, workspace_id: workspaceId, head: status.last_event_sequence });
       liveWrite = writeHint;
       for (const hint of buffered.splice(0).sort((a, b) => a.sequence - b.sequence)) writeHint(hint);
+      if (closed) return; // a slow consumer was already closed while flushing the buffer
       // The listener was installed before the status read. It now appends only
       // scalar committed hints; the browser replays the durable ledger.
       heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, HEARTBEAT_MS);
       lease = setTimeout(() => { if (!res.writableEnded) message(res, 'auth_expiring', { delivery_contract_version: 1, workspace_id: workspaceId }); close(); }, env.LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS);
       heartbeat.unref(); lease.unref();
-      req.on('close', () => close());
       summary('workspace_stream_opened');
     } catch (error) {
       const code = error instanceof WorkspaceReadError || error instanceof WorkspaceContractError ? error.code : 'WORKSPACE_STREAM_UNAVAILABLE';

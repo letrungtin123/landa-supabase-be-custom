@@ -37,7 +37,7 @@ test('source stream rejects cross-permission access before opening a listener', 
   const handler = createSourceDocumentStreamHandler({ db: { async query() { throw new Error('must not read'); } }, canRead: async () => false,
     subscribe: async () => { subscribed = true; return () => undefined; }, report() {},
   });
-  const request = { user: { ...user }, params: { documentId }, query: { ui_locale: 'en' } } as unknown as Request;
+  const request = { user: { ...user }, params: { documentId }, query: { ui_locale: 'en' }, on() { return request; } } as unknown as Request;
   const response = { writableEnded: false, status(value: number) { status = value; return response; }, json(value: Record<string, unknown>) { bodies.push(value); return response; } } as unknown as Response;
   await handler(request, response);
   assert.equal(status, 403); assert.equal(subscribed, false);

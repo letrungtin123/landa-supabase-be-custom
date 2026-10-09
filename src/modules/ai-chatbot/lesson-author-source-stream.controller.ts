@@ -55,15 +55,25 @@ export function createSourceDocumentStreamHandler(deps: {
         tenant_id: user?.tenantId && UUID.test(user.tenantId) ? user.tenantId : null, failure_code: failure,
         duration_ms: Math.max(0, Math.round(performance.now() - started)), delivered_events: delivered }); } catch { /* logging cannot fail request */ }
     };
+    // Every exit path (refusal, read failure, hub failure, client disconnect
+    // during setup, lease, terminal status) goes through release(), so no
+    // listener or timer outlives the request.
+    const release = () => {
+      if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease);
+      heartbeat = null; lease = null;
+      const stop = unsubscribe; unsubscribe = null; stop?.();
+    };
     const close = (failure: string | null = null) => {
       if (closed) return; closed = true;
-      if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease);
-      heartbeat = null; lease = null; unsubscribe?.(); unsubscribe = null;
+      release();
       report(failure ? 'source_stream_failed' : 'source_stream_closed', failure);
       if (!res.writableEnded) res.end();
     };
     const reject = (status: number, code: string) => {
+      if (closed) return; closed = true;
+      release();
       report('source_stream_failed', code);
+      if (res.headersSent || res.writableEnded) return;
       res.status(status).json({ success: false, code,
         message: locale === 'en' ? 'The source status stream is unavailable.' : 'Chưa thể theo dõi trạng thái tài liệu.', request_id: requestId });
     };
@@ -75,8 +85,11 @@ export function createSourceDocumentStreamHandler(deps: {
       || (req.query.ui_locale !== undefined && req.query.ui_locale !== 'vi' && req.query.ui_locale !== 'en')) {
       reject(400, 'SOURCE_STREAM_INPUT_INVALID'); return;
     }
+    // A client that leaves while the stream is being set up must still release it.
+    req.on('close', () => close());
     try {
       if (!await deps.canRead(user)) { reject(403, 'SOURCE_STREAM_FORBIDDEN'); return; }
+      if (closed) return;
       const read = async (): Promise<SourceRow | null> => {
         const result = await deps.db.query<SourceRow>(
           `SELECT d.id::text AS document_id, d.kb_id::text AS kb_id, d.name, d.type, d.status, d.source_info, d.updated_at
@@ -104,14 +117,18 @@ export function createSourceDocumentStreamHandler(deps: {
           if (pending && !closed) { pending = false; void publish().catch(() => close('SOURCE_STREAM_READ_FAILED')); }
         }
       };
-      unsubscribe = await deps.subscribe(documentId, hint => {
+      const stop = await deps.subscribe(documentId, hint => {
+        if (closed) return;
         if (!hint) { close('SOURCE_STREAM_UNAVAILABLE'); return; }
         if (hint.documentId.toLowerCase() === documentId.toLowerCase() && hint.tenantId.toLowerCase() === user.tenantId!.toLowerCase()) {
           void publish().catch(() => close('SOURCE_STREAM_READ_FAILED'));
         }
       });
+      if (closed) { stop(); return; }
+      unsubscribe = stop;
       const initial = await read();
-      if (!initial) { unsubscribe(); unsubscribe = null; reject(404, 'SOURCE_DOCUMENT_NOT_FOUND'); return; }
+      if (closed) return; // close() already released the subscription
+      if (!initial) { reject(404, 'SOURCE_DOCUMENT_NOT_FOUND'); return; }
       res.status(200);
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store, no-transform');
@@ -126,9 +143,10 @@ export function createSourceDocumentStreamHandler(deps: {
       if (initial.status === 'learned' || initial.status === 'error') { close(); return; }
       transportReady = true;
       if (pending) { pending = false; void publish().catch(() => close('SOURCE_STREAM_READ_FAILED')); }
+      if (closed) return;
       heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, HEARTBEAT_MS);
       lease = setTimeout(() => { if (!res.writableEnded) writeEvent(res, 'auth_expiring', { delivery_contract_version: 1, document_id: documentId }); close(); }, AUTH_LEASE_MS);
-      heartbeat.unref(); lease.unref(); req.on('close', () => close()); report('source_stream_opened');
+      heartbeat.unref(); lease.unref(); report('source_stream_opened');
     } catch {
       if (!res.headersSent) reject(503, 'SOURCE_STREAM_UNAVAILABLE'); else close('SOURCE_STREAM_UNAVAILABLE');
     }
