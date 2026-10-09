@@ -438,10 +438,16 @@ export async function markAllRead(req: Request, res: Response, next: NextFunctio
 
 // ── Course Modal Config ──
 
+/** Popup configs/states are keyed by course id: check the course is the caller's first. */
+function assertPopupCourse(req: Request): Promise<void> {
+  return learnerService.assertCoursePopupAccess(req.params.courseId, req.user!.id, req.user!.tenantId, req.user!.role);
+}
+
 /** GET /api/learner/courses/:courseId/modal-config */
 export async function getCourseModalConfig(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    await assertPopupCourse(req);
     const result = await learnerService.getCourseModalConfig(req.params.courseId);
     sendSuccess(res, result);
   } catch (err) { next(err); }
@@ -451,6 +457,7 @@ export async function getCourseModalConfig(req: Request, res: Response, next: Ne
 export async function getCourseModalState(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    await assertPopupCourse(req);
     const result = isDemoIframeSession(req.user)
       ? demoCourseModalState(req.params.courseId)
       : await learnerService.getCourseModalState(req.user.id, req.params.courseId);
@@ -462,6 +469,7 @@ export async function getCourseModalState(req: Request, res: Response, next: Nex
 export async function updateCourseModalState(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    await assertPopupCourse(req);
     const { welcome_shown, confirm_shown, complete_shown } = req.body;
     if (isDemoIframeSession(req.user)) {
       sendSuccess(res, demoCourseModalState(req.params.courseId, { welcome_shown, confirm_shown, complete_shown }));
@@ -482,6 +490,7 @@ export async function updateCourseModalState(req: Request, res: Response, next: 
 export async function getSectionModalConfigs(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    await assertPopupCourse(req);
     const result = await learnerService.getSectionModalConfigs(req.params.courseId);
     sendSuccess(res, result);
   } catch (err) { next(err); }
@@ -491,6 +500,7 @@ export async function getSectionModalConfigs(req: Request, res: Response, next: 
 export async function getSectionModalShown(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
+    await assertPopupCourse(req);
     const result = isDemoIframeSession(req.user)
       ? { shown_sections: [] }
       : await learnerService.getSectionModalShown(req.user.id, req.params.courseId);
@@ -504,11 +514,13 @@ export async function markSectionModalShown(req: Request, res: Response, next: N
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
     const { section_id } = req.body;
     if (!section_id) { sendError(res, 'Thiếu section_id', 400); return; }
+    await assertPopupCourse(req);
     if (isDemoIframeSession(req.user)) {
       sendSuccess(res, { success: true, demo_iframe: true });
       return;
     }
-    const result = await learnerService.markSectionModalShown(req.user.id, req.params.courseId, section_id);
+    const sectionId = await learnerService.assertCourseSection(req.params.courseId, section_id);
+    const result = await learnerService.markSectionModalShown(req.user.id, req.params.courseId, sectionId);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }

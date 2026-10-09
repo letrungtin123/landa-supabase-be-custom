@@ -45,6 +45,38 @@ async function assertLearnerCourseAccess(
   if (result.rowCount === 0) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
 }
 
+/**
+ * Popup configs and popup states are keyed only by course id: the caller must
+ * be able to open that course (its tenant; for learners, an assigned course),
+ * with the same refusal as the other learner course endpoints.
+ */
+export async function assertCoursePopupAccess(
+  courseId: string,
+  userId: string,
+  tenantId: string | null | undefined,
+  role: string,
+): Promise<void> {
+  if (typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255) {
+    throw new AppError('Không tìm thấy khóa học', 404);
+  }
+  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
+}
+
+/** A section popup can only be marked for a section (chapter) of that course. */
+export async function assertCourseSection(courseId: string, sectionId: unknown): Promise<string> {
+  if (typeof sectionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sectionId)) {
+    throw new AppError('Không tìm thấy phần học này', 404);
+  }
+  const result = await query(
+    `SELECT 1 FROM course_blocks
+     WHERE id = $1::uuid AND course_id = $2 AND deleted_at IS NULL
+     LIMIT 1`,
+    [sectionId, courseId],
+  );
+  if (result.rowCount === 0) throw new AppError('Không tìm thấy phần học này', 404);
+  return sectionId;
+}
+
 // ── Courses ──
 
 /**
