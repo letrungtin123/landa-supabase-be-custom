@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 import { env } from '../config/env.js';
 
 /**
@@ -19,4 +20,17 @@ export async function hashPassword(plaintext: string): Promise<string> {
  */
 export async function comparePassword(plaintext: string, hash: string): Promise<boolean> {
   return bcrypt.compare(plaintext, hash);
+}
+
+let dummyHash: Promise<string> | null = null;
+
+/**
+ * Runs a full bcrypt comparison against a throwaway hash of the configured
+ * cost. Used when a sign-in names no account, so an unknown name takes as
+ * long to refuse as a wrong password. Always resolves to false.
+ */
+export async function compareAgainstDummyPassword(plaintext: string): Promise<false> {
+  dummyHash ??= bcrypt.hash(randomBytes(24).toString('base64'), env.BCRYPT_SALT_ROUNDS);
+  await bcrypt.compare(plaintext, await dummyHash);
+  return false;
 }

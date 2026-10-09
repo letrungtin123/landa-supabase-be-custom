@@ -7,9 +7,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
-import { comparePassword } from '../../utils/password.js';
+import { compareAgainstDummyPassword, comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { AuthLoginError } from './auth-login-error.logic.js';
 import { looksLikeEmailIdentifier, normalizeEmail } from '../../utils/email.js';
 import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
@@ -81,9 +82,7 @@ const LOGIN_USER_SELECT = `
 
 async function findLoginUser(identifierInput: string) {
   const identifier = identifierInput.trim();
-  if (!identifier) {
-    throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
-  }
+  if (!identifier) return null;
 
   if (looksLikeEmailIdentifier(identifier)) {
     const normalizedEmail = normalizeEmail(identifier);
@@ -108,25 +107,25 @@ async function findLoginUser(identifierInput: string) {
 /**
  * Đăng nhập — verify password, tạo token pair.
  * Trả về access_token, refresh_token, user info, permissions.
+ *
+ * No account enumeration: an unknown name still runs a full bcrypt compare,
+ * and every refusal before the password is proven is INVALID_CREDENTIALS.
+ * Account state (disabled, no organization, ...) is told only afterwards.
  */
 export async function login(username: string, password: string, clientApp?: 'admin' | 'learner', origin?: string) {
   const userResult = await findLoginUser(username);
+  const user = userResult?.rows[0];
 
-  if (userResult.rowCount === 0) {
-    throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+  if (!user) {
+    await compareAgainstDummyPassword(password);
+    throw new AuthLoginError('INVALID_CREDENTIALS');
   }
 
-  const user = userResult.rows[0];
-
-  // Kiểm tra tài khoản active
-  if (!user.is_active) {
-    throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
-  }
-
-  // Verify password trước — tránh leak info qua timing
-  const valid = await comparePassword(password, user.password_hash);
+  const valid = typeof user.password_hash === 'string' && user.password_hash
+    ? await comparePassword(password, user.password_hash)
+    : await compareAgainstDummyPassword(password);
   if (!valid) {
-    throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+    throw new AuthLoginError('INVALID_CREDENTIALS');
   }
 
   // ── Kiểm tra user có thuộc tenant của domain đang login không ──
@@ -135,12 +134,17 @@ export async function login(username: string, password: string, clientApp?: 'adm
   if (origin && user.role !== 'superadmin') {
     const tenantFromDomain = await resolveTenantByOrigin(origin);
     if (tenantFromDomain && tenantFromDomain.id !== user.tenant_id) {
-      throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+      throw new AuthLoginError('INVALID_CREDENTIALS');
     }
   }
 
+  // Told only after the correct password.
+  if (!user.is_active) {
+    throw new AuthLoginError('ACCOUNT_DISABLED');
+  }
+
   if (clientApp === 'admin' && user.role === 'learner') {
-    throw new AppError('Tài khoản learner chỉ được truy cập trang học viên', 403);
+    throw new AuthLoginError('LEARNER_ADMIN_FORBIDDEN');
   }
 
   // learner_plus login admin: phải có ít nhất 1 permission group
@@ -150,17 +154,17 @@ export async function login(username: string, password: string, clientApp?: 'adm
       [user.id],
     );
     if (parseInt(pgCheck.rows[0].count) === 0) {
-      throw new AppError('Tài khoản chưa được gán nhóm quyền để truy cập trang quản trị', 403);
+      throw new AuthLoginError('NO_ADMIN_ACCESS');
     }
   }
 
   // learner/learner_plus: phải có tenant_id hợp lệ + tenant active
   if (isLearnerRole(user.role)) {
     if (!user.tenant_id) {
-      throw new AppError('Tài khoản chưa được gán vào tổ chức', 403);
+      throw new AuthLoginError('NO_ORGANIZATION');
     }
     if (!user.tenant_active) {
-      throw new AppError('Tổ chức đã bị vô hiệu hóa', 403);
+      throw new AuthLoginError('ORGANIZATION_DISABLED');
     }
   }
 
@@ -176,21 +180,21 @@ export async function login(username: string, password: string, clientApp?: 'adm
     const hasPrimaryTenant = !!user.tenant_id && !!user.tenant_active;
 
     if (!hasManagedTenants && !hasPrimaryTenant) {
-      throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+      throw new AuthLoginError('INVALID_CREDENTIALS');
     }
   } else if (user.role === 'staff') {
     // staff: phải có tenant_id hợp lệ + tenant active
     if (!user.tenant_id) {
-      throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+      throw new AuthLoginError('INVALID_CREDENTIALS');
     }
     if (!user.tenant_active) {
-      throw new AppError('Tài khoản hoặc mật khẩu không đúng', 401);
+      throw new AuthLoginError('INVALID_CREDENTIALS');
     }
   }
 
   // Tạo token pair
   if (user.role === 'learner' && await isActiveDemoIframeAccount(user.id)) {
-    throw new AppError('Tài khoản đang được khóa cho demo iframe', 403);
+    throw new AuthLoginError('DEMO_ACCOUNT_LOCKED');
   }
 
   const accessToken = signAccessToken({

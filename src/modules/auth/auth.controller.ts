@@ -7,6 +7,8 @@ import * as authService from './auth.service.js';
 import { loginSchema, refreshSchema } from './auth.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { appendBestEffortAuthAudit, type AuthAuditActor } from './auth-audit.service.js';
+import { AuthLoginError } from './auth-login-error.logic.js';
+import { requestUiLocale } from '../users/user-authority.logic.js';
 
 /** Password sign-in/out of operator sessions (staff+), recorded best effort. */
 async function appendBestEffortOperatorAuthAudit(
@@ -41,6 +43,14 @@ export async function loginController(req: Request, res: Response, next: NextFun
 
     sendSuccess(res, result, 'Đăng nhập thành công');
   } catch (err) {
+    if (err instanceof AuthLoginError) {
+      res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.localizedMessage(requestUiLocale(req.get('X-UI-Locale'))),
+      });
+      return;
+    }
     next(err);
   }
 }
