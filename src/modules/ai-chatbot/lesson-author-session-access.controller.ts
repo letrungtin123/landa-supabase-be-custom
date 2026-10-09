@@ -79,6 +79,24 @@ export function createLessonAuthorCourseEditorGuard(deps: Pick<LessonAuthorSessi
   };
 }
 
+/**
+ * Role + session gate for AI course design routes that are not keyed by a
+ * conversation (legacy job Apply, source document upload): the caller must be
+ * a staff/superuser/superadmin in a normal (non-demo) session with
+ * courses.can_edit, like every other AI course design handler. learner_plus
+ * is refused even when a permission group grants courses.can_edit.
+ * Install after authenticate + tenantContext and BEFORE any body/file parser.
+ */
+export function createLessonAuthorAuthorGuard(deps: Pick<LessonAuthorSessionAccessDependencies, 'canEditCourses'>) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.user;
+    try {
+      if (!courseEditorCandidate(user) || !await deps.canEditCourses(user)) { refuse(req, res, 'COURSE_EDIT_REQUIRED'); return; }
+      next();
+    } catch (error) { next(error); }
+  };
+}
+
 /** GET …/courses/:courseId/sessions/active-runs — banner data, read-only. */
 export function createLessonAuthorActiveRunsHandler(deps: Pick<LessonAuthorSessionAccessDependencies, 'db'>) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {

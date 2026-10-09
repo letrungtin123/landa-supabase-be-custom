@@ -44,6 +44,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog } from '../../middleware/audit-log.js';
 import {
   createLessonAuthorActiveRunsHandler,
+  createLessonAuthorAuthorGuard,
   createLessonAuthorCourseEditorGuard,
   createLessonAuthorSessionOwnerGuard,
 } from './lesson-author-session-access.controller.js';
@@ -192,6 +193,8 @@ router.use(tenantContext);
 const lessonAuthorAccess = { db: { query }, canEditCourses: (user: NonNullable<Request['user']>) => hasPermission(user, 'courses', 'can_edit') };
 const lessonAuthorSessionOwnerOnly = createLessonAuthorSessionOwnerGuard(lessonAuthorAccess);
 const lessonAuthorCourseEditor = createLessonAuthorCourseEditorGuard(lessonAuthorAccess, getRuntimeChatTarget);
+// Routes not keyed by a conversation: staff+ in a normal session (never learner_plus).
+const lessonAuthorAuthor = createLessonAuthorAuthorGuard(lessonAuthorAccess);
 const resolveLessonAuthorSessionOwner = async (input: { tenantId: string; courseId: string; conversationId: string }) =>
   (await findLessonAuthorSessionOwner({ query }, input))?.owner_id ?? null;
 
@@ -229,7 +232,7 @@ router.delete('/bots/assignments/:target', checkPermission('ai_chatbot', 'can_ed
 router.get('/lesson-author/settings', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getLessonAuthorSettings);
 router.put('/lesson-author/kb-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.assignLessonAuthorKb);
 router.delete('/lesson-author/kb-assignment', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.unassignLessonAuthorKb);
-router.post('/lesson-author/jobs/:jobId/apply', checkPermission('courses', 'can_edit'), chatCtrl.applyLessonAuthorJob);
+router.post('/lesson-author/jobs/:jobId/apply', checkPermission('courses', 'can_edit'), lessonAuthorAuthor, chatCtrl.applyLessonAuthorJob);
 
 router.get('/bots', checkPermission('ai_chatbot', 'can_view'), botCtrl.listBots);
 router.get('/bots/:id', checkPermission('ai_chatbot', 'can_view'), botCtrl.getBot);
@@ -258,7 +261,7 @@ router.get('/chat/lesson-author/source-documents', allowRuntimeChatTarget, check
 // AI course design source upload: course editors upload into the tenant's
 // server-resolved lesson-author knowledge base. KB management uploads above
 // keep requiring ai_chatbot rights.
-router.post('/chat/lesson-author/source-documents', checkPermission('courses', 'can_edit'), parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument);
+router.post('/chat/lesson-author/source-documents', checkPermission('courses', 'can_edit'), lessonAuthorAuthor, parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument);
 router.get('/chat/lesson-author/source-documents/:documentId/stream', allowRuntimeChatTarget, createSourceDocumentStreamHandler({
   db: { query },
   canRead: user => hasPermission(user, 'courses', 'can_edit'),
