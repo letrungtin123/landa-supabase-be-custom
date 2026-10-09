@@ -7,6 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { sendError } from '../utils/response.js';
 import { query } from '../config/database.js';
 import type { UserRole, PermissionAction } from '../types/index.js';
+import { isTenantModuleSwitchedOff } from './tenant-module-state.js';
 
 /**
  * Middleware kiểm tra role tối thiểu.
@@ -69,6 +70,31 @@ export function invalidatePermissionCache(userId?: string) {
   }
 }
 
+export type PermissionDecision = 'allowed' | 'denied' | 'module_disabled';
+
+/**
+ * Single implementation behind hasPermission and checkPermission.
+ * - superadmin: always allowed (platform operator, any tenant).
+ * - a module the superadmin turned off for the tenant: refused for everyone
+ *   else, superuser included (codes that are not modules are not gated).
+ * - superuser: full access inside the tenant.
+ * - staff / learner_plus / learner: the tenant permission matrix.
+ */
+export async function decidePermission(
+  subject: PermissionSubject,
+  moduleCode: string,
+  action: PermissionAction,
+): Promise<PermissionDecision> {
+  if (!ALLOWED_PERMISSION_ACTIONS.includes(action as typeof ALLOWED_PERMISSION_ACTIONS[number])) {
+    throw new Error('Action không hợp lệ');
+  }
+
+  if (subject.role === 'superadmin') return 'allowed';
+  if (subject.tenantId && await isTenantModuleSwitchedOff(subject.tenantId, moduleCode)) return 'module_disabled';
+  if (subject.role === 'superuser') return 'allowed';
+  return await matrixAllows(subject, moduleCode, action) ? 'allowed' : 'denied';
+}
+
 /**
  * Reusable server-side permission check for service flows that cannot use an
  * Express middleware. Keep this as the single implementation behind
@@ -80,12 +106,14 @@ export async function hasPermission(
   moduleCode: string,
   action: PermissionAction,
 ): Promise<boolean> {
-  if (!ALLOWED_PERMISSION_ACTIONS.includes(action as typeof ALLOWED_PERMISSION_ACTIONS[number])) {
-    throw new Error('Action không hợp lệ');
-  }
+  return await decidePermission(subject, moduleCode, action) === 'allowed';
+}
 
-  if (subject.role === 'superadmin' || subject.role === 'superuser') return true;
-
+async function matrixAllows(
+  subject: PermissionSubject,
+  moduleCode: string,
+  action: PermissionAction,
+): Promise<boolean> {
   const cacheKey = `${subject.id}:${subject.tenantId}:${moduleCode}:${action}`;
   const cached = permCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return cached.allowed;
@@ -109,6 +137,20 @@ export async function hasPermission(
   return allowed;
 }
 
+/** [HTTP status, Vietnamese, English] — the response picks by X-UI-Locale. */
+export const PERMISSION_ERRORS = {
+  PERMISSION_DENIED: [
+    403,
+    'Bạn không có quyền thực hiện thao tác này.',
+    'You do not have permission to do this.',
+  ],
+  MODULE_DISABLED: [
+    403,
+    'Tính năng này chưa được bật cho doanh nghiệp của bạn.',
+    'This feature is not turned on for your organization.',
+  ],
+} as const satisfies Record<string, readonly [number, string, string]>;
+
 export function checkPermission(moduleCode: string, action: PermissionAction) {
   return async function permissionMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
     if (!req.user) {
@@ -124,10 +166,13 @@ export function checkPermission(moduleCode: string, action: PermissionAction) {
     }
 
     try {
-      const allowed = await hasPermission({ id: userId, tenantId, role }, moduleCode, action);
+      const decision = await decidePermission({ id: userId, tenantId, role }, moduleCode, action);
 
-      if (!allowed) {
-        sendError(res, `Không có quyền ${action} trên module ${moduleCode}`, 403);
+      if (decision !== 'allowed') {
+        const code = decision === 'module_disabled' ? 'MODULE_DISABLED' : 'PERMISSION_DENIED';
+        const [status, vi, en] = PERMISSION_ERRORS[code];
+        const english = req.get?.('X-UI-Locale')?.trim().toLowerCase() === 'en';
+        res.status(status).json({ success: false, code, message: english ? en : vi });
         return;
       }
 
