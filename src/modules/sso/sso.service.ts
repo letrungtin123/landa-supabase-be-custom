@@ -10,8 +10,17 @@ import { hashPassword } from '../../utils/password.js';
 import { decryptSecret, encryptSecret } from './sso.crypto.js';
 import type { ExchangeSsoCodeInput, UpdateSsoConfigInput } from './sso.validator.js';
 import { SSO_PROVIDERS, type PublicSsoProvider, type SsoConfigRow, type SsoProvider } from './sso.types.js';
+import {
+  SsoLoginError,
+  assertEmailDomainAllowed,
+  assertExistingAccountLinkable,
+  assertLinkedIdentityUsable,
+  isEmailExplicitlyUnverified,
+} from './sso-account-link.logic.js';
 
 const PUBLIC_CACHE_TTL_MS = 60_000;
+/** Each outbound provider call (token, userinfo) is aborted after this long. */
+export const SSO_PROVIDER_TIMEOUT_MS = 15_000;
 const publicConfigCache = new Map<string, { expires: number; data: PublicSsoResponse }>();
 
 interface PublicSsoResponse {
@@ -30,6 +39,17 @@ interface ProviderProfile {
 interface ResolvedSsoUser {
   userId: string;
   role: string;
+  /** True only when this exchange linked an EXISTING account by email. */
+  linkedExistingAccount: boolean;
+}
+
+/** Server-side facts about a successful exchange, for the audit log only. */
+export interface SsoExchangeOutcome {
+  userId: string;
+  role: string;
+  provider: SsoProvider;
+  providerLabel: string;
+  linkedExistingAccount: boolean;
 }
 
 interface SsoExistingUserRow {
@@ -284,6 +304,28 @@ async function getEnabledConfig(tenantId: string, provider: SsoProvider): Promis
   return result.rows[0];
 }
 
+/**
+ * One provider round trip with a hard deadline that also covers reading the
+ * body. A non-2xx answer returns `ok: false` (its body is discarded).
+ */
+async function fetchProviderJson<T>(url: string, init: RequestInit): Promise<{ ok: true; body: T } | { ok: false }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SSO_PROVIDER_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return { ok: false };
+    }
+    return { ok: true, body: await response.json() as T };
+  } catch (err) {
+    if (controller.signal.aborted) throw new SsoLoginError('PROVIDER_TIMEOUT');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeInput): Promise<ProviderProfile> {
   const tokenUrl = resolveTokenUrl(row);
   const userinfoUrl = resolveUserinfoUrl(row);
@@ -302,54 +344,34 @@ async function exchangeCodeForProfile(row: SsoConfigRow, input: ExchangeSsoCodeI
   });
   if (input.code_verifier) body.set('code_verifier', input.code_verifier);
 
-  let tokenResponse: Response;
-  try {
-    tokenResponse = await fetch(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
-  } catch (err) {
-    throw err;
-  }
-  if (!tokenResponse.ok) {
+  const tokenResult = await fetchProviderJson<{ access_token?: string }>(tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!tokenResult.ok) {
     throw new AppError('Không thể xác thực SSO code', 401);
   }
 
-  let tokenJson: { access_token?: string };
-  try {
-    tokenJson = await tokenResponse.json() as { access_token?: string };
-  } catch (err) {
-    throw err;
-  }
+  const tokenJson = tokenResult.body;
   if (!tokenJson.access_token) {
     throw new AppError('SSO provider không trả access token', 401);
   }
 
-  let profileResponse: Response;
-  try {
-    profileResponse = await fetch(userinfoUrl, {
-      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
-    });
-  } catch (err) {
-    throw err;
-  }
-  if (!profileResponse.ok) {
+  const profileResult = await fetchProviderJson<ProviderProfile>(userinfoUrl, {
+    headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+  });
+  if (!profileResult.ok) {
     throw new AppError('Không thể lấy thông tin SSO user', 401);
   }
 
-  let profile: ProviderProfile;
-  try {
-    profile = await profileResponse.json() as ProviderProfile;
-  } catch (err) {
-    throw err;
-  }
+  const profile = profileResult.body;
   if (!profile.sub || !profile.email) throw new AppError('SSO profile thiếu email hoặc subject', 401);
   const normalizedEmail = normalizeEmail(profile.email);
   if (!looksLikeEmailIdentifier(normalizedEmail)) {
     throw new AppError('SSO profile email không hợp lệ', 401);
   }
-  if (profile.email_verified === false || profile.email_verified === 'false') {
+  if (isEmailExplicitlyUnverified(profile.email_verified)) {
     throw new AppError('Email SSO chưa được xác minh', 403);
   }
   return { ...profile, email: normalizedEmail };
@@ -403,7 +425,7 @@ async function linkSsoIdentity(tenantId: string, userId: string, provider: SsoPr
   );
   const linkedUserId = subjectIdentity.rows[0]?.user_id;
   if (linkedUserId && linkedUserId !== userId) {
-    throw new AppError('Tài khoản SSO đã được liên kết với người dùng khác', 409);
+    throw new SsoLoginError('ALREADY_LINKED');
   }
 
   try {
@@ -416,7 +438,7 @@ async function linkSsoIdentity(tenantId: string, userId: string, provider: SsoPr
     );
   } catch (err) {
     if (isPgUniqueViolation(err)) {
-      throw new AppError('Tài khoản SSO đã được liên kết với người dùng khác', 409);
+      throw new SsoLoginError('ALREADY_LINKED');
     }
     throw err;
   }
@@ -463,7 +485,7 @@ async function createLearnerFromProfile(
       throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
     }
 
-    return { userId, role: 'learner' };
+    return { userId, role: 'learner', linkedExistingAccount: false };
   }
 
   throw new AppError('Không thể tạo username SSO duy nhất, vui lòng thử lại', 409);
@@ -487,31 +509,28 @@ async function resolveExistingSsoUserForProfile(
   profile: ProviderProfile,
   existingUser: SsoExistingUserRow,
 ): Promise<ResolvedSsoUser> {
-  if (existingUser.tenant_id !== tenantId && existingUser.role !== 'superadmin') {
-    throw new AppError('Email SSO đã thuộc tenant khác', 403);
-  }
-  if (!existingUser.is_active) {
-    throw new AppError('Tài khoản SSO đang chờ duyệt hoặc đã bị vô hiệu hóa', 403);
-  }
+  // Same tenant for every role (no superadmin exemption) and a verified email.
+  assertExistingAccountLinkable(existingUser, tenantId, profile.email_verified);
 
   await linkSsoIdentity(tenantId, existingUser.id, provider, profile);
-  return { userId: existingUser.id, role: existingUser.role };
+  return { userId: existingUser.id, role: existingUser.role, linkedExistingAccount: true };
 }
 
 async function resolveUserForProfile(tenantId: string, provider: SsoProvider, profile: ProviderProfile, config: SsoConfigRow): Promise<ResolvedSsoUser> {
-  const identity = await query<{ user_id: string; role: string; is_active: boolean }>(
-    `SELECT i.user_id, u.role, u.is_active
+  const identity = await query<{ user_id: string; role: string; is_active: boolean; tenant_id: string | null }>(
+    `SELECT i.user_id, u.role, u.is_active, u.tenant_id
      FROM sso_user_identities i
      JOIN users u ON u.id = i.user_id
      WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_subject = $3
      LIMIT 1`,
     [tenantId, provider, profile.sub],
   );
-  if (identity.rowCount && identity.rows[0]?.user_id) {
-    if (!identity.rows[0].is_active) {
-      throw new AppError('Tài khoản SSO đang chờ duyệt hoặc đã bị vô hiệu hóa', 403);
-    }
-    return { userId: identity.rows[0].user_id, role: identity.rows[0].role };
+  const linked = identity.rows[0];
+  if (identity.rowCount && linked?.user_id) {
+    // A link made earlier for an account of another tenant (e.g. through the
+    // removed superadmin exemption) must not keep working.
+    assertLinkedIdentityUsable(linked, tenantId);
+    return { userId: linked.user_id, role: linked.role, linkedExistingAccount: false };
   }
 
   const existingUser = await findUserByNormalizedEmail(profile.email);
@@ -545,9 +564,15 @@ async function inferSsoClientApp(tenantId: string, redirectUri: string): Promise
   return null;
 }
 
+/**
+ * Code exchange → LANDA session. The response body stays the plain session
+ * (contract of POST /api/sso/exchange/:provider); `outcome` is server-only
+ * audit input for the controller.
+ */
 export async function exchangeSsoCode(provider: SsoProvider, input: ExchangeSsoCodeInput) {
   const config = await getEnabledConfig(input.tenant_id, provider);
   const profile = await exchangeCodeForProfile(config, input);
+  assertEmailDomainAllowed(profile.email, config.extra_config);
   const user = await resolveUserForProfile(input.tenant_id, provider, profile, config);
   const clientApp = input.client_app ?? await inferSsoClientApp(input.tenant_id, input.redirect_uri);
 
@@ -566,5 +591,13 @@ export async function exchangeSsoCode(provider: SsoProvider, input: ExchangeSsoC
     }
   }
 
-  return issueSessionForUserId(user.userId);
+  const session = await issueSessionForUserId(user.userId);
+  const outcome: SsoExchangeOutcome = {
+    userId: user.userId,
+    role: user.role,
+    provider,
+    providerLabel: PROVIDER_LABELS[provider],
+    linkedExistingAccount: user.linkedExistingAccount,
+  };
+  return { session, outcome };
 }

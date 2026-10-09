@@ -79,6 +79,8 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   'user.deletion_job.retry_queued': { context: [], changes: [] },
   'auth.login.succeeded': { context: [], changes: [] },
   'auth.logout.succeeded': { context: [], changes: [] },
+  'auth.sso_login.succeeded': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
+  'auth.sso_identity.linked': { context: ['related_entity_name', 'related_entity_type'], changes: [] },
 
   // Groups. Membership and assignments deliberately contain only the group
   // and related entity names/counts — never an arbitrary request payload.
@@ -277,6 +279,8 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'user.deletion_job.retry_queued',
   'auth.login.succeeded',
   'auth.logout.succeeded',
+  'auth.sso_login.succeeded',
+  'auth.sso_identity.linked',
   'group.org.created',
   'group.org.updated',
   'group.org.deleted',

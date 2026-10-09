@@ -4,7 +4,10 @@ import {
   runAuditedTransaction,
 } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
+import { appendBestEffortAuthAudit } from '../auth/auth-audit.service.js';
+import { requestUiLocale } from '../users/user-authority.logic.js';
 import * as ssoService from './sso.service.js';
+import { SsoLoginError } from './sso-account-link.logic.js';
 import { exchangeSsoCodeSchema, providerParamSchema, updateSsoConfigSchema } from './sso.validator.js';
 
 export async function listConfigsController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -90,6 +93,23 @@ export async function getPublicByDomainController(req: Request, res: Response, n
   } catch (err) { next(err); }
 }
 
+async function auditSsoExchange(req: Request, outcome: ssoService.SsoExchangeOutcome, user: { id: string; username: string; role: string; tenant_id: string | null }): Promise<void> {
+  const context = { related_entity_name: outcome.providerLabel, related_entity_type: 'sso_provider' };
+  if (outcome.linkedExistingAccount) {
+    // Linking an existing account by email is recorded for every role.
+    await appendBestEffortAuthAudit(req, user, {
+      action: 'UPDATE',
+      event: { code: 'auth.sso_identity.linked', context },
+      operatorsOnly: false,
+    });
+  }
+  await appendBestEffortAuthAudit(req, user, {
+    action: 'LOGIN',
+    event: { code: 'auth.sso_login.succeeded', context },
+    operatorsOnly: true,
+  });
+}
+
 export async function exchangeController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const providerParsed = providerParamSchema.safeParse(req.params);
@@ -98,7 +118,19 @@ export async function exchangeController(req: Request, res: Response, next: Next
     const bodyParsed = exchangeSsoCodeSchema.safeParse(req.body);
     if (!bodyParsed.success) { sendError(res, bodyParsed.error.errors[0].message, 400); return; }
 
-    const result = await ssoService.exchangeSsoCode(providerParsed.data.provider, bodyParsed.data);
-    sendSuccess(res, result, 'Đăng nhập SSO thành công');
-  } catch (err) { next(err); }
+    const { session, outcome } = await ssoService.exchangeSsoCode(providerParsed.data.provider, bodyParsed.data);
+    await auditSsoExchange(req, outcome, session.user);
+    sendSuccess(res, session, 'Đăng nhập SSO thành công');
+  } catch (err) {
+    // Account-policy refusals answer with a stable code in the request locale.
+    if (err instanceof SsoLoginError) {
+      res.status(err.statusCode).json({
+        success: false,
+        code: err.code,
+        message: err.localizedMessage(requestUiLocale(req.get('X-UI-Locale'))),
+      });
+      return;
+    }
+    next(err);
+  }
 }

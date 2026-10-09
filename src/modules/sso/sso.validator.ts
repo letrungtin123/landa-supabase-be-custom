@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { SSO_PROVIDERS } from './sso.types.js';
+import { isValidEmailDomain } from './sso-account-link.logic.js';
 
 const httpsUrl = z.string().trim().url().refine(
   (value) => value.startsWith('https://') || value.startsWith('http://localhost') || value.startsWith('http://127.0.0.1'),
@@ -20,7 +21,16 @@ export const updateSsoConfigSchema = z.object({
   token_url: httpsUrl.optional().nullable(),
   userinfo_url: httpsUrl.optional().nullable(),
   scopes: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
-  extra_config: z.record(z.unknown()).optional(),
+  extra_config: z.record(z.unknown()).optional().refine(
+    (value) => {
+      // Optional email-domain allowlist: absent/null, or a list of plain domains.
+      const domains = value?.allowed_email_domains;
+      if (domains === undefined || domains === null) return true;
+      return Array.isArray(domains) && domains.length <= 100
+        && domains.every((domain) => typeof domain === 'string' && isValidEmailDomain(domain));
+    },
+    'Danh sách tên miền email được phép không hợp lệ',
+  ),
 }).refine(
   (value) => value.client_secret === undefined || !value.clear_client_secret,
   'Không thể vừa nhập secret mới vừa xóa secret',
