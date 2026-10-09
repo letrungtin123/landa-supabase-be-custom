@@ -62,7 +62,7 @@ function conversations(): Conversation[] {
   ];
 }
 
-interface FakeDb { conversations: Conversation[]; calls: Array<{ sql: string; params: unknown[] }>; claimedBy?: string }
+interface FakeDb { conversations: Conversation[]; calls: Array<{ sql: string; params: unknown[] }>; claimedBy?: string; applied?: boolean }
 
 /** Answers exactly the statements of lesson-author-session.service.ts. */
 async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
@@ -87,7 +87,8 @@ async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
           owner_id: c.user_id, owner_full_name: NAMES[c.user_id]?.full_name ?? null, owner_username: NAMES[c.user_id]?.username ?? null,
           workspace_id: c.id === CONV_CREATOR ? 'e0000000-0000-4000-8000-000000000001' : null,
           correlation_id: c.id === CONV_CREATOR ? 'f0000000-0000-4000-8000-000000000001' : null,
-          content_locale: c.id === CONV_CREATOR ? 'vi' : null, workspace_status: c.id === CONV_CREATOR ? 'ready' : null }));
+          content_locale: c.id === CONV_CREATOR ? 'vi' : null, workspace_status: c.id === CONV_CREATOR ? 'ready' : null,
+          has_applied: db.applied === true && c.id === CONV_CREATOR }));
       return rows(list);
     }
     if (/^\s*UPDATE chat_conversations c/.test(sql)) {
@@ -100,6 +101,7 @@ async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
       return find(params[2], params[0], params[1]) ? rows([{ total_nodes: 5, applied_nodes: 2, active: false }]) : empty;
     }
     if (sql.includes('FROM lesson_author_session_deletion_jobs') && sql.includes('ORDER BY requested_at,id LIMIT 1 FOR UPDATE')) return empty;
+    if (sql.includes('JOIN lesson_author_workspace_apply_mappings m ON m.workspace_id=w.id')) return rows([{ applied: db.applied === true }]);
     if (sql.includes('EXISTS (SELECT 1 FROM lesson_author_workspaces w')) return rows([{ active: false }]);
     if (/^\s*INSERT INTO lesson_author_session_deletion_jobs/.test(sql.trim()) || sql.includes('INSERT INTO lesson_author_session_deletion_jobs')) return rows([{ id: JOB }]);
     if (sql.includes('UPDATE lesson_author_session_deletion_jobs SET status=\'running\'')) {
@@ -326,4 +328,53 @@ test('active-runs banner data is tenant/course scoped and names the creator', as
   const bad = fakeRes();
   await handler(fakeReq(ACTORS.editor, { courseId: COURSE }, { extra: '1' }), bad as unknown as Response, () => undefined);
   assert.equal(bad.statusCode, 400);
+});
+
+// ── Owner rule 2026-10-09: a session that applied content is never deleted ──
+
+test('a session with at least one applied node cannot be deleted by anyone; rename stays allowed', () => {
+  for (const actor of [ACTORS.creator, ACTORS.superuser, ACTORS.superadmin]) {
+    const permissions = lessonAuthorSessionPermissions(actor, CREATOR, { hasApplied: true });
+    assert.equal(permissions.can_delete, false, actor.role);
+    assert.equal(permissions.can_rename, true, actor.role);
+    assert.equal(permissions.can_apply, true, actor.role);
+  }
+  assert.equal(lessonAuthorSessionPermissions(ACTORS.creator, CREATOR, { hasApplied: false }).can_delete, true);
+});
+
+test('the session list hides Delete for a session that already applied content', async (t) => {
+  const db: FakeDb = { conversations: conversations(), calls: [], applied: true };
+  await installFakeDb(t, db);
+  const { listLessonAuthorSessions } = await import('./lesson-author-session.service.js');
+  const { items } = await listLessonAuthorSessions(ownerScope(ACTORS.superadmin));
+  const applied = items.find(item => item.conversation_id === CONV_CREATOR)!;
+  const other = items.find(item => item.conversation_id === CONV_EDITOR)!;
+  assert.equal(applied.permissions.can_delete, false);
+  assert.equal(other.permissions.can_delete, true);
+  const list = db.calls.find(call => call.sql.includes('LEFT JOIN LATERAL'))!;
+  assert.match(list.sql, /lesson_author_workspace_apply_mappings/);
+});
+
+test('a delete request for a session that applied content is refused with a plain message and queues nothing', async (t) => {
+  const db: FakeDb = { conversations: conversations(), calls: [], applied: true };
+  await installFakeDb(t, db);
+  const { requestLessonAuthorSessionDeletion } = await import('./lesson-author-session.service.js');
+  for (const actor of [ACTORS.creator, ACTORS.superuser, ACTORS.superadmin]) {
+    await rejectsWith(requestLessonAuthorSessionDeletion(ownerScope(actor), CONV_CREATOR), 'LESSON_AUTHOR_SESSION_HAS_APPLIED', 409);
+  }
+  assert.equal(db.calls.some(call => call.sql.includes('INSERT INTO lesson_author_session_deletion_jobs')), false);
+  const [, vi, en] = LESSON_AUTHOR_SESSION_ERRORS.HAS_APPLIED;
+  assert.match(vi, /không thể xoá/);
+  assert.match(en, /cannot be deleted/);
+});
+
+test('the deletion worker keeps a session whose content was applied after the request', async (t) => {
+  const db: FakeDb = { conversations: conversations(), calls: [], claimedBy: CREATOR, applied: true };
+  await installFakeDb(t, db);
+  const { runLessonAuthorSessionDeletion } = await import('./lesson-author-session.service.js');
+  await runLessonAuthorSessionDeletion(JOB);
+  assert.equal(db.calls.some(call => call.sql.includes('DELETE FROM chat_conversations')), false);
+  assert.equal(db.calls.some(call => call.sql.includes('DELETE FROM lesson_author_blueprints')), false);
+  const finished = db.calls.find(call => call.sql.includes("SET status='failed',is_terminal=true"))!;
+  assert.deepEqual(finished.params, [JOB, 'LESSON_AUTHOR_SESSION_HAS_APPLIED']);
 });

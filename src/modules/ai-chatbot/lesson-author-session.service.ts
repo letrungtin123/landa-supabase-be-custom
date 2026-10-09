@@ -1,8 +1,10 @@
+import type pg from 'pg';
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import {
   canManageLessonAuthorSession,
+  LESSON_AUTHOR_SESSION_CODE_PREFIX,
   LessonAuthorSessionError,
   lessonAuthorSessionOwnerName,
   lessonAuthorSessionPermissions,
@@ -136,9 +138,12 @@ export async function listLessonAuthorSessions(
     conversation_id: string; title: string; created_at: Date | string; updated_at: string;
     owner_id: string; owner_full_name: string | null; owner_username: string | null;
     workspace_id: string | null; correlation_id: string | null; content_locale: 'vi' | 'en' | null; workspace_status: string | null;
+    has_applied: boolean;
   }>(`SELECT c.id::text AS conversation_id,c.title,c.created_at,c.updated_at::text AS updated_at,
       c.user_id::text AS owner_id,creator.full_name AS owner_full_name,creator.username AS owner_username,
-      latest.id::text AS workspace_id,latest.correlation_id::text,latest.content_locale,latest.status AS workspace_status
+      latest.id::text AS workspace_id,latest.correlation_id::text,latest.content_locale,latest.status AS workspace_status,
+      EXISTS (SELECT 1 FROM lesson_author_workspaces aw JOIN lesson_author_workspace_apply_mappings am ON am.workspace_id=aw.id
+        WHERE aw.tenant_id=c.tenant_id AND aw.course_id=c.course_id AND aw.conversation_id=c.id) AS has_applied
     FROM chat_conversations c
     JOIN courses course ON course.id=c.course_id AND course.tenant_id=c.tenant_id AND course.deleted_at IS NULL
     JOIN tenant_bot_assignments assignment ON assignment.tenant_id=c.tenant_id AND assignment.bot_id=c.bot_id AND assignment.target='lesson_author'
@@ -164,7 +169,7 @@ export async function listLessonAuthorSessions(
   const rows = result.rows.slice(0, limit);
   const actor = { id: owner.userId, role: owner.role };
   const items = rows.map((row): LessonAuthorSessionSummary => {
-    const permissions = lessonAuthorSessionPermissions(actor, row.owner_id);
+    const permissions = lessonAuthorSessionPermissions(actor, row.owner_id, { hasApplied: row.has_applied === true });
     return {
       conversation_id: row.conversation_id,
       title: typeof row.title === 'string' && row.title.trim() ? row.title.trim().slice(0, 200) : 'Bản thảo khóa học',
@@ -240,6 +245,14 @@ export async function getLessonAuthorSessionDeleteImpact(owner: LessonAuthorSess
   return { conversation_id: conversationId, total_nodes: total, applied_nodes: applied, unapplied_nodes: total - applied, active: row.active === true };
 }
 
+/** At least one node of any workspace of this session was applied into the course. */
+async function sessionHasAppliedNodes(db: Pick<pg.PoolClient, 'query'>, tenantId: string, courseId: string, conversationId: string): Promise<boolean> {
+  const result = await db.query<{ applied: boolean }>(`SELECT EXISTS (SELECT 1 FROM lesson_author_workspaces w
+      JOIN lesson_author_workspace_apply_mappings m ON m.workspace_id=w.id
+      WHERE w.tenant_id=$1::uuid AND w.course_id=$2 AND w.conversation_id=$3::uuid) AS applied`, [tenantId, courseId, conversationId]);
+  return result.rows[0]?.applied === true;
+}
+
 async function publishSessionDelete(jobId: string): Promise<void> {
   try { await publish(QUEUES.LESSON_AUTHOR_SESSION_DELETE, { jobId }); }
   catch (error) { console.error('[LessonAuthorSessionDelete] publish failed', { job_id: jobId, error: error instanceof Error ? error.message : String(error) }); }
@@ -272,6 +285,7 @@ export async function requestLessonAuthorSessionDeletion(owner: LessonAuthorSess
           AND task.status IN ('blocked','queued','running')) AS active`,
     [owner.tenantId, creatorId, owner.courseId, conversationId, ACTIVE_WORKSPACE_STATUSES]);
     if (active.rows[0]?.active) throw new LessonAuthorSessionError('ACTIVE');
+    if (await sessionHasAppliedNodes(tx, owner.tenantId, owner.courseId, conversationId)) throw new LessonAuthorSessionError('HAS_APPLIED');
     const inserted = await tx.query<{ id: string }>(`INSERT INTO lesson_author_session_deletion_jobs
       (tenant_id,course_id,conversation_id,requested_by) VALUES ($1::uuid,$2,$3::uuid,$4::uuid) RETURNING id`,
     [owner.tenantId, owner.courseId, conversationId, owner.userId]);
@@ -308,6 +322,8 @@ export async function runLessonAuthorSessionDeletion(jobId: string): Promise<voi
       const creatorId = locked.rows[0]?.creator_id;
       if (locked.rows.length === 0 || !creatorId) return { conversations_deleted: 0, blueprints_deleted: 0,
         workspaces_deleted: 0, nodes_deleted: 0, applied_course_blocks_preserved: 0 };
+      // An Apply may have landed after the request was accepted: keep the session.
+      if (await sessionHasAppliedNodes(tx, job.tenant_id, job.course_id, job.conversation_id)) return null;
       const counts = await tx.query<{ blueprints: number | string; workspaces: number | string;
         nodes: number | string; course_blocks: number | string }>(`SELECT
         (SELECT COUNT(*)::int FROM lesson_author_blueprints b
@@ -336,6 +352,11 @@ export async function runLessonAuthorSessionDeletion(jobId: string): Promise<voi
         workspaces_deleted: Number(row?.workspaces) || 0,
         nodes_deleted: Number(row?.nodes) || 0, applied_course_blocks_preserved: Number(row?.course_blocks) || 0 };
     });
+    if (stats === null) {
+      await query(`UPDATE lesson_author_session_deletion_jobs SET status='failed',is_terminal=true,finished_at=clock_timestamp(),
+        lease_expires_at=NULL,last_error=$2,updated_at=clock_timestamp() WHERE id=$1::uuid`, [job.id, `${LESSON_AUTHOR_SESSION_CODE_PREFIX}HAS_APPLIED`]);
+      return;
+    }
     await query(`UPDATE lesson_author_session_deletion_jobs SET status='succeeded',is_terminal=true,finished_at=clock_timestamp(),
       lease_expires_at=NULL,last_error=NULL,stats=$2::jsonb,updated_at=clock_timestamp() WHERE id=$1::uuid`, [job.id, JSON.stringify(stats)]);
   } finally { clearInterval(heartbeat); }

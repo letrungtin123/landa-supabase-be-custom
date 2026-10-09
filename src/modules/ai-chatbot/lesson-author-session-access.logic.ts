@@ -31,6 +31,8 @@ export const LESSON_AUTHOR_SESSION_ERRORS = {
     'This design session was just changed somewhere else. Please reload the list and try again.'],
   ACTIVE: [409, 'Phiên này đang tạo nội dung. Hãy chờ hoàn tất rồi mới xoá.',
     'This session is still creating content. Wait for it to finish before deleting it.'],
+  HAS_APPLIED: [409, 'Phiên này đã đưa nội dung vào khoá học nên không thể xoá. Nội dung đã đưa vào khoá vẫn được giữ nguyên.',
+    'This session has already added content to the course, so it cannot be deleted. The added content stays in the course.'],
   DELETE_NOT_FOUND: [404, 'Không tìm thấy yêu cầu xoá này.', 'This delete request was not found.'],
   NOT_OWNER: [403, 'Chỉ người tạo phiên thiết kế này mới tiếp tục soạn được. Bạn vẫn có thể xem và đưa nội dung của phiên vào khoá học.',
     'Only the person who started this design session can continue it. You can still view it and add its content to the course.'],
@@ -92,10 +94,13 @@ export function canManageLessonAuthorSession(actor: LessonAuthorSessionActor, ow
  * editor gate (checkPermission('courses','can_edit') + tenant context); every
  * write still re-checks on the server, so these flags never grant anything.
  */
-export function lessonAuthorSessionPermissions(actor: LessonAuthorSessionActor, ownerId: string): LessonAuthorSessionPermissions {
+export function lessonAuthorSessionPermissions(actor: LessonAuthorSessionActor, ownerId: string,
+  options: { hasApplied?: boolean } = {}): LessonAuthorSessionPermissions {
   const isOwner = actor.id === ownerId;
   const canManage = canManageLessonAuthorSession(actor, ownerId);
-  return { is_owner: isOwner, can_continue: isOwner, can_rename: canManage, can_delete: canManage, can_apply: true };
+  // Owner rule 2026-10-09: a session that already applied at least one node
+  // into the course is kept for traceability and cannot be deleted by anyone.
+  return { is_owner: isOwner, can_continue: isOwner, can_rename: canManage, can_delete: canManage && options.hasApplied !== true, can_apply: true };
 }
 
 export type LessonAuthorSessionScope = 'mine' | 'all';
