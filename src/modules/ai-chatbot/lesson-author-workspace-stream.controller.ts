@@ -36,6 +36,8 @@ export function createWorkspaceStreamHandler(deps: {
   enabled: () => boolean;
   db: GenerationJobSql;
   canRead: (user: AuthUser) => Promise<boolean>;
+  /** Shared sessions: creator of the tenant/course session (see read controller). */
+  resolveSessionOwner?: (input: { tenantId: string; courseId: string; conversationId: string }) => Promise<string | null>;
   subscribe: (workspaceId: string, listener: (hint: WorkspaceCommitHint | null) => void) => Promise<() => void>;
   report: (event: WorkspaceStreamDiagnostic) => void;
 }) {
@@ -81,7 +83,9 @@ export function createWorkspaceStreamHandler(deps: {
     try {
       stage = 'workspace_stream_repository';
       if (!await deps.canRead(user)) { reject(403, 'WORKSPACE_READ_FORBIDDEN'); return; }
-      const owner = { tenantId: user.tenantId, userId: user.id, conversationId, courseId };
+      const creatorId = deps.resolveSessionOwner
+        ? await deps.resolveSessionOwner({ tenantId: user.tenantId, courseId, conversationId }) : null;
+      const owner = { tenantId: user.tenantId, userId: creatorId ?? user.id, conversationId, courseId };
       const repository = createWorkspaceReadRepository({ db: deps.db, canRead: () => deps.canRead(user) });
       const buffered: WorkspaceCommitHint[] = [];
       let liveWrite: ((hint: WorkspaceCommitHint) => void) | null = null;

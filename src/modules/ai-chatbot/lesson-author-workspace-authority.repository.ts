@@ -23,12 +23,24 @@ export interface WorkspaceSourceContext {
  * permission cache, provider, HTTP, logging, DML or import-time side effects.
  * MUST receive the same tx used by the write repository, not a pool executor.
  * Row locks serialize revocation/source/settings changes through commit. */
-export function createWorkspaceAuthority(subjectInput: AuthUser) {
+export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
+  /** Creator of the shared session whose workspace a course editor applies.
+   * Only widens the read-only source/component fences below, never canEdit. */
+  sessionOwnerId?: string;
+} = {}) {
   const subject = Object.freeze({ ...subjectInput });
-  function matches(owner: WorkspaceReadOwner): boolean {
+  const sessionOwnerId = options.sessionOwnerId && UUID.test(options.sessionOwnerId) ? options.sessionOwnerId : null;
+  function validSubject(owner: WorkspaceReadOwner): boolean {
     return subject.sessionMode === 'normal' && ['staff', 'superuser', 'superadmin'].includes(subject.role)
-      && UUID.test(subject.id) && !!subject.tenantId && UUID.test(subject.tenantId)
-      && subject.id === owner.userId && subject.tenantId === owner.tenantId;
+      && UUID.test(subject.id) && !!subject.tenantId && UUID.test(subject.tenantId) && subject.tenantId === owner.tenantId;
+  }
+  /** canEdit always evaluates the authenticated subject itself. */
+  function matches(owner: WorkspaceReadOwner): boolean {
+    return validSubject(owner) && subject.id === owner.userId;
+  }
+  /** Workspace evidence reads may target the shared session's creator. */
+  function matchesSession(owner: WorkspaceReadOwner): boolean {
+    return validSubject(owner) && (subject.id === owner.userId || owner.userId === sessionOwnerId);
   }
   async function canEdit(tx: GenerationJobSql, owner: WorkspaceReadOwner): Promise<boolean> {
     if (!matches(owner)) return false;
@@ -59,7 +71,7 @@ export function createWorkspaceAuthority(subjectInput: AuthUser) {
     } catch { return unavailable(); }
   }
   async function currentSourceHash(tx: GenerationJobSql, context: WorkspaceSourceContext): Promise<string> {
-    if (!matches(context.target)) throw new WorkspaceEditError('WORKSPACE_EDIT_FORBIDDEN');
+    if (!matchesSession(context.target)) throw new WorkspaceEditError('WORKSPACE_EDIT_FORBIDDEN');
     const target = context.target;
     try {
       const result = await tx.query(`SELECT w.kb_id,w.bot_id,w.source_document_ids,w.source_snapshot_hash,w.blueprint_id
@@ -118,7 +130,7 @@ export function createWorkspaceAuthority(subjectInput: AuthUser) {
     } catch (e) { if (e instanceof WorkspaceContractError) throw e; return unavailable(); }
   }
   async function allowedComponents(tx: GenerationJobSql, owner: WorkspaceReadOwner) {
-    if (!matches(owner)) throw new WorkspaceEditError('WORKSPACE_EDIT_FORBIDDEN');
+    if (!matchesSession(owner)) throw new WorkspaceEditError('WORKSPACE_EDIT_FORBIDDEN');
     try {
       const result = await tx.query(`SELECT settings FROM tenants WHERE id=$1 AND is_active=true FOR SHARE`, [owner.tenantId]);
       if (result.rows.length !== 1) throw new WorkspaceEditError('WORKSPACE_EDIT_FORBIDDEN');

@@ -43,6 +43,9 @@ interface Dependencies {
   enabled: () => boolean;
   db: GenerationJobSql;
   canRead: (user: AuthUser) => Promise<boolean>;
+  /** Shared sessions: creator of the tenant/course session, so any course
+   * editor (canRead) reads it read-only. Absent = caller-owned reads only. */
+  resolveSessionOwner?: (input: { tenantId: string; courseId: string; conversationId: string }) => Promise<string | null>;
   report: (event: WorkspaceReadDiagnostic) => void;
 }
 
@@ -113,7 +116,9 @@ export function createWorkspaceReadHandlers(deps: Dependencies) {
         stage = 'workspace_read_gate';
         if (!deps.enabled()) { reject('WORKSPACE_READ_DISABLED'); return; }
         stage = 'workspace_read_repository';
-        const owner = { tenantId: user.tenantId, userId: user.id, conversationId, courseId };
+        const creatorId = deps.resolveSessionOwner
+          ? await deps.resolveSessionOwner({ tenantId: user.tenantId, courseId, conversationId }) : null;
+        const owner = { tenantId: user.tenantId, userId: creatorId ?? user.id, conversationId, courseId };
         // Closure binds the authenticated principal to this request only. The
         // repository checks permission on each operation and exact ownership in SQL.
         const repository = createWorkspaceReadRepository({ db: deps.db, canRead: () => deps.canRead(user) });
