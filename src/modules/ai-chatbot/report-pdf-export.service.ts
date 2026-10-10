@@ -18,7 +18,8 @@ import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 import { enforceReportScope, hasNoAccessibleReportScope } from '../reports/report-access.service.js';
 import { getReportSnapshotHash, loadStoredReportSnapshot } from './report-chat.service.js';
-import { loadReportPdfTenantBranding, supabaseReportPdfArtifactStore, type ReportPdfArtifactStore } from './report-pdf-artifact.service.js';
+import { loadReportPdfTenantBranding, loadReportPdfTenantLabels, supabaseReportPdfArtifactStore, type ReportPdfArtifactStore } from './report-pdf-artifact.service.js';
+import { reportTenantLabelsKey, type ReportTenantLabels } from './report-labels.logic.js';
 import {
   buildReportPdfJobId,
   buildReportPdfStorageKey,
@@ -92,6 +93,8 @@ export interface ReportPdfExportDeps {
   enforceScope: typeof enforceReportScope;
   loadNarrative: (input: ReportPdfReference & { userId: string; tenantId: string }) => Promise<StoredReportChatNarrative | null>;
   loadBranding: (tenantId: string) => Promise<ReportPdfTenantBranding>;
+  /** The tenant's level/role labels, read at render time (snapshots never store them). */
+  loadLabels: (tenantId: string) => Promise<ReportTenantLabels>;
   renderer: () => Pick<ReportPdfRenderer, 'render' | 'measure'>;
   aiWriter: (context: { tenantId: string; userId: string; conversationId: string; requestId: string }) => ReportPdfAiNarrativeWriter | undefined;
   store: () => ReportPdfArtifactStore | null;
@@ -110,6 +113,7 @@ export const defaultReportPdfExportDeps: ReportPdfExportDeps = {
   enforceScope: enforceReportScope,
   loadNarrative: loadStoredReportChatNarrative,
   loadBranding: (tenantId) => loadReportPdfTenantBranding(tenantId, log),
+  loadLabels: loadReportPdfTenantLabels,
   renderer: getReportPdfRenderer,
   aiWriter: (context) => createReportPdfAiNarrativeWriter(context),
   store: () => (env.REPORT_PDF_STORAGE_ENABLED ? supabaseReportPdfArtifactStore : null),
@@ -194,8 +198,10 @@ export class ReportPdfExportService {
     return { ...stored, snapshotHash: getReportSnapshotHash(stored.snapshot) };
   }
 
-  private storageKey(actor: ReportPdfExportActor, reference: ReportPdfReference, snapshotHash: string, locale: ReportPdfLocale): string {
-    return buildReportPdfStorageKey({ tenantId: actor.tenantId, ...reference, snapshotHash, locale, templateVersion: REPORT_PDF_TEMPLATE_VERSION });
+  private storageKey(actor: ReportPdfExportActor, reference: ReportPdfReference, snapshotHash: string, locale: ReportPdfLocale, labels: ReportTenantLabels): string {
+    return buildReportPdfStorageKey({
+      tenantId: actor.tenantId, ...reference, snapshotHash, locale, templateVersion: REPORT_PDF_TEMPLATE_VERSION, labelsKey: reportTenantLabelsKey(labels),
+    });
   }
 
   private fileNameFor(locale: ReportPdfLocale, snapshot: { filter: { date_from: string; date_to: string } }, tenantName: string): string {
@@ -208,10 +214,10 @@ export class ReportPdfExportService {
     await this.assertPermission(actor);
     input.onPhase?.('validating');
     const stored = await this.loadAuthorizedSnapshot(actor, reference);
-    const branding = await this.deps.loadBranding(actor.tenantId);
+    const [branding, labels] = await Promise.all([this.deps.loadBranding(actor.tenantId), this.deps.loadLabels(actor.tenantId)]);
     const fileName = this.fileNameFor(locale, stored.snapshot, branding.name);
     const store = this.deps.store();
-    const storageKey = store ? this.storageKey(actor, reference, stored.snapshotHash, locale) : null;
+    const storageKey = store ? this.storageKey(actor, reference, stored.snapshotHash, locale, labels) : null;
     if (store && storageKey && await store.exists(storageKey)) return { fileName, storageKey, pdf: null, cached: true };
 
     input.onPhase?.('narrative');
@@ -221,6 +227,7 @@ export class ReportPdfExportService {
       snapshotHash: stored.snapshotHash,
       locale,
       tenant: branding,
+      labels,
       ...(chatNarrative && chatNarrative.snapshotHash === stored.snapshotHash ? { storedNarrative: chatNarrative.narrative, storedNarrativeLocale: chatNarrative.locale } : {}),
       writeAiNarrative: this.deps.aiWriter({ tenantId: actor.tenantId, userId: actor.userId, conversationId: reference.conversationId, requestId: input.requestId }),
     });
@@ -396,7 +403,7 @@ export class ReportPdfExportService {
     const store = this.deps.store();
     if (!locale || !store) throw new ReportPdfExportError('Report PDF job not found', 404, 'REPORT_PDF_JOB_NOT_FOUND');
     const stored = await this.loadAuthorizedSnapshot(actor, reference);
-    if (!await store.exists(this.storageKey(actor, reference, stored.snapshotHash, locale))) {
+    if (!await store.exists(this.storageKey(actor, reference, stored.snapshotHash, locale, await this.deps.loadLabels(actor.tenantId)))) {
       throw new ReportPdfExportError('Report PDF job not found', 404, 'REPORT_PDF_JOB_NOT_FOUND');
     }
     const branding = await this.deps.loadBranding(actor.tenantId);
@@ -415,7 +422,8 @@ export class ReportPdfExportService {
     let pdf = job?.artifact ?? null;
     const store = this.deps.store();
     if (!pdf && store) {
-      const key = this.storageKey(actor, reference, stored.snapshotHash, locale);
+      // The job's own key first: the labels may have changed since it rendered.
+      const key = job?.storageKey ?? this.storageKey(actor, reference, stored.snapshotHash, locale, await this.deps.loadLabels(actor.tenantId));
       if (await store.exists(key)) pdf = await store.get(key);
     }
     if (!pdf) {

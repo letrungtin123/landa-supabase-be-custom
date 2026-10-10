@@ -17,6 +17,7 @@ import { buildRuleBasedReportNarrative } from './report-pdf-narrative.logic.js';
 import { vietnameseReportFixture } from './report-pdf.fixture.js';
 import type { TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import type { TenantAiRuntimeSettings } from './ai-engine.types.js';
+import type { ReportTenantLabels } from './report-labels.logic.js';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const USER = '22222222-2222-4222-8222-222222222222';
@@ -36,9 +37,12 @@ function memoryStore(options: { failPut?: boolean } = {}): ReportPdfArtifactStor
   };
 }
 
-function harness(overrides: Partial<ReportPdfExportDeps> & { allowed?: boolean; scopeChanged?: boolean } = {}) {
+function harness(overrides: Partial<ReportPdfExportDeps> & { allowed?: boolean; scopeChanged?: boolean; labels?: ReportTenantLabels } = {}) {
   const fixture = vietnameseReportFixture();
-  const state = { allowed: overrides.allowed ?? true, scopeChanged: overrides.scopeChanged ?? false, renders: 0, audits: [] as TransactionalAuditEntry[], logs: [] as Record<string, unknown>[] };
+  const state = {
+    allowed: overrides.allowed ?? true, scopeChanged: overrides.scopeChanged ?? false, labels: overrides.labels ?? {} as ReportTenantLabels,
+    renders: 0, html: [] as string[], audits: [] as TransactionalAuditEntry[], logs: [] as Record<string, unknown>[],
+  };
   const store = memoryStore();
   const deps: ReportPdfExportDeps = {
     permissionChecker: async () => state.allowed,
@@ -48,9 +52,10 @@ function harness(overrides: Partial<ReportPdfExportDeps> & { allowed?: boolean; 
       : { groupId: fixture.snapshot.scope.groupId, subgroupId: fixture.snapshot.scope.subgroupId, teamId: fixture.snapshot.scope.teamId, allowedGroupIds: null }) as never,
     loadNarrative: async () => ({ narrative: fixture.storedNarrative, locale: 'vi', snapshotHash: fixture.snapshotHash }),
     loadBranding: async () => ({ name: 'Công ty Dược phẩm An Khang', logoDataUri: null }),
+    loadLabels: async () => state.labels,
     renderer: () => ({
       measure: async () => ({}),
-      render: async () => { state.renders += 1; return { pdf: Buffer.from('%PDF-1.7 test'), pageCount: 8, overflow: [], durationMs: 5 }; },
+      render: async (html: string) => { state.renders += 1; state.html.push(html); return { pdf: Buffer.from('%PDF-1.7 test'), pageCount: 8, overflow: [], durationMs: 5 }; },
     }),
     aiWriter: () => undefined,
     store: () => store,
@@ -99,12 +104,14 @@ test('orders export phases without treating in-flight phases as complete', () =>
 });
 
 test('derives tenant-prefixed deterministic storage keys and job ids', () => {
-  const key = buildReportPdfStorageKey({ tenantId: TENANT, ...reference, snapshotHash: 'abc', locale: 'vi', templateVersion: '3.0.0' });
+  const base = { tenantId: TENANT, ...reference, snapshotHash: 'abc', locale: 'vi' as const, templateVersion: '3.0.0', labelsKey: '' };
+  const key = buildReportPdfStorageKey(base);
   assert.match(key, new RegExp(`^${TENANT}/report-exports/${CONVERSATION}/${MESSAGE}/vi-[0-9a-f]{40}\\.pdf$`));
-  assert.equal(key, buildReportPdfStorageKey({ tenantId: TENANT, ...reference, snapshotHash: 'abc', locale: 'vi', templateVersion: '3.0.0' }));
-  assert.notEqual(key, buildReportPdfStorageKey({ tenantId: TENANT, ...reference, snapshotHash: 'abd', locale: 'vi', templateVersion: '3.0.0' }));
-  assert.notEqual(key, buildReportPdfStorageKey({ tenantId: TENANT, ...reference, snapshotHash: 'abc', locale: 'en', templateVersion: '3.0.0' }));
-  assert.notEqual(key, buildReportPdfStorageKey({ tenantId: TENANT, ...reference, snapshotHash: 'abc', locale: 'vi', templateVersion: '3.0.1' }));
+  assert.equal(key, buildReportPdfStorageKey({ ...base }));
+  assert.notEqual(key, buildReportPdfStorageKey({ ...base, snapshotHash: 'abd' }));
+  assert.notEqual(key, buildReportPdfStorageKey({ ...base, locale: 'en' }));
+  assert.notEqual(key, buildReportPdfStorageKey({ ...base, templateVersion: '3.0.1' }));
+  assert.notEqual(key, buildReportPdfStorageKey({ ...base, labelsKey: 'Khối' }), 'a label change renders a new PDF');
   const id = buildReportPdfJobId({ tenantId: TENANT, userId: USER, ...reference, locale: 'en', templateVersion: '3.0.0' });
   assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(resolveReportPdfJobLocale(id, { tenantId: TENANT, userId: USER, ...reference, templateVersion: '3.0.0' }), 'en');
@@ -137,6 +144,30 @@ test('renders, stores under the tenant prefix, and audits each delivered downloa
   });
   assert.deepEqual(state.audits[0].event, { code: 'report.pdf.exported', context: { file_name: download.fileName, file_size_bytes: download.pdf.byteLength } });
   assert.ok(state.logs.some((event) => event.event === 'report_pdf_rendered' && event.narrative === 'rules'));
+});
+
+test('words the PDF with the tenant labels and renders again when they change', async () => {
+  const labels: ReportTenantLabels = { group: 'Khối/Khu vực', subgroup: 'Đơn vị', team: 'Bộ phận', learner: 'Learner', learner_plus: 'Team Leader' };
+  const first = harness({ labels });
+  const job = await first.service.start({ ...actor, ...reference, locale: 'vi' });
+  await waitForTerminal(first.service, job.id);
+  assert.equal(first.state.renders, 1);
+  const html = first.state.html[0];
+  for (const expected of ['Xếp hạng bộ phận theo tỉ lệ hoàn thành', '>Bộ phận<', 'vai trò Learner hoặc Team Leader', 'Khối/Khu vực']) assert.ok(html.includes(expected), expected);
+  // Unit names of the fixture contain 'Chi nhánh'; the level names themselves must be gone.
+  for (const technical of ['learner_plus', '>Phòng ban<', '>Chi nhánh<', 'phòng ban', 'đơn vị']) assert.ok(!html.includes(technical), technical);
+  // Labels changed after the render: the finished job still serves its own PDF...
+  first.state.labels = { team: 'Tổ' };
+  const download = await first.service.download({ ...actor, ...reference, jobId: job.id, audit });
+  assert.equal(download.pdf.toString(), '%PDF-1.7 test');
+  // ...while a new export (another instance, or after the job expired) renders with the new labels.
+  const other = harness({ labels: { team: 'Tổ' }, store: () => first.store });
+  await assert.rejects(() => other.service.get({ ...actor, ...reference, jobId: job.id }), rejectsWith('REPORT_PDF_JOB_NOT_FOUND'));
+  const again = await other.service.start({ ...actor, ...reference, locale: 'vi' });
+  await waitForTerminal(other.service, again.id);
+  assert.equal(other.state.renders, 1);
+  assert.equal(first.store.objects.size, 2);
+  assert.ok(other.state.html[0].includes('Xếp hạng tổ theo tỉ lệ hoàn thành'));
 });
 
 test('keeps working after a restart: status and download are served from storage', async () => {

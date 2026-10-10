@@ -1,7 +1,11 @@
 // Report PDF artifacts in Supabase Storage (tenant prefix, existing bucket and
-// quota-tracked upload helper) and tenant branding for the document cover.
+// quota-tracked upload helper), tenant branding for the document cover and the
+// tenant's level/role display labels.
 import { downloadFileBuffer, storageObjectExists, uploadFile } from '../../config/storage.js';
 import { getBrandingByTenantId } from '../branding/branding.service.js';
+import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
+import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
+import { normalizeReportTenantLabels, type ReportTenantLabels } from './report-labels.logic.js';
 import type { ReportPdfTenantBranding } from './report-pdf-view-model.js';
 
 export interface ReportPdfArtifactStore {
@@ -45,4 +49,20 @@ export async function loadReportPdfTenantBranding(tenantId: string, log: (event:
     }
   }
   return { name: branding.tenant_name, logoDataUri };
+}
+
+/**
+ * The organization level and learner role names configured for the tenant
+ * (cached by the tenant label services, invalidated when a superadmin edits
+ * them). Only the labels the PDF prints are kept.
+ */
+export async function loadReportPdfTenantLabels(tenantId: string): Promise<ReportTenantLabels> {
+  const [groupLabels, roleLabels] = await Promise.all([getTenantGroupLabels(tenantId), getTenantRoleLabels(tenantId)]);
+  return normalizeReportTenantLabels({
+    group: groupLabels.group,
+    subgroup: groupLabels.subgroup,
+    team: groupLabels.team,
+    learner: roleLabels.learner,
+    learner_plus: roleLabels.learner_plus,
+  });
 }

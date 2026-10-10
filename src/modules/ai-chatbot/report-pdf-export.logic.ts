@@ -21,9 +21,10 @@ const sha256 = (parts: string[]) => createHash('sha256').update(parts.join('|'))
 
 /**
  * Tenant-prefixed, deterministic storage key. The same message + snapshot hash
- * + locale + template version always maps to the same object, so a download
- * after a restart (or on another instance) finds the stored PDF. The digest
- * makes the object name unguessable without the snapshot hash.
+ * + locale + template version + tenant labels always maps to the same object,
+ * so a download after a restart (or on another instance) finds the stored PDF,
+ * and a label change renders a new one. The digest makes the object name
+ * unguessable without the snapshot hash.
  */
 export function buildReportPdfStorageKey(input: {
   tenantId: string;
@@ -32,8 +33,10 @@ export function buildReportPdfStorageKey(input: {
   snapshotHash: string;
   locale: ReportPdfLocale;
   templateVersion: string;
+  /** reportTenantLabelsKey() of the labels the PDF is worded with. */
+  labelsKey: string;
 }): string {
-  const digest = sha256(['report-pdf', input.templateVersion, input.assistantMessageId, input.snapshotHash, input.locale]).slice(0, 40);
+  const digest = sha256(['report-pdf', input.templateVersion, input.assistantMessageId, input.snapshotHash, input.locale, input.labelsKey]).slice(0, 40);
   return `${input.tenantId}/${REPORT_PDF_STORAGE_FOLDER}/${input.conversationId}/${input.assistantMessageId}/${input.locale}-${digest}.pdf`;
 }
 
