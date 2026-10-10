@@ -91,7 +91,6 @@ test('renders the unit heat table with localized aggregate rows and notes', () =
   const vi = model(vietnameseReportFixture());
   assert.equal(vi.organization.level, 'Phòng ban');
   assert.equal(vi.organization.unitCountLabel, '9 đơn vị');
-  assert.equal(vi.organization.note, null);
   assert.deepEqual(vi.organization.rows.slice(0, 2).map((row) => [row.name, row.rateLabel, row.deltaLabel]), [
     ['Phòng Chăm sóc khách hàng', '77,4%', '+2,9 điểm %'], ['Cửa hàng Quận 1', '71,2%', '+6,3 điểm %'],
   ]);
@@ -100,7 +99,8 @@ test('renders the unit heat table with localized aggregate rows and notes', () =
   assert.equal(vi.organization.footnotes.length, 2, 'legend and learner definition; no overlap, nothing grouped');
   const viDocument = renderReportPdfHtml(vi, NO_FONTS);
   assert.ok(viDocument.includes('class="heat"') && viDocument.includes('Kho vận Hồ Chí Minh'));
-  assert.ok(!viDocument.includes(reportPdfVi.organization.breakdownMissing));
+  assert.ok(!viDocument.includes(reportPdfVi.appendix.limitations.unit_breakdown_missing));
+  assert.equal(vi.sectionNumbers.organization, '04', 'with units the breakdown is section 04');
   assert.ok(viDocument.includes(reportPdfVi.appendix.methodology.unitCounting), 'the appendix says how learners in several units are counted');
 
   const many = model(manyUnitsReportFixture());
@@ -117,16 +117,26 @@ test('renders the unit heat table with localized aggregate rows and notes', () =
   assert.ok(model(overlapping).organization.footnotes.includes(reportPdfVi.organization.overlapNote({ sum: '230', total: '200' })));
 });
 
-test('shows the scope card alone for a team scope and explains other missing breakdowns', () => {
+test('leaves the unit section out without units, renumbers the next sections and says why in the appendix', () => {
+  const sectionIds = (pdf: ReportPdfViewModel) => pdf.pages.flat().map((slice) => slice.id);
   const team = model(longNamesReportFixture('vi'));
-  assert.deepEqual([team.organization.rows.length, team.organization.note], [0, null]);
+  assert.equal(team.organization.rows.length, 0);
+  assert.ok(!sectionIds(team).includes('organization'), 'nothing below a team: no unit section');
+  assert.ok(!team.appendix.limitations.includes(reportPdfVi.appendix.limitations.unit_breakdown_missing));
+  assert.deepEqual([team.sectionNumbers.attention, team.sectionNumbers.recommendations], ['04', '05'], 'the following sections move up');
   const teamDocument = renderReportPdfHtml(team, NO_FONTS);
-  assert.ok(!teamDocument.includes(reportPdfVi.organization.breakdownMissing), 'nothing below a team: no "breakdown missing" text');
-  assert.ok(!teamDocument.includes(reportPdfVi.appendix.limitations.unit_breakdown_missing));
-  assert.equal(model(tinyReportFixture('en'), 'en').organization.note, reportPdfEn.organization.noChildUnits);
+  assert.ok(!teamDocument.includes(reportPdfVi.sections.organization.title));
+  assert.ok(teamDocument.includes('<span class="num">04</span>Rủi ro'));
+
+  const young = model(tinyReportFixture('en'), 'en');
+  assert.ok(!sectionIds(young).includes('organization'));
+  assert.ok(young.appendix.limitations.includes(reportPdfEn.appendix.limitations.no_child_units), 'one short line in the appendix');
   const older = model(englishReportFixture());
-  assert.equal(older.organization.note, reportPdfEn.organization.breakdownMissing);
+  assert.ok(!sectionIds(older).includes('organization'));
   assert.ok(older.appendix.limitations.includes(reportPdfEn.appendix.limitations.unit_breakdown_missing));
+
+  const empty = model(emptyReportFixture('vi'));
+  assert.deepEqual([empty.sectionNumbers.summary, empty.sectionNumbers.attention, empty.sectionNumbers.recommendations], ['01', '02', '03'], 'no gap in the numbering of an empty report');
 });
 
 test('overlays the comparison series by bucket index on both charts', () => {

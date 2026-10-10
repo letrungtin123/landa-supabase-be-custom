@@ -4,7 +4,8 @@
 // ═══════════════════════════════════════════════════════════════
 import type { StoredReportChatSnapshot } from './report-chat.service.js';
 import {
-  formatReportBucket,
+  formatReportBucketLabel,
+  formatReportBucketTick,
   formatReportDateTime,
   formatReportNumber,
   formatReportPercent,
@@ -23,12 +24,16 @@ import {
   type ReportKpiId,
   type ReportTrendInsight,
 } from './report-insights.logic.js';
-import { planReportPdfPages } from './report-pdf-layout.logic.js';
+import { planReportPdfPages, reportPdfSectionNumbers } from './report-pdf-layout.logic.js';
 import { describeReportFact, type ReportPdfNarrative, type ReportPdfNarrativeItem } from './report-pdf-narrative.logic.js';
 import { REPORT_SIGNAL_THRESHOLDS } from './report-chat.service.js';
+import { REPORT_SNAPSHOT_BUCKET_RULE } from './report-time-expression.logic.js';
 
 /** Bump when the layout or wording changes: stored PDFs are keyed by this version. */
-export const REPORT_PDF_TEMPLATE_VERSION = '3.1.0';
+export const REPORT_PDF_TEMPLATE_VERSION = '3.2.0';
+
+/** The course table lists at most this many courses; the rest are in the Excel export. */
+export const REPORT_PDF_MAX_COURSE_ROWS = 20;
 
 export interface ReportPdfTenantBranding { name: string; logoDataUri: string | null }
 
@@ -55,6 +60,10 @@ export interface ReportPdfKpiCard {
   tone: ReportInsightTone;
   previousLabel: string;
   spark: number[] | null;
+  /** How the Completion rate is computed (completion card only). */
+  hint: string | null;
+  /** Why no percentage / no change is shown (small comparison period). */
+  deltaNote: string | null;
 }
 
 export interface ReportPdfTrendChart {
@@ -63,14 +72,19 @@ export interface ReportPdfTrendChart {
   granularity: ReportBucketGranularity;
   values: number[];
   labels: string[];
-  previousValues: number[] | null;
+  /** Comparison series by bucket index; null where its week/month is cut by the comparison period. */
+  previousValues: Array<number | null> | null;
   previousAverage: number | null;
   average: number;
   peakIndex: number | null;
   peakLabel: string | null;
-  legend: Array<{ key: 'current' | 'previous' | 'previousAverage' | 'average'; label: string }>;
+  /** Weeks/months cut by the period (drawn lighter). */
+  partialIndexes: number[];
+  /** Buckets flagged by the data check (drawn in orange). */
+  flaggedIndexes: number[];
+  legend: Array<{ key: 'current' | 'previous' | 'previousAverage' | 'average' | 'partial' | 'flagged'; label: string }>;
   stats: Array<{ label: string; value: string; detail: string | null }>;
-  note: string | null;
+  notes: string[];
 }
 
 export interface ReportPdfCourseRow {
@@ -98,8 +112,8 @@ export interface ReportPdfUnitRow {
 export interface ReportPdfAttentionCard { severity: 'warning' | 'attention'; severityLabel: string; title: string; text: string }
 export interface ReportPdfRecommendation { text: string; priority: 'high' | 'medium' | 'low'; priorityLabel: string; fromChat: boolean }
 
-export type ReportPdfSectionId = 'summary' | 'kpis' | 'trends' | 'courses' | 'portfolio' | 'organization' | 'attention'
-  | 'recommendations' | 'appendixDefinitions' | 'appendixData';
+export type ReportPdfSectionId = 'summary' | 'kpis' | 'trends' | 'trendObservations' | 'courses' | 'portfolio' | 'organization' | 'attention'
+  | 'recommendations' | 'appendixDefinitions' | 'appendixData' | 'appendixMethods';
 /** A section on a page; row-splittable sections (portfolio, organization) carry a row range. */
 export interface ReportPdfSectionSlice { id: ReportPdfSectionId; from?: number; to?: number }
 export interface ReportPdfWatchRow { name: string; enrollments: string; notStarted: string; rate: number; rateLabel: string }
@@ -130,6 +144,7 @@ export interface ReportPdfViewModel {
   courses: {
     status: ReportPdfStatusSegment[] | null;
     statusTotal: string | null;
+    statusNote: string;
     concentration: ReportPdfConcentrationBar[];
     concentrationNote: string | null;
     backlog: ReportPdfConcentrationBar[];
@@ -139,15 +154,16 @@ export interface ReportPdfViewModel {
     minSampleNote: string;
     rows: ReportPdfCourseRow[];
     portfolioLead: string;
+    portfolioLegend: string;
     coverageNote: string | null;
+    /** "Còn N khóa học khác — xem đầy đủ trong file Excel" when the table is capped. */
+    moreCoursesNote: string | null;
     legacy: boolean;
   };
   organization: {
     level: string | null;
     rows: ReportPdfUnitRow[];
     unitCountLabel: string | null;
-    /** Shown in the scope card when there is no unit table (null for a team scope). */
-    note: string | null;
     /** Notes under the unit table (legend, definitions, overlap, others row). */
     footnotes: string[];
   };
@@ -159,10 +175,16 @@ export interface ReportPdfViewModel {
     scopeRows: Array<{ label: string; value: string }>;
     methodology: string[];
     limitations: string[];
+    /** Limitations then methodology as printable rows (headings and bullets) that may continue on the next page. */
+    methodRows: Array<{ kind: 'title' | 'item'; text: string }>;
   };
+  /** Section numbers of the present sections ("01"…, "A", "B"); an omitted section shifts the next ones. */
+  sectionNumbers: Partial<Record<ReportPdfSectionId, string>>;
   pages: ReportPdfSectionSlice[][];
 }
 
+/** The trend page keeps its observations short so they fit under the charts. */
+const MAX_TREND_OBSERVATIONS = 3;
 const TREND_OBSERVATION_IDS = new Set(['trend.enrollments.peak', 'trend.enrollments.momentum', 'trend.enrollments.vs_previous', 'trend.enrollments.spikes', 'trend.active.momentum']);
 
 function scopePath(insights: ReportInsights, dict: ReportPdfDictionary): Array<{ level: string; name: string }> {
@@ -180,10 +202,12 @@ function kpiCards(insights: ReportInsights, locale: ReportPdfLocale, dict: Repor
     const value = isRate ? formatReportPercent(kpi.current, locale) : formatReportNumber(kpi.current, locale);
     let deltaLabel: string | null = null;
     if (kpi.delta !== null) {
+      // A percentage from a tiny comparison period ("+6.100%") is never shown: the absolute change stays.
       deltaLabel = isRate
         ? `${formatReportSignedNumber(kpi.delta, locale, 1)} ${dict.units.pp}`
         : `${formatReportSignedNumber(kpi.delta, locale)}${kpi.deltaPercent !== null ? ` · ${formatReportSignedNumber(kpi.deltaPercent, locale, 1)}%` : ''}`;
     }
+    const deltaNote = kpi.smallBase ? (isRate ? dict.kpi.smallBaseRate : dict.kpi.smallBaseCount) : null;
     const previous = kpi.previous === null ? null : isRate ? formatReportPercent(kpi.previous, locale) : formatReportNumber(kpi.previous, locale);
     const spark = kpi.id === 'total_enrollments'
       ? insights.trends.enrollments?.points.map((point) => point.value) ?? null
@@ -197,19 +221,49 @@ function kpiCards(insights: ReportInsights, locale: ReportPdfLocale, dict: Repor
       tone: kpi.tone,
       previousLabel: previous === null ? dict.kpi.noComparison : dict.kpi.previous({ value: previous }),
       spark: spark && spark.length >= 2 ? spark : null,
+      hint: kpi.id === 'completion_rate' ? dict.kpi.completionHint : null,
+      deltaNote,
     };
   });
 }
 
-function trendChart(trend: ReportTrendInsight | null, kind: 'area' | 'bars', locale: ReportPdfLocale, dict: ReportPdfDictionary, periodActiveLearners: number | null = null): ReportPdfTrendChart | null {
+/** Notes under a trend chart: what a point is, partial edges, a coarsened request and the data check. */
+function trendNotes(trend: ReportTrendInsight, insights: ReportInsights, locale: ReportPdfLocale, dict: ReportPdfDictionary): string[] {
+  const t = dict.trends;
+  const notes: string[] = [];
+  const isEnrollments = trend.metric === 'enrollments';
+  if (!isEnrollments) notes.push(t.activeNote);
+  if (isEnrollments && insights.requestedGranularity && trend.granularity !== 'unknown') {
+    const requested = t.granularityWord[insights.requestedGranularity];
+    const shown = t.granularityWord[trend.granularity];
+    notes.push(insights.requestedGranularity === 'quarter'
+      ? t.requestedUnsupported({ requested, shown })
+      : t.requestedTooFine({ requested, shown, days: formatReportNumber(REPORT_SNAPSHOT_BUCKET_RULE.maxBuckets, locale) }));
+  }
+  if (isEnrollments && trend.granularity === 'week') notes.push(t.weekAxisNote);
+  if (trend.partialIndexes.length) notes.push(trend.granularity === 'month' ? t.partialMonthNote : t.partialWeekNote);
+  const anomaly = trend.anomaly;
+  if (anomaly) {
+    const first = trend.points[anomaly.indexes[0]];
+    notes.push(anomaly.kind === 'flat_tail'
+      ? t.flatTailNote({ count: formatReportNumber(anomaly.indexes.length, locale), value: formatReportNumber(anomaly.value, locale) })
+      : t.outlierNote({ when: formatReportBucketLabel(first.bucket, trend.granularity, locale, insights.period), value: formatReportNumber(anomaly.value, locale) }));
+  }
+  return notes;
+}
+
+function trendChart(trend: ReportTrendInsight | null, kind: 'area' | 'bars', insights: ReportInsights, locale: ReportPdfLocale, dict: ReportPdfDictionary, periodActiveLearners: number | null = null): ReportPdfTrendChart | null {
   if (!trend) return null;
   const granularity = trend.granularity;
+  const period = insights.period;
   const isEnrollments = trend.metric === 'enrollments';
   const legend: ReportPdfTrendChart['legend'] = [{ key: 'current', label: dict.trends.legendCurrent }];
   if (trend.previousPoints) legend.push({ key: 'previous', label: dict.trends.legendPrevious });
   else if (trend.previousAverage !== null) legend.push({ key: 'previousAverage', label: dict.trends.legendPreviousAverage });
   legend.push({ key: 'average', label: dict.trends.legendAverage });
-  const peakDate = trend.peak ? formatReportBucket(trend.peak.bucket, granularity, locale, false) : null;
+  if (trend.partialIndexes.length) legend.push({ key: 'partial', label: dict.trends.legendPartial });
+  if (trend.anomaly) legend.push({ key: 'flagged', label: dict.trends.legendFlagged });
+  const peakDate = trend.peak ? formatReportBucketLabel(trend.peak.bucket, granularity, locale, period) : null;
   const stats: ReportPdfTrendChart['stats'] = isEnrollments
     ? [
       { label: dict.trends.total, value: formatReportNumber(trend.total, locale), detail: null },
@@ -230,15 +284,17 @@ function trendChart(trend: ReportTrendInsight | null, kind: 'area' | 'bars', loc
     kind,
     granularity,
     values: trend.points.map((point) => point.value),
-    labels: trend.points.map((point) => formatReportBucket(point.bucket, granularity, locale, true)),
-    previousValues: trend.previousPoints?.map((point) => point.value) ?? null,
+    labels: trend.points.map((point) => formatReportBucketTick(point.bucket, granularity, locale, period)),
+    previousValues: trend.previousPoints?.map((point, index) => (trend.previousPartialIndexes.includes(index) ? null : point.value)) ?? null,
     previousAverage: trend.previousPoints ? null : trend.previousAverage,
     average: trend.mean,
     peakIndex: trend.peak?.index ?? null,
     peakLabel: trend.peak ? formatReportNumber(trend.peak.value, locale) : null,
+    partialIndexes: trend.partialIndexes,
+    flaggedIndexes: trend.anomaly?.indexes ?? [],
     legend,
     stats,
-    note: isEnrollments ? null : dict.trends.activeNote,
+    notes: trendNotes(trend, insights, locale, dict),
   };
 }
 
@@ -246,6 +302,11 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
   const n = (value: number | null) => (value === null ? dict.courses.notAvailable : formatReportNumber(value, locale));
   const pct = (value: number | null) => (value === null ? dict.courses.notAvailable : formatReportPercent(value, locale));
   const { courses, statusMix } = insights;
+  // The table keeps the ranking order and stops at REPORT_PDF_MAX_COURSE_ROWS; the Excel export has every course.
+  const shownRows = courses.rows.slice(0, REPORT_PDF_MAX_COURSE_ROWS);
+  const hiddenCourses = Math.max(0, (courses.totalCourses ?? courses.rows.length) - shownRows.length);
+  const totalEnrollments = insights.kpis.find((kpi) => kpi.id === 'total_enrollments')?.current ?? 0;
+  const shownShare = totalEnrollments > 0 ? (shownRows.reduce((sum, row) => sum + row.enrollments, 0) / totalEnrollments) * 100 : null;
   const status = statusMix ? (['completed', 'in_progress', 'not_started'] as const).map((key) => {
     const count = key === 'completed' ? statusMix.completed : key === 'in_progress' ? statusMix.inProgress : statusMix.notStarted;
     const ratio = count / statusMix.total;
@@ -270,6 +331,7 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
   return {
     status,
     statusTotal: statusMix ? formatReportNumber(statusMix.total, locale) : null,
+    statusNote: dict.courses.statusShareNote,
     concentration: courses.rows.slice(0, 5).map((row) => ({
       name: row.name,
       ratio: row.enrollments / maxEnrollments,
@@ -286,7 +348,7 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
     top: courses.topPerformers.map(ranked),
     low: courses.lowPerformers.map(ranked),
     minSampleNote: dict.courses.minSampleNote({ n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.minimumCourseSample, locale) }),
-    rows: courses.rows.map((row, index) => ({
+    rows: shownRows.map((row, index) => ({
       rank: index + 1,
       name: row.name,
       enrollments: n(row.enrollments),
@@ -298,8 +360,11 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
       share: pct(row.enrollmentShare),
       watch: row.watch,
     })),
-    portfolioLead: dict.courses.portfolioLead({ n: formatReportNumber(courses.rows.length, locale) }),
-    coverageNote: courses.coverageShare !== null && courses.truncated ? dict.courses.coverageNote({ share: formatReportPercent(courses.coverageShare, locale) }) : null,
+    portfolioLead: dict.courses.portfolioLead({ n: formatReportNumber(shownRows.length, locale) }),
+    portfolioLegend: dict.courses.portfolioLegend,
+    coverageNote: shownShare !== null && (hiddenCourses > 0 || courses.truncated) ? dict.courses.coverageNote({ share: formatReportPercent(shownShare, locale) }) : null,
+    moreCoursesNote: hiddenCourses > 0 ? dict.courses.moreCourses({ n: formatReportNumber(hiddenCourses, locale) })
+      : courses.truncated ? dict.courses.moreCoursesUnknown : null,
     legacy: snapshot.version !== 2,
   };
 }
@@ -307,11 +372,8 @@ function courseSection(insights: ReportInsights, locale: ReportPdfLocale, dict: 
 function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, dict: ReportPdfDictionary): ReportPdfViewModel['organization'] {
   const o = dict.organization;
   const units = insights.units;
-  if (!units) {
-    const note = insights.unitBreakdownState === 'missing' || insights.unitBreakdownState === 'invalid' ? o.breakdownMissing
-      : insights.unitBreakdownState === 'no_child_units' ? o.noChildUnits : null;
-    return { level: null, rows: [], unitCountLabel: null, note, footnotes: [] };
-  }
+  // Without units the section is left out; the appendix limitations say why.
+  if (!units) return { level: null, rows: [], unitCountLabel: null, footnotes: [] };
   // The colour scale spans real units only: an "others" or "not in any unit" row at 0 % must not
   // wash out the differences between units.
   const unitRates = units.rows.filter((row) => row.kind === 'unit').map((row) => row.completionRate);
@@ -324,7 +386,6 @@ function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, 
   return {
     level: dict.scope[units.level],
     unitCountLabel: o.unitCount({ n: n(units.unitCount) }),
-    note: null,
     footnotes: [
       `${o.heatLegend} ${o.deltaNote}`,
       o.learnersNote,
@@ -346,7 +407,7 @@ function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, 
   };
 }
 
-function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; dict: ReportPdfDictionary; narrative: ReportPdfNarrative; periodLabel: string; comparisonLabel: string | null; comparisonTitle: string; scopeLabel: string; generatedAtLabel: string; reference: string; templateVersion: string }): ReportPdfViewModel['appendix'] {
+function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; dict: ReportPdfDictionary; narrative: ReportPdfNarrative; periodLabel: string; comparisonLabel: string | null; comparisonTitle: string; scopeLabel: string; generatedAtLabel: string; reference: string; templateVersion: string }): Omit<ReportPdfViewModel['appendix'], 'methodRows'> {
   const { dict, locale } = input;
   const a = dict.appendix;
   const pct = (value: number) => formatReportPercent(value, locale);
@@ -378,7 +439,25 @@ function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; di
       a.methodology.stability({ countPct: pct(REPORT_INSIGHT_THRESHOLDS.stableCountDeltaPercent), ratePp: formatReportPercentagePoints(REPORT_INSIGHT_THRESHOLDS.stableRateDeltaPp, locale) }),
       a.methodology.sample({ n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.minimumCourseSample, locale) }),
       a.methodology.concentration({ share: pct(REPORT_INSIGHT_THRESHOLDS.concentrationShare) }),
-      a.methodology.activation({ share: pct(REPORT_INSIGHT_THRESHOLDS.activationNotStartedShare) }),
+      a.methodology.activation({
+        share: pct(REPORT_INSIGHT_THRESHOLDS.activationNotStartedShare),
+        n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.activationMinimumEnrollments, locale),
+        courseMin: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.minimumCourseSample, locale),
+      }),
+      a.methodology.percentChange({
+        base: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.percentChangeMinimumBase, locale),
+        max: pct(REPORT_INSIGHT_THRESHOLDS.percentChangeMaximum),
+        minEnrollments: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.rateChangeMinimumEnrollments, locale),
+      }),
+      a.methodology.buckets({
+        dayMax: formatReportNumber(REPORT_SNAPSHOT_BUCKET_RULE.autoDayMaxDays, locale),
+        weekMax: formatReportNumber(REPORT_SNAPSHOT_BUCKET_RULE.autoWeekMaxDays, locale),
+      }),
+      a.methodology.dataQuality({
+        n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.flatTailMinimumBuckets, locale),
+        value: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.flatTailMinimumValue, locale),
+        ratio: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.outlierRatio, locale),
+      }),
       a.methodology.anomaly({ sigma: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.anomalySigma, locale), n: formatReportNumber(REPORT_INSIGHT_THRESHOLDS.anomalyMinimumBuckets, locale) }),
       a.methodology.momentum({ pct: pct(REPORT_INSIGHT_THRESHOLDS.momentumChangePercent) }),
       a.methodology.signals({
@@ -396,6 +475,19 @@ function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; di
     ],
     limitations: insights.limitations.map((code) => a.limitations[code]),
   };
+}
+
+function withMethodRows(appendixData: Omit<ReportPdfViewModel['appendix'], 'methodRows'>, dict: ReportPdfDictionary): ReportPdfViewModel['appendix'] {
+  const a = dict.appendix;
+  // Limitations first: they qualify the figures of this report; the methodology is reference text.
+  const methodRows: ReportPdfViewModel['appendix']['methodRows'] = [
+    ...(appendixData.limitations.length
+      ? [{ kind: 'title' as const, text: a.limitationsTitle }, ...appendixData.limitations.map((text) => ({ kind: 'item' as const, text }))]
+      : []),
+    { kind: 'title', text: a.methodologyTitle },
+    ...appendixData.methodology.map((text) => ({ kind: 'item' as const, text })),
+  ];
+  return { ...appendixData, methodRows };
 }
 
 export function buildReportPdfViewModel(input: {
@@ -422,13 +514,14 @@ export function buildReportPdfViewModel(input: {
     .filter((fact) => TREND_OBSERVATION_IDS.has(fact.id))
     .sort((left, right) => right.priority - left.priority)
     .map((fact) => ({ text: describeReportFact(fact, insights, locale) ?? '', factIds: [fact.id], tone: fact.tone }))
-    .filter((item): item is ReportPdfNarrativeItem => Boolean(item.text));
+    .filter((item): item is ReportPdfNarrativeItem => Boolean(item.text))
+    .slice(0, MAX_TREND_OBSERVATIONS);
   const attention = insights.attention.slice(0, 6).map((item) => {
     const fact = insights.facts.find((candidate) => candidate.id === item.factId);
     const text = narrative.risks.find((risk) => risk.factIds.includes(item.factId))?.text ?? (fact ? describeReportFact(fact, insights, locale) : null);
     return text ? { severity: item.severity, severityLabel: dict.attention.severity[item.severity], title: dict.attention.titles[item.kind], text } : null;
   }).filter((item): item is ReportPdfAttentionCard => item !== null);
-  const base: Omit<ReportPdfViewModel, 'pages'> = {
+  const base: Omit<ReportPdfViewModel, 'pages' | 'sectionNumbers'> = {
     locale,
     available: insights.available,
     dict,
@@ -449,8 +542,8 @@ export function buildReportPdfViewModel(input: {
     coverKpis: ['completion_rate', 'total_enrollments', 'active_learners'].map((id) => kpis.find((kpi) => kpi.id === id)!),
     scorecardNote: dict.summary.scorecardNote({ suffix: dict.comparison[insights.comparisonBasis].suffix }),
     trends: {
-      enrollments: trendChart(insights.trends.enrollments, 'area', locale, dict),
-      active: trendChart(insights.trends.activeLearners, 'bars', locale, dict, insights.kpis.find((kpi) => kpi.id === 'active_learners')?.current ?? null),
+      enrollments: trendChart(insights.trends.enrollments, 'area', insights, locale, dict),
+      active: trendChart(insights.trends.activeLearners, 'bars', insights, locale, dict, insights.kpis.find((kpi) => kpi.id === 'active_learners')?.current ?? null),
       observations,
     },
     courses: courseSection(insights, locale, dict, snapshot),
@@ -475,9 +568,10 @@ export function buildReportPdfViewModel(input: {
       priorityLabel: dict.recommendations.priority[item.priority ?? 'medium'],
       fromChat: item.origin === 'chat',
     })),
-    appendix: appendix(insights, { locale, dict, narrative, periodLabel, comparisonLabel, comparisonTitle, scopeLabel, generatedAtLabel, reference, templateVersion }),
+    appendix: withMethodRows(appendix(insights, { locale, dict, narrative, periodLabel, comparisonLabel, comparisonTitle, scopeLabel, generatedAtLabel, reference, templateVersion }), dict),
   };
-  return { ...base, pages: planReportPdfPages(base) };
+  const numbered = { ...base, sectionNumbers: reportPdfSectionNumbers(base) };
+  return { ...numbered, pages: planReportPdfPages(numbered) };
 }
 
 /** Localized, ASCII-safe download file name. */

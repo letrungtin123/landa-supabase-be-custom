@@ -17,10 +17,10 @@ const ICON_DOWN = trusted('<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/200
 const ICON_FLAT = trusted('<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect fill="currentColor" x="1" y="4" width="8" height="2" rx="1"/></svg>');
 const ICON_CHECK = trusted('<svg viewBox="0 0 16 16" width="16" height="16" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="7" fill="currentColor" fill-opacity="0.15"/><path d="m4.8 8.2 2.2 2.2 4.4-4.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>');
 
-const SECTION_NUMBERS: Record<ReportPdfSectionId, string> = {
-  summary: '01', kpis: '01', trends: '02', courses: '03', portfolio: '03', organization: '04',
-  attention: '05', recommendations: '06', appendixDefinitions: 'A', appendixData: 'B',
-};
+/** Number of a section in this document (consecutive: an omitted section shifts the next ones). */
+function sectionNumber(model: ReportPdfViewModel, id: ReportPdfSectionId): string {
+  return model.sectionNumbers[id] ?? '';
+}
 
 function sectionHead(number: string, copy: { eyebrow: string; title: string }, lead?: string | null): SafeHtml {
   return html`<div class="section-head"><div class="eyebrow"><span class="num">${number}</span>${copy.eyebrow}</div><h2>${copy.title}</h2>${lead ? html`<p class="lead">${lead}</p>` : ''}</div>`;
@@ -36,6 +36,11 @@ function sliceRange(slice: ReportPdfSectionSlice, size: number): { from: number;
   return { from, to, first: from === 0, last: to >= size };
 }
 
+/** Plain notes of a KPI: how the Completion rate is computed, why a percentage is missing. */
+function cardNotes(card: ReportPdfKpiCard): SafeHtml {
+  return html`${card.deltaNote ? html`<div class="kpi-note">${card.deltaNote}</div>` : ''}${card.hint ? html`<div class="kpi-hint">${card.hint}</div>` : ''}`;
+}
+
 function deltaChip(card: ReportPdfKpiCard, model: ReportPdfViewModel): SafeHtml {
   if (!card.deltaLabel || !card.direction) return html`<span class="delta tone-neutral">${model.dict.kpi.notComparableShort}</span>`;
   const icon = card.direction === 'up' ? ICON_UP : card.direction === 'down' ? ICON_DOWN : ICON_FLAT;
@@ -47,8 +52,9 @@ export function renderCover(model: ReportPdfViewModel): SafeHtml {
   const chips = model.scopePath.length
     ? model.scopePath.map((item) => html`<span class="chip"><span>${item.level}</span><b>${item.name}</b></span>`)
     : [html`<span class="chip"><span>${dict.cover.scope}</span><b>${dict.scope.all}</b></span>`];
+  // The logo sits on a light badge: a dark logo stays readable on the dark cover, without recolouring it.
   const tenantMark = model.tenant.logoDataUri
-    ? html`<img src="${model.tenant.logoDataUri}" alt=""><span class="tenant-name">${model.tenant.name}</span>`
+    ? html`<span class="logo-badge"><img src="${model.tenant.logoDataUri}" alt=""></span><span class="tenant-name">${model.tenant.name}</span>`
     : html`<span class="tenant-name">${model.tenant.name}</span>`;
   return html`<section class="page cover">
   <div class="hero">${renderCoverArt()}
@@ -63,7 +69,7 @@ export function renderCover(model: ReportPdfViewModel): SafeHtml {
   <div class="body" data-fit>
     <div>
       <div class="glance-title">${dict.cover.atAGlance}</div>
-      <div class="glance" style="margin-top:3mm">${model.coverKpis.map((card) => html`<div class="item"><div class="label">${card.label}</div><div class="value">${card.value}</div>${deltaChip(card, model)}</div>`)}</div>
+      <div class="glance" style="margin-top:3mm">${model.coverKpis.map((card) => html`<div class="item"><div class="label">${card.label}</div><div class="value">${card.value}</div>${deltaChip(card, model)}${cardNotes(card)}</div>`)}</div>
     </div>
     <dl class="meta">
       <div><dt>${dict.cover.period}</dt><dd>${model.periodLabel}</dd></div>
@@ -87,7 +93,7 @@ function renderSummary(model: ReportPdfViewModel): SafeHtml {
   const commentary = narrative.commentary.length
     ? html`<div class="commentary"><div class="label">${dict.summary.commentary}</div><ul>${narrative.commentary.map((text) => html`<li>${text}</li>`)}</ul></div>`
     : '';
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.summary, dict.sections.summary)}
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'summary'), dict.sections.summary)}
   <div class="headline-card tone-${narrative.headline.tone}"><p>${renderNarrativeText(narrative.headline.text, model.entities)}</p></div>
   <h3>${dict.summary.keyFindings}</h3>${findings}${commentary}</section>`;
 }
@@ -98,6 +104,7 @@ function renderKpis(model: ReportPdfViewModel): SafeHtml {
     <div class="kpi-value">${card.value}</div>
     <div class="kpi-row">${deltaChip(card, model)}</div>
     <div class="kpi-prev" style="margin-top:1.2mm">${card.previousLabel}</div>
+    ${cardNotes(card)}
     ${card.spark ? renderSparkline(card.spark, card.tone === 'negative' ? 'negative' : card.tone === 'positive' ? 'positive' : 'neutral') : ''}
   </div>`);
   return html`<section class="section"><div class="card-head" style="margin-bottom:0"><h3>${model.dict.summary.scorecard}</h3></div>
@@ -106,26 +113,32 @@ function renderKpis(model: ReportPdfViewModel): SafeHtml {
 
 function trendCard(chart: ReportPdfTrendChart, model: ReportPdfViewModel): SafeHtml {
   const format = (value: number) => formatReportNumber(value, model.locale, Number.isInteger(value) ? 0 : 1);
-  const legend = chart.legend.map((item) => html`<span class="key"><i class="swatch ${chart.kind === 'bars' && item.key === 'current' ? 'bars' : item.key}"></i>${item.label}</span>`);
+  const legend = chart.legend.map((item) => html`<span class="key"><i class="swatch ${chart.kind === 'bars' && ['current', 'partial', 'flagged'].includes(item.key) ? `bars ${item.key}` : item.key}"></i>${item.label}</span>`);
   const svg = chart.kind === 'area'
-    ? renderAreaTrendChart({ ...chart, format, height: 210 })
-    : renderBarTrendChart({ ...chart, format, height: 180 });
+    ? renderAreaTrendChart({ ...chart, format, height: 186 })
+    : renderBarTrendChart({ ...chart, format, height: 156 });
   return html`<div class="card chart-card">
     <div class="card-head"><h3>${chart.title}</h3><div class="legend">${legend}</div></div>
     ${svg}
     <div class="stat-strip">${chart.stats.map((stat) => html`<div class="stat"><div class="label">${stat.label}</div><div class="value">${stat.value}</div>${stat.detail ? html`<div class="detail">${stat.detail}</div>` : ''}</div>`)}</div>
-    ${chart.note ? html`<p class="note" style="margin-top:2mm">${chart.note}</p>` : ''}
+    ${chart.notes.length ? html`<div class="chart-notes">${chart.notes.map((text) => html`<p class="note">${text}</p>`)}</div>` : ''}
   </div>`;
 }
 
 function renderTrends(model: ReportPdfViewModel): SafeHtml {
   const { dict, trends } = model;
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'trends'), dict.sections.trends)}
+  ${trends.enrollments ? trendCard(trends.enrollments, model) : html`<div class="empty">${dict.trends.noTrend}</div>`}
+  ${trends.active ? trendCard(trends.active, model) : ''}</section>`;
+}
+
+/** Trend observations: right under the charts, or at the top of the next page with a "continued" heading. */
+function renderTrendObservations(model: ReportPdfViewModel, _slice: ReportPdfSectionSlice, context: SectionContext): SafeHtml {
+  const { dict, trends } = model;
   const observations = trends.observations.length
     ? html`<ul class="observations">${trends.observations.map((item) => html`<li class="tone-${item.tone}">${renderNarrativeText(item.text, model.entities)}</li>`)}</ul>`
     : html`<p class="note">${dict.trends.noObservations}</p>`;
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.trends, dict.sections.trends)}
-  ${trends.enrollments ? trendCard(trends.enrollments, model) : html`<div class="empty">${dict.trends.noTrend}</div>`}
-  ${trends.active ? trendCard(trends.active, model) : ''}
+  return html`<section class="section">${context.firstOnPage ? continuedHead(sectionNumber(model, 'trends'), dict.sections.trends, dict.meta.continued) : ''}
   <div><h3 style="margin-bottom:2mm">${dict.trends.observations}</h3>${observations}</div></section>`;
 }
 
@@ -142,9 +155,9 @@ function renderCourses(model: ReportPdfViewModel): SafeHtml {
   const ranked = (items: typeof courses.top, kind: 'top' | 'low') => (items.length
     ? html`<div class="ranked ${kind}">${items.map((item) => html`<div class="item"><div><div class="name">${item.name}</div><div class="detail">${item.detail}</div></div><div class="rate">${item.rateLabel}</div></div>`)}</div>`
     : html`<div class="empty">${dict.courses.noRankable}</div>`);
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.courses, dict.sections.courses)}
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'courses'), dict.sections.courses)}
   <div class="grid-2">
-    <div class="card status-card"><div class="card-head"><h3>${dict.courses.statusTitle}</h3></div>${status}</div>
+    <div class="card status-card"><div class="card-head"><h3>${dict.courses.statusTitle}</h3></div>${status}${courses.status ? html`<p class="note status-note">${courses.statusNote}</p>` : ''}</div>
     <div class="card"><div class="card-head"><h3>${dict.courses.concentrationTitle}</h3></div>${concentration}</div>
   </div>
   <div class="grid-2">
@@ -167,13 +180,13 @@ function renderPortfolio(model: ReportPdfViewModel, slice: ReportPdfSectionSlice
     <td class="rate"><div class="cell"><div class="track"><i style="width:${num(Math.max(row.rate, 1), 1)}%"></i></div><span class="label">${row.rateLabel}</span></div></td>
     <td class="num">${row.share}</td></tr>`);
   const head = range.first
-    ? sectionHead(SECTION_NUMBERS.portfolio, dict.sections.portfolio, courses.portfolioLead)
-    : continuedHead(SECTION_NUMBERS.portfolio, dict.sections.portfolio, dict.meta.continued);
+    ? sectionHead(sectionNumber(model, 'portfolio'), dict.sections.portfolio, courses.portfolioLead)
+    : continuedHead(sectionNumber(model, 'portfolio'), dict.sections.portfolio, dict.meta.continued);
   return html`<section class="section">${head}
   <table class="portfolio"><colgroup><col style="width:7mm"><col><col style="width:14mm"><col style="width:15mm"><col style="width:14mm"><col style="width:15mm"><col style="width:31mm"><col style="width:13mm"></colgroup>
   <thead><tr><th>${c.rank}</th><th>${c.course}</th><th class="num">${c.enrollments}</th><th class="num">${c.completed}</th><th class="num">${c.inProgress}</th><th class="num">${c.notStarted}</th><th>${c.completionRate}</th><th class="num">${c.share}</th></tr></thead>
   <tbody>${rows}</tbody></table>
-  ${range.last && courses.coverageNote ? html`<p class="note">${courses.coverageNote}</p>` : ''}</section>`;
+  ${range.last ? html`<div class="table-notes">${courses.moreCoursesNote ? html`<p class="more-courses">${courses.moreCoursesNote}</p>` : ''}${courses.coverageNote ? html`<p class="note">${courses.coverageNote}</p>` : ''}<p class="note">${courses.portfolioLegend}</p></div>` : ''}</section>`;
 }
 
 function renderOrganization(model: ReportPdfViewModel, slice: ReportPdfSectionSlice): SafeHtml {
@@ -192,12 +205,10 @@ function renderOrganization(model: ReportPdfViewModel, slice: ReportPdfSectionSl
       ${range.last && organization.footnotes.length ? html`<div class="footnotes">${organization.footnotes.map((text) => html`<p class="note">${text}</p>`)}</div>` : ''}</div>`
     : '';
   if (!range.first) {
-    return html`<section class="section">${continuedHead(SECTION_NUMBERS.organization, dict.sections.organization, dict.meta.continued)}${breakdown}</section>`;
+    return html`<section class="section">${continuedHead(sectionNumber(model, 'organization'), dict.sections.organization, dict.meta.continued)}${breakdown}</section>`;
   }
-  // No note for a team scope: there is nothing below a team to break down.
-  const note = organization.note ? html`<p class="note" style="margin-top:3mm">${organization.note}</p>` : '';
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.organization, dict.sections.organization)}
-  <div class="card soft"><div class="card-head"><h3>${o.scopeTitle}</h3></div>${path}${note}</div>${breakdown}</section>`;
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'organization'), dict.sections.organization)}
+  <div class="card soft"><div class="card-head"><h3>${o.scopeTitle}</h3></div>${path}</div>${breakdown}</section>`;
 }
 
 function renderAttention(model: ReportPdfViewModel): SafeHtml {
@@ -213,12 +224,12 @@ function renderAttention(model: ReportPdfViewModel): SafeHtml {
       <tbody>${model.watchlist.rows.map((row) => html`<tr><td class="name"><div class="clamp">${row.name}</div></td><td class="num">${row.enrollments}</td><td class="num">${row.notStarted}</td>
         <td class="rate"><div class="cell"><div class="track warm"><i style="width:${num(Math.max(row.rate, 1), 1)}%"></i></div><span class="label">${row.rateLabel}</span></div></td></tr>`)}</tbody></table></div>`
     : '';
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.attention, dict.sections.attention)}${body}${watch}</section>`;
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'attention'), dict.sections.attention)}${body}${watch}</section>`;
 }
 
 function renderRecommendations(model: ReportPdfViewModel): SafeHtml {
   const { dict } = model;
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.recommendations, dict.sections.recommendations)}
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'recommendations'), dict.sections.recommendations)}
   <ol class="recs">${model.recommendations.map((item, index) => html`<li class="rec"><span class="no">${index + 1}</span><div>
     <div class="meta"><span class="prio prio-${item.priority}">${item.priorityLabel}</span>${item.fromChat ? html`<span class="from-chat">${dict.recommendations.fromChat}</span>` : ''}</div>
     <p>${renderNarrativeText(item.text, model.entities)}</p></div></li>`)}</ol></section>`;
@@ -227,7 +238,7 @@ function renderRecommendations(model: ReportPdfViewModel): SafeHtml {
 function renderAppendixDefinitions(model: ReportPdfViewModel): SafeHtml {
   const { dict } = model;
   const a = dict.appendix;
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.appendixDefinitions, dict.sections.appendix)}
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'appendixDefinitions'), dict.sections.appendix)}
   <div><h3 style="margin-bottom:1.5mm">${a.definitionsTitle}</h3>
   <table class="defs"><tbody>${model.appendix.definitions.map((row) => html`<tr><td class="term">${row.label}</td><td>${row.text}</td></tr>`)}</tbody></table></div>
   <div class="formula"><h3>${a.formulaTitle}</h3>
@@ -240,16 +251,30 @@ function renderAppendixDefinitions(model: ReportPdfViewModel): SafeHtml {
 function renderAppendixData(model: ReportPdfViewModel): SafeHtml {
   const { dict } = model;
   const a = dict.appendix;
-  return html`<section class="section">${sectionHead(SECTION_NUMBERS.appendixData, dict.sections.appendixData)}
-  <div><h3 style="margin-bottom:1.5mm">${a.scopeTitle}</h3><table class="kv"><tbody>${model.appendix.scopeRows.map((row) => html`<tr><td class="key">${row.label}</td><td>${row.value}</td></tr>`)}</tbody></table></div>
-  <div><h3 style="margin-bottom:2mm">${a.methodologyTitle}</h3><ul class="bullets">${model.appendix.methodology.map((text) => html`<li>${text}</li>`)}</ul></div>
-  ${model.appendix.limitations.length ? html`<div><h3 style="margin-bottom:2mm">${a.limitationsTitle}</h3><ul class="bullets">${model.appendix.limitations.map((text) => html`<li>${text}</li>`)}</ul></div>` : ''}</section>`;
+  return html`<section class="section">${sectionHead(sectionNumber(model, 'appendixData'), dict.sections.appendixData)}
+  <div><h3 style="margin-bottom:1.5mm">${a.scopeTitle}</h3><table class="kv"><tbody>${model.appendix.scopeRows.map((row) => html`<tr><td class="key">${row.label}</td><td>${row.value}</td></tr>`)}</tbody></table></div></section>`;
 }
 
-const RENDERERS: Record<ReportPdfSectionId, (model: ReportPdfViewModel, slice: ReportPdfSectionSlice) => SafeHtml> = {
+/** Methodology and limitations: rows that fill the page under the scope table and continue on the next one. */
+function renderAppendixMethods(model: ReportPdfViewModel, slice: ReportPdfSectionSlice, context: SectionContext): SafeHtml {
+  const { dict } = model;
+  const rows = model.appendix.methodRows;
+  const range = sliceRange(slice, rows.length);
+  const body = rows.slice(range.from, range.to).map((row, offset) => (row.kind === 'title'
+    ? html`<h3 class="flow-title" data-measure="row:appendixMethods:${range.from + offset}">${row.text}</h3>`
+    : html`<p class="flow-item" data-measure="row:appendixMethods:${range.from + offset}">${row.text}</p>`));
+  return html`<section class="section">${context.firstOnPage ? continuedHead(sectionNumber(model, 'appendixMethods'), dict.sections.appendixData, dict.meta.continued) : ''}
+  <div class="flow-rows">${body}</div></section>`;
+}
+
+/** Where a section is printed: flow text gets a "continued" heading at the top of a page. */
+interface SectionContext { firstOnPage: boolean }
+
+const RENDERERS: Record<ReportPdfSectionId, (model: ReportPdfViewModel, slice: ReportPdfSectionSlice, context: SectionContext) => SafeHtml> = {
   summary: renderSummary,
   kpis: renderKpis,
   trends: renderTrends,
+  trendObservations: renderTrendObservations,
   courses: renderCourses,
   portfolio: renderPortfolio,
   organization: renderOrganization,
@@ -257,10 +282,12 @@ const RENDERERS: Record<ReportPdfSectionId, (model: ReportPdfViewModel, slice: R
   recommendations: renderRecommendations,
   appendixDefinitions: renderAppendixDefinitions,
   appendixData: renderAppendixData,
+  appendixMethods: renderAppendixMethods,
 };
 
-export function renderReportPdfSection(model: ReportPdfViewModel, slice: ReportPdfSectionSlice): SafeHtml {
-  return RENDERERS[slice.id](model, slice);
+/** Renders one section alone (measurement pass); `firstOnPage` adds the "continued" heading of flow text. */
+export function renderReportPdfSection(model: ReportPdfViewModel, slice: ReportPdfSectionSlice, context: SectionContext = { firstOnPage: false }): SafeHtml {
+  return RENDERERS[slice.id](model, slice, context);
 }
 
 export function renderContentPage(model: ReportPdfViewModel, sections: ReportPdfSectionSlice[], pageNumber: number, totalPages: number): SafeHtml {
@@ -271,7 +298,7 @@ export function renderContentPage(model: ReportPdfViewModel, sections: ReportPdf
   const sectionList = sections.map((slice) => (slice.from === undefined ? slice.id : `${slice.id}[${slice.from}-${slice.to}]`)).join(' ');
   return html`<section class="page" data-sections="${sectionList}">
   <header class="page-header"><div class="brandline">${brand}<span class="sep"></span><span class="doc">${model.title}</span></div><span class="period">${model.periodLabel}</span></header>
-  <div class="page-body">${sections.map((slice) => RENDERERS[slice.id](model, slice))}</div>
+  <div class="page-body">${sections.map((slice, index) => RENDERERS[slice.id](model, slice, { firstOnPage: index === 0 }))}</div>
   <footer class="page-footer"><span class="confidential">${ICON_LOCK}${dict.meta.confidentialFooter}</span><span>${dict.meta.dataAsOf({ date: model.generatedAtLabel })}</span><span class="page-no">${dict.meta.page({ current: String(pageNumber), total: String(totalPages) })}</span></footer>
 </section>`;
 }

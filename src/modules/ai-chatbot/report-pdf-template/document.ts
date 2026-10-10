@@ -33,7 +33,14 @@ export function renderReportPdfHtml(model: ReportPdfViewModel, options: { fontCs
  */
 export function renderReportPdfMeasureHtml(model: Omit<ReportPdfViewModel, 'pages'>, options: { fontCss?: string } = {}): string {
   const full = { ...model, pages: [] } as ReportPdfViewModel;
-  const blocks = reportPdfSectionOrder(model).map((id) => `<div data-measure="section:${id}">${renderReportPdfSection(full, { id }).value}</div>`);
+  const blocks = reportPdfSectionOrder(model).map((id) => `<div data-measure="section:${id}">${renderReportPdfSection(full, { id }, { firstOnPage: false }).value}</div>`);
+  const order = reportPdfSectionOrder(model);
+  if (order.includes('trendObservations')) {
+    blocks.push(`<div data-measure="first:trendObservations">${renderReportPdfSection(full, { id: 'trendObservations' }, { firstOnPage: true }).value}</div>`);
+  }
+  // Heading of appendix rows that continue on a new page.
+  const methodRows = model.appendix.methodRows.length;
+  blocks.push(`<div data-measure="cont:appendixMethods">${renderReportPdfSection(full, { id: 'appendixMethods', from: methodRows, to: methodRows }, { firstOnPage: true }).value}</div>`);
   blocks.push(`<div data-measure="cont:portfolio">${renderReportPdfSection(full, { id: 'portfolio', from: model.courses.rows.length, to: model.courses.rows.length }).value}</div>`);
   if (model.organization.rows.length) {
     blocks.push(`<div data-measure="cont:organization">${renderReportPdfSection(full, { id: 'organization', from: model.organization.rows.length, to: model.organization.rows.length }).value}</div>`);

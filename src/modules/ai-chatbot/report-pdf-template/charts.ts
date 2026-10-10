@@ -31,11 +31,15 @@ export function pickReportChartTickIndexes(size: number, maxTicks = 7): number[]
 interface TrendChartInput {
   values: number[];
   labels: string[];
-  previousValues: number[] | null;
+  previousValues: Array<number | null> | null;
   previousAverage: number | null;
   average: number;
   peakIndex: number | null;
   peakLabel: string | null;
+  /** Weeks/months cut by the period: drawn lighter. */
+  partialIndexes?: number[];
+  /** Buckets flagged by the data check: drawn in orange. */
+  flaggedIndexes?: number[];
   format: Formatter;
   width?: number;
   height?: number;
@@ -76,15 +80,25 @@ function peakMarker(input: { x: number; y: number; label: string; width: number 
  * Comparison series aligned with the current one by bucket index (day 1 with
  * day 1...): points past the current series' length are not drawn.
  */
-function alignedPreviousValues(input: Pick<TrendChartInput, 'values' | 'previousValues'>): number[] {
-  return (input.previousValues ?? []).slice(0, input.values.length).map((value) => (Number.isFinite(value) ? value : 0));
+function alignedPreviousValues(input: Pick<TrendChartInput, 'values' | 'previousValues'>): Array<number | null> {
+  return (input.previousValues ?? []).slice(0, input.values.length).map((value) => (value === null ? null : Number.isFinite(value) ? value : 0));
 }
 
-/** Dashed comparison line: one point per bucket, or a level line for a single bucket. */
-function previousSeries(values: number[], xFor: (index: number) => number, yFor: (value: number) => number, width: number): string {
-  if (values.length === 1) return referenceLine({ value: values[0], width, yFor, className: 'line-previous' });
-  return values.length > 1
-    ? `<path class="line-previous" d="${values.map((value, index) => `${index ? 'L' : 'M'}${num(xFor(index))} ${num(yFor(value))}`).join(' ')}"/>` : '';
+/**
+ * Dashed comparison line: one point per bucket (a gap where a bucket is not
+ * comparable), or a level line for a single bucket.
+ */
+function previousSeries(values: Array<number | null>, xFor: (index: number) => number, yFor: (value: number) => number, width: number): string {
+  const known = values.filter((value): value is number => value !== null);
+  if (values.length === 1 && known.length === 1) return referenceLine({ value: known[0], width, yFor, className: 'line-previous' });
+  let path = '';
+  let open = false;
+  values.forEach((value, index) => {
+    if (value === null) { open = false; return; }
+    path += `${path ? ' ' : ''}${open ? 'L' : 'M'}${num(xFor(index))} ${num(yFor(value))}`;
+    open = true;
+  });
+  return known.length > 1 ? `<path class="line-previous" d="${path}"/>` : '';
 }
 
 /** Area/line chart of the current period with the comparison series or average. */
@@ -94,7 +108,7 @@ export function renderAreaTrendChart(input: TrendChartInput): SafeHtml {
   const plotWidth = width - PAD.left - PAD.right;
   const plotHeight = height - PAD.top - PAD.bottom;
   const previousValues = alignedPreviousValues(input);
-  const all = [...input.values, ...previousValues, input.previousAverage ?? 0, input.average];
+  const all = [...input.values, ...previousValues.filter((value): value is number => value !== null), input.previousAverage ?? 0, input.average];
   const scale = niceReportChartScale(Math.max(...all));
   const xFor = (index: number) => PAD.left + (input.values.length <= 1 ? plotWidth / 2 : (index * plotWidth) / (input.values.length - 1));
   const yFor = (value: number) => PAD.top + plotHeight - (value / scale.max) * plotHeight;
@@ -106,13 +120,20 @@ export function renderAreaTrendChart(input: TrendChartInput): SafeHtml {
   const previousAverage = input.previousAverage !== null ? referenceLine({ value: input.previousAverage, width, yFor, className: 'line-previous-average' }) : '';
   const average = referenceLine({ value: input.average, width, yFor, className: 'line-average' });
   const single = points.length === 1 ? `<circle class="point" cx="${num(points[0][0])}" cy="${num(points[0][1])}" r="3.6"/>` : '';
+  const flagged = new Set(input.flaggedIndexes ?? []);
+  const marks = [
+    ...(input.partialIndexes ?? []).filter((index) => points[index] && !flagged.has(index))
+      .map((index) => `<circle class="point-partial" cx="${num(points[index][0])}" cy="${num(points[index][1])}" r="3.4"/>`),
+    ...[...flagged].filter((index) => points[index])
+      .map((index) => `<circle class="point-flagged" cx="${num(points[index][0])}" cy="${num(points[index][1])}" r="3.6"/>`),
+  ].join('');
   const peak = input.peakIndex !== null && input.peakLabel && points[input.peakIndex]
     ? peakMarker({ x: points[input.peakIndex][0], y: points[input.peakIndex][1], label: input.peakLabel, width }) : '';
   return trusted(`<svg class="chart" viewBox="0 0 ${width} ${height}" role="img" xmlns="http://www.w3.org/2000/svg">`
     + '<defs><linearGradient id="areaFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="#2F5BEA" stop-opacity="0.26"/><stop offset="100%" stop-color="#2F5BEA" stop-opacity="0.02"/></linearGradient></defs>'
     + axes({ width, height, scale, labels: input.labels, xFor: (index) => xFor(index), format: input.format })
     + area + previousAverage + average + previous
-    + (points.length > 1 ? `<path class="line-current" d="${line}"/>` : '') + single + peak
+    + (points.length > 1 ? `<path class="line-current" d="${line}"/>` : '') + single + marks + peak
     + '</svg>');
 }
 
@@ -123,15 +144,18 @@ export function renderBarTrendChart(input: TrendChartInput): SafeHtml {
   const plotWidth = width - PAD.left - PAD.right;
   const plotHeight = height - PAD.top - PAD.bottom;
   const previousValues = alignedPreviousValues(input);
-  const scale = niceReportChartScale(Math.max(...input.values, ...previousValues, input.average, input.previousAverage ?? 0));
+  const scale = niceReportChartScale(Math.max(...input.values, ...previousValues.filter((value): value is number => value !== null), input.average, input.previousAverage ?? 0));
   const slot = plotWidth / Math.max(1, input.values.length);
   const barWidth = Math.max(2, Math.min(28, slot * 0.64));
   const xFor = (index: number) => PAD.left + slot * index + slot / 2;
   const yFor = (value: number) => PAD.top + plotHeight - (value / scale.max) * plotHeight;
+  const partial = new Set(input.partialIndexes ?? []);
+  const flagged = new Set(input.flaggedIndexes ?? []);
   const bars = input.values.map((value, index) => {
     const y = yFor(value);
     const barHeight = Math.max(value > 0 ? 1.2 : 0, yFor(0) - y);
-    return `<rect class="bar${index === input.peakIndex ? ' bar-peak' : ''}" x="${num(xFor(index) - barWidth / 2)}" y="${num(yFor(0) - barHeight)}" width="${num(barWidth)}" height="${num(barHeight)}" rx="${num(Math.min(3, barWidth / 3))}"/>`;
+    const state = flagged.has(index) ? ' bar-flagged' : index === input.peakIndex ? ' bar-peak' : partial.has(index) ? ' bar-partial' : '';
+    return `<rect class="bar${state}" x="${num(xFor(index) - barWidth / 2)}" y="${num(yFor(0) - barHeight)}" width="${num(barWidth)}" height="${num(barHeight)}" rx="${num(Math.min(3, barWidth / 3))}"/>`;
   }).join('');
   const average = referenceLine({ value: input.average, width, yFor, className: 'line-average' });
   // Comparison period over the bars, one point per bucket, or its average.

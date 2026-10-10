@@ -59,7 +59,9 @@ h3 { font-size: 10.5pt; line-height: 1.3; font-weight: 700; color: var(--ink); }
 .cover .cover-art { position: absolute; inset: 0; width: 100%; height: 100%; }
 .cover .hero-top { position: absolute; top: 15mm; left: 18mm; right: 18mm; display: flex; justify-content: space-between; align-items: center; }
 .cover .tenant-mark { display: flex; align-items: center; gap: 3mm; font-size: 11pt; font-weight: 700; letter-spacing: 0.01em; max-width: 120mm; }
-.cover .tenant-mark img { height: 9mm; max-width: 60mm; object-fit: contain; }
+.cover .tenant-mark .logo-badge { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; padding: 1.6mm 3mm;
+  border-radius: 2.6mm; background: #FFFFFF; box-shadow: 0 0.6mm 2.4mm rgba(4, 12, 40, 0.28); }
+.cover .tenant-mark img { display: block; height: 9mm; max-width: 60mm; object-fit: contain; }
 .cover .tenant-mark .tenant-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cover .badge-confidential { display: inline-flex; align-items: center; gap: 1.6mm; padding: 1.4mm 3.2mm; border-radius: 4mm;
   border: 0.8pt solid rgba(255,255,255,0.55); font-size: 8pt; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; }
@@ -79,6 +81,7 @@ h3 { font-size: 10.5pt; line-height: 1.3; font-weight: 700; color: var(--ink); }
 .cover .glance .item { border-left: 1mm solid var(--brand); padding: 1mm 0 1mm 3.5mm; }
 .cover .glance .label { font-size: 8.4pt; color: var(--muted); font-weight: 600; }
 .cover .glance .value { font-size: 20pt; font-weight: 800; color: var(--ink); line-height: 1.2; }
+.cover .glance .kpi-note, .cover .glance .kpi-hint { margin-top: 1.2mm; }
 .cover .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm 6mm; padding-top: 5mm; border-top: 0.6pt solid var(--line); }
 .cover .meta dt { font-size: 8pt; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 .cover .meta dd { font-size: 9.5pt; font-weight: 600; color: var(--ink); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; word-break: break-word; }
@@ -114,12 +117,14 @@ h3 { font-size: 10.5pt; line-height: 1.3; font-weight: 700; color: var(--ink); }
 .commentary li { font-size: 9.5pt; color: var(--text); padding-left: 3.5mm; position: relative; }
 .commentary li::before { content: ''; position: absolute; left: 0; top: 2.2mm; width: 1.4mm; height: 1.4mm; border-radius: 50%; background: var(--faint); }
 .kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; }
-.kpi { position: relative; height: 36mm; border: 0.7pt solid var(--line); border-radius: 3.2mm; padding: 3.6mm 4mm; display: flex; flex-direction: column; overflow: hidden; }
+.kpi { position: relative; min-height: 36mm; border: 0.7pt solid var(--line); border-radius: 3.2mm; padding: 3.6mm 4mm; display: flex; flex-direction: column; overflow: hidden; }
 .kpi > * { flex-shrink: 0; }
 .kpi .kpi-label { font-size: 7.8pt; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); line-height: 1.35; height: 2.75em; overflow: hidden; padding-right: 1mm; }
 .kpi .kpi-value { font-size: 20pt; font-weight: 800; color: var(--ink); line-height: 1.15; letter-spacing: -0.01em; }
 .kpi .kpi-row { display: flex; align-items: center; gap: 2mm; margin-top: 1mm; }
 .kpi .kpi-prev { font-size: 8pt; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-note { font-size: 7.4pt; line-height: 1.35; color: var(--warn); font-weight: 600; margin-top: 0.8mm; }
+.kpi-hint { font-size: 7.4pt; line-height: 1.35; color: var(--muted); margin-top: 0.8mm; }
 .kpi .spark { position: absolute; right: 4mm; top: 12.5mm; width: 22mm; height: 8mm; }
 .spark-line { fill: none; stroke: var(--brand); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .spark-area { fill: var(--brand); fill-opacity: 0.08; stroke: none; }
@@ -130,13 +135,18 @@ h3 { font-size: 10.5pt; line-height: 1.3; font-weight: 700; color: var(--ink); }
 /* ── Charts ── */
 .chart-card { padding: 4.5mm 5mm 4mm; }
 .chart-card .card-head h3 { font-size: 10.5pt; }
-.legend { display: flex; gap: 4mm; font-size: 8pt; color: var(--muted); white-space: nowrap; }
+.legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 1mm 4mm; font-size: 8pt; color: var(--muted); white-space: nowrap; }
+.chart-card .card-head h3 { flex: 0 0 auto; white-space: nowrap; }
 .legend .key { display: inline-flex; align-items: center; gap: 1.4mm; }
 .legend .swatch { width: 5mm; height: 0; border-top: 2pt solid var(--brand); }
 .legend .swatch.previous { border-top: 1.6pt dashed var(--faint); }
 .legend .swatch.previousAverage { border-top: 1.6pt dashed #7B8AA3; }
 .legend .swatch.average { border-top: 1.4pt dotted var(--brand-strong); }
 .legend .swatch.bars { width: 3mm; height: 3mm; border: none; border-radius: 0.8mm; background: #8FA9F5; }
+.legend .swatch.partial { width: 2.6mm; height: 2.6mm; border: 1.2pt solid var(--brand); border-radius: 50%; background: #FFFFFF; }
+.legend .swatch.flagged { width: 2.6mm; height: 2.6mm; border: none; border-radius: 50%; background: #E07B12; }
+.legend .swatch.bars.partial { border-radius: 0.8mm; border: 0.8pt dashed #6F8FE8; background: #DCE5FC; }
+.legend .swatch.bars.flagged { border-radius: 0.8mm; background: #F0A54A; }
 svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
 svg.chart text { font-family: '${REPORT_PDF_FONT_FAMILY}', sans-serif; }
 .grid { stroke: var(--line); stroke-width: 0.8; }
@@ -153,6 +163,12 @@ svg.chart text { font-family: '${REPORT_PDF_FONT_FAMILY}', sans-serif; }
 .peak-text { font-size: 10.5px; font-weight: 700; fill: #FFFFFF; }
 .bar { fill: #9DB4F6; }
 .bar-peak { fill: var(--brand); }
+.bar-partial { fill: #DCE5FC; stroke: #6F8FE8; stroke-width: 0.8; stroke-dasharray: 2 1.5; }
+.bar-flagged { fill: #F0A54A; }
+.point-partial { fill: #FFFFFF; stroke: var(--brand); stroke-width: 1.6; }
+.point-flagged { fill: #E07B12; stroke: #FFFFFF; stroke-width: 1.2; }
+.chart-notes { margin-top: 2mm; display: flex; flex-direction: column; gap: 0.6mm; }
+.chart-notes .note { font-size: 7.8pt; line-height: 1.4; }
 .stat-strip { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 0; margin-top: 3mm; border-top: 0.6pt solid var(--line); padding-top: 3mm; }
 .stat { padding: 0 3.5mm; border-left: 0.6pt solid var(--line); }
 .stat:first-child { border-left: none; padding-left: 0; }
@@ -182,6 +198,7 @@ svg.donut { width: 36mm; height: 36mm; display: block; }
 .status-legend .name { font-size: 9pt; color: var(--muted); line-height: 1.3; }
 .status-legend .figures { font-size: 11pt; font-weight: 800; color: var(--ink); white-space: nowrap; line-height: 1.3; }
 .status-legend .figures span { color: var(--muted); font-weight: 500; margin-left: 1.5mm; }
+.status-note { margin-top: 2.6mm; }
 .bars { display: flex; flex-direction: column; gap: 2.4mm; }
 .bar-row .top { display: flex; justify-content: space-between; gap: 3mm; font-size: 9pt; }
 .bar-row .name { color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; line-height: 1.35; }
@@ -209,6 +226,8 @@ th.num, td.num { text-align: right; }
 td.num { font-weight: 600; color: var(--ink); white-space: nowrap; }
 td.rank { color: var(--faint); font-weight: 700; }
 td.name .clamp { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; font-weight: 600; color: var(--ink); }
+.table-notes { display: flex; flex-direction: column; gap: 1mm; margin-top: -1.5mm; }
+.table-notes .more-courses { font-size: 9pt; font-weight: 700; color: var(--brand-strong); }
 .watch { display: inline-block; margin-top: 0.6mm; padding: 0 1.8mm; border-radius: 2mm; background: var(--warn-soft); color: var(--warn); font-size: 7.6pt; font-weight: 700; }
 td.rate .cell { display: grid; grid-template-columns: 1fr 12mm; gap: 2mm; align-items: center; }
 td.rate .track { margin-top: 0; }
@@ -261,6 +280,12 @@ td.rate .label { text-align: right; font-weight: 700; color: var(--ink); white-s
 .kv td { vertical-align: top; padding: 1.7mm 1.6mm; }
 .kv td.key { width: 52mm; font-weight: 700; color: var(--ink); }
 .bullets li { position: relative; padding-left: 4.5mm; font-size: 9.2pt; margin-bottom: 1.6mm; }
+/* Measured rows: spacing is padding (inside the measured height), never margin. */
+.flow-rows { display: flex; flex-direction: column; }
+.flow-rows .flow-title { padding: 2.4mm 0 2mm; }
+.flow-rows .flow-title:first-child { padding-top: 0; }
+.flow-rows .flow-item { position: relative; padding: 0 0 1.6mm 4.5mm; font-size: 9.2pt; }
+.flow-rows .flow-item::before { content: ''; position: absolute; left: 0.4mm; top: 2mm; width: 1.6mm; height: 1.6mm; border-radius: 50%; background: var(--brand); }
 .bullets li::before { content: ''; position: absolute; left: 0.4mm; top: 2mm; width: 1.6mm; height: 1.6mm; border-radius: 50%; background: var(--brand); }
 .mono { font-family: '${REPORT_PDF_FONT_FAMILY}', sans-serif; letter-spacing: 0.06em; font-weight: 700; }
 `;

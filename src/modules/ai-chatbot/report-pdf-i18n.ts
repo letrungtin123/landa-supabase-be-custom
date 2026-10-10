@@ -86,11 +86,6 @@ export function formatReportMonth(value: string, locale: ReportPdfLocale): strin
 
 export type ReportBucketGranularity = 'day' | 'week' | 'month' | 'unknown';
 
-export function formatReportBucket(bucket: string, granularity: ReportBucketGranularity, locale: ReportPdfLocale, compact: boolean): string {
-  if (granularity === 'month') return formatReportMonth(bucket, locale);
-  return compact ? formatReportShortDate(bucket, locale) : formatReportDate(bucket, locale);
-}
-
 /**
  * A day range written as short as it stays clear:
  * vi "15/06–21/06/2026", "29/12/2025–04/01/2026";
