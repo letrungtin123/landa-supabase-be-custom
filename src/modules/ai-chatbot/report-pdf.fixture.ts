@@ -6,6 +6,7 @@ import {
   getReportSnapshotHash,
   type ReportChatSnapshot,
   type ReportSnapshotExtensions,
+  type ReportTrendContext,
   type StoredReportChatSnapshot,
 } from './report-chat.service.js';
 import type { ReportCoursePerformance, ReportSummary } from '../reports/reports.service.js';
@@ -91,6 +92,7 @@ function build(input: {
   courses: ReportCoursePerformance[];
   availability?: ReportChatSnapshot['availability']['state'];
   extensions?: ReportSnapshotExtensions;
+  trendContext?: ReportTrendContext;
 }): ReportChatSnapshot {
   const status = input.courses.reduce((acc, course) => ({
     completed: acc.completed + course.completed_enrollments,
@@ -119,7 +121,7 @@ function build(input: {
     status,
     input.scopeDisplay,
     input.availability ?? 'available',
-    { granularity: 'day' },
+    input.trendContext ?? { granularity: 'day' },
     undefined,
     input.extensions,
   );
@@ -393,6 +395,131 @@ export function legacyReportFixture(): ReportPdfFixture {
     ],
   };
   return fixture('legacy-vi', 'Công ty Cổ phần Dược phẩm An Khang', 'vi', snapshot);
+}
+
+/** Points of a series that starts on `start` (YYYY-MM-DD) and steps by days, weeks or months. */
+function seriesFrom(start: string, step: 'day' | 'week' | 'month', values: number[]): Array<{ bucket: string; label: string; value: number }> {
+  const [year, month, day] = start.split('-').map(Number);
+  return values.map((value, index) => {
+    const date = step === 'month' ? new Date(Date.UTC(year, month - 1 + index, 1)) : new Date(Date.UTC(year, month - 1, day + index * (step === 'week' ? 7 : 1)));
+    const bucket = date.toISOString().slice(0, 10);
+    return { bucket, label: bucket, value };
+  });
+}
+
+const SMALL_BASE_COURSES: CourseSpec[] = [
+  ['An toàn lao động và 5S tại nơi làm việc', 52, 29, 18, 5, 74.6], ['Hội nhập nhân sự mới', 47, 25, 20, 2, 78.8],
+  ['Quy trình vận hành kho và giao nhận', 38, 25, 13, 0, 87.9], ['Chăm sóc khách hàng theo chuẩn dịch vụ', 37, 24, 13, 0, 86.1],
+  ['Kỹ năng tổ trưởng và kèm cặp nhân viên', 35, 19, 14, 2, 80.2], ['Quản trị kinh doanh hiện đại', 27, 15, 12, 0, 80.1],
+  ['Lập trình Python cơ bản', 26, 4, 8, 14, 30.8], ['Bảo mật thông tin trong công việc', 23, 12, 8, 3, 74.3],
+  ['Tiếng Anh giao tiếp văn phòng', 22, 14, 8, 0, 86.9], ['Ngôn ngữ TypeScript', 20, 16, 4, 0, 93.1],
+  ['Trải nghiệm khách hàng nâng cao', 18, 15, 3, 0, 94], ['Trải nghiệm khách hàng', 16, 14, 2, 0, 96.1],
+  ['Ứng dụng AI trong công việc', 15, 9, 6, 0, 86.1], ['An toàn, sức khỏe và môi trường', 14, 9, 5, 0, 87.8],
+  ['Kiến thức doanh nghiệp', 13, 6, 7, 0, 86.6], ['Sản phẩm của công ty', 13, 8, 5, 0, 86.8],
+  ['Tài chính doanh nghiệp và đầu tư', 5, 1, 4, 0, 69.3],
+];
+
+/**
+ * A month compared with an almost empty previous month (47 enrollments, 1
+ * active learner), a course with 14 of 26 learners not started, and a
+ * learner-activity series that ends with four identical days (35) while
+ * enrollments are 0: the shape of a real report that needed review.
+ */
+export function smallBaseReportFixture(locale: 'vi' | 'en' = 'vi'): ReportPdfFixture {
+  const courses = portfolio(SMALL_BASE_COURSES);
+  const completed = sum(courses.map((course) => course.completed_enrollments));
+  const total = sum(courses.map((course) => course.total_enrollments));
+  const snapshot = build({
+    dateFrom: '2026-07-01', dateTo: '2026-07-31', previousFrom: '2026-06-01', previousTo: '2026-06-30', basis: 'calendar_month',
+    generatedAt: '2026-09-30T05:59:00.000Z', scope: {}, scopeDisplay: {},
+    current: { total_learners: 9, active_learners: 62, completion_rate: 67.1, total_enrollments: total, completed_enrollments: completed, incomplete_enrollments: total - completed },
+    previous: { total_learners: 11, active_learners: 1, completion_rate: 33.8, total_enrollments: 47, completed_enrollments: 21, incomplete_enrollments: 26 },
+    enrollmentTrend: daily(2026, 7, [12, 14, 15, 13, 9, 16, 15, 14, 13, 16, 18, 17, 19, 20, 26, 18, 17, 16, 15, 16, 15, 15, 14, 13, 12, 11, 10, 12, 0, 0, 0]),
+    activeTrend: daily(2026, 7, [2, 3, 4, 3, 5, 4, 3, 5, 4, 5, 6, 7, 8, 7, 9, 8, 10, 9, 8, 9, 10, 10, 11, 12, 9, 10, 11, 35, 35, 35, 35]),
+    courses,
+  });
+  return fixture(`small-base-${locale}`, 'Công ty Cổ phần Học Tốt', locale, snapshot);
+}
+
+/**
+ * 45 days (Wednesday 17 June to Friday 31 July 2026) by ISO week: the first
+ * and last weeks have 5 of 7 days in the period; the comparison series too.
+ */
+export function weeklyReportFixture(): ReportPdfFixture {
+  const courses = portfolio([...SMALL_BASE_COURSES, ['Kỹ năng thuyết trình', 45, 30, 10, 5, 79.5]]);
+  const completed = sum(courses.map((course) => course.completed_enrollments));
+  const total = sum(courses.map((course) => course.total_enrollments));
+  const snapshot = build({
+    dateFrom: '2026-06-17', dateTo: '2026-07-31', previousFrom: '2026-05-03', previousTo: '2026-06-16', basis: 'equal_length',
+    generatedAt: '2026-08-01T02:00:00.000Z', scope: {}, scopeDisplay: {},
+    current: { total_learners: 14, active_learners: 71, completion_rate: 69.4, total_enrollments: total, completed_enrollments: completed, incomplete_enrollments: total - completed },
+    previous: { total_learners: 12, active_learners: 60, completion_rate: 64.2, total_enrollments: 411, completed_enrollments: 230, incomplete_enrollments: 181 },
+    enrollmentTrend: seriesFrom('2026-06-15', 'week', [40, 75, 82, 70, 90, 68, 41]),
+    activeTrend: seriesFrom('2026-06-15', 'week', [22, 35, 40, 38, 44, 36, 25]),
+    courses,
+    trendContext: { granularity: 'week' },
+    extensions: {
+      previous_enrollment_trend: seriesFrom('2026-04-27', 'week', [3, 60, 66, 58, 71, 64, 69, 20]).map(({ bucket, value }) => ({ bucket, value })),
+      previous_active_learner_trend: seriesFrom('2026-04-27', 'week', [2, 30, 33, 31, 35, 32, 34, 12]).map(({ bucket, value }) => ({ bucket, value })),
+      unit_breakdown_status: 'no_child_units',
+    },
+  });
+  return fixture('weekly-vi', 'Công ty Cổ phần Học Tốt', 'vi', snapshot);
+}
+
+/**
+ * The last 12 months (11 October 2025 to 10 October 2026) by month: spans two
+ * calendar years, the first and last months are partial. With
+ * `requestedDay`, the user asked "theo ngày" and the chart uses ISO weeks.
+ */
+export function yearlyReportFixture(options: { requestedDay?: boolean } = {}): ReportPdfFixture {
+  const months = [180, 260, 240, 210, 150, 290, 310, 280, 300, 330, 350, 320, 95];
+  const weeks = Array.from({ length: 53 }, (_, index) => 50 + ((index * 17) % 29));
+  const values = options.requestedDay ? weeks : months;
+  const total = sum(values);
+  const courses = portfolio([
+    ['Kỹ năng lãnh đạo', 900, 520, 300, 80, 71.2], ['An toàn lao động', 800, 610, 150, 40, 83.4], ['Chăm sóc khách hàng', 700, 400, 220, 80, 66.1],
+    ['Bảo mật thông tin', 500, 300, 150, 50, 70.4], ['Quy trình kho vận', total - 2900, 200, total - 3200, 100, 62.8],
+  ]);
+  const completed = sum(courses.map((course) => course.completed_enrollments));
+  const snapshot = build({
+    dateFrom: '2025-10-11', dateTo: '2026-10-10', previousFrom: '2024-10-11', previousTo: '2025-10-10', basis: 'equal_length',
+    generatedAt: '2026-10-10T08:00:00.000Z', scope: {}, scopeDisplay: {},
+    current: { total_learners: 120, active_learners: 410, completion_rate: 63.5, total_enrollments: total, completed_enrollments: completed, incomplete_enrollments: total - completed },
+    previous: { total_learners: 95, active_learners: 350, completion_rate: 60.1, total_enrollments: 2670, completed_enrollments: 1500, incomplete_enrollments: 1170 },
+    enrollmentTrend: options.requestedDay ? seriesFrom('2025-10-06', 'week', weeks) : seriesFrom('2025-10-01', 'month', months),
+    activeTrend: options.requestedDay
+      ? seriesFrom('2025-10-06', 'week', weeks.map((value) => Math.round(value * 0.6)))
+      : seriesFrom('2025-10-01', 'month', months.map((value) => Math.round(value * 0.45))),
+    courses,
+    trendContext: options.requestedDay ? { granularity: 'week', requested_granularity: 'day' } : { granularity: 'month' },
+    extensions: { unit_breakdown_status: 'no_child_units' },
+  });
+  return fixture(options.requestedDay ? 'yearly-by-day-vi' : 'yearly-vi', 'Công ty Cổ phần Học Tốt', 'vi', snapshot);
+}
+
+/** 60 courses in the period: the snapshot keeps the 20 with the most enrollments and the course count. */
+export function manyCoursesReportFixture(): ReportPdfFixture {
+  const specs: CourseSpec[] = Array.from({ length: 20 }, (_, index) => {
+    const total = 80 - index * 3;
+    const completed = Math.round(total * 0.55);
+    const notStarted = Math.round((total - completed) * 0.3);
+    return [`Khóa học số ${index + 1}`, total, completed, total - completed - notStarted, notStarted, Math.round((completed / total) * 1000) / 10 + 6];
+  });
+  const courses = portfolio(specs);
+  const completed = sum(courses.map((course) => course.completed_enrollments));
+  const listed = sum(courses.map((course) => course.total_enrollments));
+  const snapshot = build({
+    dateFrom: '2026-07-01', dateTo: '2026-07-31', previousFrom: '2026-06-01', previousTo: '2026-06-30', basis: 'calendar_month',
+    generatedAt: '2026-08-01T02:00:00.000Z', scope: {}, scopeDisplay: {},
+    current: { total_learners: 60, active_learners: 380, completion_rate: 58.2, total_enrollments: listed + 300, completed_enrollments: completed + 150, incomplete_enrollments: listed + 150 - completed },
+    previous: { total_learners: 52, active_learners: 340, completion_rate: 55.9, total_enrollments: 1240, completed_enrollments: 610, incomplete_enrollments: 630 },
+    enrollmentTrend: daily(2026, 7, Array.from({ length: 31 }, (_, index) => 40 + ((index * 7) % 13))),
+    activeTrend: daily(2026, 7, Array.from({ length: 31 }, (_, index) => 30 + ((index * 5) % 11))),
+    courses,
+    extensions: { unit_breakdown_status: 'no_child_units', course_portfolio_total: 60 },
+  });
+  return fixture('many-courses-vi', 'Công ty Cổ phần Học Tốt', 'vi', snapshot);
 }
 
 export function allReportPdfFixtures(): ReportPdfFixture[] {

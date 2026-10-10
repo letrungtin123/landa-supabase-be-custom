@@ -64,13 +64,15 @@ test('puts the unit ranking in the summary and unit risks in the risks and actio
   const decline = insights.facts.find((fact) => fact.id === 'risk.unit_decline')!;
   const unit = `{{${decline.entities[0]}}}`;
   assert.ok(vi.findings.some((item) => item.factIds.includes('units.ranking')), 'best/worst unit in the executive summary');
-  assert.deepEqual(vi.risks.map((item) => item.factIds[0]), ['risk.watchlist', 'risk.unit_decline', 'risk.unit_low_completion', 'risk.unit_gap']);
+  // The course activation risk has data here; its wording comes with the PDF narrative.
+  assert.deepEqual(vi.risks.map((item) => item.factIds[0]), ['risk.watchlist', 'risk.unit_decline', 'risk.unit_low_completion']);
   assert.equal(vi.risks[1].text, `Tỉ lệ hoàn thành của ${unit} giảm 6,5 điểm % so với tháng trước, từ 63,8% xuống 57,3%.`);
   assert.ok(vi.recommendations.some((item) => item.factIds.includes('risk.unit_decline') && item.priority === 'high' && item.text.includes(unit)));
   assert.ok(!vi.recommendations.some((item) => item.factIds.includes('risk.unit_gap')), 'the lowest unit already has its low-completion action');
   assert.deepEqual(validateReportPdfNarrative(vi, insights, 'vi').issues, []);
-  const en = buildRuleBasedReportNarrative(buildReportInsights(englishExtendedReportFixture().snapshot), 'en');
-  assert.match(en.risks.find((item) => item.factIds.includes('risk.unit_decline'))!.text, /^The completion rate of \{\{U\d+\}\} fell by 10\.3 pp vs the previous month, from 55\.1% to 44\.8%\.$/);
+  // English extended fixture: four higher-priority risks come first, the unit decline still has its card text.
+  const extended = buildReportInsights(englishExtendedReportFixture().snapshot);
+  assert.match(describeReportFact(extended.facts.find((fact) => fact.id === 'risk.unit_decline')!, extended, 'en')!, /^The completion rate of \{\{U\d+\}\} fell by 10\.3 pp vs the previous month, from 55\.1% to 44\.8%\.$/);
 });
 
 test('checks unit numbers like every other fact (sign, unit, source)', () => {

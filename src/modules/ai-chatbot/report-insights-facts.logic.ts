@@ -2,8 +2,10 @@
 // attention items. No I/O. Entity names never appear in facts: courses/units
 // are referenced by tokens (C1, U1) that are substituted only when rendering.
 import { REPORT_SIGNAL_THRESHOLDS, type ReportAnalyticsSignal } from './report-chat.service.js';
+import { reportBucketEnd } from './report-date.logic.js';
 import {
   REPORT_INSIGHT_THRESHOLDS as T,
+  isReportPercentChangeMeaningful,
   type ReportAttentionItem,
   type ReportAttentionKind,
   type ReportInsightFact,
@@ -13,7 +15,7 @@ import {
   type ReportTrendInsight,
 } from './report-insights.types.js';
 
-type FactsInput = Omit<ReportInsights, 'attention' | 'facts' | 'entities' | 'limitations'> & {
+type FactsInput = Omit<ReportInsights, 'attention' | 'facts' | 'entities' | 'limitations' | 'hiddenPercentChanges'> & {
   signals: ReportAnalyticsSignal[];
   contextValues: Record<string, number>;
 };
@@ -38,6 +40,7 @@ const ATTENTION_SEVERITY: Record<ReportAttentionKind, ReportAttentionItem['sever
   unit_gap: 'attention',
   unit_decline: 'warning',
   unit_low_completion: 'attention',
+  course_activation_risk: 'attention',
 };
 
 /** Splits YYYY-MM[-DD] into numeric fact values, e.g. peak_day/peak_month/peak_year. */
@@ -49,6 +52,33 @@ export function reportDateParts(prefix: string, ymd: string): Record<string, num
     [`${prefix}_month`]: Number(match[2]),
     ...(match[3] ? { [`${prefix}_day`]: Number(match[3]) } : {}),
   };
+}
+
+/**
+ * Date values of a chart bucket as written in a sentence: the day for day
+ * buckets, year and month only for months ("tháng 04/2026", never
+ * "01/04/2026"), and for an ISO week its first and last day inside the period
+ * (`<prefix>_*` and `<prefix>_end_*`).
+ */
+export function reportBucketDateParts(
+  prefix: string,
+  bucket: string,
+  granularity: ReportTrendInsight['granularity'],
+  period: { dateFrom: string; dateTo: string },
+): Record<string, number> {
+  if (granularity === 'month') return reportDateParts(prefix, bucket.slice(0, 7));
+  if (granularity !== 'week' || !/^\d{4}-\d{2}-\d{2}$/.test(bucket)) return reportDateParts(prefix, bucket);
+  const end = reportBucketEnd(bucket, 'week');
+  const first = bucket > period.dateFrom ? bucket : period.dateFrom;
+  const last = end < period.dateTo ? end : period.dateTo;
+  return { ...reportDateParts(prefix, first), ...reportDateParts(`${prefix}_end`, last) };
+}
+
+/** A relative change kept as a fact value only when its base makes it meaningful; otherwise recorded as hidden. */
+function percentValue(base: number, percent: number, hidden: number[]): number | null {
+  if (isReportPercentChangeMeaningful(base, percent)) return Math.abs(percent);
+  hidden.push(Math.abs(percent));
+  return null;
 }
 
 function fact(input: Omit<ReportInsightFact, 'entities' | 'values'> & { values: Record<string, number | null | undefined>; entities?: string[] }): ReportInsightFact {
@@ -74,29 +104,31 @@ function kpiFacts(kpis: ReportKpiInsight[]): ReportInsightFact[] {
   }));
 }
 
-function trendFacts(trend: ReportTrendInsight | null): ReportInsightFact[] {
+function trendFacts(trend: ReportTrendInsight | null, period: FactsInput['period'], hidden: number[]): ReportInsightFact[] {
   if (!trend) return [];
   const facts: ReportInsightFact[] = [];
+  const momentumPct = () => (trend.momentum ? percentValue(trend.momentum.firstTotal, trend.momentum.changePercent, hidden) : null);
   if (trend.metric === 'enrollments') {
     if (trend.peak && trend.points.length >= 3 && trend.mean > 0) {
       facts.push(fact({
         id: 'trend.enrollments.peak', kind: 'trend_peak', tone: 'neutral', priority: 45 + (trend.spikes.length ? 8 : 0),
-        values: { value: trend.peak.value, ratio: round(trend.peak.value / trend.mean, 1), ...reportDateParts('peak', trend.peak.bucket) },
+        values: { value: trend.peak.value, ratio: round(trend.peak.value / trend.mean, 1), ...reportBucketDateParts('peak', trend.peak.bucket, trend.granularity, period) },
       }));
     }
     if (trend.previousAverage !== null && trend.previousAverage > 0 && trend.mean >= 0) {
-      const change = ((trend.mean - trend.previousAverage) / trend.previousAverage) * 100;
+      const change = round(((trend.mean - trend.previousAverage) / trend.previousAverage) * 100, 1);
       if (Math.abs(change) >= T.stableCountDeltaPercent) {
+        // 47 enrollments last period and 421 now: "+765%" says nothing; the averages are kept.
         facts.push(fact({
           id: 'trend.enrollments.vs_previous', kind: 'trend_vs_previous', tone: change > 0 ? 'positive' : 'negative', priority: 58,
-          values: { avg: round(trend.mean, 1), previous: round(trend.previousAverage, 1), pct: round(Math.abs(change), 1), direction: change > 0 ? 1 : -1 },
+          values: { avg: round(trend.mean, 1), previous: round(trend.previousAverage, 1), pct: percentValue(trend.previousTotal ?? 0, change, hidden), direction: change > 0 ? 1 : -1 },
         }));
       }
     }
     if (trend.momentum && Math.abs(trend.momentum.changePercent) >= T.momentumChangePercent) {
       facts.push(fact({
         id: 'trend.enrollments.momentum', kind: 'trend_momentum', tone: trend.momentum.changePercent > 0 ? 'positive' : 'attention', priority: 52,
-        values: { first: trend.momentum.first, last: trend.momentum.last, pct: Math.abs(trend.momentum.changePercent), direction: trend.momentum.changePercent > 0 ? 1 : -1 },
+        values: { first: trend.momentum.first, last: trend.momentum.last, pct: momentumPct(), direction: trend.momentum.changePercent > 0 ? 1 : -1 },
       }));
     }
     // A single spike is the peak already reported above.
@@ -104,16 +136,31 @@ function trendFacts(trend: ReportTrendInsight | null): ReportInsightFact[] {
       const largest = trend.spikes.reduce((max, spike) => (spike.value > max.value ? spike : max));
       facts.push(fact({
         id: 'trend.enrollments.spikes', kind: 'trend_spikes', tone: 'neutral', priority: 44,
-        values: { count: trend.spikes.length, value: largest.value, ...reportDateParts('spike', largest.bucket) },
+        values: { count: trend.spikes.length, value: largest.value, ...reportBucketDateParts('spike', largest.bucket, trend.granularity, period) },
       }));
     }
   } else if (trend.momentum && Math.abs(trend.momentum.changePercent) >= T.momentumChangePercent) {
     facts.push(fact({
       id: 'trend.active.momentum', kind: 'active_trend_momentum', tone: trend.momentum.changePercent > 0 ? 'positive' : 'attention', priority: 45,
-      values: { first: trend.momentum.first, last: trend.momentum.last, pct: Math.abs(trend.momentum.changePercent), direction: trend.momentum.changePercent > 0 ? 1 : -1 },
+      values: { first: trend.momentum.first, last: trend.momentum.last, pct: momentumPct(), direction: trend.momentum.changePercent > 0 ? 1 : -1 },
     }));
   }
   return facts;
+}
+
+/** Data-quality facts (never risks): a suspicious flat tail or outlier bucket in a series. */
+function anomalyFacts(input: FactsInput): ReportInsightFact[] {
+  return ([['enrollments', input.trends.enrollments], ['active_learners', input.trends.activeLearners]] as const).flatMap(([metric, trend]) => {
+    if (!trend?.anomaly) return [];
+    const first = trend.points[trend.anomaly.indexes[0]];
+    return [fact({
+      id: `data.anomaly.${metric}`, kind: 'data_anomaly', tone: 'attention', priority: 20,
+      values: {
+        count: trend.anomaly.indexes.length, value: trend.anomaly.value,
+        ...reportBucketDateParts('start', first.bucket, trend.granularity, input.period),
+      },
+    })];
+  });
 }
 
 function courseFacts(input: FactsInput): ReportInsightFact[] {
@@ -188,6 +235,18 @@ function attentionFacts(input: FactsInput): ReportInsightFact[] {
       values: { share: status.notStartedShare, count: status.notStarted, threshold: T.activationNotStartedShare },
     }));
   }
+  // Same rule per course (from minimumCourseSample enrollments): a course where many learners never started.
+  const activation = input.courses.activationRisk[0];
+  if (activation && activation.notStarted !== null && activation.notStartedShare !== null) {
+    facts.push(fact({
+      id: 'risk.course_activation', kind: 'course_activation_risk', tone: 'attention', priority: 78,
+      values: {
+        count: input.courses.activationRisk.length, not_started: activation.notStarted, enrollments: activation.enrollments,
+        share: activation.notStartedShare, threshold: T.activationNotStartedShare, min: T.minimumCourseSample,
+      },
+      entities: input.courses.activationRisk.map((row) => row.token),
+    }));
+  }
   const activityDrop = signal('end_period_activity_drop');
   if (activityDrop && activityDrop.evidence.current !== undefined && activityDrop.evidence.previous !== undefined) {
     facts.push(fact({
@@ -253,20 +312,22 @@ function unitFacts(input: FactsInput): ReportInsightFact[] {
   })];
 }
 
-export function buildReportInsightFacts(input: FactsInput): { facts: ReportInsightFact[]; attention: ReportAttentionItem[] } {
+export function buildReportInsightFacts(input: FactsInput): { facts: ReportInsightFact[]; attention: ReportAttentionItem[]; hiddenPercentChanges: number[] } {
   const context = fact({ id: 'context.period', kind: 'context', tone: 'neutral', priority: 0, values: input.contextValues });
+  const hidden = input.kpis.flatMap((kpi) => (kpi.hiddenDeltaPercent === null ? [] : [Math.abs(kpi.hiddenDeltaPercent)]));
   if (!input.available) {
     const empty = kpiFacts(input.kpis).filter((item) => item.id === 'kpi.total_enrollments' || item.id === 'kpi.active_learners');
-    return { facts: [context, ...empty], attention: [] };
+    return { facts: [context, ...empty], attention: [], hiddenPercentChanges: hidden };
   }
   const risks = attentionFacts(input).sort((left, right) => right.priority - left.priority);
   const facts = [
     context,
     ...kpiFacts(input.kpis),
     ...courseFacts(input),
-    ...trendFacts(input.trends.enrollments),
-    ...trendFacts(input.trends.activeLearners),
+    ...trendFacts(input.trends.enrollments, input.period, hidden),
+    ...trendFacts(input.trends.activeLearners, input.period, hidden),
     ...unitFacts(input),
+    ...anomalyFacts(input),
     ...risks,
   ];
   const attention = risks.map((item) => ({
@@ -274,5 +335,5 @@ export function buildReportInsightFacts(input: FactsInput): { facts: ReportInsig
     severity: ATTENTION_SEVERITY[item.kind as ReportAttentionKind],
     factId: item.id,
   }));
-  return { facts, attention };
+  return { facts, attention, hiddenPercentChanges: [...new Set(hidden.map((value) => round(value, 2)))] };
 }

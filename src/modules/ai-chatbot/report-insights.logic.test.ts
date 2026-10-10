@@ -1,15 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildReportInsights, countReportBuckets, REPORT_INSIGHT_THRESHOLDS } from './report-insights.logic.js';
 import {
+  buildReportInsights,
+  countReportBucketEquivalents,
+  countReportBuckets,
+  detectReportTrendAnomaly,
+  isReportPercentChangeMeaningful,
+  REPORT_INSIGHT_THRESHOLDS,
+} from './report-insights.logic.js';
+import {
+  allReportPdfFixtures,
   emptyReportFixture,
   englishExtendedReportFixture,
   englishReportFixture,
   legacyReportFixture,
   longNamesReportFixture,
   manyUnitsReportFixture,
+  smallBaseReportFixture,
   tinyReportFixture,
   vietnameseReportFixture,
+  weeklyReportFixture,
 } from './report-pdf.fixture.js';
 import type { StoredReportChatSnapshot } from './report-chat.service.js';
 
@@ -86,6 +96,7 @@ test('raises attention items with severities from signals and thresholds', () =>
   assert.deepEqual(insights.attention.map((item) => [item.kind, item.severity]), [
     ['completion_decline', 'warning'],
     ['course_watchlist', 'warning'],
+    ['course_activation_risk', 'attention'],
     ['activation_risk', 'attention'],
     ['activity_drop', 'attention'],
     ['active_learner_drop', 'attention'],
@@ -224,4 +235,79 @@ test('counts chart buckets per granularity', () => {
   assert.equal(countReportBuckets('2026-01-01', '2026-03-31', 'month'), 3);
   assert.equal(countReportBuckets('2026-09-14', '2026-09-27', 'week'), 2);
   assert.equal(countReportBuckets('2026-09-14', '2026-09-27', 'unknown'), null);
+});
+
+test('shows a percentage change only from a comparison value of 10 and up to +300%', () => {
+  assert.equal(isReportPercentChangeMeaningful(10, 300), true);
+  assert.equal(isReportPercentChangeMeaningful(10, 310), false);
+  assert.equal(isReportPercentChangeMeaningful(9, 33.3), false);
+  assert.equal(isReportPercentChangeMeaningful(47, 795.7), false);
+  assert.equal(isReportPercentChangeMeaningful(262, -95), true, 'a large fall from a real base stays meaningful');
+
+  const insights = buildReportInsights(smallBaseReportFixture().snapshot);
+  const item = (id: string) => insights.kpis.find((candidate) => candidate.id === id)!;
+  assert.deepEqual([item('total_enrollments').delta, item('total_enrollments').deltaPercent, item('total_enrollments').smallBase], [374, null, true], '47 -> 421');
+  assert.deepEqual([item('active_learners').delta, item('active_learners').deltaPercent, item('active_learners').smallBase], [61, null, true], '1 -> 62');
+  assert.deepEqual([item('total_learners').deltaPercent, item('total_learners').smallBase], [-18.18, false], '11 -> 9 keeps its percentage');
+  assert.deepEqual([item('completion_rate').delta, item('completion_rate').smallBase], [33.3, false], 'both periods have 10+ enrollments');
+  assert.deepEqual(insights.hiddenPercentChanges, [795.74, 6100, 1066.67, 576.92, 765], 'withheld changes, the trend average (+765%) included');
+  const vsPrevious = insights.facts.find((candidate) => candidate.id === 'trend.enrollments.vs_previous')!;
+  assert.deepEqual(vsPrevious.values, { avg: 13.6, previous: 1.6, direction: 1 }, 'no percentage value to quote');
+  assert.equal(insights.facts.find((candidate) => candidate.id === 'kpi.total_enrollments')?.values.delta_percent, undefined);
+
+  // Too few enrollments in a period: the completion-rate change is not judged.
+  const tinyRate = kpi(tinyReportFixture().snapshot, 'completion_rate');
+  assert.deepEqual([tinyRate.delta, tinyRate.direction, tinyRate.smallBase], [null, null, true]);
+});
+
+test('averages week and month buckets per whole bucket and marks the cut edges', () => {
+  const weekly = buildReportInsights(weeklyReportFixture().snapshot).trends.enrollments!;
+  assert.equal(weekly.granularity, 'week');
+  assert.deepEqual(weekly.partialIndexes, [0, 6], 'Wed 17 June and Fri 31 July cut the first and last week');
+  assert.deepEqual(weekly.coverage.slice(0, 2), [0.7143, 1]);
+  assert.deepEqual(weekly.previousPartialIndexes, [0, 7]);
+  assert.equal(weekly.mean, 72.49, '466 enrollments over 45 days = 6.43 weeks');
+  assert.equal(weekly.previousAverage, 63.93);
+  assert.equal(weekly.momentum, null, 'only 5 whole weeks: no momentum claim');
+  assert.equal(countReportBucketEquivalents('2025-10-11', '2026-10-10', 'month')?.toFixed(4), (21 / 31 + 11 + 10 / 31).toFixed(4));
+  assert.equal(countReportBucketEquivalents('2026-06-17', '2026-07-31', 'week'), 45 / 7);
+  assert.equal(countReportBucketEquivalents('2026-06-01', '2026-06-30', 'day'), 30);
+  const peak = buildReportInsights(weeklyReportFixture().snapshot).facts.find((candidate) => candidate.id === 'trend.enrollments.peak')!;
+  assert.deepEqual(peak.values, { value: 90, ratio: 1.2, peak_year: 2026, peak_month: 7, peak_day: 13, peak_end_year: 2026, peak_end_month: 7, peak_end_day: 19 });
+});
+
+test('flags a course with 30% or more of its learners not started, from 5 enrollments', () => {
+  const insights = buildReportInsights(smallBaseReportFixture().snapshot);
+  const risk = insights.facts.find((candidate) => candidate.id === 'risk.course_activation')!;
+  assert.deepEqual(risk.values, { count: 1, not_started: 14, enrollments: 26, share: 53.85, threshold: 30, min: 5 });
+  assert.equal(insights.entities.find((entity) => entity.token === risk.entities[0])?.name, 'Lập trình Python cơ bản');
+  assert.deepEqual(insights.attention.map((item) => item.kind), ['course_watchlist', 'course_activation_risk']);
+  const vi = buildReportInsights(vietnameseReportFixture().snapshot).courses.activationRisk.map((row) => [row.name, row.notStarted, row.enrollments]);
+  assert.deepEqual(vi, [['Lập kế hoạch kinh doanh cho quản lý cửa hàng', 8, 24], ['Kỹ năng lãnh đạo cho trưởng nhóm', 4, 12]], 'a 4-enrollment course is not judged');
+});
+
+test('flags a suspicious flat tail and keeps it out of the trend; ordinary series are not flagged', () => {
+  const points = (values: number[]) => values.map((value, index) => ({ bucket: `2026-07-${String(index + 1).padStart(2, '0')}`, value }));
+  const insights = buildReportInsights(smallBaseReportFixture().snapshot);
+  const active = insights.trends.activeLearners!;
+  assert.deepEqual(active.anomaly, { kind: 'flat_tail', indexes: [27, 28, 29, 30], value: 35 });
+  assert.deepEqual(active.excludedIndexes, [27, 28, 29, 30]);
+  assert.deepEqual(active.peak, { index: 23, bucket: '2026-07-24', value: 12 }, 'the flagged tail is not presented as the peak');
+  assert.equal(active.mean, 7.11, 'nor in the average');
+  assert.ok(active.momentum && active.momentum.last < 35);
+  assert.ok(insights.limitations.includes('data_anomaly'));
+  assert.deepEqual(insights.facts.find((candidate) => candidate.id === 'data.anomaly.active_learners')?.values, { count: 4, value: 35, start_year: 2026, start_month: 7, start_day: 28 });
+  assert.ok(!insights.attention.some((item) => item.factId.startsWith('data.')), 'a data check is not a business risk');
+
+  assert.equal(detectReportTrendAnomaly(points([5, 7, 6, 8, 9, 2, 2, 2])), null, 'a small repeated value is ordinary');
+  assert.equal(detectReportTrendAnomaly(points([5, 7, 6, 8, 9, 0, 0, 0])), null, 'zeros are not a data problem');
+  assert.equal(detectReportTrendAnomaly(points([9, 9, 9, 9, 9, 9, 9])), null, 'a whole flat series is not a tail');
+  assert.equal(detectReportTrendAnomaly(points([12, 15, 14, 14])), null, 'too short to judge');
+  assert.deepEqual(detectReportTrendAnomaly(points([4, 6, 5, 3, 7, 300, 5, 6])), { kind: 'outlier', indexes: [5], value: 300 });
+  assert.equal(detectReportTrendAnomaly(points([0, 0, 0, 0, 0, 300, 0, 0])), null, 'one bulk day without other activity is not judged');
+  for (const fixture of allReportPdfFixtures().filter((item) => !item.name.startsWith('small-base'))) {
+    const checked = buildReportInsights(fixture.snapshot);
+    assert.equal(checked.trends.enrollments?.anomaly ?? null, null, `${fixture.name} enrollments`);
+    assert.equal(checked.trends.activeLearners?.anomaly ?? null, null, `${fixture.name} active learners`);
+  }
 });
