@@ -1686,6 +1686,47 @@ export async function getReportCoursePerformance(
 }
 
 /**
+ * Number of distinct courses in the same enrollment cohort as
+ * getReportCoursePerformance, so a capped course list can say how many
+ * courses it leaves out.
+ */
+export async function getReportCourseCount(
+  tenantId: string,
+  groupId?: string,
+  subgroupId?: string,
+  teamId?: string,
+  dateRange?: ReportDateRange,
+): Promise<number> {
+  const range = getReportRange(undefined, undefined, dateRange);
+  const countCacheKey = cacheKey('reports', 'course-count', 'v1', tenantId, stableHash({
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+  }));
+
+  return cacheJson(countCacheKey, getSummaryCacheTtl(range), async () => {
+    const cohort = buildReportEnrollmentCte({
+      tenantParam: '$1',
+      rangeStartParam: '$2',
+      rangeEndParam: '$3',
+      groupId,
+      subgroupId,
+      teamId,
+      scopeParamStart: 4,
+    });
+    const result = await query<{ course_count: string }>(
+      `WITH ${cohort.sql}
+       SELECT COUNT(DISTINCT re.course_id)::bigint AS course_count
+       FROM report_enrollments re`,
+      [tenantId, range.startDate, range.endDate, ...cohort.params],
+    );
+    return Number(result.rows[0]?.course_count) || 0;
+  });
+}
+
+/**
  * Returns only report-course candidates from the same authorized enrollment
  * cohort used by the dashboard rankings. The caller must still resolve an
  * exact normalized title before selecting a course for a chat response.

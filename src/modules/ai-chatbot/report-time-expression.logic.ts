@@ -755,14 +755,28 @@ export function reportRangesAgree(
     && dayCountBetween(parsed.date_from, parsed.date_to) === dayCountBetween(model.date_from, model.date_to);
 }
 
+/**
+ * Bucket rule of the AI report snapshot charts (chat card and PDF). It is
+ * separate from the Reports screen rule (reports.service resolveChartGranularity):
+ * without a request, up to 31 days are shown by day, up to 120 days by ISO
+ * week, longer ranges (max 366 days) by month. An explicit request is kept
+ * while it fits the 62-bucket cap of a snapshot series, else coarsened.
+ */
+export const REPORT_SNAPSHOT_BUCKET_RULE = {
+  autoDayMaxDays: 31,
+  autoWeekMaxDays: 120,
+  maxBuckets: 62,
+} as const;
+
 /** Snapshot chart series are capped at 62 buckets; a too-fine request is coarsened, never truncated. */
 export function resolveSnapshotChartGranularity(
   requested: ReportGranularity | null | undefined,
   range: ReportDateRangeYmd,
-): 'auto' | 'day' | 'week' | 'month' {
-  if (!requested) return 'auto';
+): 'day' | 'week' | 'month' {
+  const rule = REPORT_SNAPSHOT_BUCKET_RULE;
   const days = dayCountBetween(range.date_from, range.date_to);
-  if (requested === 'day') return days <= 62 ? 'day' : days <= 62 * 7 ? 'week' : 'month';
-  if (requested === 'week') return days <= 62 * 7 ? 'week' : 'month';
+  if (!requested) return days <= rule.autoDayMaxDays ? 'day' : days <= rule.autoWeekMaxDays ? 'week' : 'month';
+  if (requested === 'day') return days <= rule.maxBuckets ? 'day' : days <= rule.maxBuckets * 7 ? 'week' : 'month';
+  if (requested === 'week') return days <= rule.maxBuckets * 7 ? 'week' : 'month';
   return 'month';
 }

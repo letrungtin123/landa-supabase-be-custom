@@ -15,6 +15,7 @@ import {
   localYmd,
   parseYmd,
   resolveComparableReportPeriod,
+  reportBucketCoverage,
   resolveNearestReportDataPeriod,
   type ReportComparisonPeriod,
   type ReportNearestDataPeriod,
@@ -132,7 +133,12 @@ export interface ReportScopeDisplay {
 
 export interface ReportTrendContext {
   granularity?: 'day' | 'week' | 'month';
+  /** The breakdown the user asked for, kept only when the chart had to use another one ("theo ngày" over a year). */
+  requested_granularity?: ReportGranularity;
 }
+
+/** Courses kept in a snapshot's course_portfolio (the ones with the most enrollments). */
+export const REPORT_SNAPSHOT_COURSE_LIMIT = 20;
 
 export type ReportCourseDetail = Pick<
   reportsService.ReportCoursePerformance,
@@ -168,6 +174,8 @@ export interface ReportSnapshotExtensions {
   previous_active_learner_trend?: ReportPreviousTrend;
   unit_breakdown?: ReportUnitBreakdown;
   unit_breakdown_status?: ReportUnitBreakdownStatus;
+  /** Distinct courses of the period cohort; set only when course_portfolio was capped at REPORT_SNAPSHOT_COURSE_LIMIT. */
+  course_portfolio_total?: number;
 }
 
 export interface ReportChatSnapshot extends Omit<LegacyReportChatSnapshot, 'version'>, ReportSnapshotExtensions {
@@ -497,7 +505,7 @@ export async function buildReportChatSnapshot(input: {
     chart('active_learners', normalized.dateRange, chartGranularity),
     chart('total_enrollments', previousRange, previousChartGranularity),
     chart('active_learners', previousRange, previousChartGranularity),
-    reportsService.getReportCoursePerformance(input.tenantId, 20, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
+    reportsService.getReportCoursePerformance(input.tenantId, REPORT_SNAPSHOT_COURSE_LIMIT, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportCompletionStatusDistribution(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     resolveReportScopeDisplay(input.tenantId, scope),
     courseDetailRequest,
@@ -510,6 +518,18 @@ export async function buildReportChatSnapshot(input: {
     }),
   ]);
   const availability = hasReportData(summary) ? 'available' : 'empty';
+  // Only a full course list can leave courses out; one more cohort count then
+  // lets the PDF say how many ("Còn N khóa học khác").
+  const coursePortfolioTotal = availability === 'available' && coursePortfolio.length >= REPORT_SNAPSHOT_COURSE_LIMIT
+    ? await reportsService.getReportCourseCount(input.tenantId, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange)
+    : null;
+  const effectiveGranularity = enrollmentChart.granularity;
+  const trendContext: ReportTrendContext = effectiveGranularity
+    ? {
+      granularity: effectiveGranularity,
+      ...(input.granularity && input.granularity !== effectiveGranularity ? { requested_granularity: input.granularity } : {}),
+    }
+    : {};
   const snapshot = createReportSnapshot(
     base,
     summary,
@@ -520,7 +540,7 @@ export async function buildReportChatSnapshot(input: {
     completionStatus,
     scopeDisplay,
     availability,
-    enrollmentChart.granularity ? { granularity: enrollmentChart.granularity } : {},
+    trendContext,
     courseDetail ?? undefined,
     // An empty period has nothing to compare or break down.
     availability === 'available'
@@ -528,6 +548,7 @@ export async function buildReportChatSnapshot(input: {
         previousEnrollmentTrend: chartToPreviousTrend(previousEnrollmentChart, enrollmentChart.granularity),
         previousActiveLearnerTrend: chartToPreviousTrend(previousActiveLearnerChart, activeLearnerChart.granularity),
         unitBreakdown,
+        coursePortfolioTotal,
       })
       : { unit_breakdown_status: unitBreakdown.unit_breakdown_status === 'leaf_scope' ? 'leaf_scope' : 'not_computed' },
   );
@@ -594,13 +615,30 @@ export function buildReportSnapshotExtensions(input: {
   previousEnrollmentTrend?: ReportPreviousTrend;
   previousActiveLearnerTrend?: ReportPreviousTrend;
   unitBreakdown: { unit_breakdown?: ReportUnitBreakdown; unit_breakdown_status: ReportUnitBreakdownStatus };
+  coursePortfolioTotal?: number | null;
 }): ReportSnapshotExtensions {
   return {
     ...(input.previousEnrollmentTrend?.length ? { previous_enrollment_trend: input.previousEnrollmentTrend } : {}),
     ...(input.previousActiveLearnerTrend?.length ? { previous_active_learner_trend: input.previousActiveLearnerTrend } : {}),
     ...(input.unitBreakdown.unit_breakdown ? { unit_breakdown: input.unitBreakdown.unit_breakdown } : {}),
     unit_breakdown_status: input.unitBreakdown.unit_breakdown_status,
+    ...(typeof input.coursePortfolioTotal === 'number' ? { course_portfolio_total: input.coursePortfolioTotal } : {}),
   };
+}
+
+/**
+ * The end-of-period activity comparison only uses whole buckets: a trailing
+ * ISO week or month cut by the last day of the range has fewer days and would
+ * read as a drop. Day buckets are whole by construction.
+ */
+export function completeTrailingActivityBuckets<T extends { bucket: string }>(
+  trend: T[],
+  granularity: ReportTrendContext['granularity'],
+  filter: Pick<NormalizedReportChatFilter, 'date_from' | 'date_to'>,
+): T[] {
+  if ((granularity !== 'week' && granularity !== 'month') || trend.length < 2) return trend;
+  const coverage = reportBucketCoverage(trend[trend.length - 1].bucket, granularity, filter);
+  return coverage.ratio < 1 ? trend.slice(0, -1) : trend;
 }
 
 function roundReportValue(value: number): number {
@@ -772,6 +810,7 @@ export function createReportSnapshot(
     ...(extensions.previous_active_learner_trend ? { previous_active_learner_trend: extensions.previous_active_learner_trend } : {}),
     ...(extensions.unit_breakdown ? { unit_breakdown: extensions.unit_breakdown } : {}),
     ...(extensions.unit_breakdown_status ? { unit_breakdown_status: extensions.unit_breakdown_status } : {}),
+    ...(typeof extensions.course_portfolio_total === 'number' ? { course_portfolio_total: extensions.course_portfolio_total } : {}),
     top_courses: coursePortfolio.slice(0, 5).map(({ course_id, name, total_enrollments }) => ({ course_id, name, enrollments: total_enrollments })),
     completion_ranking: [...coursePortfolio]
       .sort((left, right) => right.completion_rate - left.completion_rate || right.completed_enrollments - left.completed_enrollments || right.total_enrollments - left.total_enrollments || left.name.localeCompare(right.name))
@@ -781,7 +820,11 @@ export function createReportSnapshot(
     ...(courseDetail ? { course_detail: courseDetail } : {}),
     completion_status_distribution: completionStatus,
     factual_metrics: factualMetrics,
-    signals: buildReportSignals({ metrics: factualMetrics, activeTrend: activeLearnerTrend, coursePortfolio }),
+    signals: buildReportSignals({
+      metrics: factualMetrics,
+      activeTrend: completeTrailingActivityBuckets(activeLearnerTrend, enrollmentTrendContext.granularity, base.filter),
+      coursePortfolio,
+    }),
     signal_threshold_version: REPORT_SIGNAL_THRESHOLD_VERSION,
     availability: {
       state: availabilityState,
@@ -831,6 +874,7 @@ export function isStoredReportChatSnapshot(value: unknown): value is StoredRepor
       && (value.previous_active_learner_trend === undefined || Array.isArray(value.previous_active_learner_trend))
       && (value.unit_breakdown === undefined || isRecord(value.unit_breakdown))
       && (value.unit_breakdown_status === undefined || typeof value.unit_breakdown_status === 'string')
+      && (value.course_portfolio_total === undefined || typeof value.course_portfolio_total === 'number')
       && isRecord(value.availability));
 }
 

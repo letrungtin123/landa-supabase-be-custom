@@ -128,6 +128,31 @@ export function dayCountBetween(dateFrom: string, dateTo: string): number {
   return Math.floor((toMs - fromMs) / 86_400_000) + 1;
 }
 
+export type ReportBucketSize = 'day' | 'week' | 'month';
+
+/** Last day of the chart bucket that starts on `bucket` (ISO week: Monday to Sunday). */
+export function reportBucketEnd(bucket: string, size: ReportBucketSize): string {
+  const parts = parseYmd(bucket);
+  if (!parts || size === 'day') return bucket;
+  return size === 'week' ? addDays(bucket, 6) : endOfMonth(parts.year, parts.month);
+}
+
+/**
+ * Share of a chart bucket that lies inside the report range: an ISO week or a
+ * calendar month cut by the first or last day of the range is partial
+ * (e.g. 5 of 7 days). Days are always whole.
+ */
+export function reportBucketCoverage(bucket: string, size: ReportBucketSize, range: ReportDateRangeYmd): { days: number; length: number; ratio: number } {
+  const parts = parseYmd(bucket);
+  if (!parts || size === 'day') return { days: 1, length: 1, ratio: 1 };
+  const end = reportBucketEnd(bucket, size);
+  const length = dayCountBetween(bucket, end);
+  const first = bucket > range.date_from ? bucket : range.date_from;
+  const last = end < range.date_to ? end : range.date_to;
+  const days = last >= first ? dayCountBetween(first, last) : 0;
+  return { days, length, ratio: length > 0 ? days / length : 1 };
+}
+
 export function shiftRangeYears(range: ReportDateRangeYmd, years: number): ReportDateRangeYmd {
   return { date_from: addMonths(range.date_from, years * 12), date_to: addMonths(range.date_to, years * 12) };
 }

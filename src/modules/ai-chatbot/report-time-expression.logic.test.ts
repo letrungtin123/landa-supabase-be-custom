@@ -237,8 +237,19 @@ test('agreement tolerates days after today and a model-guessed year only when th
   assert.equal(reportRangesAgree(range('2026-07-01', '2026-07-31'), range('2026-07-01', '2026-07-30'), today, true), false);
 });
 
+test('picks the snapshot chart buckets by range length (day ≤ 31, week ≤ 120, else month)', () => {
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-07-01', '2026-07-31')), 'day');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-07-01', '2026-08-01')), 'week', '32 days');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-06-17', '2026-07-31')), 'week', '45 days');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-06-03', '2026-09-30')), 'week', '120 days');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-06-02', '2026-09-30')), 'month', '121 days');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2025-10-09', '2026-10-08')), 'month', 'one year');
+});
+
 test('never asks the chart for more than 62 buckets', () => {
-  assert.equal(resolveSnapshotChartGranularity(null, range('2026-01-01', '2026-10-08')), 'auto');
+  assert.equal(resolveSnapshotChartGranularity(null, range('2026-01-01', '2026-10-08')), 'month');
+  assert.equal(resolveSnapshotChartGranularity('day', range('2026-08-01', '2026-10-01')), 'day', '62 days');
+  assert.equal(resolveSnapshotChartGranularity('day', range('2026-08-01', '2026-10-02')), 'week', '63 days');
   assert.equal(resolveSnapshotChartGranularity('day', range('2026-09-01', '2026-09-30')), 'day');
   assert.equal(resolveSnapshotChartGranularity('day', range('2026-01-01', '2026-10-08')), 'week');
   assert.equal(resolveSnapshotChartGranularity('week', range('2026-01-01', '2026-10-08')), 'week');

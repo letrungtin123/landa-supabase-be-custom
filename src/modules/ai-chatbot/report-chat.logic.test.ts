@@ -739,6 +739,56 @@ test('stores the breakdown and the comparison series as additive V2 snapshot fie
   assert.deepEqual(leaf, { unit_breakdown_status: 'leaf_scope' });
 });
 
+test('stores the cohort course count and a coarsened breakdown request as additive snapshot fields', () => {
+  const summary = {
+    meta: { month: 6, year: 2026, month_label: '', is_current_month: false, date_from: '2026-06-17', date_to: '2026-07-31' },
+    overview: { total_learners: 4, active_learners: 3, completion_rate: 50, total_enrollments: 9, completed_enrollments: 4, incomplete_enrollments: 5 },
+  };
+  const extensions = buildReportSnapshotExtensions({ unitBreakdown: { unit_breakdown_status: 'no_child_units' }, coursePortfolioTotal: 63 });
+  assert.deepEqual(extensions, { unit_breakdown_status: 'no_child_units', course_portfolio_total: 63 });
+  assert.deepEqual(buildReportSnapshotExtensions({ unitBreakdown: { unit_breakdown_status: 'no_child_units' }, coursePortfolioTotal: null }), { unit_breakdown_status: 'no_child_units' });
+  const snapshot = createReportSnapshot(
+    {
+      version: 2, generated_at: '2026-08-01T00:00:00.000Z', timezone: 'Asia/Ho_Chi_Minh',
+      filter: { date_from: '2026-06-17', date_to: '2026-07-31' }, scope: { groupId: undefined, subgroupId: undefined, teamId: undefined },
+      comparison: { date_from: '2026-05-03', date_to: '2026-06-16', basis: 'equal_length' },
+    },
+    summary, summary, [], [], [], { not_started: 1, in_progress: 4, completed: 4 }, {}, 'available',
+    { granularity: 'week', requested_granularity: 'day' }, undefined, extensions,
+  );
+  assert.equal(snapshot.course_portfolio_total, 63);
+  assert.deepEqual(snapshot.enrollment_trend_context, { granularity: 'week', requested_granularity: 'day' });
+  assert.equal(isStoredReportChatSnapshot(snapshot), true);
+  assert.equal(isStoredReportChatSnapshot({ ...snapshot, course_portfolio_total: '63' }), false);
+});
+
+test('a trailing week cut by the end of the range is not read as an end-of-period activity drop', () => {
+  const summary = {
+    meta: { month: 6, year: 2026, month_label: '', is_current_month: false, date_from: '2026-06-01', date_to: '2026-07-28' },
+    overview: { total_learners: 4, active_learners: 30, completion_rate: 50, total_enrollments: 40, completed_enrollments: 20, incomplete_enrollments: 20 },
+  };
+  // 9 ISO weeks from Monday 1 June; the last one starts on Monday 27 July.
+  const series = (values: number[]) => values.map((value, index) => {
+    const date = new Date(Date.UTC(2026, 5, 1 + index * 7)).toISOString().slice(0, 10);
+    return { bucket: date, label: date, value };
+  });
+  const dropped = (dateTo: string, values: number[]) => {
+    const trend = series(values);
+    return createReportSnapshot(
+      {
+        version: 2, generated_at: '2026-08-05T00:00:00.000Z', timezone: 'Asia/Ho_Chi_Minh',
+        filter: { date_from: '2026-06-01', date_to: dateTo }, scope: { groupId: undefined, subgroupId: undefined, teamId: undefined },
+        comparison: { date_from: '2026-04-04', date_to: '2026-05-31', basis: 'equal_length' },
+      },
+      summary, summary, trend, trend, [], { not_started: 1, in_progress: 4, completed: 4 }, {}, 'available', { granularity: 'week' },
+    ).signals.some((signal) => signal.id === 'end_period_activity_drop');
+  };
+  const steady = [10, 10, 10, 10, 10, 8, 8, 8, 0];
+  assert.equal(dropped('2026-08-02', steady), true, 'a whole last week at 0 is a drop');
+  assert.equal(dropped('2026-07-28', steady), false, 'the same week cut after 2 days is left out');
+  assert.equal(dropped('2026-07-28', [10, 10, 10, 10, 2, 2, 2, 2, 1]), true, 'a drop over whole weeks is still reported');
+});
+
 test('a failing breakdown query leaves the report without a breakdown instead of failing it', async () => {
   const warn = console.warn;
   console.warn = () => undefined;
