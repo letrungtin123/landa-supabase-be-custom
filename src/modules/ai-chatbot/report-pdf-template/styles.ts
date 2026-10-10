@@ -243,7 +243,7 @@ td.rate .label { text-align: right; font-weight: 700; color: var(--ink); white-s
 .scope-node .level { font-size: 7.8pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .scope-node .name { font-size: 10pt; font-weight: 700; color: var(--ink); word-break: break-word; }
 .heat tr.aggregate td { border-top: 0.8pt solid var(--line-strong); }
-.heat tr.aggregate td.name .clamp { font-weight: 600; font-style: italic; color: var(--muted); }
+.heat tr.aggregate td.name .clamp { font-weight: 600; font-style: italic; color: var(--muted); display: block; overflow: visible; }
 .footnotes { margin-top: 2mm; display: flex; flex-direction: column; gap: 0.8mm; }
 
 

@@ -11,6 +11,7 @@ import {
 } from './report-chat.service.js';
 import type { ReportCoursePerformance, ReportSummary } from '../reports/reports.service.js';
 import type { ReportUnitBreakdownRow, ReportUnitLevel } from './report-unit-breakdown.logic.js';
+import type { ReportTenantLabels } from './report-labels.logic.js';
 
 type CourseSpec = [name: string, enrollments: number, completed: number, inProgress: number, notStarted: number, rate: number];
 
@@ -21,6 +22,8 @@ export interface ReportPdfFixture {
   snapshot: StoredReportChatSnapshot;
   snapshotHash: string;
   storedNarrative?: unknown;
+  /** The tenant's configured level/role labels (none: the default names). */
+  labels?: ReportTenantLabels;
 }
 
 function summary(dateFrom: string, dateTo: string, overview: ReportSummary['overview']): ReportSummary {
@@ -316,6 +319,36 @@ export function manyUnitsReportFixture(): ReportPdfFixture {
   return fixture('many-units-vi', 'Tổng công ty Dược phẩm An Khang', 'vi', snapshot);
 }
 
+/** Level and role names of a production tenant (Nesso), as its superadmin configured them. */
+export const NESSO_LIKE_LABELS: ReportTenantLabels = {
+  group: 'Khối/Khu vực', subgroup: 'Đơn vị', team: 'Bộ phận', learner: 'Learner', learner_plus: 'Team Leader',
+};
+
+/** Longest allowed labels (64 characters each), a digit and a direction word included: layout stress case. */
+export const LONG_LABELS: ReportTenantLabels = {
+  group: 'Khối Kinh doanh và Phát triển Thị trường Khu vực Miền Nam 2026',
+  subgroup: 'Đơn vị Vận hành Chuỗi cửa hàng Bán lẻ và Tăng trưởng Kênh Online',
+  team: 'Bộ phận Chăm sóc Khách hàng, Hậu mãi và Hỗ trợ Kỹ thuật Tầng 2',
+  learner: 'Nhân viên tham gia chương trình đào tạo nội bộ toàn hệ thống A1',
+  learner_plus: 'Trưởng nhóm phụ trách kèm cặp và đánh giá học viên cấp cơ sở B2',
+};
+
+/**
+ * The production-shaped Vietnamese report of a tenant with its own level and
+ * role names (company › branch scope, broken down by its team level). Unit
+ * and scope names avoid the default level words, so a default name in the
+ * document can only come from the template.
+ */
+export function customLabelsReportFixture(locale: 'vi' | 'en' = 'vi', labels: ReportTenantLabels = NESSO_LIKE_LABELS): ReportPdfFixture {
+  const snapshot = vietnameseSnapshot({
+    scope: { groupId: '6c1d3f5a-2e8b-4f9c-8d4a-3b7e9f2a5c81', subgroupId: '9f4b2d0e-5a3c-4b7f-a8e2-1d6a0f3b4c95' },
+    scopeDisplay: { group_name: 'Miền Nam', subgroup_name: 'Hồ Chí Minh' },
+    extensions: breakdown('team', unitRows(VI_UNITS, 'custom-team'), 230),
+  });
+  const name = labels === NESSO_LIKE_LABELS ? `custom-labels-${locale}` : `long-labels-${locale}`;
+  return { ...fixture(name, 'Nesso', locale, snapshot), labels };
+}
+
 /** Very small dataset with no comparison activity. */
 export function tinyReportFixture(locale: 'vi' | 'en' = 'vi'): ReportPdfFixture {
   const courses = portfolio([['Hội nhập nhân viên mới', 2, 1, 1, 0, 62.5]]);
@@ -529,5 +562,6 @@ export function allReportPdfFixtures(): ReportPdfFixture[] {
     longNamesReportFixture('vi'), longNamesReportFixture('en'), legacyReportFixture(),
     smallBaseReportFixture('vi'), smallBaseReportFixture('en'), weeklyReportFixture(), yearlyReportFixture(),
     yearlyReportFixture({ requestedDay: true }), manyCoursesReportFixture(),
+    customLabelsReportFixture('vi'), customLabelsReportFixture('en'), customLabelsReportFixture('vi', LONG_LABELS), customLabelsReportFixture('en', LONG_LABELS),
   ];
 }

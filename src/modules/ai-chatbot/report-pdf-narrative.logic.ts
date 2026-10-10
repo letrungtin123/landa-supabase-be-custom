@@ -14,10 +14,12 @@ import {
   formatReportPercent,
   formatReportPercentagePoints,
   getReportPdfDictionary,
+  getReportPdfDictionaryFor,
   type ReportBucketGranularity,
   type ReportPdfLocale,
 } from './report-pdf-i18n.js';
 import { REPORT_INSIGHT_THRESHOLDS, type ReportInsightFact, type ReportInsights, type ReportInsightTone, type ReportKpiInsight } from './report-insights.logic.js';
+import { reportLabelTerms, type ReportTenantLabels } from './report-labels.logic.js';
 
 export type ReportPdfNarrativePriority = 'high' | 'medium' | 'low';
 export interface ReportPdfNarrativeItem {
@@ -125,7 +127,7 @@ function anomalyOf(factId: string, insights: ReportInsights) {
 
 /** One localized, tokenized sentence per fact. Every number comes from fact.values. */
 export function describeReportFact(fact: ReportInsightFact, insights: ReportInsights, locale: ReportPdfLocale): string | null {
-  const dict = getReportPdfDictionary(locale);
+  const dict = getReportPdfDictionaryFor(locale, insights);
   const t = dict.narrative;
   const v = fact.values;
   const n = (value: number | undefined, digits = 0) => formatReportNumber(value ?? 0, locale, digits);
@@ -296,7 +298,7 @@ function buildRisks(insights: ReportInsights, locale: ReportPdfLocale): ReportPd
  * rephrase these (validateReportPdfNarrative checks the rec ids).
  */
 export function buildReportRecommendationCandidates(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfRecommendationCandidate[] {
-  const t = getReportPdfDictionary(locale).narrative;
+  const t = getReportPdfDictionaryFor(locale, insights).narrative;
   const n = (value: number | undefined, digits = 0) => formatReportNumber(value ?? 0, locale, digits);
   const pct = (value: number | undefined) => formatReportPercent(value ?? 0, locale);
   const items: ReportPdfRecommendationCandidate[] = [];
@@ -423,9 +425,13 @@ const PP_SUFFIX = /^\s?(?:điểm\s?(?:%|phần\s+trăm)|điểm(?![\p{L}\p{N}])
 const PERCENT_SUFFIX = /^\s?(?:%|phần\s+trăm(?![\p{L}\p{N}])|per\s?cent(?![\p{L}\p{N}]))/iu;
 const SIGN_PREFIX = /(?:^|[\s([:;,])([-−+])$/u;
 
-/** Extracts numbers written in the locale's format (vi: 1.234,5 · en: 1,234.5) with their sign and unit. */
-export function extractReportNarrativeNumbers(text: string, locale: ReportPdfLocale): ReportNarrativeNumber[] {
-  const stripped = blankEntityTokens(text);
+/**
+ * Extracts numbers written in the locale's format (vi: 1.234,5 · en: 1,234.5)
+ * with their sign and unit. Entity tokens and tenant labels (`labels`, from
+ * reportLabelPattern) are not part of the claim and are skipped.
+ */
+export function extractReportNarrativeNumbers(text: string, locale: ReportPdfLocale, labels: RegExp | null = null): ReportNarrativeNumber[] {
+  const stripped = blankEntityTokens(text, labels);
   const pattern = locale === 'vi'
     ? /\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?/g
     : /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g;
@@ -442,9 +448,21 @@ export function extractReportNarrativeNumbers(text: string, locale: ReportPdfLoc
   });
 }
 
-/** NFC text with entity tokens replaced by blanks of the same length (offsets stay valid). */
-function blankEntityTokens(text: string): string {
-  return text.normalize('NFC').replace(ENTITY_TOKEN, (token) => ' '.repeat(token.length));
+/** NFC text with entity tokens (and tenant labels) replaced by blanks of the same length (offsets stay valid). */
+function blankEntityTokens(text: string, labels: RegExp | null = null): string {
+  const blank = (match: string) => ' '.repeat(match.length);
+  const tokensBlanked = text.normalize('NFC').replace(ENTITY_TOKEN, blank);
+  return labels ? tokensBlanked.replace(labels, blank) : tokensBlanked;
+}
+
+/**
+ * Whole-word, case-insensitive pattern of the tenant's configured labels, or
+ * null without any. A label is a name, like an entity token: its digits,
+ * direction words or language are never read as a claim.
+ */
+export function reportLabelPattern(labels: ReportTenantLabels): RegExp | null {
+  const terms = reportLabelTerms(labels).map((term) => term.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'));
+  return terms.length ? new RegExp(`${WORD_START}(?:${terms.join('|')})${WORD_END}`, 'giu') : null;
 }
 
 // Direction words. "Strong" words carry a direction anywhere in their clause;
@@ -603,26 +621,32 @@ interface ValidationContext {
   contextValues: AllowedValue[];
   /** Relative changes withheld for a small comparison base (never quotable). */
   hiddenPercents: number[];
+  /** The tenant's labels (reportLabelPattern): blanked like entity tokens. */
+  labels: RegExp | null;
 }
+
+/** A tenant label counts like an entity token in the length limit: at most 64 characters, it is a name, not prose. */
+const LABEL_LENGTH_PLACEHOLDER = '{{U1}}';
 
 function validateItem(item: ReportPdfNarrativeItem, label: string, context: ValidationContext, options: { describesData: boolean }): string[] {
   const issues: string[] = [];
   const text = item.text.trim();
   if (!text) return [`${label}: empty`];
-  if (text.length > context.maxChars) issues.push(`${label}: too_long`);
+  const measured = context.labels ? text.normalize('NFC').replace(context.labels, LABEL_LENGTH_PLACEHOLDER) : text;
+  if (measured.length > context.maxChars) issues.push(`${label}: too_long`);
   for (const match of text.matchAll(ENTITY_TOKEN)) {
     if (!context.entities.has(match[1])) issues.push(`${label}: unknown_entity:${match[1]}`);
   }
-  if (/[{}]/.test(text.replace(ENTITY_TOKEN, ''))) issues.push(`${label}: malformed_token`);
-  if (/[<>]/.test(text)) issues.push(`${label}: markup`);
+  const stripped = blankEntityTokens(text, context.labels);
+  if (/[{}]/.test(stripped)) issues.push(`${label}: malformed_token`);
+  if (/[<>]/.test(stripped)) issues.push(`${label}: markup`);
   const cited = item.factIds.map((id) => context.facts.get(id));
   const unknownFacts = item.factIds.filter((_id, index) => !cited[index]);
   if (unknownFacts.length) issues.push(`${label}: unknown_fact:${unknownFacts.join(',')}`);
   const facts = cited.filter((fact): fact is ReportInsightFact => Boolean(fact));
   const allowed = [...context.contextValues, ...facts.flatMap((fact) => allowedValuesOf(fact, context.insights))];
-  const stripped = blankEntityTokens(text);
   let previousEnd = 0;
-  for (const number of extractReportNarrativeNumbers(text, context.locale)) {
+  for (const number of extractReportNarrativeNumbers(text, context.locale, context.labels)) {
     // "+795,7%" from 47 to 421 enrollments was withheld on purpose: quoting it is an error of its own.
     const hidden = number.unit === 'percent' && context.hiddenPercents.some((value) => sameRounded(value, number))
       && !allowed.some((value) => sameRounded(value.value, number) && unitAccepts(number.unit, value.unit));
@@ -658,6 +682,7 @@ export function validateReportPdfNarrative(narrative: ReportPdfNarrative, insigh
     maxChars: limits.itemMaxChars,
     contextValues: Object.values(facts.get('context.period')?.values ?? {}).map((value) => ({ value, unit: 'count' as const, signed: false, direction: null })),
     hiddenPercents: insights.hiddenPercentChanges,
+    labels: reportLabelPattern(insights.labels),
   };
   const issues: string[] = [];
   const data = { describesData: true };
@@ -685,8 +710,9 @@ export function validateReportPdfNarrative(narrative: ReportPdfNarrative, insigh
     }
     issues.push(...validateItem({ ...item, factIds: candidate.factIds }, label, context, { describesData: false }));
   });
+  // Tenant labels are names in any language ("Bộ phận" in an English report): the language check skips them.
   const allText = [narrative.headline, ...narrative.findings, ...narrative.risks, ...narrative.recommendations]
-    .map((item) => item.text.replace(ENTITY_TOKEN, '')).join(' ');
+    .map((item) => blankEntityTokens(item.text, context.labels)).join(' ');
   if (locale === 'vi' && !VIETNAMESE_CHARS.test(allText)) issues.push('language: expected_vietnamese');
   if (locale === 'en' && VIETNAMESE_CHARS.test(allText)) issues.push('language: expected_english');
   return { ok: issues.length === 0, issues };
@@ -781,6 +807,7 @@ export function buildReportPdfAiNarrativeRequest(insights: ReportInsights, local
     'Copy numbers exactly as written in the cited fact statements. Never compute, round differently, estimate or invent numbers, dates, ratios or rankings.',
     'Keep the unit (%, percentage points, counts) and the direction (increase or decrease) each number has in its statement.',
     'Refer to courses and units only with their tokens such as {{C1}} or {{U1}}, exactly as given. Never invent names.',
+    'Organization level names in the statements are the organization\'s own terms: keep them exactly as written, never translate or replace them.',
     'Do not speculate about causes.',
     'recommendations: select 1 to 5 entries of recommendation_candidates, most important first. For each, set rec_id to the candidate id and rewrite its statement in plain words; keep every number, target and token it contains and add no other action, number or name.',
     'headline: one sentence. findings: 3 to 5 sentences. risks: 0 to 4 sentences built from risk facts.',

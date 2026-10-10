@@ -7,6 +7,7 @@
 import type { StoredReportChatSnapshot } from './report-chat.service.js';
 import type { ReportPdfLocale } from './report-pdf-i18n.js';
 import { buildReportInsights, type ReportInsights } from './report-insights.logic.js';
+import type { ReportTenantLabels } from './report-labels.logic.js';
 import {
   buildRuleBasedReportNarrative,
   mergeStoredChatNarrative,
@@ -33,6 +34,8 @@ export interface ReportPdfComposeInput {
   snapshotHash: string;
   locale: ReportPdfLocale;
   tenant: ReportPdfTenantBranding;
+  /** The tenant's configured level/role labels (missing ones use the default names). */
+  labels?: ReportTenantLabels;
   storedNarrative?: unknown;
   storedNarrativeLocale?: ReportPdfLocale;
   writeAiNarrative?: ReportPdfAiNarrativeWriter;
@@ -48,7 +51,7 @@ export interface ReportPdfComposition {
 
 /** Pure composition (plus the optional, already-guarded AI writer). */
 export async function composeReportPdfDocument(input: ReportPdfComposeInput): Promise<ReportPdfComposition> {
-  const insights = buildReportInsights(input.snapshot);
+  const insights = buildReportInsights(input.snapshot, input.labels);
   let narrative = buildRuleBasedReportNarrative(insights, input.locale);
   if (input.writeAiNarrative) {
     const candidate = await input.writeAiNarrative(insights, input.locale);

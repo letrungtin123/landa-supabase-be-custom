@@ -1,8 +1,10 @@
 // Locale-aware dictionary access and number/date formatting for the report PDF.
 // Narrative numbers are produced only by these formatters, so the narrative
 // validator (report-pdf-narrative.logic.ts) can parse them back exactly.
-import { reportPdfEn } from './report-pdf-i18n.en.js';
-import { reportPdfVi, type ReportPdfDictionary } from './report-pdf-i18n.vi.js';
+import { resolveReportPdfLabelWords, type ReportPdfLabelWords, type ReportTenantLabels } from './report-labels.logic.js';
+import type { ReportUnitLevel } from './report-unit-breakdown.logic.js';
+import { buildReportPdfEn, reportPdfEn } from './report-pdf-i18n.en.js';
+import { buildReportPdfVi, reportPdfVi, type ReportPdfDictionary } from './report-pdf-i18n.vi.js';
 
 export type ReportPdfLocale = 'vi' | 'en';
 export type { ReportPdfDictionary } from './report-pdf-i18n.vi.js';
@@ -11,8 +13,22 @@ const REPORT_TIME_ZONE = 'Asia/Ho_Chi_Minh';
 const NUMBER_LOCALE: Record<ReportPdfLocale, string> = { vi: 'vi-VN', en: 'en-US' };
 const EN_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
 
-export function getReportPdfDictionary(locale: ReportPdfLocale): ReportPdfDictionary {
-  return locale === 'en' ? reportPdfEn : reportPdfVi;
+/**
+ * Dictionary of a locale. Without label words it uses the default level and
+ * role names; with them (resolved from the tenant's labels, see
+ * report-labels.logic.ts) every level and role name is the tenant's.
+ */
+export function getReportPdfDictionary(locale: ReportPdfLocale, words?: ReportPdfLabelWords): ReportPdfDictionary {
+  if (!words) return locale === 'en' ? reportPdfEn : reportPdfVi;
+  return locale === 'en' ? buildReportPdfEn(words) : buildReportPdfVi(words);
+}
+
+/** Dictionary worded with the tenant's labels, naming the breakdown level of these insights. */
+export function getReportPdfDictionaryFor(
+  locale: ReportPdfLocale,
+  insights: { labels: ReportTenantLabels; unitLevel: ReportUnitLevel | null },
+): ReportPdfDictionary {
+  return getReportPdfDictionary(locale, resolveReportPdfLabelWords(locale, insights.labels, insights.unitLevel));
 }
 
 export function normalizeReportPdfLocale(value: unknown): ReportPdfLocale | null {

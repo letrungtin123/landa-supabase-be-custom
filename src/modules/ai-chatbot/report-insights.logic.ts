@@ -9,6 +9,7 @@ import { REPORT_SIGNAL_THRESHOLDS, type StoredReportChatSnapshot } from './repor
 import { reportBucketCoverage } from './report-date.logic.js';
 import type { ReportBucketGranularity } from './report-pdf-i18n.js';
 import { buildReportInsightFacts, reportDateParts } from './report-insights-facts.logic.js';
+import { normalizeReportTenantLabels, reportChildUnitLevel, type ReportTenantLabels } from './report-labels.logic.js';
 import type { ReportGranularity } from './report-time-expression.logic.js';
 import {
   REPORT_INSIGHTS_VERSION,
@@ -476,8 +477,12 @@ function readRequestedGranularity(snapshot: StoredReportChatSnapshot, granularit
     ? requested as ReportGranularity : null;
 }
 
-/** Builds every deterministic insight of a stored report snapshot. */
-export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportInsights {
+/**
+ * Builds every deterministic insight of a stored report snapshot. `labels` are
+ * the tenant's configured level/role names: they only change wording, never a
+ * figure or a fact.
+ */
+export function buildReportInsights(snapshot: StoredReportChatSnapshot, labels: ReportTenantLabels = {}): ReportInsights {
   const limitations: ReportInsightLimitation[] = [];
   const overview = snapshot.summary.overview;
   const isV2 = snapshot.version === 2;
@@ -535,7 +540,9 @@ export function buildReportInsights(snapshot: StoredReportChatSnapshot): ReportI
     courses,
     units,
     unitBreakdownState: unitBreakdown.state,
+    unitLevel: units?.level ?? reportChildUnitLevel(snapshot.scope),
     scope,
+    labels: normalizeReportTenantLabels(labels),
   };
   const entities: ReportEntity[] = [
     ...courses.rows.map((row) => ({ token: row.token, type: 'course' as const, name: row.name })),

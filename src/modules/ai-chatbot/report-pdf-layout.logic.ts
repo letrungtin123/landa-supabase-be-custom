@@ -75,7 +75,8 @@ const lines = (text: string, charsPerLine: number, max = 99) => Math.min(max, Ma
 /** Conservative estimate used when no browser measurement is available. */
 export function estimateReportPdfLayout(model: LayoutModel): ReportPdfLayoutMeasurements {
   const portfolioRows = model.courses.rows.map((row) => 8 + (lines(row.name, 36, 2) - 1) * 5 + (row.watch ? 5 : 0));
-  const unitRows = model.organization.rows.map((row) => 8 + (lines(row.name, 40, 2) - 1) * 5);
+  // Unit names are clamped to two lines; the "other units" rows (level labels, up to 64 characters) are never cut.
+  const unitRows = model.organization.rows.map((row) => 8 + (lines(row.name, 40, row.aggregate ? 99 : 2) - 1) * 5);
   const methodRows = model.appendix.methodRows.map((row) => (row.kind === 'title' ? 9 : 2 + lines(row.text, 95) * 5.2));
   const narrative = model.narrative;
   const attentionRows = Math.ceil(model.attention.length / 2);

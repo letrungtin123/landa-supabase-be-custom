@@ -19,7 +19,7 @@ const clone = (narrative: ReportPdfNarrative): ReportPdfNarrative => structuredC
 test('rule-based narratives of every fixture pass the number validator in both locales', () => {
   for (const fixture of allReportPdfFixtures()) {
     for (const locale of ['vi', 'en'] as const) {
-      const insights = buildReportInsights(fixture.snapshot);
+      const insights = buildReportInsights(fixture.snapshot, fixture.labels);
       const narrative = buildRuleBasedReportNarrative(insights, locale);
       const validation = validateReportPdfNarrative(narrative, insights, locale);
       assert.deepEqual(validation.issues, [], `${fixture.name}/${locale}`);
@@ -32,7 +32,7 @@ test('rule-based narratives of every fixture pass the number validator in both l
 test('every fact statement sent to Gemini passes the validator when quoted verbatim', () => {
   for (const fixture of allReportPdfFixtures()) {
     for (const locale of ['vi', 'en'] as const) {
-      const insights = buildReportInsights(fixture.snapshot);
+      const insights = buildReportInsights(fixture.snapshot, fixture.labels);
       const rules = buildRuleBasedReportNarrative(insights, locale);
       for (const fact of insights.facts.filter((candidate) => candidate.kind !== 'context')) {
         const statement = describeReportFact(fact, insights, locale);
@@ -175,7 +175,7 @@ test('rejects a count quoted as a percentage and a percentage quoted as a count'
 
 test('a narrative that fails the sign or unit check falls back to the rule-based narrative', async () => {
   const fixture = vietnameseReportFixture();
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   const rules = buildRuleBasedReportNarrative(insights, 'vi');
   const wrong = withFinding({ ...rules, source: 'ai' }, 'Tỉ lệ hoàn thành giảm 3,7 điểm % so với tháng trước.', ['kpi.completion_rate']);
   const composed = await composeReportPdfDocument({
@@ -239,7 +239,7 @@ test('rejects unknown facts, unknown entities, markup and the wrong language', (
 
 test('reuses a valid stored chat narrative in the same locale only', () => {
   const fixture = vietnameseReportFixture();
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   const rules = buildRuleBasedReportNarrative(insights, 'vi');
   const merged = mergeStoredChatNarrative({ narrative: rules, stored: fixture.storedNarrative, storedLocale: 'vi', locale: 'vi', snapshot: fixture.snapshot });
   assert.equal(merged.commentary.length, 1);
@@ -266,7 +266,7 @@ test('reuses a valid stored chat narrative in the same locale only', () => {
 
 test('sends Gemini only tokenized fact statements and parses its JSON contract', () => {
   const fixture = englishReportFixture();
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   const request = buildReportPdfAiNarrativeRequest(insights, 'vi');
   assert.match(request.systemInstruction, /Vietnamese/);
   assert.ok(!request.payload.includes('Customer Service Fundamentals'));

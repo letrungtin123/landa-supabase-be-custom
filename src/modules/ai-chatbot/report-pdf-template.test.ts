@@ -28,7 +28,7 @@ const NO_FONTS = { fontCss: '/* fonts omitted in tests */' };
 const VIETNAMESE_CHARS = /[ăâđêôơưàáạảãầấậẩẫằắặẳẵèéẹẻẽềếệểễìíịỉĩòóọỏõồốộổỗờớợởỡùúụủũừứựửữỳýỵỷỹ]/i;
 
 function model(fixture: ReportPdfFixture, locale = fixture.locale): ReportPdfViewModel {
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   return buildReportPdfViewModel({
     snapshot: fixture.snapshot,
     snapshotHash: fixture.snapshotHash,
@@ -90,7 +90,7 @@ test('builds charts and course data from mutually exclusive snapshot counts', ()
 test('renders the unit heat table with localized aggregate rows and notes', () => {
   const vi = model(vietnameseReportFixture());
   assert.equal(vi.organization.level, 'Phòng ban');
-  assert.equal(vi.organization.unitCountLabel, '9 đơn vị');
+  assert.equal(vi.organization.unitCountLabel, '9 phòng ban', 'without tenant labels the default level name is used');
   assert.deepEqual(vi.organization.rows.slice(0, 2).map((row) => [row.name, row.rateLabel, row.deltaLabel]), [
     ['Phòng Chăm sóc khách hàng', '77,4%', '+2,9 điểm %'], ['Cửa hàng Quận 1', '71,2%', '+6,3 điểm %'],
   ]);
@@ -105,12 +105,12 @@ test('renders the unit heat table with localized aggregate rows and notes', () =
 
   const many = model(manyUnitsReportFixture());
   assert.equal(many.organization.rows.length, 32);
-  assert.deepEqual(many.organization.rows.slice(-2).map((row) => [row.name, row.aggregate]), [['Các đơn vị khác (4)', true], ['Chưa thuộc đơn vị', true]]);
-  assert.equal(many.organization.unitCountLabel, '34 đơn vị');
-  assert.ok(many.organization.footnotes.some((text) => text.startsWith('Bảng liệt kê 30 đơn vị')));
+  assert.deepEqual(many.organization.rows.slice(-2).map((row) => [row.name, row.aggregate]), [['Các công ty khác (4)', true], ['Chưa thuộc công ty nào', true]]);
+  assert.equal(many.organization.unitCountLabel, '34 công ty');
+  assert.ok(many.organization.footnotes.some((text) => text.startsWith('Bảng liệt kê 30 công ty')));
   assert.ok(renderReportPdfHtml(many, NO_FONTS).includes('class="aggregate"'));
   const en = model({ ...manyUnitsReportFixture(), locale: 'en' }, 'en');
-  assert.deepEqual(en.organization.rows.slice(-2).map((row) => row.name), ['Other units (4)', 'Other (not in any unit)']);
+  assert.deepEqual(en.organization.rows.slice(-2).map((row) => row.name), ['Other companies (4)', 'Other (not in any company)']);
 
   const overlapping = structuredClone(vietnameseReportFixture());
   (overlapping.snapshot as unknown as { unit_breakdown: { scope_learners: number } }).unit_breakdown.scope_learners = 200;
@@ -130,10 +130,10 @@ test('leaves the unit section out without units, renumbers the next sections and
 
   const young = model(tinyReportFixture('en'), 'en');
   assert.ok(!sectionIds(young).includes('organization'));
-  assert.ok(young.appendix.limitations.includes(reportPdfEn.appendix.limitations.no_child_units), 'one short line in the appendix');
+  assert.ok(young.appendix.limitations.includes('No company in this scope has learners yet, so the report has no breakdown by company.'), 'one short line in the appendix, naming the level below the scope');
   const older = model(englishReportFixture());
   assert.ok(!sectionIds(older).includes('organization'));
-  assert.ok(older.appendix.limitations.includes(reportPdfEn.appendix.limitations.unit_breakdown_missing));
+  assert.ok(older.appendix.limitations.includes('The snapshot does not include figures per company, so the report has no breakdown by company.'));
 
   const empty = model(emptyReportFixture('vi'));
   assert.deepEqual([empty.sectionNumbers.summary, empty.sectionNumbers.attention, empty.sectionNumbers.recommendations], ['01', '02', '03'], 'no gap in the numbering of an empty report');
@@ -186,9 +186,10 @@ test('renders the whole document in the request locale', () => {
   const en = renderReportPdfHtml(model(englishReportFixture()), NO_FONTS);
   const text = visibleText(en);
   assert.ok(!VIETNAMESE_CHARS.test(text), 'no Vietnamese text in an English document with English names');
-  for (const label of ['Confidential · For internal use only', 'Page 2 of', 'Executive summary', 'Metric definitions', 'learner_plus']) {
+  for (const label of ['Confidential · For internal use only', 'Page 2 of', 'Executive summary', 'Metric definitions', '(role Learner or Learner+)']) {
     assert.ok(en.includes(label), label);
   }
+  assert.ok(!/learner_plus|role learner\b/.test(en), 'no technical role id, only the role names the dashboard shows');
   const vi = renderReportPdfHtml(model(vietnameseReportFixture()), NO_FONTS);
   for (const label of ['Bảo mật · Chỉ lưu hành nội bộ', 'Trang 2/', 'Tóm tắt điều hành', 'Định nghĩa chỉ số']) {
     assert.ok(vi.includes(label), label);

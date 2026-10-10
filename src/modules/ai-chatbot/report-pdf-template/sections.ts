@@ -197,7 +197,7 @@ function renderOrganization(model: ReportPdfViewModel, slice: ReportPdfSectionSl
     ? html`<div class="scope-path">${model.scopePath.map((item, index) => html`<span class="scope-node depth-${index}"><span class="level">${item.level}</span><span class="name">${item.name}</span></span>`)}</div>`
     : html`<div class="scope-path"><span class="scope-node"><span class="level">${dict.cover.scope}</span><span class="name">${dict.scope.all}</span></span></div>`;
   const breakdown = organization.rows.length
-    ? html`<div>${range.first ? html`<div class="card-head"><h3>${o.breakdownTitle}</h3><span class="note">${organization.level ? o.levelLabel({ level: organization.level }) : ''} · ${organization.unitCountLabel ?? ''}</span></div>` : ''}
+    ? html`<div>${range.first ? html`<div class="card-head"><h3>${o.breakdownTitle}</h3><span class="note">${organization.unitCountLabel ?? ''}</span></div>` : ''}
       <table class="heat"><colgroup><col><col style="width:20mm"><col style="width:22mm"><col style="width:20mm"><col style="width:30mm"><col style="width:24mm"></colgroup>
       <thead><tr><th>${o.columns.unit}</th><th class="num">${o.columns.learners}</th><th class="num">${o.columns.active}</th><th class="num">${o.columns.enrollments}</th><th class="num">${o.columns.completionRate}</th><th class="num">${o.columns.delta}</th></tr></thead>
       <tbody>${organization.rows.slice(range.from, range.to).map((row, offset) => html`<tr data-measure="row:organization:${range.from + offset}"${row.aggregate ? html` class="aggregate"` : ''}><td class="name"><div class="clamp">${row.name}</div></td><td class="num">${row.learners}</td><td class="num">${row.active}</td><td class="num">${row.enrollments}</td>

@@ -34,7 +34,7 @@ import type { StoredReportChatSnapshot } from './report-chat.service.js';
 const NO_FONTS = { fontCss: '/* fonts omitted in tests */' };
 
 function model(fixture: ReportPdfFixture, locale = fixture.locale, logoDataUri: string | null = null): ReportPdfViewModel {
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   return buildReportPdfViewModel({
     snapshot: fixture.snapshot, snapshotHash: fixture.snapshotHash, locale,
     tenant: { name: fixture.tenantName, logoDataUri }, insights, narrative: buildRuleBasedReportNarrative(insights, locale),
@@ -42,7 +42,7 @@ function model(fixture: ReportPdfFixture, locale = fixture.locale, logoDataUri: 
 }
 
 const fact = (fixture: ReportPdfFixture, id: string) => {
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   return { insights, fact: insights.facts.find((item) => item.id === id) };
 };
 
@@ -133,7 +133,7 @@ test('4. a peak is worded by its bucket: a day, a week or a month', () => {
   assert.equal(model(weeklyReportFixture()).trends.enrollments!.stats.find((stat) => stat.label === reportPdfVi.trends.peak)?.detail, 'Tuần 13/07–19/07/2026');
   // Every fact statement of the new fixtures stays verifiable when quoted.
   for (const fixture of [yearlyReportFixture(), weeklyReportFixture(), yearlyReportFixture({ requestedDay: true })]) {
-    const insights = buildReportInsights(fixture.snapshot);
+    const insights = buildReportInsights(fixture.snapshot, fixture.labels);
     const rules = buildRuleBasedReportNarrative(insights, 'vi');
     assert.deepEqual(validateReportPdfNarrative(rules, insights, 'vi').issues, [], fixture.name);
   }
@@ -166,7 +166,7 @@ test('6. a flagged flat tail is drawn in orange, explained under the chart and i
 
 test('7. recommendations come from detected signals with who, what and a target; the AI may only select and reword them', async () => {
   const fixture = smallBaseReportFixture();
-  const insights = buildReportInsights(fixture.snapshot);
+  const insights = buildReportInsights(fixture.snapshot, fixture.labels);
   const python = `{{${insights.facts.find((item) => item.id === 'risk.course_activation')!.entities[0]}}}`;
   const rules = buildRuleBasedReportNarrative(insights, 'vi');
   assert.ok(rules.recommendations.length >= 3 && rules.recommendations.length <= 5);
@@ -238,10 +238,10 @@ test('10. the course table lists at most 20 courses in ranking order and says ho
   assert.equal((html.match(/<table class="portfolio">/g) ?? []).length, slices.length, 'each page repeats the table header');
 });
 
-test('8/11. appendix rows flow onto the next page, the unit section is left out without units, template 3.2.0', () => {
-  assert.equal(REPORT_PDF_TEMPLATE_VERSION, '3.2.0');
+test('8/11. appendix rows flow onto the next page, the unit section is left out without units, template 3.3.0', () => {
+  assert.equal(REPORT_PDF_TEMPLATE_VERSION, '3.3.0');
   const vi = model(smallBaseReportFixture());
-  assert.ok(vi.appendix.scopeRows.some((row) => row.value === 'Mẫu 3.2.0'));
+  assert.ok(vi.appendix.scopeRows.some((row) => row.value === 'Mẫu 3.3.0'));
   assert.ok(!vi.pages.flat().some((slice) => slice.id === 'organization'));
   assert.equal(vi.sectionNumbers.attention, '04');
   assert.equal(vi.appendix.methodRows[0].text, reportPdfVi.appendix.limitationsTitle, 'limitations come first');

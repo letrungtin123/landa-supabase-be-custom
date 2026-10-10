@@ -1,7 +1,8 @@
 // Types and versioned thresholds of the deterministic report insights engine.
 import { REPORT_SIGNAL_THRESHOLDS, type ReportComparisonPeriod } from './report-chat.service.js';
 import type { ReportBucketGranularity } from './report-pdf-i18n.js';
-import type { ReportUnitRowKind } from './report-unit-breakdown.logic.js';
+import type { ReportTenantLabels } from './report-labels.logic.js';
+import type { ReportUnitLevel, ReportUnitRowKind } from './report-unit-breakdown.logic.js';
 import type { ReportGranularity } from './report-time-expression.logic.js';
 
 export const REPORT_INSIGHTS_VERSION = 'insights-v3';
@@ -231,7 +232,11 @@ export interface ReportInsights {
   courses: ReportCourseInsights;
   units: ReportUnitInsights | null;
   unitBreakdownState: ReportUnitBreakdownState;
+  /** Level of the units below the scope (the breakdown level); null for a team scope. */
+  unitLevel: ReportUnitLevel | null;
   scope: ReportScopeInsight;
+  /** The tenant's configured level/role labels, read at render time (never part of the snapshot). */
+  labels: ReportTenantLabels;
   attention: ReportAttentionItem[];
   facts: ReportInsightFact[];
   entities: ReportEntity[];

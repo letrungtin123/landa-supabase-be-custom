@@ -13,6 +13,7 @@ import {
   formatReportPeriod,
   formatReportSignedNumber,
   getReportPdfDictionary,
+  getReportPdfDictionaryFor,
   type ReportBucketGranularity,
   type ReportPdfDictionary,
   type ReportPdfLocale,
@@ -29,8 +30,8 @@ import { describeReportFact, type ReportPdfNarrative, type ReportPdfNarrativeIte
 import { REPORT_SIGNAL_THRESHOLDS } from './report-chat.service.js';
 import { REPORT_SNAPSHOT_BUCKET_RULE } from './report-time-expression.logic.js';
 
-/** Bump when the layout or wording changes: stored PDFs are keyed by this version. */
-export const REPORT_PDF_TEMPLATE_VERSION = '3.2.0';
+/** Bump when the layout or wording changes: stored PDFs are keyed by this version (and by the tenant's labels). */
+export const REPORT_PDF_TEMPLATE_VERSION = '3.3.0';
 
 /** The course table lists at most this many courses; the rest are in the Excel export. */
 export const REPORT_PDF_MAX_COURSE_ROWS = 20;
@@ -407,7 +408,7 @@ function organizationSection(insights: ReportInsights, locale: ReportPdfLocale, 
   };
 }
 
-function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; dict: ReportPdfDictionary; narrative: ReportPdfNarrative; periodLabel: string; comparisonLabel: string | null; comparisonTitle: string; scopeLabel: string; generatedAtLabel: string; reference: string; templateVersion: string }): Omit<ReportPdfViewModel['appendix'], 'methodRows'> {
+function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; dict: ReportPdfDictionary; narrative: ReportPdfNarrative; periodLabel: string; comparisonLabel: string | null; comparisonTitle: string; scopeDetail: string; generatedAtLabel: string; reference: string; templateVersion: string }): Omit<ReportPdfViewModel['appendix'], 'methodRows'> {
   const { dict, locale } = input;
   const a = dict.appendix;
   const pct = (value: number) => formatReportPercent(value, locale);
@@ -426,7 +427,7 @@ function appendix(insights: ReportInsights, input: { locale: ReportPdfLocale; di
       { label: a.rows.period, value: input.periodLabel },
       { label: a.rows.comparison, value: input.comparisonLabel ?? dict.cover.noComparison },
       { label: a.rows.basis, value: input.comparisonTitle },
-      { label: a.rows.scope, value: input.scopeLabel },
+      { label: a.rows.scope, value: input.scopeDetail },
       { label: a.rows.timezone, value: a.rows.timezoneValue },
       { label: a.rows.snapshot, value: input.generatedAtLabel },
       { label: a.rows.freshness, value: a.rows.freshnessValue },
@@ -500,7 +501,8 @@ export function buildReportPdfViewModel(input: {
   templateVersion?: string;
 }): ReportPdfViewModel {
   const { snapshot, locale, insights, narrative } = input;
-  const dict = getReportPdfDictionary(locale);
+  // Level and role names are the tenant's labels (insights.labels), the breakdown level included.
+  const dict = getReportPdfDictionaryFor(locale, insights);
   const path = scopePath(insights, dict);
   const periodLabel = formatReportPeriod(insights.period.dateFrom, insights.period.dateTo, locale);
   const comparisonLabel = insights.comparison ? formatReportPeriod(insights.comparison.dateFrom, insights.comparison.dateTo, locale) : null;
@@ -568,7 +570,11 @@ export function buildReportPdfViewModel(input: {
       priorityLabel: dict.recommendations.priority[item.priority ?? 'medium'],
       fromChat: item.origin === 'chat',
     })),
-    appendix: withMethodRows(appendix(insights, { locale, dict, narrative, periodLabel, comparisonLabel, comparisonTitle, scopeLabel, generatedAtLabel, reference, templateVersion }), dict),
+    appendix: withMethodRows(appendix(insights, {
+      locale, dict, narrative, periodLabel, comparisonLabel, comparisonTitle, generatedAtLabel, reference, templateVersion,
+      // The appendix names each level with the tenant's label: "Khối/Khu vực: Khối Kinh doanh › Đơn vị: Chi nhánh HCM".
+      scopeDetail: path.length ? path.map((item) => `${item.level}: ${item.name}`).join(' › ') : dict.scope.all,
+    }), dict),
   };
   const numbered = { ...base, sectionNumbers: reportPdfSectionNumbers(base) };
   return { ...numbered, pages: planReportPdfPages(numbered) };
