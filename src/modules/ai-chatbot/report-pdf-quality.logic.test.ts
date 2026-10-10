@@ -49,7 +49,7 @@ const fact = (fixture: ReportPdfFixture, id: string) => {
 test('1. the Completion rate keeps its name and value, with a plain note; status shares are labelled as shares of enrollments', () => {
   const vi = model(smallBaseReportFixture());
   const rate = vi.kpis.find((card) => card.id === 'completion_rate')!;
-  assert.deepEqual([rate.label, rate.value, rate.hint], ['Tỉ lệ hoàn thành', '67,1%', 'Tính theo tiến độ trung bình của học viên, xem Phụ lục A']);
+  assert.deepEqual([rate.label, rate.value, rate.hint], ['Tỉ lệ hoàn thành', '67,1%', 'Tính theo tiến độ trung bình của học viên']);
   assert.equal(vi.coverKpis.find((card) => card.id === 'completion_rate')?.hint, rate.hint, 'the note is also on the cover, where the rate first appears');
   assert.ok(vi.kpis.filter((card) => card.id !== 'completion_rate').every((card) => card.hint === null));
   assert.equal(vi.courses.statusNote, reportPdfVi.courses.statusShareNote);

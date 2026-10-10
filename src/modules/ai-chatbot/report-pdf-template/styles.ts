@@ -270,13 +270,6 @@ td.rate .label { text-align: right; font-weight: 700; color: var(--ink); white-s
 /* ── Appendix ── */
 .defs td { vertical-align: top; padding: 2mm 1.6mm; }
 .defs td.term { width: 46mm; font-weight: 700; color: var(--ink); }
-.formula { border-radius: 3.2mm; border: 0.8pt solid #D6E0FA; background: #F7F9FF; padding: 4.5mm 5mm; display: flex; flex-direction: column; gap: 2.6mm; }
-.formula ol { counter-reset: step; display: flex; flex-direction: column; gap: 1.8mm; }
-.formula li { position: relative; padding-left: 7mm; font-size: 9.2pt; }
-.formula li::before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: 0.3mm; width: 4.8mm; height: 4.8mm; border-radius: 50%; background: var(--brand); color: #FFFFFF; font-size: 7.8pt; font-weight: 800; display: flex; align-items: center; justify-content: center; }
-.formula .expr { font-size: 11pt; font-weight: 700; color: var(--navy-2); background: #FFFFFF; border: 0.6pt solid #D6E0FA; border-radius: 2.4mm; padding: 2.6mm 3.5mm; text-align: center; letter-spacing: 0.01em; }
-.formula .legend-text { font-size: 8.6pt; color: var(--muted); }
-.formula .callout { font-size: 8.8pt; color: var(--warn); background: var(--warn-soft); border-radius: 2mm; padding: 2mm 3mm; font-weight: 600; }
 .kv td { vertical-align: top; padding: 1.7mm 1.6mm; }
 .kv td.key { width: 52mm; font-weight: 700; color: var(--ink); }
 .bullets li { position: relative; padding-left: 4.5mm; font-size: 9.2pt; margin-bottom: 1.6mm; }

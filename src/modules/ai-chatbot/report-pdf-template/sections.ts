@@ -240,12 +240,7 @@ function renderAppendixDefinitions(model: ReportPdfViewModel): SafeHtml {
   const a = dict.appendix;
   return html`<section class="section">${sectionHead(sectionNumber(model, 'appendixDefinitions'), dict.sections.appendix)}
   <div><h3 style="margin-bottom:1.5mm">${a.definitionsTitle}</h3>
-  <table class="defs"><tbody>${model.appendix.definitions.map((row) => html`<tr><td class="term">${row.label}</td><td>${row.text}</td></tr>`)}</tbody></table></div>
-  <div class="formula"><h3>${a.formulaTitle}</h3>
-    <ol>${a.formulaSteps.map((step) => html`<li>${step}</li>`)}</ol>
-    <div class="expr">${a.formulaExpression}</div>
-    <p class="legend-text">${a.formulaLegend}</p>
-    <p class="callout">${a.formulaNote}</p></div></section>`;
+  <table class="defs"><tbody>${model.appendix.definitions.map((row) => html`<tr><td class="term">${row.label}</td><td>${row.text}</td></tr>`)}</tbody></table></div></section>`;
 }
 
 function renderAppendixData(model: ReportPdfViewModel): SafeHtml {

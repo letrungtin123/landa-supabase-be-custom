@@ -186,12 +186,16 @@ test('renders the whole document in the request locale', () => {
   const en = renderReportPdfHtml(model(englishReportFixture()), NO_FONTS);
   const text = visibleText(en);
   assert.ok(!VIETNAMESE_CHARS.test(text), 'no Vietnamese text in an English document with English names');
-  for (const label of ['Confidential · For internal use only', 'Page 2 of', 'Executive summary', 'How the Completion rate is calculated', '99.99%', 'learner_plus']) {
+  for (const label of ['Confidential · For internal use only', 'Page 2 of', 'Executive summary', 'Metric definitions', 'learner_plus']) {
     assert.ok(en.includes(label), label);
   }
   const vi = renderReportPdfHtml(model(vietnameseReportFixture()), NO_FONTS);
-  for (const label of ['Bảo mật · Chỉ lưu hành nội bộ', 'Trang 2/', 'Tóm tắt điều hành', 'Cách tính Tỉ lệ hoàn thành', '99,99%', 'được tính là 0%']) {
+  for (const label of ['Bảo mật · Chỉ lưu hành nội bộ', 'Trang 2/', 'Tóm tắt điều hành', 'Định nghĩa chỉ số']) {
     assert.ok(vi.includes(label), label);
+  }
+  // Owner decision 2026-10-10: the PDF no longer prints the completion-rate calculation box.
+  for (const removed of ['How the Completion rate is calculated', 'Cách tính Tỉ lệ hoàn thành']) {
+    assert.ok(!en.includes(removed) && !vi.includes(removed), removed);
   }
   const viForEnglishData = renderReportPdfHtml(model(englishReportFixture(), 'vi'), NO_FONTS);
   assert.ok(viForEnglishData.includes('Bảo mật'), 'locale comes from the request, not from the data');
