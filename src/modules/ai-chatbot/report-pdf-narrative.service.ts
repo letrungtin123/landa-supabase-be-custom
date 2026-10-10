@@ -36,7 +36,7 @@ const RESPONSE_SCHEMA = {
     headline: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] },
     findings: { type: 'ARRAY', items: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] } },
     risks: { type: 'ARRAY', items: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] } },
-    recommendations: { type: 'ARRAY', items: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } }, priority: { type: 'STRING', enum: ['high', 'medium', 'low'] } }, required: ['text', 'fact_ids', 'priority'] } },
+    recommendations: { type: 'ARRAY', items: { type: 'OBJECT', properties: { rec_id: { type: 'STRING' }, text: { type: 'STRING' } }, required: ['rec_id', 'text'] } },
   },
   required: ['headline', 'findings', 'risks', 'recommendations'],
 } as const;
@@ -159,7 +159,7 @@ export function createReportPdfAiNarrativeWriter(
       reservationId = null;
       let parsed: unknown = null;
       try { parsed = JSON.parse(response.text); } catch { parsed = null; }
-      const narrative = toReportPdfAiNarrative(parsed, insights);
+      const narrative = toReportPdfAiNarrative(parsed, insights, locale);
       if (!narrative) {
         // Shape only (finish reason, sizes, failing paths): never the narrative text.
         const issues = parsed === null ? [] : ReportPdfAiNarrativeSchema.safeParse(parsed).error?.issues ?? [];

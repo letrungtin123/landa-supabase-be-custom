@@ -64,15 +64,14 @@ test('puts the unit ranking in the summary and unit risks in the risks and actio
   const decline = insights.facts.find((fact) => fact.id === 'risk.unit_decline')!;
   const unit = `{{${decline.entities[0]}}}`;
   assert.ok(vi.findings.some((item) => item.factIds.includes('units.ranking')), 'best/worst unit in the executive summary');
-  // The course activation risk has data here; its wording comes with the PDF narrative.
-  assert.deepEqual(vi.risks.map((item) => item.factIds[0]), ['risk.watchlist', 'risk.unit_decline', 'risk.unit_low_completion']);
-  assert.equal(vi.risks[1].text, `Tỉ lệ hoàn thành của ${unit} giảm 6,5 điểm % so với tháng trước, từ 63,8% xuống 57,3%.`);
+  assert.deepEqual(vi.risks.map((item) => item.factIds[0]), ['risk.watchlist', 'risk.course_activation', 'risk.unit_decline', 'risk.unit_low_completion']);
+  assert.equal(vi.risks[2].text, `Tỉ lệ hoàn thành của ${unit} giảm 6,5 điểm % so với tháng trước, từ 63,8% xuống 57,3%.`);
   assert.ok(vi.recommendations.some((item) => item.factIds.includes('risk.unit_decline') && item.priority === 'high' && item.text.includes(unit)));
   assert.ok(!vi.recommendations.some((item) => item.factIds.includes('risk.unit_gap')), 'the lowest unit already has its low-completion action');
   assert.deepEqual(validateReportPdfNarrative(vi, insights, 'vi').issues, []);
   // English extended fixture: four higher-priority risks come first, the unit decline still has its card text.
   const extended = buildReportInsights(englishExtendedReportFixture().snapshot);
-  assert.match(describeReportFact(extended.facts.find((fact) => fact.id === 'risk.unit_decline')!, extended, 'en')!, /^The completion rate of \{\{U\d+\}\} fell by 10\.3 pp vs the previous month, from 55\.1% to 44\.8%\.$/);
+  assert.match(describeReportFact(extended.facts.find((fact) => fact.id === 'risk.unit_decline')!, extended, 'en')!,/^The completion rate of \{\{U\d+\}\} fell by 10\.3 pp vs the previous month, from 55\.1% to 44\.8%\.$/);
 });
 
 test('checks unit numbers like every other fact (sign, unit, source)', () => {
@@ -244,9 +243,18 @@ test('reuses a valid stored chat narrative in the same locale only', () => {
   const rules = buildRuleBasedReportNarrative(insights, 'vi');
   const merged = mergeStoredChatNarrative({ narrative: rules, stored: fixture.storedNarrative, storedLocale: 'vi', locale: 'vi', snapshot: fixture.snapshot });
   assert.equal(merged.commentary.length, 1);
-  assert.equal(merged.recommendations[0].origin, 'chat');
-  assert.equal(merged.recommendations.filter((item) => item.factIds.includes('risk.watchlist')).length, 1, 'chat action replaces the rule action for the same signal');
+  assert.deepEqual(merged.recommendations, rules.recommendations, 'the report keeps its own targeted action for a signal the chat also covered');
   assert.equal(validateReportPdfNarrative(merged, insights, 'vi').ok, true);
+  // A chat action fills in only for a detected signal without a report action; an untied one is dropped.
+  const fewer = { ...rules, recommendations: rules.recommendations.slice(0, 2) };
+  const stored = structuredClone(fixture.storedNarrative) as { recommended_actions: Array<{ signal_id: string | null; priority: string; action: string }> };
+  stored.recommended_actions = [
+    { signal_id: 'enrollment_period_change', priority: 'medium', action: 'Duy trì truyền thông khóa học để giữ mức ghi danh.' },
+    { signal_id: null, priority: 'low', action: 'Theo dõi báo cáo thường xuyên.' },
+  ];
+  const filled = mergeStoredChatNarrative({ narrative: fewer, stored, storedLocale: 'vi', locale: 'vi', snapshot: fixture.snapshot });
+  assert.deepEqual(filled.recommendations.map((item) => item.origin ?? 'report'), ['report', 'report', 'chat']);
+  assert.deepEqual(filled.recommendations[2].factIds, ['kpi.total_enrollments']);
 
   assert.deepEqual(mergeStoredChatNarrative({ narrative: rules, stored: fixture.storedNarrative, storedLocale: 'vi', locale: 'en', snapshot: fixture.snapshot }), rules);
   const withNumber = structuredClone(fixture.storedNarrative) as { interpretation: string[] };
@@ -269,10 +277,13 @@ test('sends Gemini only tokenized fact statements and parses its JSON contract',
     headline: { text: rules.headline.text, fact_ids: rules.headline.factIds },
     findings: rules.findings.map((item) => ({ text: item.text, fact_ids: item.factIds })),
     risks: rules.risks.map((item) => ({ text: item.text, fact_ids: item.factIds })),
-    recommendations: rules.recommendations.map((item) => ({ text: item.text, fact_ids: item.factIds, priority: item.priority })),
+    recommendations: rules.recommendations.map((item) => ({ rec_id: item.recId, text: item.text })),
   };
-  const parsed = toReportPdfAiNarrative(aiShape, insights);
+  const parsed = toReportPdfAiNarrative(aiShape, insights, 'en');
   assert.equal(parsed?.source, 'ai');
   assert.equal(parsed?.findings[0].tone, insights.facts.find((fact) => fact.id === rules.findings[0].factIds[0])?.tone);
-  assert.equal(toReportPdfAiNarrative({ headline: 'x' }, insights), null);
+  assert.deepEqual(parsed?.recommendations.map((item) => [item.recId, item.priority, item.factIds]), rules.recommendations.map((item) => [item.recId, item.priority, item.factIds]),
+    'facts and priority come from the selected candidate');
+  assert.equal(toReportPdfAiNarrative({ headline: 'x' }, insights, 'en'), null);
+  assert.ok(JSON.parse(request.payload).recommendation_candidates.length >= rules.recommendations.length, 'the model selects among the deterministic actions');
 });

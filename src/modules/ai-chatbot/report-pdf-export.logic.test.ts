@@ -330,7 +330,8 @@ test('the AI narrative writer accounts tokens and only returns validated narrati
     headline: { text: headline, fact_ids: rules.headline.factIds },
     findings: rules.findings.map((item) => ({ text: item.text, fact_ids: item.factIds })),
     risks: rules.risks.map((item) => ({ text: item.text, fact_ids: item.factIds })),
-    recommendations: rules.recommendations.map((item) => ({ text: item.text, fact_ids: item.factIds, priority: item.priority })),
+    // The model only selects and rewords the deterministic actions (by rec_id).
+    recommendations: rules.recommendations.map((item) => ({ rec_id: item.recId, text: item.text })),
   });
   const calls = { reserve: 0, finalize: 0, release: 0, generate: 0 };
   const logs: Record<string, unknown>[] = [];

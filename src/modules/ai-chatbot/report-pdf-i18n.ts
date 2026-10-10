@@ -91,6 +91,58 @@ export function formatReportBucket(bucket: string, granularity: ReportBucketGran
   return compact ? formatReportShortDate(bucket, locale) : formatReportDate(bucket, locale);
 }
 
+/**
+ * A day range written as short as it stays clear:
+ * vi "15/06–21/06/2026", "29/12/2025–04/01/2026";
+ * en "15–21 Jun 2026", "29 Jun–5 Jul 2026", "29 Dec 2025–4 Jan 2026".
+ */
+export function formatReportDayRange(from: string, to: string, locale: ReportPdfLocale): string {
+  const start = parseYmd(from);
+  const end = parseYmd(to);
+  if (!start || !end) return `${from}–${to}`;
+  if (from === to) return formatReportDate(from, locale);
+  const sameYear = start.year === end.year;
+  if (locale === 'vi') return `${sameYear ? formatReportShortDate(from, locale) : formatReportDate(from, locale)}–${formatReportDate(to, locale)}`;
+  if (sameYear && start.month === end.month) return `${start.day}–${formatReportDate(to, locale)}`;
+  return `${sameYear ? formatReportShortDate(from, locale) : formatReportDate(from, locale)}–${formatReportDate(to, locale)}`;
+}
+
+/** Days of a chart bucket inside the period (a week or month may be cut by the period). */
+export function reportBucketSpan(bucket: string, granularity: ReportBucketGranularity, period: { dateFrom: string; dateTo: string }): { from: string; to: string } {
+  const parts = parseYmd(bucket);
+  if (!parts || granularity === 'day' || granularity === 'unknown') return { from: bucket, to: bucket };
+  const startMs = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const endMs = granularity === 'week' ? startMs + 6 * 86_400_000 : Date.UTC(parts.year, parts.month, 0);
+  const end = new Date(endMs).toISOString().slice(0, 10);
+  return { from: bucket > period.dateFrom ? bucket : period.dateFrom, to: end < period.dateTo ? end : period.dateTo };
+}
+
+/**
+ * Short x-axis label of a bucket. Days and weeks (first day in the period)
+ * show the year only when the period spans two calendar years; months are
+ * vi "T4/2026", en "Apr 2026".
+ */
+export function formatReportBucketTick(bucket: string, granularity: ReportBucketGranularity, locale: ReportPdfLocale, period: { dateFrom: string; dateTo: string }): string {
+  if (granularity === 'month') {
+    const parts = parseYmd(bucket);
+    if (!parts) return bucket;
+    return locale === 'en' ? `${EN_MONTHS[parts.month - 1]} ${parts.year}` : `T${parts.month}/${parts.year}`;
+  }
+  const start = reportBucketSpan(bucket, granularity, period).from;
+  return period.dateFrom.slice(0, 4) !== period.dateTo.slice(0, 4) ? formatReportDate(start, locale) : formatReportShortDate(start, locale);
+}
+
+/** Full label of a bucket: a date, a week's days in the period or a month. */
+export function formatReportBucketLabel(bucket: string, granularity: ReportBucketGranularity, locale: ReportPdfLocale, period: { dateFrom: string; dateTo: string }): string {
+  const trends = getReportPdfDictionary(locale).trends;
+  if (granularity === 'month') return trends.bucketMonth({ month: formatReportMonth(bucket, locale) });
+  if (granularity === 'week') {
+    const span = reportBucketSpan(bucket, granularity, period);
+    return trends.bucketWeek({ range: formatReportDayRange(span.from, span.to, locale) });
+  }
+  return formatReportDate(bucket, locale);
+}
+
 export function formatReportPeriod(dateFrom: string, dateTo: string, locale: ReportPdfLocale): string {
   return `${formatReportDate(dateFrom, locale)} – ${formatReportDate(dateTo, locale)}`;
 }

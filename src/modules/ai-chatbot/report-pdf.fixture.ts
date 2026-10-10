@@ -527,5 +527,7 @@ export function allReportPdfFixtures(): ReportPdfFixture[] {
     vietnameseReportFixture(), englishReportFixture(), englishExtendedReportFixture(), manyUnitsReportFixture(),
     tinyReportFixture('vi'), tinyReportFixture('en'), emptyReportFixture('en'), emptyReportFixture('vi'),
     longNamesReportFixture('vi'), longNamesReportFixture('en'), legacyReportFixture(),
+    smallBaseReportFixture('vi'), smallBaseReportFixture('en'), weeklyReportFixture(), yearlyReportFixture(),
+    yearlyReportFixture({ requestedDay: true }), manyCoursesReportFixture(),
   ];
 }

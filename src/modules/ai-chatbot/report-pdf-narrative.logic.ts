@@ -8,11 +8,13 @@ import { z } from 'zod';
 import { isReportNarrativeAllowed, type StoredReportChatSnapshot } from './report-chat.service.js';
 import {
   formatReportDate,
+  formatReportDayRange,
   formatReportMonth,
   formatReportNumber,
   formatReportPercent,
   formatReportPercentagePoints,
   getReportPdfDictionary,
+  type ReportBucketGranularity,
   type ReportPdfLocale,
 } from './report-pdf-i18n.js';
 import { REPORT_INSIGHT_THRESHOLDS, type ReportInsightFact, type ReportInsights, type ReportInsightTone, type ReportKpiInsight } from './report-insights.logic.js';
@@ -24,6 +26,17 @@ export interface ReportPdfNarrativeItem {
   tone: ReportInsightTone;
   priority?: ReportPdfNarrativePriority;
   origin?: 'chat';
+  /** Recommendation candidate this action comes from (deterministic or rephrased by AI). */
+  recId?: string;
+}
+
+/** A deterministic recommendation built from one detected signal, with its numbers and target. */
+export interface ReportPdfRecommendationCandidate {
+  id: string;
+  text: string;
+  factIds: string[];
+  priority: ReportPdfNarrativePriority;
+  tone: ReportInsightTone;
 }
 export interface ReportPdfNarrative {
   source: 'ai' | 'rules';
@@ -49,13 +62,31 @@ const ENTITY_TOKEN = /\{\{([CU]\d{1,3})\}\}/g;
 const VIETNAMESE_CHARS = /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i;
 const token = (value: string) => `{{${value}}}`;
 
-function formatFactDate(values: Record<string, number>, prefix: string, locale: ReportPdfLocale): string {
+function factYmd(values: Record<string, number>, prefix: string): string | null {
   const year = values[`${prefix}_year`];
   const month = values[`${prefix}_month`];
+  if (!year || !month) return null;
   const day = values[`${prefix}_day`];
-  if (!year || !month) return '';
-  const ym = `${year}-${String(month).padStart(2, '0')}`;
-  return day ? formatReportDate(`${ym}-${String(day).padStart(2, '0')}`, locale) : formatReportMonth(ym, locale);
+  return `${year}-${String(month).padStart(2, '0')}${day ? `-${String(day).padStart(2, '0')}` : ''}`;
+}
+
+function chartGranularity(insights: ReportInsights): ReportBucketGranularity {
+  return insights.trends.enrollments?.granularity ?? insights.trends.activeLearners?.granularity ?? 'unknown';
+}
+
+/**
+ * When a bucket happened, worded by its size: "vào ngày 15/07/2026",
+ * "vào tuần 15/06–21/06/2026", "vào tháng 04/2026" (en "on …", "in the week of …", "in …").
+ */
+function formatFactWhen(values: Record<string, number>, prefix: string, insights: ReportInsights, locale: ReportPdfLocale): string {
+  const t = getReportPdfDictionary(locale).narrative;
+  const start = factYmd(values, prefix);
+  if (!start) return '';
+  const granularity = chartGranularity(insights);
+  if (granularity === 'month' || start.length === 7) return t.whenMonth({ month: formatReportMonth(start.slice(0, 7), locale) });
+  const end = factYmd(values, `${prefix}_end`);
+  if (granularity === 'week' && end) return t.whenWeek({ range: formatReportDayRange(start, end, locale) });
+  return t.whenDay({ date: formatReportDate(start, locale) });
 }
 
 function perUnit(insights: ReportInsights, locale: ReportPdfLocale): string {
@@ -77,9 +108,19 @@ export function describeKpiChange(kpi: ReportKpiInsight, insights: ReportInsight
   const direction = dict.direction[kpi.direction];
   if (kpi.unit === 'percentage') return dict.narrative.changeRate({ direction, delta: formatReportPercentagePoints(kpi.delta, locale), suffix });
   const delta = formatReportNumber(Math.abs(kpi.delta), locale);
+  if (kpi.smallBase) return dict.narrative.changeCountSmallBase({ direction, delta, suffix });
   return kpi.deltaPercent === null
     ? dict.narrative.changeCountNoPct({ direction, delta, suffix })
     : dict.narrative.changeCount({ direction, delta, pct: formatReportPercent(Math.abs(kpi.deltaPercent), locale), suffix });
+}
+
+function seriesName(factId: string, locale: ReportPdfLocale): string {
+  const t = getReportPdfDictionary(locale).narrative;
+  return factId.endsWith('active_learners') ? t.seriesActive : t.seriesEnrollments;
+}
+
+function anomalyOf(factId: string, insights: ReportInsights) {
+  return (factId.endsWith('active_learners') ? insights.trends.activeLearners : insights.trends.enrollments)?.anomaly ?? null;
 }
 
 /** One localized, tokenized sentence per fact. Every number comes from fact.values. */
@@ -99,6 +140,7 @@ export function describeReportFact(fact: ReportInsightFact, insights: ReportInsi
       const label = dict.kpi[kpi.id].sentence;
       const change = describeKpiChange(kpi, insights, locale);
       if (kpi.unit === 'percentage') {
+        if (kpi.smallBase && kpi.previous !== null) return t.kpiRateSmallSample({ current: pct(v.current), previous: pct(v.previous) });
         return change && kpi.previous !== null
           ? t.kpiRate({ current: pct(v.current), previous: pct(v.previous), change })
           : t.kpiPlain({ label, current: pct(v.current) });
@@ -116,13 +158,29 @@ export function describeReportFact(fact: ReportInsightFact, insights: ReportInsi
     case 'spread':
       return t.spread({ spread: pp(v.spread), best: pct(v.best), worst: pct(v.worst) });
     case 'trend_peak':
-      return t.trendPeak({ date: formatFactDate(v, 'peak', locale), value: n(v.value), ratio: n(v.ratio, 1) });
+      return t.trendPeak({ when: formatFactWhen(v, 'peak', insights, locale), value: n(v.value), ratio: n(v.ratio, 1) });
     case 'trend_momentum':
       return (v.direction > 0 ? t.trendMomentumUp : t.trendMomentumDown)({ last: n(v.last, 1), first: n(v.first, 1), unit: perUnit(insights, locale) });
-    case 'trend_vs_previous':
-      return t.trendVsPrevious({ avg: n(v.avg, 1), unit: perUnit(insights, locale), direction: dict.direction[v.direction > 0 ? 'up' : 'down'], pct: pct(v.pct), previous: n(v.previous, 1) });
+    case 'trend_vs_previous': {
+      const direction = dict.direction[v.direction > 0 ? 'up' : 'down'];
+      // Without a meaningful percentage (tiny comparison period) only the two averages are given.
+      return v.pct === undefined
+        ? t.trendVsPreviousSmallBase({ avg: n(v.avg, 1), unit: perUnit(insights, locale), direction, previous: n(v.previous, 1) })
+        : t.trendVsPrevious({ avg: n(v.avg, 1), unit: perUnit(insights, locale), direction, pct: pct(v.pct), previous: n(v.previous, 1) });
+    }
     case 'trend_spikes':
-      return t.trendSpikes({ count: n(v.count), date: formatFactDate(v, 'spike', locale), value: n(v.value) });
+      return t.trendSpikes({ count: n(v.count), when: formatFactWhen(v, 'spike', insights, locale), value: n(v.value) });
+    case 'course_activation_risk': {
+      const params = { course: entity(), notStarted: n(v.not_started), enrollments: n(v.enrollments), share: pct(v.share), threshold: pct(v.threshold) };
+      return v.count > 1 ? t.courseActivation({ ...params, count: n(v.count) }) : t.courseActivationOne(params);
+    }
+    case 'data_anomaly': {
+      const anomaly = anomalyOf(fact.id, insights);
+      if (!anomaly) return null;
+      return anomaly.kind === 'flat_tail'
+        ? t.dataFlatTail({ count: n(v.count), series: seriesName(fact.id, locale), value: n(v.value) })
+        : t.dataOutlier({ series: seriesName(fact.id, locale), when: formatFactWhen(v, 'start', insights, locale), value: n(v.value) });
+    }
     case 'active_trend_momentum':
       return (v.direction > 0 ? t.activeTrendMomentumUp : t.activeTrendMomentumDown)({ last: n(v.last, 1), first: n(v.first, 1) });
     case 'unit_ranking':
@@ -136,9 +194,9 @@ export function describeReportFact(fact: ReportInsightFact, insights: ReportInsi
     case 'activity_drop':
       return t.activityDrop({ recent: n(v.recent), preceding: n(v.preceding) });
     case 'enrollment_drop':
-      return t.enrollmentDrop({ delta: n(v.delta), pct: pct(v.pct), suffix });
+      return v.pct === undefined ? t.enrollmentDropSmallBase({ delta: n(v.delta), suffix }) : t.enrollmentDrop({ delta: n(v.delta), pct: pct(v.pct), suffix });
     case 'active_learner_drop':
-      return t.activeDrop({ delta: n(v.delta), pct: pct(v.pct), suffix });
+      return v.pct === undefined ? t.activeDropSmallBase({ delta: n(v.delta), suffix }) : t.activeDrop({ delta: n(v.delta), pct: pct(v.pct), suffix });
     case 'backlog_concentration':
       return t.backlog({ course: entity(), share: pct(v.share), count: n(v.count) });
     case 'unit_gap':
@@ -155,7 +213,9 @@ export function describeReportFact(fact: ReportInsightFact, insights: ReportInsi
 }
 
 const RISK_KINDS = new Set<ReportInsightFact['kind']>(['completion_decline', 'course_watchlist', 'activity_drop', 'activation_risk',
-  'backlog_concentration', 'enrollment_drop', 'active_learner_drop', 'unit_gap', 'unit_decline', 'unit_low_completion']);
+  'course_activation_risk', 'backlog_concentration', 'enrollment_drop', 'active_learner_drop', 'unit_gap', 'unit_decline', 'unit_low_completion']);
+/** Facts that are never findings: risks have their own section, data checks are chart notes and actions. */
+const NON_FINDING_KINDS = new Set<ReportInsightFact['kind']>([...RISK_KINDS, 'data_anomaly']);
 
 function buildHeadline(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfNarrativeItem {
   const t = getReportPdfDictionary(locale).narrative;
@@ -198,7 +258,7 @@ function buildFindings(insights: ReportInsights, locale: ReportPdfLocale, headli
   // card words the gap differently.
   const excluded = new Set(headline.factIds);
   const candidates = insights.facts
-    .filter((fact) => fact.kind !== 'context' && !RISK_KINDS.has(fact.kind) && !excluded.has(fact.id))
+    .filter((fact) => fact.kind !== 'context' && !NON_FINDING_KINDS.has(fact.kind) && !excluded.has(fact.id))
     .filter((fact) => !(fact.kind === 'low_performer' && fact.entities.some((entity) => watchTokens.has(entity))))
     .filter((fact) => !(fact.kind === 'kpi' && ['kpi.completed_enrollments', 'kpi.incomplete_enrollments'].includes(fact.id)))
     .sort((left, right) => right.priority - left.priority);
@@ -228,67 +288,98 @@ function buildRisks(insights: ReportInsights, locale: ReportPdfLocale): ReportPd
   });
 }
 
-function buildRecommendations(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfNarrativeItem[] {
+/**
+ * Every recommendation the report may make, one per detected signal, in
+ * priority order. Each one says who to act on, what to do and the target,
+ * with numbers taken only from the fact it cites. The rule-based narrative
+ * keeps the first maxRecommendations; an AI narrative may only select and
+ * rephrase these (validateReportPdfNarrative checks the rec ids).
+ */
+export function buildReportRecommendationCandidates(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfRecommendationCandidate[] {
   const t = getReportPdfDictionary(locale).narrative;
-  const n = (value: number | undefined) => formatReportNumber(value ?? 0, locale);
+  const n = (value: number | undefined, digits = 0) => formatReportNumber(value ?? 0, locale, digits);
   const pct = (value: number | undefined) => formatReportPercent(value ?? 0, locale);
-  const items: ReportPdfNarrativeItem[] = [];
+  const items: ReportPdfRecommendationCandidate[] = [];
   const push = (text: string, factIds: string[], priority: ReportPdfNarrativePriority, tone: ReportInsightTone = 'attention') => {
-    if (!items.some((item) => item.text === text)) items.push({ text, factIds, priority, tone });
+    if (!items.some((item) => item.text === text)) items.push({ id: `rec.${factIds[0]}`, text, factIds, priority, tone });
   };
   if (!insights.available) {
     push(t.recStart, ['kpi.total_enrollments'], 'medium', 'neutral');
-    push(t.recMonitor, ['kpi.total_enrollments'], 'low', 'neutral');
     return items;
   }
+  const fact = (id: string) => insights.facts.find((candidate) => candidate.id === id);
   for (const item of insights.attention) {
-    const fact = insights.facts.find((candidate) => candidate.id === item.factId)!;
-    const v = fact.values;
-    const entity = fact.entities[0] ? token(fact.entities[0]) : '';
-    switch (fact.kind) {
-      case 'completion_decline': push(t.recCompletionDecline, [fact.id], 'high'); break;
-      case 'course_watchlist': push(t.recWatchlist({ course: entity, count: n(v.count) }), [fact.id], 'high'); break;
-      case 'activation_risk': push(t.recActivation({ count: n(v.count) }), [fact.id], v.share >= 50 ? 'high' : 'medium'); break;
-      case 'activity_drop': push(t.recActivityDrop, [fact.id], 'medium'); break;
-      case 'enrollment_drop': push(t.recEnrollmentDrop, [fact.id], 'medium'); break;
-      case 'active_learner_drop': push(t.recActiveDrop, [fact.id], 'medium'); break;
-      case 'backlog_concentration': push(t.recBacklog({ course: entity, share: pct(v.share) }), [fact.id], 'medium'); break;
-      case 'unit_gap': {
-        // The lowest unit may already have its own low-completion action.
-        const lowUnit = insights.facts.find((candidate) => candidate.id === 'risk.unit_low_completion')?.entities[0];
-        if (fact.entities[0] !== lowUnit) push(t.recUnitGap({ unit: entity }), [fact.id], 'medium');
+    const risk = fact(item.factId)!;
+    const v = risk.values;
+    const entity = risk.entities[0] ? token(risk.entities[0]) : '';
+    switch (risk.kind) {
+      case 'completion_decline': push(t.recCompletionDecline({ previous: pct(v.previous) }), [risk.id], 'high'); break;
+      case 'course_watchlist': {
+        const params = { course: entity, rate: pct(v.rate), max: pct(v.max) };
+        push(v.count > 1 ? t.recWatchlist({ ...params, count: n(v.count) }) : t.recWatchlistOne(params), [risk.id], 'high');
         break;
       }
-      case 'unit_decline': push(t.recUnitDecline({ unit: entity }), [fact.id], 'high'); break;
+      case 'activation_risk':
+        push(t.recActivation({ count: n(v.count), share: pct(v.share), threshold: pct(v.threshold) }), [risk.id], v.share >= 50 ? 'high' : 'medium');
+        break;
+      case 'course_activation_risk': {
+        const params = { course: entity, notStarted: n(v.not_started), share: pct(v.share), threshold: pct(v.threshold) };
+        push(v.count > 1 ? t.recCourseActivation({ ...params, count: n(v.count) }) : t.recCourseActivationOne(params), [risk.id], v.share >= 50 ? 'high' : 'medium');
+        break;
+      }
+      case 'activity_drop': push(t.recActivityDrop, [risk.id], 'medium'); break;
+      case 'enrollment_drop': push(t.recEnrollmentDrop({ previous: n(v.previous) }), [risk.id], 'medium'); break;
+      case 'active_learner_drop': push(t.recActiveDrop({ previous: n(v.previous) }), [risk.id], 'medium'); break;
+      case 'backlog_concentration': push(t.recBacklog({ course: entity, share: pct(v.share), count: n(v.count) }), [risk.id], 'medium'); break;
+      case 'unit_gap': {
+        // The lowest unit may already have its own low-completion action.
+        const lowUnit = fact('risk.unit_low_completion')?.entities[0];
+        if (risk.entities[0] !== lowUnit) push(t.recUnitGap({ unit: entity, rate: pct(v.worst_rate), best: pct(v.best_rate) }), [risk.id], 'medium');
+        break;
+      }
+      case 'unit_decline': push(t.recUnitDecline({ unit: entity, previous: pct(v.previous) }), [risk.id], 'high'); break;
       case 'unit_low_completion':
-        push(v.count > 1 ? t.recUnitLowCompletion({ unit: entity, count: n(v.count) }) : t.recUnitLowCompletionOne({ unit: entity }), [fact.id], 'medium');
+        push(v.count > 1 ? t.recUnitLowCompletion({ unit: entity, count: n(v.count), max: pct(v.max) }) : t.recUnitLowCompletionOne({ unit: entity, max: pct(v.max) }), [risk.id], 'medium');
         break;
       default: break;
     }
   }
-  const fact = (id: string) => insights.facts.find((candidate) => candidate.id === id);
   const momentum = fact('trend.enrollments.momentum');
-  if (momentum && momentum.values.direction < 0) push(t.recMomentum, [momentum.id], 'medium');
+  if (momentum && momentum.values.direction < 0) push(t.recMomentum({ first: n(momentum.values.first, 1), unit: perUnit(insights, locale) }), [momentum.id], 'medium');
   const low = fact('courses.low');
   const watchTokens = new Set(fact('risk.watchlist')?.entities ?? []);
-  if (low?.entities[0] && low.tone === 'negative' && !watchTokens.has(low.entities[0])) push(t.recReviewCourse({ course: token(low.entities[0]) }), [low.id], 'medium');
+  if (low?.entities[0] && low.tone === 'negative' && !watchTokens.has(low.entities[0])) {
+    push(t.recReviewCourse({ course: token(low.entities[0]), rate: pct(low.values.rate) }), [low.id], 'medium');
+  }
   const status = fact('status.mix');
   if (status && status.values.in_progress_share >= REPORT_INSIGHT_THRESHOLDS.inProgressNudgeShare) {
     push(t.recNudgeInProgress({ count: n(status.values.in_progress) }), [status.id], 'medium', 'neutral');
   }
-  const concentration = insights.facts.find((fact) => fact.id === 'courses.concentration');
+  for (const anomaly of insights.facts.filter((candidate) => candidate.kind === 'data_anomaly')) {
+    const series = seriesName(anomaly.id, locale);
+    const kind = anomalyOf(anomaly.id, insights)?.kind;
+    if (kind === 'flat_tail') push(t.recDataFlatTail({ series, count: n(anomaly.values.count), value: n(anomaly.values.value) }), [anomaly.id], 'medium', 'neutral');
+    else if (kind === 'outlier') push(t.recDataOutlier({ series, when: formatFactWhen(anomaly.values, 'start', insights, locale) }), [anomaly.id], 'medium', 'neutral');
+  }
+  const concentration = fact('courses.concentration');
   if (concentration && concentration.tone === 'attention') {
     push(t.recConcentration({ n: n(concentration.values.n), share: pct(concentration.values.share) }), [concentration.id], 'low', 'neutral');
   }
-  const top = insights.facts.find((fact) => fact.id === 'courses.top');
-  if (top?.entities[0]) push(t.recReplicate({ course: token(top.entities[0]) }), [top.id], 'low', 'positive');
-  if (items.length < REPORT_PDF_NARRATIVE_LIMITS.minRecommendations) push(t.recMonitor, ['kpi.total_enrollments'], 'low', 'neutral');
+  const top = fact('courses.top');
+  if (top?.entities[0]) push(t.recReplicate({ course: token(top.entities[0]), rate: pct(top.values.rate) }), [top.id], 'low', 'positive');
+  // Only without any signal: a report always closes with one action.
+  if (!items.length) push(t.recMonitor, ['kpi.total_enrollments'], 'low', 'neutral');
   const rank: Record<ReportPdfNarrativePriority, number> = { high: 0, medium: 1, low: 2 };
   return items
     .map((item, index) => ({ item, index }))
-    .sort((left, right) => rank[left.item.priority ?? 'medium'] - rank[right.item.priority ?? 'medium'] || left.index - right.index)
-    .map(({ item }) => item)
-    .slice(0, REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations);
+    .sort((left, right) => rank[left.item.priority] - rank[right.item.priority] || left.index - right.index)
+    .map(({ item }) => item);
+}
+
+function buildRecommendations(insights: ReportInsights, locale: ReportPdfLocale): ReportPdfNarrativeItem[] {
+  return buildReportRecommendationCandidates(insights, locale)
+    .slice(0, REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations)
+    .map((candidate) => ({ text: candidate.text, factIds: candidate.factIds, priority: candidate.priority, tone: candidate.tone, recId: candidate.id }));
 }
 
 /** Deterministic narrative written only from insight facts (used when AI is off or rejected). */
@@ -422,6 +513,7 @@ const FACT_VALUE_UNITS: Partial<Record<ReportInsightFact['kind'], Record<string,
   completion_decline: { current: 'percent', previous: 'percent', delta: 'pp', threshold: 'pp' },
   course_watchlist: { max: 'percent', rate: 'percent' },
   activation_risk: { share: 'percent', threshold: 'percent' },
+  course_activation_risk: { share: 'percent', threshold: 'percent' },
   enrollment_drop: { pct: 'percent' },
   active_learner_drop: { pct: 'percent' },
   backlog_concentration: { share: 'percent' },
@@ -509,6 +601,8 @@ interface ValidationContext {
   locale: ReportPdfLocale;
   maxChars: number;
   contextValues: AllowedValue[];
+  /** Relative changes withheld for a small comparison base (never quotable). */
+  hiddenPercents: number[];
 }
 
 function validateItem(item: ReportPdfNarrativeItem, label: string, context: ValidationContext, options: { describesData: boolean }): string[] {
@@ -529,7 +623,10 @@ function validateItem(item: ReportPdfNarrativeItem, label: string, context: Vali
   const stripped = blankEntityTokens(text);
   let previousEnd = 0;
   for (const number of extractReportNarrativeNumbers(text, context.locale)) {
-    const issue = checkNumber(number, allowed, directionBefore(stripped, previousEnd, number.start));
+    // "+795,7%" from 47 to 421 enrollments was withheld on purpose: quoting it is an error of its own.
+    const hidden = number.unit === 'percent' && context.hiddenPercents.some((value) => sameRounded(value, number))
+      && !allowed.some((value) => sameRounded(value.value, number) && unitAccepts(number.unit, value.unit));
+    const issue = hidden ? 'small_base_percent' : checkNumber(number, allowed, directionBefore(stripped, previousEnd, number.start));
     if (issue) issues.push(`${label}: ${issue}:${number.raw}`);
     previousEnd = number.end;
   }
@@ -560,6 +657,7 @@ export function validateReportPdfNarrative(narrative: ReportPdfNarrative, insigh
     locale,
     maxChars: limits.itemMaxChars,
     contextValues: Object.values(facts.get('context.period')?.values ?? {}).map((value) => ({ value, unit: 'count' as const, signed: false, direction: null })),
+    hiddenPercents: insights.hiddenPercentChanges,
   };
   const issues: string[] = [];
   const data = { describesData: true };
@@ -570,8 +668,23 @@ export function validateReportPdfNarrative(narrative: ReportPdfNarrative, insigh
   if (narrative.recommendations.length < 1 || narrative.recommendations.length > limits.maxRecommendations) issues.push('recommendations: count');
   narrative.findings.forEach((item, index) => issues.push(...validateItem(item, `findings[${index}]`, context, data)));
   narrative.risks.forEach((item, index) => issues.push(...validateItem(item, `risks[${index}]`, context, data)));
-  narrative.recommendations.filter((item) => item.origin !== 'chat')
-    .forEach((item, index) => issues.push(...validateItem(item, `recommendations[${index}]`, context, { describesData: false })));
+  // An action is one of the deterministic candidates (selected, maybe reworded):
+  // it cites that candidate's facts and names only that candidate's courses/units.
+  const candidates = new Map(buildReportRecommendationCandidates(insights, locale).map((candidate) => [candidate.id, candidate]));
+  narrative.recommendations.forEach((item, index) => {
+    if (item.origin === 'chat') return;
+    const label = `recommendations[${index}]`;
+    const candidate = item.recId ? candidates.get(item.recId) : undefined;
+    if (!candidate) {
+      issues.push(`${label}: unknown_recommendation`);
+      return;
+    }
+    const allowedTokens = new Set([...candidate.text.matchAll(ENTITY_TOKEN)].map((match) => match[1]));
+    for (const match of item.text.matchAll(ENTITY_TOKEN)) {
+      if (!allowedTokens.has(match[1])) issues.push(`${label}: recommendation_entity:${match[1]}`);
+    }
+    issues.push(...validateItem({ ...item, factIds: candidate.factIds }, label, context, { describesData: false }));
+  });
   const allText = [narrative.headline, ...narrative.findings, ...narrative.risks, ...narrative.recommendations]
     .map((item) => item.text.replace(ENTITY_TOKEN, '')).join(' ');
   if (locale === 'vi' && !VIETNAMESE_CHARS.test(allText)) issues.push('language: expected_vietnamese');
@@ -616,19 +729,20 @@ export function mergeStoredChatNarrative(input: {
   if (!parsed.success || !parsed.data.interpretation.length || !isReportNarrativeAllowed(parsed.data, input.snapshot)) return input.narrative;
   const language = parsed.data.interpretation.join(' ');
   if ((input.locale === 'vi') !== VIETNAMESE_CHARS.test(language)) return input.narrative;
-  const chatActions: ReportPdfNarrativeItem[] = parsed.data.recommended_actions.map((action) => ({
-    text: action.action,
-    factIds: action.signal_id && SIGNAL_TO_FACT[action.signal_id] ? [SIGNAL_TO_FACT[action.signal_id]] : [],
-    priority: action.priority,
-    tone: 'attention',
-    origin: 'chat',
-  }));
-  const coveredFacts = new Set(chatActions.flatMap((action) => action.factIds));
-  const remaining = input.narrative.recommendations.filter((item) => !item.factIds.some((id) => coveredFacts.has(id)));
+  // The report's own actions carry the numbers and targets. A chat action is
+  // kept only when it is tied to a detected signal the report has no action
+  // for yet; untied (generic) chat actions are dropped.
+  const coveredFacts = new Set(input.narrative.recommendations.flatMap((item) => item.factIds));
+  const chatActions: ReportPdfNarrativeItem[] = parsed.data.recommended_actions.flatMap((action) => {
+    const factId = action.signal_id ? SIGNAL_TO_FACT[action.signal_id] : undefined;
+    if (!factId || coveredFacts.has(factId)) return [];
+    coveredFacts.add(factId);
+    return [{ text: action.action, factIds: [factId], priority: action.priority, tone: 'attention' as const, origin: 'chat' as const }];
+  });
   return {
     ...input.narrative,
     commentary: parsed.data.interpretation.slice(0, REPORT_PDF_NARRATIVE_LIMITS.maxCommentary),
-    recommendations: [...chatActions, ...remaining].slice(0, REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations),
+    recommendations: [...input.narrative.recommendations, ...chatActions].slice(0, REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations),
   };
 }
 
@@ -638,11 +752,16 @@ const AiItemSchema = z.object({
   text: z.string().trim().min(1).max(REPORT_PDF_NARRATIVE_LIMITS.itemMaxChars),
   fact_ids: z.array(z.string().trim().min(1).max(64)).min(1).max(6),
 });
+/** An AI recommendation only selects and rewords a deterministic candidate (its id, facts and priority are kept). */
+const AiRecommendationSchema = z.object({
+  rec_id: z.string().trim().min(1).max(80),
+  text: z.string().trim().min(1).max(REPORT_PDF_NARRATIVE_LIMITS.itemMaxChars),
+});
 export const ReportPdfAiNarrativeSchema = z.object({
   headline: AiItemSchema.extend({ text: z.string().trim().min(1).max(REPORT_PDF_NARRATIVE_LIMITS.headlineMaxChars) }),
   findings: z.array(AiItemSchema).min(1).max(REPORT_PDF_NARRATIVE_LIMITS.maxFindings),
   risks: z.array(AiItemSchema).max(REPORT_PDF_NARRATIVE_LIMITS.maxRisks),
-  recommendations: z.array(AiItemSchema.extend({ priority: z.enum(['high', 'medium', 'low']) })).min(1).max(REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations),
+  recommendations: z.array(AiRecommendationSchema).min(1).max(REPORT_PDF_NARRATIVE_LIMITS.maxRecommendations),
 });
 
 export function buildReportPdfAiNarrativeRequest(insights: ReportInsights, locale: ReportPdfLocale): { systemInstruction: string; payload: string } {
@@ -662,8 +781,9 @@ export function buildReportPdfAiNarrativeRequest(insights: ReportInsights, local
     'Copy numbers exactly as written in the cited fact statements. Never compute, round differently, estimate or invent numbers, dates, ratios or rankings.',
     'Keep the unit (%, percentage points, counts) and the direction (increase or decrease) each number has in its statement.',
     'Refer to courses and units only with their tokens such as {{C1}} or {{U1}}, exactly as given. Never invent names.',
-    'Do not speculate about causes. Recommendations must be concrete operational actions tied to risk or finding facts.',
-    'headline: one sentence. findings: 3 to 5 sentences. risks: 0 to 4 sentences built from risk facts. recommendations: 2 to 5 actions with priority high, medium or low.',
+    'Do not speculate about causes.',
+    'recommendations: select 1 to 5 entries of recommendation_candidates, most important first. For each, set rec_id to the candidate id and rewrite its statement in plain words; keep every number, target and token it contains and add no other action, number or name.',
+    'headline: one sentence. findings: 3 to 5 sentences. risks: 0 to 4 sentences built from risk facts.',
     'Do not mention AI, prompts, tools, databases, snapshots, tokens or fact ids in the text.',
   ].join(' ');
   return {
@@ -673,14 +793,16 @@ export function buildReportPdfAiNarrativeRequest(insights: ReportInsights, local
       comparison: insights.comparisonBasis,
       data_available: insights.available,
       facts,
+      recommendation_candidates: buildReportRecommendationCandidates(insights, locale).map((candidate) => ({ id: candidate.id, priority: candidate.priority, statement: candidate.text })),
     }),
   };
 }
 
 /** Converts a schema-valid Gemini response into a narrative (validation happens separately). */
-export function toReportPdfAiNarrative(raw: unknown, insights: ReportInsights): ReportPdfNarrative | null {
+export function toReportPdfAiNarrative(raw: unknown, insights: ReportInsights, locale: ReportPdfLocale): ReportPdfNarrative | null {
   const parsed = ReportPdfAiNarrativeSchema.safeParse(raw);
   if (!parsed.success) return null;
+  const candidates = new Map(buildReportRecommendationCandidates(insights, locale).map((candidate) => [candidate.id, candidate]));
   const facts = new Map(insights.facts.map((fact) => [fact.id, fact]));
   const toneOf = (ids: string[]): ReportInsightTone => facts.get(ids[0])?.tone ?? 'neutral';
   const item = (value: { text: string; fact_ids: string[] }) => ({ text: value.text, factIds: value.fact_ids, tone: toneOf(value.fact_ids) });
@@ -689,7 +811,11 @@ export function toReportPdfAiNarrative(raw: unknown, insights: ReportInsights): 
     headline: item(parsed.data.headline),
     findings: parsed.data.findings.map(item),
     risks: parsed.data.risks.map(item),
-    recommendations: parsed.data.recommendations.map((value) => ({ ...item(value), priority: value.priority })),
+    // Facts and priority come from the selected candidate; an unknown rec_id is rejected by the validator.
+    recommendations: parsed.data.recommendations.map((value) => {
+      const candidate = candidates.get(value.rec_id);
+      return { text: value.text, recId: value.rec_id, factIds: candidate?.factIds ?? [], priority: candidate?.priority ?? 'medium', tone: candidate?.tone ?? 'neutral' };
+    }),
     commentary: [],
   };
 }

@@ -236,5 +236,6 @@ test('composes the document with the stored chat narrative and an injected AI wr
   assert.equal(aiCalls, 1);
   assert.equal(composition.narrative.source, 'rules', 'a rejected AI narrative falls back to rules');
   assert.equal(composition.narrative.commentary.length, 1);
-  assert.ok(composition.html.includes('Từ phân tích trong cuộc trò chuyện'));
+  assert.ok(composition.html.includes(reportPdfVi.summary.commentary), 'the chat commentary is kept');
+  assert.ok(!composition.narrative.recommendations.some((item) => item.origin === 'chat'), 'the report already has a targeted action for that signal');
 });
