@@ -11,9 +11,12 @@ import {
   buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
   normalizeReportExcelLocale,
+  resolveReportExcelLabels,
   streamCourseLearnerExcel,
   streamReportExcel,
+  type ReportExcelLocale,
 } from './reports-export.service.js';
+import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
 import {
   canReportOnLearner,
   enforceReportScope as enforceSharedReportScope,
@@ -21,6 +24,15 @@ import {
   type ReportScope,
 } from './report-access.service.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
+
+/** Level names of an Excel export: the tenant's labels, else the names the client sent, else the defaults. */
+async function getExportLabels(req: Request, tenantId: string, locale: ReportExcelLocale) {
+  return resolveReportExcelLabels(
+    await getTenantGroupLabels(tenantId),
+    { group: req.query.group_label, subgroup: req.query.subgroup_label, team: req.query.team_label },
+    locale,
+  );
+}
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
 const VALID_COURSE_COMPLETION_STATUSES = new Set(['all', 'not_started', 'learning', 'completed']);
@@ -258,11 +270,7 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
         subgroupId: scope.subgroupId,
         teamId: scope.teamId,
       },
-      labels: {
-        group: (req.query.group_label as string) || (locale === 'en' ? 'Company' : 'Công ty'),
-        subgroup: (req.query.subgroup_label as string) || (locale === 'en' ? 'Branch' : 'Chi nhánh'),
-        team: (req.query.team_label as string) || (locale === 'en' ? 'Department' : 'Phòng ban'),
-      },
+      labels: await getExportLabels(req, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
     });
@@ -333,11 +341,7 @@ export async function exportExcel(req: Request, res: Response) {
         subgroupId: scope.subgroupId,
         teamId: scope.teamId,
       },
-      labels: {
-        group: (req.query.group_label as string) || (locale === 'en' ? 'Company' : 'Công ty'),
-        subgroup: (req.query.subgroup_label as string) || (locale === 'en' ? 'Branch' : 'Chi nhánh'),
-        team: (req.query.team_label as string) || (locale === 'en' ? 'Department' : 'Phòng ban'),
-      },
+      labels: await getExportLabels(req, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
     });

@@ -5,6 +5,7 @@ import {
   buildReportExcelFileName,
   getReportExcelCopy,
   normalizeReportExcelLocale,
+  resolveReportExcelLabels,
 } from './reports-export.service.js';
 
 test('normalizes only the supported Excel export locales', () => {
@@ -49,4 +50,16 @@ test('keeps Vietnamese filenames for legacy exports and uses English filenames w
     buildCourseLearnerExcelFileName('en', 'System Security & AI', dateRange, undefined, 2026),
     'course-learners-system-security-ai-2026-07-01-to-2026-07-31.xlsx',
   );
+});
+
+test('names the organization levels with the tenant labels, then the client names, then the localized defaults', () => {
+  const nesso = { group: 'Khối/Khu vực', subgroup: 'Đơn vị', team: 'Bộ phận' };
+  assert.deepEqual(resolveReportExcelLabels(nesso, { group: 'Công ty', team: 'Phòng ban' }, 'en'), nesso, 'configured labels win, in English too');
+  assert.deepEqual(resolveReportExcelLabels({}, { group: ' Khối ', subgroup: '', team: 42 }, 'vi'), { group: 'Khối', subgroup: 'Chi nhánh', team: 'Phòng ban' });
+  assert.deepEqual(resolveReportExcelLabels({ team: '  ' }, {}, 'en'), { group: 'Company', subgroup: 'Branch', team: 'Department' });
+});
+
+test('the team breakdown member column names the team level instead of a fixed word', () => {
+  assert.equal(getReportExcelCopy('vi').currentTeamMembers('bộ phận'), 'Học viên hiện thuộc bộ phận');
+  assert.equal(getReportExcelCopy('en').currentTeamMembers('department'), 'Current department members');
 });

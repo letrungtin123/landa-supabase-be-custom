@@ -150,7 +150,8 @@ type ReportExcelCopy = {
   averageCompletionRateInYear: string;
   trendBy: string;
   teamBreakdown: string;
-  currentTeamMembers: string;
+  /** Header of the member count, naming the team level with its label (lowercased). */
+  currentTeamMembers: (team: string) => string;
   averageProgress: string;
   rank: string;
   course: string;
@@ -176,10 +177,10 @@ type ReportExcelCopy = {
 
 const REPORT_EXCEL_COPY: Record<ReportExcelLocale, ReportExcelCopy> = {
   vi: {
-    all: 'Tất cả', dateRangeSeparator: 'đến', year: 'Năm', dataPeriod: 'Kỳ dữ liệu', aggregationPeriod: 'Khoảng tổng hợp', aggregationYear: 'Năm tổng hợp', exportedBy: 'Người xuất', exportedAt: 'Thời gian xuất', notes: 'Ghi chú', notesValue: 'Dữ liệu được tính theo tenant và bộ lọc phân quyền hiện tại.', item: 'Mục', value: 'Giá trị', information: 'Thông tin', reportFileInformation: 'Thông tin file báo cáo', dateRange: 'Khoảng ngày', month: 'Tháng', totalLearners: 'Tổng học viên đã tạo', activeLearners: 'Học viên có hoạt động học', periodEnrollments: 'Lượt ghi danh trong kỳ', enrollments: 'Lượt ghi danh', completed: 'Đã hoàn thành', incomplete: 'Chưa hoàn thành', averageCompletionRate: 'Tỷ lệ hoàn thành trung bình của học viên', overviewForPeriod: 'Tổng quan kỳ', overviewByDateRange: 'Tổng quan theo khoảng ngày', monthlyOverview: 'Tổng quan tháng', monthlyOverviewTitle: 'Tổng quan theo tháng - năm', totalPeriodEnrollments: 'Tổng lượt ghi danh trong khoảng', totalYearEnrollments: 'Tổng lượt ghi danh trong năm', completedInYear: 'Đã hoàn thành trong năm', incompleteInYear: 'Chưa hoàn thành trong năm', averageCompletionRateInYear: 'Tỷ lệ hoàn thành trung bình của học viên trong năm', trendBy: 'Xu hướng theo', teamBreakdown: 'Chi tiết', currentTeamMembers: 'Học viên hiện thuộc đội', averageProgress: 'Tiến độ trung bình', rank: 'Hạng', course: 'Khóa học', courseRanking: 'Xếp hạng khóa học', courseCompletionRanking: 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', username: 'Username', fullName: 'Họ tên', learnerList: 'Danh sách học viên', learnerListInScope: 'Danh sách học viên trong phạm vi đang lọc', latestCompletion: 'Hoàn thành gần nhất', courseLearnerDetail: 'Chi tiết khóa-học viên', courseEnrollmentDetail: 'Chi tiết lượt ghi danh theo từng khóa học', status: 'Trạng thái', progress: 'Tiến độ', completedInPeriod: 'Hoàn thành trong kỳ', enrolledAt: 'Ngày ghi danh', completedAt: 'Ngày hoàn thành', yes: 'Có', no: 'Chưa', statuses: { completed: 'Đã học', learning: 'Đang học', not_started: 'Chưa học' }, months: ['', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6', 'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'],
+    all: 'Tất cả', dateRangeSeparator: 'đến', year: 'Năm', dataPeriod: 'Kỳ dữ liệu', aggregationPeriod: 'Khoảng tổng hợp', aggregationYear: 'Năm tổng hợp', exportedBy: 'Người xuất', exportedAt: 'Thời gian xuất', notes: 'Ghi chú', notesValue: 'Dữ liệu được tính theo tenant và bộ lọc phân quyền hiện tại.', item: 'Mục', value: 'Giá trị', information: 'Thông tin', reportFileInformation: 'Thông tin file báo cáo', dateRange: 'Khoảng ngày', month: 'Tháng', totalLearners: 'Tổng học viên đã tạo', activeLearners: 'Học viên có hoạt động học', periodEnrollments: 'Lượt ghi danh trong kỳ', enrollments: 'Lượt ghi danh', completed: 'Đã hoàn thành', incomplete: 'Chưa hoàn thành', averageCompletionRate: 'Tỷ lệ hoàn thành trung bình của học viên', overviewForPeriod: 'Tổng quan kỳ', overviewByDateRange: 'Tổng quan theo khoảng ngày', monthlyOverview: 'Tổng quan tháng', monthlyOverviewTitle: 'Tổng quan theo tháng - năm', totalPeriodEnrollments: 'Tổng lượt ghi danh trong khoảng', totalYearEnrollments: 'Tổng lượt ghi danh trong năm', completedInYear: 'Đã hoàn thành trong năm', incompleteInYear: 'Chưa hoàn thành trong năm', averageCompletionRateInYear: 'Tỷ lệ hoàn thành trung bình của học viên trong năm', trendBy: 'Xu hướng theo', teamBreakdown: 'Chi tiết', currentTeamMembers: (team) => `Học viên hiện thuộc ${team}`, averageProgress: 'Tiến độ trung bình', rank: 'Hạng', course: 'Khóa học', courseRanking: 'Xếp hạng khóa học', courseCompletionRanking: 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', username: 'Username', fullName: 'Họ tên', learnerList: 'Danh sách học viên', learnerListInScope: 'Danh sách học viên trong phạm vi đang lọc', latestCompletion: 'Hoàn thành gần nhất', courseLearnerDetail: 'Chi tiết khóa-học viên', courseEnrollmentDetail: 'Chi tiết lượt ghi danh theo từng khóa học', status: 'Trạng thái', progress: 'Tiến độ', completedInPeriod: 'Hoàn thành trong kỳ', enrolledAt: 'Ngày ghi danh', completedAt: 'Ngày hoàn thành', yes: 'Có', no: 'Chưa', statuses: { completed: 'Đã học', learning: 'Đang học', not_started: 'Chưa học' }, months: ['', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6', 'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'],
   },
   en: {
-    all: 'All', dateRangeSeparator: 'to', year: 'Year', dataPeriod: 'Data period', aggregationPeriod: 'Aggregation period', aggregationYear: 'Aggregation year', exportedBy: 'Exported by', exportedAt: 'Exported at', notes: 'Notes', notesValue: 'Data is calculated using the current tenant and authorized report filters.', item: 'Item', value: 'Value', information: 'Information', reportFileInformation: 'Report file information', dateRange: 'Date range', month: 'Month', totalLearners: 'Total learners created', activeLearners: 'Learners with learning activity', periodEnrollments: 'Period enrollments', enrollments: 'Enrollments', completed: 'Completed', incomplete: 'Incomplete', averageCompletionRate: 'Average learner completion rate', overviewForPeriod: 'Period overview', overviewByDateRange: 'Overview by date range', monthlyOverview: 'Monthly overview', monthlyOverviewTitle: 'Monthly overview - year', totalPeriodEnrollments: 'Total enrollments in range', totalYearEnrollments: 'Total enrollments in year', completedInYear: 'Completed in year', incompleteInYear: 'Incomplete in year', averageCompletionRateInYear: 'Average learner completion rate in year', trendBy: 'Trend by', teamBreakdown: 'Breakdown', currentTeamMembers: 'Current team members', averageProgress: 'Average progress', rank: 'Rank', course: 'Course', courseRanking: 'Course ranking', courseCompletionRanking: 'Course completion ranking', username: 'Username', fullName: 'Full name', learnerList: 'Learner list', learnerListInScope: 'Learners in the selected scope', latestCompletion: 'Latest completion', courseLearnerDetail: 'Course-learner detail', courseEnrollmentDetail: 'Course enrollment detail', status: 'Status', progress: 'Progress', completedInPeriod: 'Completed in period', enrolledAt: 'Enrolled at', completedAt: 'Completed at', yes: 'Yes', no: 'No', statuses: { completed: 'Completed', learning: 'In progress', not_started: 'Not started' }, months: ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
+    all: 'All', dateRangeSeparator: 'to', year: 'Year', dataPeriod: 'Data period', aggregationPeriod: 'Aggregation period', aggregationYear: 'Aggregation year', exportedBy: 'Exported by', exportedAt: 'Exported at', notes: 'Notes', notesValue: 'Data is calculated using the current tenant and authorized report filters.', item: 'Item', value: 'Value', information: 'Information', reportFileInformation: 'Report file information', dateRange: 'Date range', month: 'Month', totalLearners: 'Total learners created', activeLearners: 'Learners with learning activity', periodEnrollments: 'Period enrollments', enrollments: 'Enrollments', completed: 'Completed', incomplete: 'Incomplete', averageCompletionRate: 'Average learner completion rate', overviewForPeriod: 'Period overview', overviewByDateRange: 'Overview by date range', monthlyOverview: 'Monthly overview', monthlyOverviewTitle: 'Monthly overview - year', totalPeriodEnrollments: 'Total enrollments in range', totalYearEnrollments: 'Total enrollments in year', completedInYear: 'Completed in year', incompleteInYear: 'Incomplete in year', averageCompletionRateInYear: 'Average learner completion rate in year', trendBy: 'Trend by', teamBreakdown: 'Breakdown', currentTeamMembers: (team) => `Current ${team} members`, averageProgress: 'Average progress', rank: 'Rank', course: 'Course', courseRanking: 'Course ranking', courseCompletionRanking: 'Course completion ranking', username: 'Username', fullName: 'Full name', learnerList: 'Learner list', learnerListInScope: 'Learners in the selected scope', latestCompletion: 'Latest completion', courseLearnerDetail: 'Course-learner detail', courseEnrollmentDetail: 'Course enrollment detail', status: 'Status', progress: 'Progress', completedInPeriod: 'Completed in period', enrolledAt: 'Enrolled at', completedAt: 'Completed at', yes: 'Yes', no: 'No', statuses: { completed: 'Completed', learning: 'In progress', not_started: 'Not started' }, months: ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
   },
 };
 
@@ -189,6 +190,31 @@ export function normalizeReportExcelLocale(value: unknown): ReportExcelLocale {
 
 export function getReportExcelCopy(locale: ReportExcelLocale): ReportExcelCopy {
   return REPORT_EXCEL_COPY[locale];
+}
+
+/** Localized default level names, as the dashboard shows them without tenant labels. */
+const DEFAULT_EXCEL_LEVEL_LABELS: Record<ReportExcelLocale, ExportLabels> = {
+  vi: { group: 'Công ty', subgroup: 'Chi nhánh', team: 'Phòng ban' },
+  en: { group: 'Company', subgroup: 'Branch', team: 'Department' },
+};
+
+/**
+ * Level names of the Excel export: the tenant's configured label (the name
+ * every screen shows) first, then the name the client sent, then the
+ * localized default.
+ */
+export function resolveReportExcelLabels(
+  tenantLabels: Partial<Record<keyof ExportLabels, string>>,
+  requested: Partial<Record<keyof ExportLabels, unknown>>,
+  locale: ReportExcelLocale,
+): ExportLabels {
+  const pick = (key: keyof ExportLabels): string => {
+    const configured = tenantLabels[key]?.trim();
+    if (configured) return configured;
+    const sent = requested[key];
+    return (typeof sent === 'string' && sent.trim()) || DEFAULT_EXCEL_LEVEL_LABELS[locale][key];
+  };
+  return { group: pick('group'), subgroup: pick('subgroup'), team: pick('team') };
 }
 
 export function buildReportExcelFileName(
@@ -852,7 +878,7 @@ async function writeTeamBreakdownSheet(
     { header: options.labels.group, key: 'groupName', width: 24 },
     { header: options.labels.subgroup, key: 'subgroupName', width: 26 },
     { header: options.labels.team, key: 'teamName', width: 28 },
-    { header: copy.currentTeamMembers, key: 'memberCount', width: 22 },
+    { header: copy.currentTeamMembers(lowerLabel(options.labels.team, options.locale)), key: 'memberCount', width: 22 },
     { header: copy.periodEnrollments, key: 'enrollments', width: 20 },
     { header: copy.completed, key: 'completed', width: 18 },
     { header: copy.incomplete, key: 'incomplete', width: 18 },
