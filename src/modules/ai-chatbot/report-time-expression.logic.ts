@@ -26,6 +26,7 @@ import {
   type ReportDateRangeYmd,
 } from './report-date.logic.js';
 import { foldReportText } from './report-text.logic.js';
+import { REPORT_AUTO_BUCKET_RULE, resolveAutoReportBucket } from '../reports/report-buckets.logic.js';
 
 export type ReportGranularity = 'day' | 'week' | 'month' | 'quarter';
 export type ReportTimeConfidence = 'high' | 'medium' | 'none';
@@ -756,15 +757,15 @@ export function reportRangesAgree(
 }
 
 /**
- * Bucket rule of the AI report snapshot charts (chat card and PDF). It is
- * separate from the Reports screen rule (reports.service resolveChartGranularity):
- * without a request, up to 31 days are shown by day, up to 120 days by ISO
- * week, longer ranges (max 366 days) by month. An explicit request is kept
+ * Bucket rule of the AI report snapshot charts (chat card and PDF). Without a
+ * request it is the shared report rule, the same as the Reports screen
+ * (reports/report-buckets.logic.ts): up to 31 days by day, up to 120 days by
+ * ISO week, longer ranges (max 366 days) by month. An explicit request is kept
  * while it fits the 62-bucket cap of a snapshot series, else coarsened.
  */
 export const REPORT_SNAPSHOT_BUCKET_RULE = {
-  autoDayMaxDays: 31,
-  autoWeekMaxDays: 120,
+  autoDayMaxDays: REPORT_AUTO_BUCKET_RULE.dayMaxDays,
+  autoWeekMaxDays: REPORT_AUTO_BUCKET_RULE.weekMaxDays,
   maxBuckets: 62,
 } as const;
 
@@ -775,7 +776,7 @@ export function resolveSnapshotChartGranularity(
 ): 'day' | 'week' | 'month' {
   const rule = REPORT_SNAPSHOT_BUCKET_RULE;
   const days = dayCountBetween(range.date_from, range.date_to);
-  if (!requested) return days <= rule.autoDayMaxDays ? 'day' : days <= rule.autoWeekMaxDays ? 'week' : 'month';
+  if (!requested) return resolveAutoReportBucket(days);
   if (requested === 'day') return days <= rule.maxBuckets ? 'day' : days <= rule.maxBuckets * 7 ? 'week' : 'month';
   if (requested === 'week') return days <= rule.maxBuckets * 7 ? 'week' : 'month';
   return 'month';

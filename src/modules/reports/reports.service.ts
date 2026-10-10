@@ -9,6 +9,7 @@
 import { cacheJson, cacheKey, stableHash } from '../../config/cache.js';
 import { query } from '../../config/database.js';
 import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
+import { resolveAutoReportBucket } from './report-buckets.logic.js';
 
 // ── Types ──
 
@@ -387,13 +388,17 @@ export function resolveReportChartGranularity(range: ReportDateRange, requested:
   return resolveChartGranularity(range, requested);
 }
 
+/**
+ * An explicit choice is kept within its limits; 'auto' follows the shared
+ * report bucket rule (report-buckets.logic.ts): up to 31 days by day, up to
+ * 120 days by ISO week, longer ranges by month.
+ */
 function resolveChartGranularity(range: ReportDateRange, requested: ReportChartGranularity = 'auto'): EffectiveChartGranularity {
   const days = getRangeDayCount(range);
   if (requested === 'day' && days <= 366) return 'day';
   if (requested === 'week' && days <= 1095) return 'week';
   if (requested === 'month') return 'month';
-  if (days <= 31) return 'day';
-  return 'month';
+  return resolveAutoReportBucket(days);
 }
 
 function getGranularityStep(granularity: EffectiveChartGranularity): string {
