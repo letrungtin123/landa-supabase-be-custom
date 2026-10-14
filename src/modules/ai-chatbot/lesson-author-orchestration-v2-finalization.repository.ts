@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { readOrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import type { OrchestrationV2ChapterReceipt } from './lesson-author-orchestration-v2-chapter.logic.js';
+import { isIdmPreserveSource } from './lesson-author-idm-preserve.logic.js';
 import {
   finalizeOrchestrationV2Course,
   ORCHESTRATION_V2_COURSE_CONTRACT,
@@ -197,13 +198,16 @@ export function createOrchestrationV2FinalizationRepository(
       [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id]);
       const originRow = origins.rows[0];
       if (origins.rows.length !== 1 || !originRow) fail('ORCHESTRATION_V2_FINALIZATION_EVIDENCE_INVALID');
+      // QLT-6: a kept document's units are its own text by design, not a fallback for missing AI content, so the
+      // mostly-fallback refusal does not apply to it.
+      const kept = isIdmPreserveSource(view.design.project_context);
       return finalizeOrchestrationV2Course({ source_snapshot_hash: lease.source_snapshot_hash,
         expected_manifest_hash: String(row.manifest_hash), admitted_fact_count: Number(row.admitted_fact_count),
         assembly_hash: assembly.assembly_hash, inventory_hash: String(inventoryPayload.inventory_hash), tasks,
         chapter_receipts: receipts, assessment_obligations: assessmentObligations,
         idm_accounting: { ...view.dispositionCounts },
-        idm_unit_origins: { unit_count: Number(originRow!.unit_count),
-          whole_fallback_count: Number(originRow!.whole_fallback_count) } });
+        ...(kept ? {} : { idm_unit_origins: { unit_count: Number(originRow!.unit_count),
+          whole_fallback_count: Number(originRow!.whole_fallback_count) } }) });
     });
   }
 

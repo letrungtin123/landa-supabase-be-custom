@@ -728,14 +728,19 @@ test('QLT-6: Python designs for the audience and purpose the author entered and 
     assert.ok(design.notes.course.includes('• Khoá học được thiết kế theo dạng: Quy trình, quy định, tuân thủ, an toàn'));
   });
 
-test('QLT-6: a preserve_source course skeleton fails in Python with a stable 422 before any provider call',
+test('QLT-6: a kept document is only segmented: a non-matching answer falls back to its headings, no design stage',
   { skip: IDM_BRIDGE_AVAILABLE ? false : 'landa-ai-rag/.venv-dev or tests/idm_contract_bridge.py is not available' },
   () => {
     const golden = idmGoldenSource();
     const request = goldenSkeletonRequest(golden, { design_mode: 'preserve_source', learner_audience: null,
       course_purpose: null });
+    // The bridge answers the preserve fixture's segmentation (27 lines) for the 61 golden lines: invalid twice.
     const [result] = idmBridge([{ stage: 'course_skeleton', request }]);
-    assert.equal(result!.status, 422);
-    assert.equal(result!.response.detail.code, 'ORCHESTRATION_V2_PRESERVE_SOURCE_NOT_READY');
-    assert.deepEqual(result!.calls, []);
+    assert.equal(result!.status, 200);
+    assert.deepEqual(result!.calls.map(name => name.replace(/IdmWire$/, '')),
+      ['IdmPreserveSegmentationV1', 'IdmPreserveSegmentationV1']);
+    const design = readIdmCourseDesign(result!.response.idm);
+    assert.deepEqual(design.stage_origins, { preserve_segmentation: 'deterministic_fallback' });
+    assert.equal(design.project_context.design_mode, 'preserve_source');
+    assert.equal(result!.response.quality_state, 'review_required');
   });

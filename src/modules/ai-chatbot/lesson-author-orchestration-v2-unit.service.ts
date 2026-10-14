@@ -10,6 +10,7 @@ import type {
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
 import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
+import { isIdmPreserveSource } from './lesson-author-idm-preserve.logic.js';
 import { withOrchestrationV2TransientRetry } from './lesson-author-orchestration-v2-lock-order.js';
 
 type UnitRepository = ReturnType<typeof createOrchestrationV2UnitRepository>;
@@ -115,7 +116,9 @@ export async function executeOrchestrationV2UnitTask(
   // Only durable evidence of a previous provider dispatch can suppress a paid
   // call. dispatch_epoch also advances for a pre-dispatch DB failure, so using
   // the epoch here would incorrectly turn a safe retry into fallback content.
-  const fallbackOnly = lease.provider_replay_required;
+  // QLT-6: a kept document's unit never calls the provider: it takes the same
+  // provider-free path (no dispatch fence, the claim's reservation is released).
+  const fallbackOnly = lease.provider_replay_required || isIdmPreserveSource(input.contract.idm_unit_brief);
   let providerDispatchMarked = fallbackOnly;
   const beforeProviderDispatch = fallbackOnly ? undefined : async () => {
     if (providerDispatchMarked) {

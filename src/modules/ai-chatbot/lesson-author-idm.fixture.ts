@@ -248,7 +248,8 @@ export const IDM_BRIDGE_AVAILABLE = IDM_PYTHON_AVAILABLE
   && existsSync(resolve(RAG_ROOT, 'tests/idm_contract_bridge.py'));
 
 export interface IdmBridgeMessage {
-  stage: 'course_skeleton' | 'chapter_shard' | 'unit' | 'golden_unit' | 'acceptance';
+  stage: 'course_skeleton' | 'chapter_shard' | 'unit' | 'golden_unit' | 'acceptance' | 'preserve_source'
+    | 'preserve_text';
   request: unknown;
   options?: Record<string, unknown>;
 }

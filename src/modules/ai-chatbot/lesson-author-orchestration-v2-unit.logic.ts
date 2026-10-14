@@ -29,6 +29,7 @@ import {
 } from './lesson-author-idm.contract.js';
 import { idmAuthorNote } from './lesson-author-idm-architecture.logic.js';
 import { buildIdmUnitBrief, idmOutputBudgetFinding } from './lesson-author-idm-unit.logic.js';
+import { idmPreserveUnitFinding, isIdmPreserveSource } from './lesson-author-idm-preserve.logic.js';
 
 export const ORCHESTRATION_V2_UNIT_CONTRACT = 'orchestration-unit-baseline-v2';
 const UNIT_CONTENT_V3_DENSITY_POLICY = 'unit-content-v3-density-1';
@@ -124,7 +125,8 @@ export function orchestrationV2UnitArtifactHash(
 
 /** Which revision-0 acceptance check rejected a unit (logged as `acceptance_check`). */
 export type OrchestrationV2UnitAcceptanceCheck =
-  | 'normalization' | 'response' | 'coverage' | 'idm_budget' | 'workspace_component' | 'publication';
+  | 'normalization' | 'response' | 'coverage' | 'idm_budget' | 'workspace_component' | 'publication'
+  | 'preserve_text';
 
 /**
  * Safe reason of a unit_acceptance rejection: the check, a stable validator
@@ -509,6 +511,10 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
   });
   // A null brief (Python's dump of a legacy contract) is legacy.
   const brief = contract.idm_unit_brief ?? undefined;
+  // QLT-6: a kept document's unit is its own text. The instructional-quality rules of generated html (source
+  // mentions, file names, repeated blocks, ...) would reject or change the document's words, so they are off and
+  // the exact-text check below decides instead (Python reports what they would have flagged).
+  const preserve = isIdmPreserveSource(brief);
   // An IDM worksheet (html slot with role practice) repeats its template's row labels in the worked example.
   const worksheets = new Set((brief?.components ?? []).flatMap((slot, index) =>
     slot.role === 'practice' && slot.type === 'html' ? [index] : []));
@@ -522,7 +528,7 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
     supporting_evidence_fact_ids: component.metadata?.supporting_evidence_fact_ids as string[] | undefined,
   })), {
     exact_identifiers: contract.source_facts.flatMap(fact => [fact.fact_key, fact.source_ref ?? '']).filter(Boolean),
-  }, { worksheet_component_indexes: worksheets });
+  }, { worksheet_component_indexes: worksheets, ...(preserve ? { enforceGeneratedContentQuality: false } : {}) });
   if (coverage) {
     fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
       { check: 'coverage', code: coverage.code, path: componentPath(coverage.component_index) });
@@ -557,6 +563,15 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
         path: componentPath(index) });
     }
   });
+  if (preserve) {
+    // On the html as stored (after the course html sanitizer): exactly the unit's lines, word for word, in order.
+    const finding = idmPreserveUnitFinding(contract.component_plan.map(plan => plan.type),
+      contract.source_facts.map(fact => fact.fact_text), componentContents.map(content => content.data));
+    if (finding) {
+      fail('ORCHESTRATION_V2_UNIT_BASELINE_INVALID',
+        { check: 'preserve_text', code: finding.code, path: componentPath(finding.index) });
+    }
+  }
   const unitContent = readWorkspaceContent({ title: contract.unit_title, purpose: contract.unit_purpose,
     data: {}, implementation_notes: quality === null ? null : idmAuthorNote([quality.author_note], IDM_UNIT_NOTE_MAX_CHARS) });
   const nodes = [{ path: contract.unit_path, content: unitContent }, ...componentContents.map((content, index) => ({

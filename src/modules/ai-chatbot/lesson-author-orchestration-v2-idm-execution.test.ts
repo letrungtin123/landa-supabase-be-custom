@@ -211,6 +211,35 @@ test('IDM units use LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS; legacy keeps its ow
   assert.equal(mismatched.length, 0, 'a pipeline mismatch never reaches the provider');
 });
 
+test('QLT-6: a kept document unit takes the provider-free path: fallback_only and no dispatch fence', async () => {
+  const { fixture, view, assembly } = idmAssembly();
+  const keys = new Set(fixture.design.block_scopes[0]!.fact_keys);
+  const contract = prepareOrchestrationV2UnitGenerationContract({ assembly, unit_path: 'chapter_1.lesson_1.unit_1',
+    source_facts: remapFactsToBlockScopes(fixture.facts.filter(fact => keys.has(fact.fact_key)), view),
+    idm: { design: fixture.design, lesson_facts: fixture.facts } });
+  const kept = { ...contract, idm_unit_brief: { ...contract.idm_unit_brief!, design_mode: 'preserve_source' as const } };
+  const authority = { tenant_id: uuid(4), kb_id: uuid(8), conversation_id: uuid(9), correlation_id: uuid(10),
+    locale: 'vi' as const, source_documents: [] };
+  const collected = new Error('IDM_REQUEST_COLLECTED');
+  const send = async (unit: unknown) => {
+    const marks: string[] = [];
+    const seen: Array<{ request: Row; fenced: boolean }> = [];
+    await assert.rejects(executeOrchestrationV2UnitTask(lease({ kind: 'generate_unit', node_id: uuid(30) }),
+      { load: async () => ({ authority, contract: unit }) } as never,
+      { markProviderDispatched: async () => { marks.push('dispatch'); } } as never,
+      { generate: async (request: Row, execution: { beforeProviderDispatch?: () => Promise<void> }) => {
+        seen.push({ request, fenced: execution.beforeProviderDispatch !== undefined }); throw collected;
+      } } as never, { embedding_model: 'e', embedding_dimensions: 768, allowed_component_types: new Set(SIX),
+        pipeline: 'idm-1' }, (raw: unknown) => raw as never, async () => undefined, async () => undefined,
+      new AbortController().signal), error => error === collected);
+    return { marks, seen: seen[0]! };
+  };
+  const preserved = await send(kept);
+  assert.deepEqual([preserved.seen.request.fallback_only, preserved.seen.fenced, preserved.marks], [true, false, []]);
+  const designed = await send(contract);
+  assert.deepEqual([designed.seen.request.fallback_only, designed.seen.fenced], [false, true]);
+});
+
 function sqlFixture(handler: (sql: string, params: unknown[]) => Row[] | undefined) {
   const queries: string[] = [];
   const artifacts: Row[] = [];
