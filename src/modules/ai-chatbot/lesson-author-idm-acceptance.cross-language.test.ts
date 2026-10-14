@@ -132,6 +132,9 @@ test('the Python acceptance mirror reports the same first rule as Node (check, c
     const paragraph = (unit: Row, text: string) => sections(html(unit))[0]!.blocks.push(block('paragraph', { text }));
     const long = Array.from({ length: 4 }, (_, part) => Array.from({ length: 250 },
       (_word, index) => `mục${part * 250 + index}`).join(' '));
+    // QLT-5 C: 200-word paragraphs; an explained context unit has 607 words (450 × 1.35) instead of 450.
+    const filler = Array.from({ length: 3 }, (_, part) => Array.from({ length: 200 },
+      (_word, index) => `ý${part * 200 + index}`).join(' '));
     const cases: Case[] = [
       { name: 'unchanged worksheet', base: 'worksheet', edit: () => undefined },
       { name: 'worksheet repeats template cells', base: 'worksheet', edit: unit => {
@@ -154,6 +157,12 @@ test('the Python acceptance mirror reports the same first rule as Node (check, c
       { name: 'over budget', base: 'worksheet', edit: unit => long.forEach(text => paragraph(unit, text)) },
       { name: 'over budget in a fallback unit', base: 'worksheet', origin: 'structured_fallback',
         edit: unit => long.forEach(text => paragraph(unit, text)) },
+      { name: 'explained unit within its raised budget', base: 'severity_explain',
+        edit: unit => filler.slice(0, 2).forEach(text => paragraph(unit, text)) },
+      { name: 'explained unit over its raised budget', base: 'severity_explain',
+        edit: unit => filler.forEach(text => paragraph(unit, text)) },
+      { name: 'the same text over the budget of a unit that is not explained', base: 'severity',
+        edit: unit => filler.slice(0, 2).forEach(text => paragraph(unit, text)) },
       { name: 'short choice', base: 'worksheet', edit: unit => { problem(unit).choices[0].text = 'Có'; } },
       { name: 'two choices', base: 'worksheet', edit: unit => { problem(unit).choices = problem(unit).choices
         .filter((choice: Row) => choice.correct).concat([{ text: 'Chuyển hồ sơ cho bộ phận khác ngay.', correct: false }]); } },
@@ -195,6 +204,11 @@ test('the Python acceptance mirror reports the same first rule as Node (check, c
     const verdicts = prepared.map(({ item, contract, response }, index) => ({ name: item.name,
       node: nodeVerdict(contract, response, normalize), python: python[index] ?? null }));
     for (const verdict of verdicts) assert.deepEqual(verdict.python, verdict.node, verdict.name);
+    // QLT-5 C: both sides read the raised budget from the brief's content mode.
+    const verdictOf = (name: string) => verdicts.find(verdict => verdict.name === name)!.node;
+    assert.equal(verdictOf('explained unit within its raised budget'), null);
+    assert.equal(verdictOf('explained unit over its raised budget')?.check, 'idm_budget');
+    assert.equal(verdictOf('the same text over the budget of a unit that is not explained')?.check, 'idm_budget');
     // The corpus exercises every check Node applies to authored content, not only accepted units.
     assert.deepEqual([...new Set(verdicts.map(verdict => verdict.node?.check ?? 'accepted'))].sort(),
       ['accepted', 'coverage', 'idm_budget', 'normalization', 'workspace_component']);

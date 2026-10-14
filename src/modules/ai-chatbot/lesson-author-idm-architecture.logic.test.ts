@@ -195,6 +195,8 @@ test('IDM unit contract carries a sealed brief inside the contract hash; require
   assert.throws(() => prepareOrchestrationV2UnitGenerationContract({ assembly, unit_path: contract.unit_path,
     source_facts: contract.source_facts }), { code: 'ORCHESTRATION_V2_UNIT_CONTRACT_INVALID' });
   assert.equal(idmUnitOutputBudget(brief).max_words, 450);
+  // A contract-1 fixture design has no purpose: the brief carries no content mode (today's rules).
+  assert.equal(brief.fidelity_mode, null);
   assert.equal(idmUnitOutputBudget({ unit_segment: 'job_aid', components: [{ ...brief.components[0]!,
     treatments: Array.from({ length: 20 }, (_, index) => ({ block_id: `cb_${String(index + 1).padStart(4, '0')}`,
       treatment: 'keep' as const, detail_level: 'd' })) }] }).max_words, 1_600);
@@ -324,6 +326,26 @@ test('IDM output budget is measured exactly like Python (code points, \\w+ words
   assert.equal(exceedsIdmOutputBudget(brief, [full, full]), false);
   assert.equal(exceedsIdmOutputBudget(brief, [full, html(Array(251).fill('từ').join(' '))]), true);
 });
+
+test('QLT-5 C: an explained unit gets 135% of its word budget (floored like Python budget_words), job aids excepted',
+  () => {
+    const components: [] = [];
+    assert.deepEqual(idmUnitOutputBudget({ unit_segment: 'context_explain', components, fidelity_mode: 'explain' }),
+      { max_words: 607, max_visible_chars: 4_249 });
+    // 250 × 1.35 = 337.5: floored, as Python's integer arithmetic does.
+    assert.deepEqual(idmUnitOutputBudget({ unit_segment: 'summary_apply', components, fidelity_mode: 'explain' }),
+      { max_words: 337, max_visible_chars: 2_359 });
+    for (const mode of ['keep', 'structured', null, undefined] as const) {
+      assert.equal(idmUnitOutputBudget({ unit_segment: 'context_explain', components, fidelity_mode: mode }).max_words,
+        450);
+    }
+    assert.equal(idmUnitOutputBudget({ unit_segment: 'job_aid', components, fidelity_mode: 'explain' }).max_words, 600);
+    const brief = { unit_segment: 'summary_apply' as const, components, fidelity_mode: 'explain' as const };
+    const html = (words: number) => ({ type: 'html', data: `<p>${Array(words).fill('từ').join(' ')}</p>` });
+    assert.equal(exceedsIdmOutputBudget(brief, [html(337)]), false);
+    assert.equal(exceedsIdmOutputBudget(brief, [html(338)]), true);
+    assert.equal(exceedsIdmOutputBudget({ ...brief, fidelity_mode: 'structured' }, [html(251)]), true);
+  });
 
 test('IDM unit acceptance never rejects semantic html that Python accepted at the budget edge', () => {
   const { contract } = idmUnit();

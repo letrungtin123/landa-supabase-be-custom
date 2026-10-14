@@ -596,11 +596,14 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       assert.equal(briefHash, hash(brief));
       // QLT-5: every brief carries the design's purpose to the writer and the judge.
       assert.deepEqual([brief.purpose_profile, brief.purpose_summary], [design.purpose!.profile, design.purpose!.summary]);
+      // QLT-5 C: and its content mode (keep for the golden compliance course).
+      assert.equal(brief.fidelity_mode, design.purpose!.fidelity_mode);
     }
     // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
     assert.equal(design.idm_contract_version, 2);
     assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);
     assert.equal(design.purpose?.profile, 'compliance');
+    assert.equal(design.purpose?.fidelity_mode, 'keep');
     assert.ok(design.notes.course.includes('Mục đích khoá học: Quy trình, quy định, tuân thủ, an toàn'));
 
     // (d) Apply compile parity: the Apply identity (with notes) equals the published inventory.

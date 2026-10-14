@@ -444,4 +444,40 @@ test('unit briefs read in both shapes and the purpose fields are bound by brief_
   assert.deepEqual(readIdmUnitBrief(legacy), legacy);
   assert.equal(Object.hasOwn(readIdmUnitBrief(legacy), 'purpose_profile'), false);
   assert.deepEqual(sealIdmUnitBrief({ ...base, purpose_profile: null, purpose_summary: null }).purpose_profile, null);
+  // QLT-5 C: the content mode is an optional key of a contract-2 brief, bound by brief_hash like the purpose.
+  const explained = sealIdmUnitBrief({ ...base, purpose_profile: 'onboarding', purpose_summary: 'Giúp nhân viên mới.',
+    fidelity_mode: 'explain' });
+  assert.equal(explained.fidelity_mode, 'explain');
+  assert.deepEqual(readIdmUnitBrief(JSON.parse(JSON.stringify(explained))), explained);
+  assert.throws(() => readIdmUnitBrief({ ...explained, fidelity_mode: 'structured' }),
+    invalidAt('idm_unit_brief.brief_hash'));
+  assert.throws(() => sealIdmUnitBrief({ ...base, purpose_profile: 'onboarding', purpose_summary: null,
+    fidelity_mode: 'verbatim' as never }), invalidAt('idm_unit_brief.fidelity_mode'));
+  assert.equal(sealIdmUnitBrief({ ...base, purpose_profile: null, purpose_summary: null, fidelity_mode: null })
+    .fidelity_mode, null);
+  // Only a brief that carries the purpose fields may carry the mode; a brief built before it reads unchanged.
+  assert.throws(() => sealIdmUnitBrief({ ...base, fidelity_mode: 'explain' }), invalidAt('idm_unit_brief'));
+  assert.equal(Object.hasOwn(readIdmUnitBrief(JSON.parse(JSON.stringify(current))), 'fidelity_mode'), false);
+});
+
+test('QLT-5 C: the design purpose may carry a content mode and the blueprint the explain treatment', () => {
+  const edit = (contract: 1 | 2, change: (design: Mutable) => void) => {
+    const design = structuredClone(idmFixture(undefined, { contract }).design) as Mutable;
+    change(design);
+    return rehashIdmDesign(design as IdmCourseDesignV1);
+  };
+  const moded = edit(2, design => {
+    design.purpose.fidelity_mode = 'explain';
+    design.blueprint[0].treatment = 'explain';
+  });
+  const read = readIdmCourseDesign(moded);
+  assert.equal(read.purpose?.fidelity_mode, 'explain');
+  assert.equal(read.blueprint[0]!.treatment, 'explain');
+  assert.doesNotThrow(() => readIdmCourseDesign(edit(2, design => { design.purpose.fidelity_mode = null; })));
+  // A contract-2 purpose stored before the mode existed reads unchanged (no key added, hash verified).
+  assert.equal(Object.hasOwn(readIdmCourseDesign(edit(2, () => undefined)).purpose!, 'fidelity_mode'), false);
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.purpose.fidelity_mode = 'verbatim'; })),
+    invalidAt('idm.purpose.fidelity_mode'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.blueprint[0].treatment = 'paraphrase'; })),
+    invalidAt('idm.blueprint[0].treatment'));
 });

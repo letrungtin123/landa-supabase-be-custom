@@ -25,19 +25,25 @@ export const IDM_EXTRA_WORDS_PER_BLOCK = 120;
 export const IDM_MIN_GENERATED_WORDS = 250;
 export const IDM_MAX_GENERATED_WORDS = 1_600;
 export const IDM_VISIBLE_CHARS_PER_WORD = 7;
+/** Python `EXPLAIN_BUDGET_PERCENT` (QLT-5 C): an explained unit's word budget, in percent, job aids excepted. */
+export const IDM_EXPLAIN_BUDGET_PERCENT = 135;
 export const IDM_CONTEXT_FACTS_MAX = 80;
 export const IDM_CONTEXT_FACTS_MAX_CHARS = 24_000;
 const MAX_PRACTICE_SENTENCES = 3;
 
 const contractInvalid = (): never => { throw new IdmError('IDM_SHARD_DESIGN_INVALID'); };
 
-/** Words = clamp(segment + 120 × (distinct treatment blocks − 1), 250, 1600); chars = words × 7. */
-export function idmUnitOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components'>): Readonly<{
-  max_words: number; max_visible_chars: number;
-}> {
+/**
+ * Words = clamp(segment + 120 × (distinct treatment blocks − 1), 250, 1600); an explained unit (`fidelity_mode`
+ * "explain", not a job aid) gets floor(words × 135 / 100), exactly as Python `budget_words`; chars = words × 7.
+ */
+export function idmUnitOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components' | 'fidelity_mode'>):
+Readonly<{ max_words: number; max_visible_chars: number }> {
   const blocks = new Set(brief.components.flatMap(slot => slot.treatments.map(item => item.block_id)));
-  const words = Math.max(IDM_MIN_GENERATED_WORDS, Math.min(IDM_MAX_GENERATED_WORDS,
+  const base = Math.max(IDM_MIN_GENERATED_WORDS, Math.min(IDM_MAX_GENERATED_WORDS,
     IDM_SEGMENT_WORD_BUDGET[brief.unit_segment] + IDM_EXTRA_WORDS_PER_BLOCK * Math.max(0, blocks.size - 1)));
+  const words = brief.fidelity_mode === 'explain' && brief.unit_segment !== 'job_aid'
+    ? Math.floor(base * IDM_EXPLAIN_BUDGET_PERCENT / 100) : base;
   return Object.freeze({ max_words: words, max_visible_chars: words * IDM_VISIBLE_CHARS_PER_WORD });
 }
 
@@ -93,7 +99,7 @@ export function idmPythonHtmlVisibleText(component: Readonly<Record<string, unkn
  * html component on its own, with code-point length (`len`) and `\w+` words, so
  * a unit Python accepted is never rejected here near the budget.
  */
-export function exceedsIdmOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components'>,
+export function exceedsIdmOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components' | 'fidelity_mode'>,
   htmlComponents: ReadonlyArray<Readonly<Record<string, unknown>>>): boolean {
   return idmOutputBudgetFinding(brief, htmlComponents) !== null;
 }
@@ -103,7 +109,7 @@ export function exceedsIdmOutputBudget(brief: Pick<IdmUnitBriefV1, 'unit_segment
  * W5 budget, with a safe reason code: `IDM_HTML_VISIBLE_TEXT_INVALID` when its
  * semantic payload cannot be measured, else `IDM_HTML_DENSITY_EXCEEDED`.
  */
-export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components'>,
+export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment' | 'components' | 'fidelity_mode'>,
   htmlComponents: ReadonlyArray<Readonly<Record<string, unknown>>>): { position: number; code: string } | null {
   const budget = idmUnitOutputBudget(brief);
   for (const [position, component] of htmlComponents.entries()) {
@@ -186,6 +192,8 @@ export function buildIdmUnitBrief(input: {
     // QLT-5: the writer and the judge keep the unit on the course purpose (null for a contract-1 design).
     purpose_profile: design.purpose?.profile ?? null,
     purpose_summary: design.purpose?.summary ?? null,
+    // QLT-5 C: the content mode the writer, its checks and the W5 budget follow (null: today's rules).
+    fidelity_mode: design.purpose?.fidelity_mode ?? null,
     module_title: idmStripWhitespace(chapter.title),
     lesson_title: idmStripWhitespace(lesson.title),
     lesson_objective: idmStripWhitespace(lesson.objective),

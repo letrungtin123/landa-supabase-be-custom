@@ -18,7 +18,10 @@ import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
  * `purpose`, the unit brief's purpose fields and the module context's
  * `purpose`. Designs stored under contract 1 still read: each reader accepts
  * exactly one of the two shapes and returns it unchanged (absent keys stay
- * absent), so `design_hash` and `brief_hash` still verify.
+ * absent), so `design_hash` and `brief_hash` still verify. QLT-5 C adds, still
+ * in contract 2, the optional `purpose.fidelity_mode` and brief `fidelity_mode`
+ * (the content mode; absent or null reads as "structured") and the `explain`
+ * treatment.
  */
 
 export const IDM_PIPELINE_VERSION = 'idm-1' as const;
@@ -69,7 +72,7 @@ export const IDM_LO_RELATIONS = ['direct', 'supporting', 'context', 'unrelated',
 export const IDM_BLOOMS = ['remember', 'understand', 'apply', 'analyze', 'evaluate', 'create'] as const;
 export const IDM_CLASSIFICATIONS = ['must_do', 'must_know', 'reference', 'nice_to_know', 'remove'] as const;
 export const IDM_PLACEMENTS = ['course', 'reference_job_aid', 'excluded'] as const;
-export const IDM_TREATMENTS = ['keep', 'condense', 'rewrite', 'combine', 'separate', 'move_to_reference',
+export const IDM_TREATMENTS = ['keep', 'condense', 'rewrite', 'explain', 'combine', 'separate', 'move_to_reference',
   'convert_to_job_aid', 'remove'] as const;
 export const IDM_DISPOSITIONS = ['course', 'reference_job_aid', 'nice_to_know', 'remove', 'hold', 'noise'] as const;
 export const IDM_SUPPORT_KINDS = ['explain_concept', 'explain_principle', 'example', 'non_example', 'worked_example',
@@ -88,6 +91,8 @@ export const IDM_PURPOSE_PROFILES = ['onboarding', 'product', 'compliance', 'sal
 export const IDM_PURPOSE_CONFIDENCES = ['high', 'medium', 'low'] as const;
 export const IDM_PURPOSE_ORIGINS = ['author_intent', 'ai_inferred', 'deterministic_fallback'] as const;
 export const IDM_PURPOSE_EVIDENCE = ['title', 'description', 'source'] as const;
+/** Python `FidelityMode` (QLT-5 C): how closely learner text follows the source wording. */
+export const IDM_FIDELITY_MODES = ['keep', 'structured', 'explain'] as const;
 const LOCALES = ['vi', 'en'] as const;
 
 export type IdmIntent = typeof IDM_INTENTS[number];
@@ -111,6 +116,7 @@ export type IdmComponentType = typeof IDM_COMPONENT_TYPES[number];
 export type IdmJudgeCriterion = typeof IDM_JUDGE_CRITERIA[number];
 export type IdmJudgeSeverity = typeof IDM_JUDGE_SEVERITIES[number];
 export type IdmPurposeProfile = typeof IDM_PURPOSE_PROFILES[number];
+export type IdmFidelityMode = typeof IDM_FIDELITY_MODES[number];
 export type IdmContractVersion = typeof IDM_READABLE_CONTRACT_VERSIONS[number];
 
 // --- Models (spec §6.2-§6.8) ---------------------------------------------------------------
@@ -226,6 +232,8 @@ export interface IdmPurposeV1 {
   evidence: Array<typeof IDM_PURPOSE_EVIDENCE[number]>;
   signals: string[];
   template_gaps: IdmTemplateGapV1[];
+  /** QLT-5 C: the content mode every later stage follows; absent in a purpose stored before it ("structured"). */
+  fidelity_mode?: IdmFidelityMode | null;
 }
 
 export interface IdmCourseDesignV1 {
@@ -353,6 +361,8 @@ export interface IdmUnitBriefV1 {
   /** Contract 2: the design's purpose (null for a contract-1 design); absent in a contract-1 brief. */
   purpose_profile?: IdmPurposeProfile | null;
   purpose_summary?: string | null;
+  /** QLT-5 C: the design purpose's content mode (null without one); absent in a brief built before it. */
+  fidelity_mode?: IdmFidelityMode | null;
   module_title: string;
   lesson_title: string;
   lesson_objective: string;
@@ -593,9 +603,13 @@ const templateGap: Reader<IdmTemplateGapV1> = (value, path) => {
     note: text(item.note, `${path}.note`, 1, 300) };
 };
 
+const PURPOSE_KEYS = ['profile', 'summary', 'confidence', 'origin', 'evidence', 'signals', 'template_gaps'] as const;
+const fidelityMode: Reader<IdmFidelityMode> = (value, path) => oneOf(value, path, IDM_FIDELITY_MODES);
+
+/** `fidelity_mode` is optional (QLT-5 C): a purpose stored without it reads unchanged, so its hash still verifies. */
 const purpose: Reader<IdmPurposeV1> = (value, path) => {
-  const item = object(value, path, ['profile', 'summary', 'confidence', 'origin', 'evidence', 'signals',
-    'template_gaps']);
+  const moded = hasKey(value, 'fidelity_mode');
+  const item = object(value, path, moded ? [...PURPOSE_KEYS, 'fidelity_mode'] : PURPOSE_KEYS);
   return {
     profile: oneOf(item.profile, `${path}.profile`, IDM_PURPOSE_PROFILES),
     summary: text(item.summary, `${path}.summary`, 10, 500),
@@ -604,6 +618,7 @@ const purpose: Reader<IdmPurposeV1> = (value, path) => {
     evidence: list(item.evidence, `${path}.evidence`, 0, 3, (entry, at) => oneOf(entry, at, IDM_PURPOSE_EVIDENCE)),
     signals: list(item.signals, `${path}.signals`, 0, 8, line(40)),
     template_gaps: list(item.template_gaps, `${path}.template_gaps`, 0, 12, templateGap),
+    ...(moded ? { fidelity_mode: nullable(fidelityMode)(item.fidelity_mode, `${path}.fidelity_mode`) } : {}),
   };
 };
 
@@ -964,7 +979,10 @@ const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
 
 function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitBriefV1, 'brief_hash'> {
   const purposeful = hasKey(value, 'purpose_profile');
-  const keys = (purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1).filter(key => sealed || key !== 'brief_hash');
+  // QLT-5 C: a contract-2 brief may carry the content mode; a brief built before it reads unchanged.
+  const moded = purposeful && hasKey(value, 'fidelity_mode');
+  const keys = [...(purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1), ...(moded ? ['fidelity_mode'] : [])]
+    .filter(key => sealed || key !== 'brief_hash');
   const item = object(value, path, keys);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
@@ -975,6 +993,7 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
         : oneOf(item.purpose_profile, `${path}.purpose_profile`, IDM_PURPOSE_PROFILES),
       purpose_summary: nullableText(item.purpose_summary, `${path}.purpose_summary`, 500),
     } : {}),
+    ...(moded ? { fidelity_mode: nullable(fidelityMode)(item.fidelity_mode, `${path}.fidelity_mode`) } : {}),
     module_title: text(item.module_title, `${path}.module_title`, 1, 500),
     lesson_title: text(item.lesson_title, `${path}.lesson_title`, 1, 180),
     lesson_objective: text(item.lesson_objective, `${path}.lesson_objective`, 1, 500),
