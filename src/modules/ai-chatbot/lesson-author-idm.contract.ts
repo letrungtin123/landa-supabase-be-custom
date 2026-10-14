@@ -14,10 +14,11 @@ import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
  * still carry leading/trailing whitespace. Any violation throws `IdmError` with
  * code `IDM_CONTRACT_INVALID` and the JSON path of the first offending value.
  *
- * Contract 2 (QLT-5) adds `project_context.course_description` and the
- * design's `purpose`. Designs stored under contract 1 still read: the reader
- * accepts exactly one of the two shapes and returns it unchanged (absent keys
- * stay absent), so `design_hash` still verifies.
+ * Contract 2 (QLT-5) adds `project_context.course_description`, the design's
+ * `purpose`, the unit brief's purpose fields and the module context's
+ * `purpose`. Designs stored under contract 1 still read: each reader accepts
+ * exactly one of the two shapes and returns it unchanged (absent keys stay
+ * absent), so `design_hash` and `brief_hash` still verify.
  */
 
 export const IDM_PIPELINE_VERSION = 'idm-1' as const;
@@ -349,6 +350,9 @@ export interface IdmUnitBriefV1 {
   pipeline_version: typeof IDM_PIPELINE_VERSION;
   course_title: string;
   target_audience: string;
+  /** Contract 2: the design's purpose (null for a contract-1 design); absent in a contract-1 brief. */
+  purpose_profile?: IdmPurposeProfile | null;
+  purpose_summary?: string | null;
   module_title: string;
   lesson_title: string;
   lesson_objective: string;
@@ -958,12 +962,19 @@ const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
   };
 };
 
-function unitBrief(value: unknown, path: string, keys: readonly string[]): Omit<IdmUnitBriefV1, 'brief_hash'> {
+function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitBriefV1, 'brief_hash'> {
+  const purposeful = hasKey(value, 'purpose_profile');
+  const keys = (purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1).filter(key => sealed || key !== 'brief_hash');
   const item = object(value, path, keys);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
     course_title: text(item.course_title, `${path}.course_title`, 1, 500),
     target_audience: text(item.target_audience, `${path}.target_audience`, 1, 2_000),
+    ...(purposeful ? {
+      purpose_profile: item.purpose_profile === null ? null
+        : oneOf(item.purpose_profile, `${path}.purpose_profile`, IDM_PURPOSE_PROFILES),
+      purpose_summary: nullableText(item.purpose_summary, `${path}.purpose_summary`, 500),
+    } : {}),
     module_title: text(item.module_title, `${path}.module_title`, 1, 500),
     lesson_title: text(item.lesson_title, `${path}.lesson_title`, 1, 180),
     lesson_objective: text(item.lesson_objective, `${path}.lesson_objective`, 1, 500),
@@ -979,14 +990,15 @@ function unitBrief(value: unknown, path: string, keys: readonly string[]): Omit<
   };
 }
 
-const UNIT_BRIEF_KEYS = ['pipeline_version', 'course_title', 'target_audience', 'module_title', 'lesson_title',
+const UNIT_BRIEF_KEYS_V1 = ['pipeline_version', 'course_title', 'target_audience', 'module_title', 'lesson_title',
   'lesson_objective', 'lesson_practice_sentences', 'previous_lesson_title', 'next_lesson_title', 'unit_segment',
   'unit_purpose', 'components', 'lesson_context_facts', 'job_aid_signpost', 'brief_hash'] as const;
+const UNIT_BRIEF_KEYS = [...UNIT_BRIEF_KEYS_V1, 'purpose_profile', 'purpose_summary'] as const;
 
-/** Strictly parse an `IdmUnitBriefV1` and verify `brief_hash` (Python `brief_hash_of`). */
+/** Strictly parse an `IdmUnitBriefV1` (either contract) and verify `brief_hash` (Python `brief_hash_of`). */
 export function readIdmUnitBrief(value: unknown): IdmUnitBriefV1 {
   const path = 'idm_unit_brief';
-  const brief = unitBrief(value, path, UNIT_BRIEF_KEYS);
+  const brief = unitBrief(value, path, true);
   const briefHash = sha256((value as Record<string, unknown>).brief_hash, `${path}.brief_hash`);
   const sealed: IdmUnitBriefV1 = { ...brief, brief_hash: briefHash };
   if (briefHash !== idmBriefHash(sealed)) invalid(`${path}.brief_hash`);
@@ -995,7 +1007,7 @@ export function readIdmUnitBrief(value: unknown): IdmUnitBriefV1 {
 
 /** Validate an unhashed brief and attach its canonical `brief_hash`. */
 export function sealIdmUnitBrief(value: Omit<IdmUnitBriefV1, 'brief_hash'>): IdmUnitBriefV1 {
-  const brief = unitBrief(value, 'idm_unit_brief', UNIT_BRIEF_KEYS.filter(key => key !== 'brief_hash'));
+  const brief = unitBrief(value, 'idm_unit_brief', false);
   return readIdmUnitBrief({ ...brief, brief_hash: idmBriefHash(brief) });
 }
 
@@ -1141,6 +1153,8 @@ function sufficientIdmBudgetMs(windowMs: number, path: string): number {
 export interface IdmModuleContextV1 {
   pipeline_version: typeof IDM_PIPELINE_VERSION;
   project_context: IdmProjectContextV1;
+  /** The design's purpose; null for a contract-1 design (QLT-5). */
+  purpose: IdmPurposeV1 | null;
   target_audience: IdmAudienceV1;
   module: IdmModulePlanV1;
   learning_objectives: IdmLearningObjectiveV1[];
@@ -1158,13 +1172,14 @@ export interface IdmModuleContextV1 {
 /** Validate a Node-built module context against the Python bounds before it is sent. */
 export function readIdmModuleContext(value: unknown): IdmModuleContextV1 {
   const path = 'idm_module_context';
-  const item = object(value, path, ['pipeline_version', 'project_context', 'target_audience', 'module',
+  const item = object(value, path, ['pipeline_version', 'project_context', 'purpose', 'target_audience', 'module',
     'learning_objectives', 'must_dos', 'blocks', 'blueprint', 'block_scopes', 'lesson_index_offset',
     'allowed_component_types', 'token_allowance', 'remaining_budget_ms', 'design_hash']);
   const allowance = object(item.token_allowance, `${path}.token_allowance`, ['input_tokens', 'output_tokens']);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
     project_context: projectContext(item.project_context, `${path}.project_context`),
+    purpose: nullable(purpose)(item.purpose, `${path}.purpose`),
     target_audience: audience(item.target_audience, `${path}.target_audience`),
     module: modulePlan(item.module, `${path}.module`),
     learning_objectives: list(item.learning_objectives, `${path}.learning_objectives`, 1, 8, learningObjective),

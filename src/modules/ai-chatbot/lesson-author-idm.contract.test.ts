@@ -6,9 +6,11 @@ import {
   boundIdmRemainingBudgetMs,
   buildIdmCourseSkeletonRequest,
   idmBlockScopeKey,
+  idmBriefHash,
   idmHash,
   idmTextLength,
   readIdmCourseDesign,
+  readIdmModuleContext,
   readIdmShardDesign,
   readIdmUnitBrief,
   readIdmUnitQuality,
@@ -19,7 +21,12 @@ import {
   type IdmUnitBriefV1,
   type IdmUnitQualityV1,
 } from './lesson-author-idm.contract.js';
-import { assertIdmCourseDesignInvariants, planIdmChapterShards } from './lesson-author-idm-scope-view.logic.js';
+import {
+  assertIdmCourseDesignInvariants,
+  buildIdmModuleContext,
+  idmShardLessonsOf,
+  planIdmChapterShards,
+} from './lesson-author-idm-scope-view.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { readOrchestrationV2CourseSkeletonResponse } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { ORCHESTRATION_V2_IDM_EXECUTION_POLICY } from './lesson-author-orchestration-v2-execution.config.js';
@@ -396,4 +403,45 @@ test('a design never mixes the contract-1 and contract-2 shapes', () => {
     design.project_context.course_description = 'x'.repeat(2_001);
   })), invalidAt('idm.project_context.course_description'));
   assert.doesNotThrow(() => readIdmCourseDesign(edit(2, design => { design.project_context.course_description = null; })));
+});
+
+test('the module context carries the purpose of a contract-2 design and null for contract 1', () => {
+  for (const contract of [1, 2] as const) {
+    const fixture = idmFixture(undefined, { contract });
+    const plans = planIdmChapterShards(fixture.skeleton, fixture.design, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning,
+      'a'.repeat(64));
+    const shard = plans.chapter_tasks[0]!.shard_plan!;
+    const context = buildIdmModuleContext({ design: fixture.design, lessons: idmShardLessonsOf(fixture.design, shard),
+      allowed_component_types: ['html', 'problem'], input_tokens: 400_000, max_output_tokens: 65_536,
+      provider_max_attempts: 2, remaining_ms: 500_000 });
+    assert.deepEqual(context.purpose, contract === 2 ? IDM_FIXTURE_PURPOSE : null);
+    assert.deepEqual(context.project_context, fixture.design.project_context);
+    assert.deepEqual(readIdmModuleContext(JSON.parse(JSON.stringify(context))), context);
+    assert.throws(() => readIdmModuleContext({ ...context, purpose: undefined }), invalidAt('idm_module_context.purpose'));
+    const { purpose: _purpose, ...withoutPurpose } = context;
+    assert.throws(() => readIdmModuleContext(withoutPurpose), invalidAt('idm_module_context'));
+  }
+});
+
+test('unit briefs read in both shapes and the purpose fields are bound by brief_hash', () => {
+  const base = {
+    pipeline_version: 'idm-1' as const, course_title: 'Hội nhập', target_audience: 'Nhân viên mới',
+    module_title: 'Công ty là ai', lesson_title: 'Lịch sử', lesson_objective: 'Giới thiệu công ty',
+    lesson_practice_sentences: [], previous_lesson_title: null, next_lesson_title: null,
+    unit_segment: 'context_explain' as const, unit_purpose: 'Giới thiệu lịch sử công ty.', job_aid_signpost: null,
+    components: [{ component_plan_id: `cp2_${'b'.repeat(32)}`, type: 'html' as const, role: 'explain' as const,
+      title: 'Lịch sử', support_items: [], practice: null, treatments: [], owned_fact_keys: ['f1'],
+      supporting_fact_keys: [] }],
+    lesson_context_facts: [],
+  };
+  const current = sealIdmUnitBrief({ ...base, purpose_profile: 'onboarding', purpose_summary: 'Giúp nhân viên mới.' });
+  assert.deepEqual(readIdmUnitBrief(JSON.parse(JSON.stringify(current))), current);
+  assert.throws(() => readIdmUnitBrief({ ...current, purpose_profile: 'sales' }), invalidAt('idm_unit_brief.brief_hash'));
+  assert.throws(() => sealIdmUnitBrief({ ...base, purpose_profile: 'marketing' as never, purpose_summary: null }),
+    invalidAt('idm_unit_brief.purpose_profile'));
+  assert.throws(() => sealIdmUnitBrief({ ...base, purpose_profile: null } as never), invalidAt('idm_unit_brief'));
+  const legacy = { ...base, brief_hash: idmBriefHash(base) };
+  assert.deepEqual(readIdmUnitBrief(legacy), legacy);
+  assert.equal(Object.hasOwn(readIdmUnitBrief(legacy), 'purpose_profile'), false);
+  assert.deepEqual(sealIdmUnitBrief({ ...base, purpose_profile: null, purpose_summary: null }).purpose_profile, null);
 });

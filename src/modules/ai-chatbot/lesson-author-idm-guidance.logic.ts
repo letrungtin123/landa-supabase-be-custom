@@ -96,12 +96,15 @@ const INTERNAL_ID = /\[?\b(?:cb_\d{4}|sec_\d{3}|lo_\d{1,2}|md_\d{1,2}|lsn_\d{3}|
  * outdated issue first, then the rest; Hold blocks are left out (their
  * question is on the Hold item); duplicates once. The free-text note truncates
  * this list after ten questions ("và N mục khác"); author notes keep it whole.
+ * QLT-5: the parts of the course pattern the source lacks ("Tài liệu chưa có
+ * phần: … — cần bổ sung") lead the list; a contract-1 design has none.
  */
-export function idmAuthorSmeQuestions(design: Pick<IdmCourseDesignV1, 'blocks' | 'hold_items'>): string[] {
+export function idmAuthorSmeQuestions(design: Pick<IdmCourseDesignV1, 'blocks' | 'hold_items' | 'purpose'>): string[] {
   const held = new Set(design.hold_items.map(item => item.block_id));
   const urgent = (block: IdmCourseDesignV1['blocks'][number]) => block.issues.some(issue => issue.type === 'conflict' || issue.type === 'outdated');
   const ordered = [...design.blocks.filter(urgent), ...design.blocks.filter(block => !urgent(block))];
-  const questions = ordered.filter(block => !held.has(block.block_id)).flatMap(block => block.sme_questions)
+  const gaps = (design.purpose?.template_gaps ?? []).map(gap => gap.note);
+  const questions = [...gaps, ...ordered.filter(block => !held.has(block.block_id)).flatMap(block => block.sme_questions)]
     .map(question => authorText(question.replace(INTERNAL_ID, '').replace(/(?<=\S)[ \t]{2,}/g, ' ')))
     .filter((question): question is string => !!question);
   return [...new Set(questions)].slice(0, IDM_GUIDANCE_MAX_SME_QUESTIONS);

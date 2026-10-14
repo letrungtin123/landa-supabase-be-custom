@@ -82,3 +82,20 @@ test('author notes keep the complete SME list in note order; the workspace read 
   const tampered = JSON.parse(JSON.stringify(design)); tampered.blocks[0].sme_questions = ['Đổi sau khi băm?'];
   assert.equal(readIdmAuthorNotesGuidance(tampered), null);
 });
+
+test('QLT-5: the course-pattern gaps lead the SME list of a contract-2 design; contract 1 has none', () => {
+  const current = idmFixture(undefined, { contract: 2 }).design;
+  const questions = idmAuthorSmeQuestions(current);
+  assert.deepEqual(questions, ['Tài liệu chưa có phần: Cơ cấu tổ chức và người liên hệ — cần bổ sung.']);
+  const notes = readIdmAuthorNotesGuidance(JSON.parse(JSON.stringify(current)))!;
+  assert.deepEqual(notes.sme_questions, questions);
+  assert.deepEqual(Object.keys(readIdmAuthorGuidance(JSON.parse(JSON.stringify(current)))!).sort(),
+    ['hold_items', 'nice_to_know', 'pending_objectives']);
+  const withQuestions = structuredClone(questionedDesign()) as IdmCourseDesignV1;
+  withQuestions.idm_contract_version = 2;
+  withQuestions.project_context = { ...withQuestions.project_context, course_description: null };
+  withQuestions.purpose = structuredClone(current.purpose);
+  assert.deepEqual(idmAuthorSmeQuestions(rehashIdmDesign(withQuestions)).slice(0, 2),
+    ['Tài liệu chưa có phần: Cơ cấu tổ chức và người liên hệ — cần bổ sung.', 'Câu hỏi ‹ưu tiên› mâu thuẫn?']);
+  assert.deepEqual(idmAuthorSmeQuestions(questionedDesign())[0], 'Câu hỏi ‹ưu tiên› mâu thuẫn?');
+});

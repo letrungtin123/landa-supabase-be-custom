@@ -374,6 +374,8 @@ export function buildIdmModuleContext(input: {
   return readIdmModuleContext({
     pipeline_version: IDM_PIPELINE_VERSION,
     project_context: design.project_context,
+    // QLT-5: the module designer stays on the course purpose; a contract-1 design has none.
+    purpose: design.purpose ?? null,
     target_audience: design.target_audience,
     module: { ...module, lessons: shardLessons },
     learning_objectives: design.learning_objectives,

@@ -594,6 +594,8 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       assert.equal(contractHash, hash(base));
       const { brief_hash: briefHash, ...brief } = contract.idm_unit_brief!;
       assert.equal(briefHash, hash(brief));
+      // QLT-5: every brief carries the design's purpose to the writer and the judge.
+      assert.deepEqual([brief.purpose_profile, brief.purpose_summary], [design.purpose!.profile, design.purpose!.summary]);
     }
     // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
     assert.equal(design.idm_contract_version, 2);

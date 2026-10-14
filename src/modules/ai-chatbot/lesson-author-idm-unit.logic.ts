@@ -183,6 +183,9 @@ export function buildIdmUnitBrief(input: {
     pipeline_version: IDM_PIPELINE_VERSION,
     course_title: idmStripWhitespace(assembly.architecture.title),
     target_audience: design.target_audience.description,
+    // QLT-5: the writer and the judge keep the unit on the course purpose (null for a contract-1 design).
+    purpose_profile: design.purpose?.profile ?? null,
+    purpose_summary: design.purpose?.summary ?? null,
     module_title: idmStripWhitespace(chapter.title),
     lesson_title: idmStripWhitespace(lesson.title),
     lesson_objective: idmStripWhitespace(lesson.objective),
