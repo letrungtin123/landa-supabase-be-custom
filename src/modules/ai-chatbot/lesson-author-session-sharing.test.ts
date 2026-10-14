@@ -88,6 +88,8 @@ async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
           workspace_id: c.id === CONV_CREATOR ? 'e0000000-0000-4000-8000-000000000001' : null,
           correlation_id: c.id === CONV_CREATOR ? 'f0000000-0000-4000-8000-000000000001' : null,
           content_locale: c.id === CONV_CREATOR ? 'vi' : null, workspace_status: c.id === CONV_CREATOR ? 'ready' : null,
+          launch_brief: c.id === CONV_CREATOR ? { design_mode: 'preserve_source', learner_audience: null,
+            course_purpose: null, version: 1 } : null,
           has_applied: db.applied === true && c.id === CONV_CREATOR }));
       return rows(list);
     }
@@ -255,6 +257,9 @@ test('every course editor of the tenant sees every session of the course with it
     assert.deepEqual(creatorSession.owner, { user_id: CREATOR, display_name: 'Nguyễn Văn Tạo' });
     assert.equal(creatorSession.is_mine, actor.id === CREATOR);
     assert.equal(creatorSession.workspace?.can_edit, actor.id === CREATOR, 'only the creator edits the workspace');
+    // QLT-6: the session list shows how the latest workspace was started (storage version never exposed).
+    assert.deepEqual(creatorSession.workspace?.launch_brief,
+      { design_mode: 'preserve_source', learner_audience: null, course_purpose: null });
     assert.equal(creatorSession.permissions.can_apply, true);
     assert.equal(creatorSession.permissions.can_delete, actor.id === CREATOR || actor.role !== 'staff');
     assert.equal(items[1]!.owner.display_name, 'bien.tap');
@@ -262,6 +267,7 @@ test('every course editor of the tenant sees every session of the course with it
   const list = db.calls.filter(call => call.sql.includes('LEFT JOIN LATERAL'));
   assert.ok(list.every(call => call.params[0] === TENANT_A), 'tenant filter on every list');
   assert.doesNotMatch(list[0]!.sql, /c\.user_id=\$2::uuid AND c\.course_id/);
+  assert.match(list[0]!.sql, /latest\.launch_brief/);
 
   // "Mine" filter.
   const mine = await listLessonAuthorSessions(ownerScope(ACTORS.editor), { scope: 'mine' });

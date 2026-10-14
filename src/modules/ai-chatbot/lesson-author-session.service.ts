@@ -11,8 +11,9 @@ import {
   type LessonAuthorSessionPermissions,
   type LessonAuthorSessionScope,
 } from './lesson-author-session-access.logic.js';
+import { readStoredLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTIVE_WORKSPACE_STATUSES = ['queued', 'designing', 'drafting'];
 const DELETE_LEASE_SECONDS = 15 * 60;
 
@@ -39,6 +40,8 @@ export interface LessonAuthorSessionSummary {
     correlation_id: string;
     content_locale: 'vi' | 'en';
     status: string;
+    /** QLT-6: how the session's latest workspace was started; null before QLT-6. */
+    launch_brief: LessonAuthorLaunchBrief | null;
     /** Only the creator edits/continues; others open it read-only and may Apply. */
     can_edit: boolean;
   };
@@ -138,10 +141,11 @@ export async function listLessonAuthorSessions(
     conversation_id: string; title: string; created_at: Date | string; updated_at: string;
     owner_id: string; owner_full_name: string | null; owner_username: string | null;
     workspace_id: string | null; correlation_id: string | null; content_locale: 'vi' | 'en' | null; workspace_status: string | null;
-    has_applied: boolean;
+    launch_brief: unknown; has_applied: boolean;
   }>(`SELECT c.id::text AS conversation_id,c.title,c.created_at,c.updated_at::text AS updated_at,
       c.user_id::text AS owner_id,creator.full_name AS owner_full_name,creator.username AS owner_username,
       latest.id::text AS workspace_id,latest.correlation_id::text,latest.content_locale,latest.status AS workspace_status,
+      latest.launch_brief,
       EXISTS (SELECT 1 FROM lesson_author_workspaces aw JOIN lesson_author_workspace_apply_mappings am ON am.workspace_id=aw.id
         WHERE aw.tenant_id=c.tenant_id AND aw.course_id=c.course_id AND aw.conversation_id=c.id) AS has_applied
     FROM chat_conversations c
@@ -149,7 +153,7 @@ export async function listLessonAuthorSessions(
     JOIN tenant_bot_assignments assignment ON assignment.tenant_id=c.tenant_id AND assignment.bot_id=c.bot_id AND assignment.target='lesson_author'
     LEFT JOIN users creator ON creator.id=c.user_id
     LEFT JOIN LATERAL (
-      SELECT w.id,w.correlation_id,w.content_locale,w.status
+      SELECT w.id,w.correlation_id,w.content_locale,w.status,w.launch_brief
       FROM lesson_author_workspaces w
       WHERE w.tenant_id=c.tenant_id AND w.course_id=c.course_id AND w.requested_by=c.user_id
         AND w.conversation_id=c.id AND w.contract_version=1 AND w.engine='self_built_rag'
@@ -184,6 +188,7 @@ export async function listLessonAuthorSessions(
         correlation_id: row.correlation_id,
         content_locale: row.content_locale,
         status: row.workspace_status,
+        launch_brief: readStoredLaunchBrief(row.launch_brief),
         can_edit: permissions.can_continue,
       } : null,
     };

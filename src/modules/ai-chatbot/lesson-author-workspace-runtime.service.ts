@@ -16,6 +16,7 @@ import { verifyWorkspaceSchema } from './lesson-author-workspace-schema.reposito
 import { generationSnapshotHash as hash, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
 import type { GenerationJobSql, GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
+import { isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 /** Injectable composition seam; production exports below retain their signatures.
  * Importing this module performs no config/connection/service initialization. */
@@ -211,18 +212,18 @@ function admission(){
 /** Creation is atomic with the EXISTING durable Blueprint enqueue/message/token
  * reservation. Same idempotency identity survives an uncertain POST; no second
  * provider call or independent correlation is generated on replay. */
-async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi'}){
+async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief}){
   if(!ready||!isDurableBlueprintWorkerReady())throw new AppError('Workspace worker is not ready.',503,'WORKSPACE_EXECUTION_DISABLED');
   if(user.sessionMode!=='normal'||!user.tenantId||!['staff','superuser','superadmin'].includes(user.role)
     ||![user.id,user.tenantId,input.conversationId,input.operationId].every(id=>UUID.test(id))
     ||!input.sourceDocumentIds.length||input.sourceDocumentIds.length>5||new Set(input.sourceDocumentIds).size!==input.sourceDocumentIds.length
-    ||input.sourceDocumentIds.some(id=>!UUID.test(id))||!['en','vi'].includes(input.locale))reject('WORKSPACE_CREATE_INPUT_INVALID');
+    ||input.sourceDocumentIds.some(id=>!UUID.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
   const tenantId=user.tenantId,content=input.locale==='en'?'Create lesson content from the selected documents.':'Tạo nội dung bài học từ tài liệu đã chọn.';
   return withLessonAuthorConversationLock(input.conversationId,async()=>{
     const prior=await query<GenerationJobRow>(`SELECT * FROM lesson_author_generation_jobs WHERE tenant_id=$1 AND conversation_id=$2 AND requested_by=$3 AND idempotency_key=$4`,
       [tenantId,input.conversationId,user.id,input.operationId]);
     const prepared=await prepareDurableBlueprint(input.conversationId,user.id,tenantId,content,{target:'lesson_author',courseId:input.courseId,
-      mode:'course_blueprint',locale:input.locale,sourceDocuments:input.sourceDocumentIds.map(document_id=>({document_id}))},prior.rows[0]);
+      mode:'course_blueprint',locale:input.locale,sourceDocuments:input.sourceDocumentIds.map(document_id=>({document_id})),launchBrief:input.brief},prior.rows[0]);
     if(!prepared)reject('WORKSPACE_ENGINE_UNSUPPORTED');
     if(!prior.rows.length)await prepared.filterInput();
     const root=prior.rows[0]?.correlation_id??randomUUID();
@@ -240,17 +241,18 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
         AND status IN ('queued','designing','drafting') AND idempotency_key<>$4 FOR UPDATE`,[tenantId,input.courseId,user.id,input.operationId]);
       if(active.rows.length)reject('WORKSPACE_ALREADY_ACTIVE');
       const job=await durableBlueprintRepository.enqueue({...prepared.identity,idempotencyKey:input.operationId,correlationId:root},()=>prepared.reserveAndCreateMessage(root));
-      const existing=await tx.query(`SELECT id,conversation_id,correlation_id,content_locale,status,request_hash FROM lesson_author_workspaces
+      const existing=await tx.query(`SELECT id,conversation_id,correlation_id,content_locale,status,request_hash,launch_brief FROM lesson_author_workspaces
         WHERE tenant_id=$1 AND conversation_id=$2 AND requested_by=$3 AND idempotency_key=$4 FOR UPDATE`,[tenantId,input.conversationId,user.id,input.operationId]);
-      if(existing.rows.length){const w=existing.rows[0];if(w.correlation_id!==job.job.correlation_id||w.request_hash!==prepared.identity.requestHash)reject('WORKSPACE_CREATE_CONFLICT');
-        return{workspace_id:String(w.id),conversation_id:String(w.conversation_id),correlation_id:String(w.correlation_id),content_locale:input.locale,status:String(w.status),replayed:true};}
+      if(existing.rows.length){const w=existing.rows[0];if(w.correlation_id!==job.job.correlation_id||w.request_hash!==prepared.identity.requestHash||!sameLaunchBrief(w.launch_brief,input.brief))reject('WORKSPACE_CREATE_CONFLICT');
+        return{workspace_id:String(w.id),conversation_id:String(w.conversation_id),correlation_id:String(w.correlation_id),content_locale:input.locale,status:String(w.status),launch_brief:readStoredLaunchBrief(w.launch_brief),replayed:true};}
       // A legacy enqueue cannot later be taken over as a workspace by replay.
       if(!job.created)reject('WORKSPACE_CREATE_CONFLICT');
       const id=randomUUID();
       await tx.query(`INSERT INTO lesson_author_workspaces(id,tenant_id,course_id,conversation_id,requested_by,bot_id,kb_id,
-        content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[])`,[id,tenantId,input.courseId,input.conversationId,user.id,
-        prepared.identity.botId,prepared.identity.kbId,input.locale,root,input.operationId,prepared.identity.requestHash,prepared.identity.sourceSnapshotHash,prepared.identity.sourceDocumentIds]);
+        content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids,launch_brief)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[],$14::jsonb)`,[id,tenantId,input.courseId,input.conversationId,user.id,
+        prepared.identity.botId,prepared.identity.kbId,input.locale,root,input.operationId,prepared.identity.requestHash,prepared.identity.sourceSnapshotHash,prepared.identity.sourceDocumentIds,
+        JSON.stringify(storedLaunchBrief(input.brief))]);
       // Installed publish_lesson_author_workspace_created trigger emits the
       // unique workspace_created event; a second INSERT would roll back creation.
       await tx.query(`UPDATE lesson_author_workspaces SET status='designing' WHERE id=$1`,[id]);
@@ -258,7 +260,7 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
         VALUES($1,$2,$3,'architecture_started',$4)`,[id,tenantId,input.courseId,input.operationId]);
       await tx.query(`UPDATE chat_messages SET metadata=metadata||$3::jsonb WHERE id=$1 AND conversation_id=$2`,
         [job.job.user_message_id,input.conversationId,JSON.stringify({lesson_author_workspace_id:id})]);
-      return{workspace_id:id,conversation_id:input.conversationId,correlation_id:root,content_locale:input.locale,status:'designing',replayed:false};
+      return{workspace_id:id,conversation_id:input.conversationId,correlation_id:root,content_locale:input.locale,status:'designing',launch_brief:input.brief,replayed:false};
     });
     if(!result.replayed)prepared.markAccepted();log({event:'workspace_created',...result});return result;
   });

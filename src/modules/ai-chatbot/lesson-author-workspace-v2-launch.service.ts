@@ -6,6 +6,9 @@ import type { WorkspaceLaunchInput, WorkspaceLaunchResult } from './lesson-autho
 import type { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
 import type { OrchestrationV2AdmissionReceipt } from './lesson-author-orchestration-v2-admission.repository.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
+import {
+  isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
+} from './lesson-author-launch-brief.logic.js';
 
 type Query = (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
 type ExistingWorkspace = {
@@ -16,6 +19,8 @@ type ExistingWorkspace = {
   status: string;
   request_hash: string;
   source_document_ids: string[];
+  /** QLT-6 stored launch brief (raw jsonb; NULL for a workspace created before it). */
+  launch_brief: unknown;
 };
 
 export interface WorkspaceV2LaunchDependencies {
@@ -56,7 +61,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
   const report = (event: Record<string, unknown>) => { try { deps.report?.(event); } catch { /* diagnostics never decide commits */ } };
 
   async function findReplay(tenantId: string, userId: string, input: WorkspaceLaunchInput): Promise<ExistingWorkspace | null> {
-    const found = await deps.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids
+    const found = await deps.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief
       FROM lesson_author_workspaces
       WHERE tenant_id=$1 AND course_id=$2 AND conversation_id=$3 AND requested_by=$4 AND idempotency_key=$5
         AND contract_version=1 AND engine='self_built_rag'`,
@@ -74,7 +79,9 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       && input.sourceDocumentIds.length >= 1 && input.sourceDocumentIds.length <= 5
       && input.sourceDocumentIds.every(value => UUID.test(value))
       && new Set(input.sourceDocumentIds).size === input.sourceDocumentIds.length
-      && ['en', 'vi'].includes(input.locale);
+      && ['en', 'vi'].includes(input.locale)
+      // QLT-6: the controller already parsed and cleaned the brief; anything else is a caller bug.
+      && isNormalizedLaunchBrief(input.brief);
   }
 
   return async function launch(user: AuthUser, input: WorkspaceLaunchInput): Promise<WorkspaceLaunchResult> {
@@ -86,9 +93,11 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
 
     return deps.withLessonAuthorConversationLock(input.conversationId, async () => {
       const replay = await findReplay(tenantId, user.id, input);
+      // QLT-6: the same operation with another launch brief is another request (checked again under lock below).
+      if (replay && !sameLaunchBrief(replay.launch_brief, input.brief)) fail('WORKSPACE_CREATE_CONFLICT');
       const candidate = await deps.prepareDurableBlueprint(input.conversationId, user.id, tenantId, content, {
         target: 'lesson_author', courseId: input.courseId, mode: 'course_blueprint', locale: input.locale,
-        sourceDocuments: input.sourceDocumentIds.map(document_id => ({ document_id })),
+        sourceDocuments: input.sourceDocumentIds.map(document_id => ({ document_id })), launchBrief: input.brief,
       }, replay ? { source_document_ids: replay.source_document_ids, user_message_id: null } : undefined);
       if (!candidate) fail('WORKSPACE_ENGINE_UNSUPPORTED');
       const prepared = candidate!;
@@ -115,7 +124,8 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         [tenantId, input.courseId, user.id, input.operationId]);
         if (active.rows.length) fail('WORKSPACE_ALREADY_ACTIVE');
 
-        const locked = await tx.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids
+        const locked = await tx.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,
+            launch_brief
           FROM lesson_author_workspaces
           WHERE tenant_id=$1 AND course_id=$2 AND conversation_id=$3 AND requested_by=$4 AND idempotency_key=$5
             AND contract_version=1 AND engine='self_built_rag' FOR UPDATE`,
@@ -125,20 +135,22 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         let replayed = true;
         if (workspace) {
           if (workspace.correlation_id !== root || workspace.request_hash !== prepared.identity.requestHash
-            || workspace.content_locale !== input.locale
+            || workspace.content_locale !== input.locale || !sameLaunchBrief(workspace.launch_brief, input.brief)
             || !sameIds(workspace.source_document_ids, prepared.identity.sourceDocumentIds)) fail('WORKSPACE_CREATE_CONFLICT');
         } else {
           replayed = false;
           const workspaceId = id();
           if (!UUID.test(workspaceId) || !HASH.test(prepared.identity.requestHash)
             || !HASH.test(prepared.identity.sourceSnapshotHash)) fail('WORKSPACE_CREATE_CONFLICT');
+          // QLT-6: the launch brief is written once here; the workspace guard trigger keeps it immutable.
           const inserted = await tx.query(`INSERT INTO lesson_author_workspaces(id,tenant_id,course_id,conversation_id,requested_by,bot_id,kb_id,
-              content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids,status)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[],'queued')
-            RETURNING id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids`,
+              content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids,status,launch_brief)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[],'queued',$14::jsonb)
+            RETURNING id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief`,
           [workspaceId, tenantId, input.courseId, input.conversationId, user.id, prepared.identity.botId,
             prepared.identity.kbId, input.locale, root, input.operationId, prepared.identity.requestHash,
-            prepared.identity.sourceSnapshotHash, prepared.identity.sourceDocumentIds]);
+            prepared.identity.sourceSnapshotHash, prepared.identity.sourceDocumentIds,
+            JSON.stringify(storedLaunchBrief(input.brief))]);
           workspace = inserted.rows[0] as ExistingWorkspace | undefined;
           if (!workspace || workspace.id !== workspaceId || workspace.status !== 'queued') fail('WORKSPACE_CREATE_CONFLICT');
           // The installed workspace guard requires every shell to start queued.
@@ -147,11 +159,13 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
           // the shell, event and V2 bootstrap evidence all-or-nothing.
           const designing = await tx.query(`UPDATE lesson_author_workspaces SET status='designing'
             WHERE id=$1 AND tenant_id=$2 AND course_id=$3 AND status='queued'
-            RETURNING id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids`,
+            RETURNING id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief`,
           [workspaceId, tenantId, input.courseId]);
           workspace = designing.rows[0] as ExistingWorkspace | undefined;
           if (designing.rows.length !== 1 || !workspace || workspace.id !== workspaceId
-            || workspace.status !== 'designing') fail('WORKSPACE_CREATE_CONFLICT');
+            || workspace.status !== 'designing' || !sameLaunchBrief(workspace.launch_brief, input.brief)) {
+            fail('WORKSPACE_CREATE_CONFLICT');
+          }
           const event = await tx.query(`INSERT INTO lesson_author_workspace_events(workspace_id,tenant_id,course_id,event_kind,operation_id)
             VALUES($1,$2,$3,'architecture_started',$4) RETURNING sequence`,
           [workspaceId, tenantId, input.courseId, input.operationId]);
@@ -176,7 +190,8 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         }
         return { workspace_id: confirmedWorkspace.id, conversation_id: confirmedWorkspace.conversation_id,
           correlation_id: confirmedWorkspace.correlation_id, content_locale: confirmedWorkspace.content_locale,
-          status: confirmedWorkspace.status, replayed } satisfies WorkspaceLaunchResult;
+          status: confirmedWorkspace.status, launch_brief: readStoredLaunchBrief(confirmedWorkspace.launch_brief),
+          replayed } satisfies WorkspaceLaunchResult;
       });
       if (!result.replayed) prepared.markAccepted();
       report({ event: 'workspace_v2_launch_admitted', workspace_id: result.workspace_id,

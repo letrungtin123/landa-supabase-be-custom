@@ -1,4 +1,5 @@
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { isNormalizedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 export interface OrchestrationV2AdmissionAuthority {
   workspace_id: string;
@@ -6,6 +7,8 @@ export interface OrchestrationV2AdmissionAuthority {
   course_id: string;
   source_snapshot_hash: string;
   source_document_ids: readonly string[];
+  /** QLT-6: the workspace's launch brief (null for a workspace created before it). */
+  launch_brief?: LessonAuthorLaunchBrief | null;
 }
 
 export interface OrchestrationV2AdmissionConfig {
@@ -52,7 +55,8 @@ export function prepareOrchestrationV2Admission(
     || !integer(config.tenant_concurrency_limit, 1, 1_024)
     || !integer(config.workspace_concurrency_limit, 1, 128)
     || config.workspace_concurrency_limit > config.tenant_concurrency_limit
-    || !integer(config.routing_shard_count, 1, 4_096)) fail();
+    || !integer(config.routing_shard_count, 1, 4_096)
+    || (authority.launch_brief != null && !isNormalizedLaunchBrief(authority.launch_brief))) fail();
   const source_document_ids = Object.freeze([...authority.source_document_ids].sort());
   const bootstrap = {
     contract_version: 2,
@@ -65,6 +69,11 @@ export function prepareOrchestrationV2Admission(
     model: config.model,
     tenant_concurrency_limit: config.tenant_concurrency_limit,
     workspace_concurrency_limit: config.workspace_concurrency_limit,
+    // QLT-6: the run is bound to the brief it was admitted with; absent for a workspace without one, so the
+    // bootstrap hash of a run admitted before QLT-6 is unchanged.
+    ...(authority.launch_brief ? { launch_brief: { design_mode: authority.launch_brief.design_mode,
+      learner_audience: authority.launch_brief.learner_audience, course_purpose: authority.launch_brief.course_purpose } }
+      : {}),
   };
   const sourceTask = {
     contract_version: 2,

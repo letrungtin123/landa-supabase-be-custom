@@ -3,13 +3,21 @@ import type { Request, Response } from 'express';
 import type { AuthUser } from '../../types/express.js';
 import type { GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
+import {
+  isLaunchBriefErrorCode, isNormalizedLaunchBrief, LAUNCH_BRIEF_BODY_KEYS, LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError,
+  parseLaunchBrief, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
+} from './lesson-author-launch-brief.logic.js';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const states=['queued','designing','drafting','ready','needs_action','failed','canceled'];
-export interface WorkspaceLaunchInput{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';}
-export interface WorkspaceLaunchResult{workspace_id:string;conversation_id:string;correlation_id:string;content_locale:'en'|'vi';status:string;replayed?:boolean;}
+const BASE_CREATE_KEYS='content_locale,operation_id,source_document_ids';
+/** `brief` (QLT-6): the validated launch brief of the Create request, stored write-once with the workspace. */
+export interface WorkspaceLaunchInput{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief;}
+/** `launch_brief`: null for a workspace created before QLT-6 (storage `version` is never exposed). */
+export interface WorkspaceLaunchResult{workspace_id:string;conversation_id:string;correlation_id:string;content_locale:'en'|'vi';status:string;launch_brief:LessonAuthorLaunchBrief|null;replayed?:boolean;}
 function validResult(value:WorkspaceLaunchResult){return[ value.workspace_id,value.conversation_id,value.correlation_id ].every(id=>UUID.test(id))
-  &&['en','vi'].includes(value.content_locale)&&states.includes(value.status);}
+  &&['en','vi'].includes(value.content_locale)&&states.includes(value.status)
+  &&(value.launch_brief===null||isNormalizedLaunchBrief(value.launch_brief));}
 function object(v:unknown):v is Record<string,unknown>{return !!v&&typeof v==='object'&&!Array.isArray(v);}
 export function createWorkspaceLaunchHandlers(deps:{
   readEnabled():boolean;executionReady():boolean;editEnabled?():boolean;db:GenerationJobDatabase;
@@ -24,7 +32,9 @@ export function createWorkspaceLaunchHandlers(deps:{
       const failure=(status:number,external:string,internal=external)=>{
         try{deps.report({event:'workspace_launch_failed',action,request_id:requestId,correlation_id:root,workspace_id:workspaceId,
           failure_stage:`workspace_${action}`,internal_failure_code:internal,external_failure_code:external,http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{}
-        res.status(status).json({success:false,code:external,request_id:requestId,message:locale==='en'
+        // QLT-6: a launch brief problem is the author's to fix, so it says exactly what to change.
+        const brief=isLaunchBriefErrorCode(external)?LAUNCH_BRIEF_ERROR_MESSAGES[external]:null;
+        res.status(status).json({success:false,code:external,request_id:requestId,message:brief?brief[locale==='en'?1:0]:locale==='en'
           ? 'The workspace operation could not be confirmed. Refresh the state before trying again.'
           : 'Chưa thể xác nhận thao tác bản thảo. Hãy tải lại trạng thái trước khi thử lại.'});
       };
@@ -39,16 +49,21 @@ export function createWorkspaceLaunchHandlers(deps:{
         let result:WorkspaceLaunchResult|null;
         if(action==='create'){
           const body:unknown=req.body,conversationId=req.params.conversationId;
-          if(!UUID.test(conversationId??'')||!object(body)||Object.keys(body).sort().join(',')!=='content_locale,operation_id,source_document_ids'
+          // Exactly the three base keys plus the QLT-6 brief keys; the brief keys are checked below with their own codes.
+          if(!UUID.test(conversationId??'')||!object(body)
+            ||Object.keys(body).filter(k=>!(LAUNCH_BRIEF_BODY_KEYS as readonly string[]).includes(k)).sort().join(',')!==BASE_CREATE_KEYS
             ||typeof body.operation_id!=='string'||!UUID.test(body.operation_id)||typeof body.content_locale!=='string'||!['en','vi'].includes(body.content_locale)
             ||!Array.isArray(body.source_document_ids)||body.source_document_ids.length<1||body.source_document_ids.length>5
             ||body.source_document_ids.some(id=>typeof id!=='string'||!UUID.test(id))||new Set(body.source_document_ids).size!==body.source_document_ids.length){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
-          result=await deps.create(user,{courseId,conversationId,operationId:body.operation_id,locale:body.content_locale as 'en'|'vi',sourceDocumentIds:body.source_document_ids});
+          let brief:LessonAuthorLaunchBrief;
+          try{brief=parseLaunchBrief(body);}
+          catch(error){if(error instanceof LaunchBriefError){failure(400,error.code);return;}throw error;}
+          result=await deps.create(user,{courseId,conversationId,operationId:body.operation_id,locale:body.content_locale as 'en'|'vi',sourceDocumentIds:body.source_document_ids,brief});
         }else{
           result=await deps.db.transaction(async tx=>{
             const a=createWorkspaceAuthority(user),owner={tenantId:user.tenantId!,userId:user.id,courseId,conversationId:''};
             if(!await a.canEdit(tx,owner))throw Object.assign(new Error('WORKSPACE_READ_FORBIDDEN'),{code:'WORKSPACE_READ_FORBIDDEN'});
-            const found=await tx.query(`SELECT w.id AS workspace_id,w.conversation_id,w.correlation_id,w.content_locale,w.status
+            const found=await tx.query(`SELECT w.id AS workspace_id,w.conversation_id,w.correlation_id,w.content_locale,w.status,w.launch_brief
               FROM lesson_author_workspaces w JOIN courses course ON course.id=w.course_id AND course.tenant_id=w.tenant_id AND course.deleted_at IS NULL
               JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.course_id=w.course_id
                 AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -62,7 +77,9 @@ export function createWorkspaceLaunchHandlers(deps:{
                 AND cardinality(w.source_document_ids)=(SELECT count(*) FROM kb_documents d WHERE d.id=ANY(w.source_document_ids)
                   AND d.tenant_id=w.tenant_id AND d.kb_id=w.kb_id)
               ORDER BY w.created_at DESC,w.id DESC LIMIT 1`,[user.tenantId,courseId,user.id]);
-            return (found.rows[0] as unknown as WorkspaceLaunchResult)??null;
+            const row=found.rows[0] as Record<string,unknown>|undefined;
+            // A stored brief of another shape throws (fails closed); NULL is a workspace from before QLT-6.
+            return row?{...row,launch_brief:readStoredLaunchBrief(row.launch_brief)} as unknown as WorkspaceLaunchResult:null;
           });
         }
         if(result&&!validResult(result)){failure(503,'WORKSPACE_READ_UNAVAILABLE','WORKSPACE_LAUNCH_READBACK_INVALID');return;}
@@ -76,6 +93,7 @@ export function createWorkspaceLaunchHandlers(deps:{
       }catch(error){
         const c=error&&typeof error==='object'?(error as {code?:unknown}).code:undefined;
         const internal=typeof c==='string'&&/^[A-Z][A-Z0-9_]{0,99}$/.test(c)?c:'WORKSPACE_RUNTIME_UNAVAILABLE';
+        if(isLaunchBriefErrorCode(internal)){failure(400,internal);return;}
         const denied=internal.includes('FORBIDDEN'),conflict=internal.includes('CONFLICT')||internal==='WORKSPACE_ALREADY_ACTIVE';
         failure(denied?403:conflict?409:503,denied?'WORKSPACE_READ_FORBIDDEN':conflict?internal:'WORKSPACE_RUNTIME_UNAVAILABLE',internal);
       }

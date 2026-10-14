@@ -1,32 +1,40 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { AppError } from '../../middleware/error-handler.js';
 import type { AuthUser } from '../../types/express.js';
+import type { LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { createWorkspaceV2LaunchService } from './lesson-author-workspace-v2-launch.service.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const hash = (value: string) => value.repeat(64).slice(0, 64);
 const user: AuthUser = { id: uuid(1), tenantId: uuid(2), role: 'superadmin', username: 'owner', sessionMode: 'normal' };
+const designBrief: LessonAuthorLaunchBrief = { design_mode: 'instructional_design',
+  learner_audience: 'Nhân viên mới', course_purpose: 'Giúp nhân viên mới hiểu công ty trong tuần đầu.' };
 const input = { courseId: 'course-v1:test+1+2026', conversationId: uuid(3), operationId: uuid(4),
-  sourceDocumentIds: [uuid(5)], locale: 'vi' as const };
+  sourceDocumentIds: [uuid(5)], locale: 'vi' as const, brief: designBrief };
+/** Stand-in for chat.service's request identity: the launch brief is part of it (QLT-6). */
+const requestHashOf = (brief: unknown) => createHash('sha256').update(JSON.stringify(brief ?? null)).digest('hex');
 
 function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean } = {}) {
   let workspace: any = options.legacyWorkspace ? { id: uuid(8), conversation_id: input.conversationId, correlation_id: uuid(9),
-    content_locale: input.locale, status: 'designing', request_hash: hash('a'), source_document_ids: input.sourceDocumentIds } : null;
+    content_locale: input.locale, status: 'designing', request_hash: hash('a'), source_document_ids: input.sourceDocumentIds,
+    launch_brief: null } : null;
   let runId: string | null = null;
   let events = 0;
-  const state = { filters: 0, accepted: 0, admissions: 0, replayContexts: [] as unknown[], sql: [] as string[] };
-  const prepared = {
+  const state = { filters: 0, accepted: 0, admissions: 0, prepares: 0, replayContexts: [] as unknown[], sql: [] as string[],
+    inserts: [] as unknown[][], briefs: [] as unknown[] };
+  const prepared = (brief: unknown) => ({
     identity: { tenantId: user.tenantId!, userId: user.id, conversationId: input.conversationId,
-      courseId: input.courseId, botId: uuid(6), kbId: uuid(7), requestHash: hash('a'),
+      courseId: input.courseId, botId: uuid(6), kbId: uuid(7), requestHash: requestHashOf(brief),
       sourceSnapshotHash: hash('b'), courseOutlineHash: hash('c'), runtimeConfigHash: hash('d'),
       locale: input.locale, model: 'model', sourceDocumentIds: input.sourceDocumentIds, editorContext: null },
     embeddingModel: 'embedding',
     async filterInput() { state.filters++; },
     markAccepted() { state.accepted++; },
-  };
-  const rows = (sql: string) => {
+  });
+  const rows = (sql: string, params: unknown[] = []) => {
     state.sql.push(sql);
     if (sql.includes('FROM courses')) return [{ id: input.courseId }];
     if (sql.includes('FROM users u JOIN tenants')) return [{ role: 'superadmin', tenant_id: null, is_active: true, tenant_active: true }];
@@ -34,8 +42,10 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean }
     if (sql.includes("status IN ('queued','designing','drafting')")) return [];
     if (sql.includes('FROM lesson_author_workspaces') && sql.includes('idempotency_key')) return workspace ? [workspace] : [];
     if (sql.includes('INSERT INTO lesson_author_workspaces')) {
+      state.inserts.push(params);
       workspace = { id: uuid(8), conversation_id: input.conversationId, correlation_id: uuid(9),
-        content_locale: input.locale, status: 'queued', request_hash: hash('a'), source_document_ids: input.sourceDocumentIds };
+        content_locale: input.locale, status: 'queued', request_hash: params[10], source_document_ids: input.sourceDocumentIds,
+        launch_brief: JSON.parse(String(params[13])) };
       return [workspace];
     }
     if (sql.includes("UPDATE lesson_author_workspaces SET status='designing'")) {
@@ -47,9 +57,9 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean }
     if (sql.includes('FROM lesson_author_workspace_v2_runs')) return runId ? [{ id: runId }] : [];
     throw new Error(`UNEXPECTED_SQL:${sql}`);
   };
-  const tx = { query: async (sql: string) => ({ rows: rows(sql), rowCount: 1 }) };
+  const tx = { query: async (sql: string, params?: unknown[]) => ({ rows: rows(sql, params), rowCount: 1 }) };
   const launch = createWorkspaceV2LaunchService({
-    query: async sql => ({ rows: rows(sql) }),
+    query: async (sql, params) => ({ rows: rows(sql, params) }),
     db: { async transaction(work) {
       const before = { workspace: structuredClone(workspace), runId, events };
       try { return await work(tx as any); } catch (error) {
@@ -58,8 +68,9 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean }
     } },
     AppError,
     prepareDurableBlueprint: (async (_conversation: string, _actor: string, _tenant: string, _content: string,
-      _options: unknown, replay?: { source_document_ids: string[]; user_message_id?: string | null }) => {
-      state.replayContexts.push(replay); return prepared as any;
+      options: { launchBrief?: unknown }, replay?: { source_document_ids: string[]; user_message_id?: string | null }) => {
+      state.prepares++; state.briefs.push(options.launchBrief);
+      state.replayContexts.push(replay); return prepared(options.launchBrief) as any;
     }) as any,
     withLessonAuthorConversationLock: async (_conversation, work) => work(),
     admit: async () => {
@@ -78,7 +89,7 @@ test('one public Create atomically creates a workspace shell and exactly one V2 
   const f = fixture();
   const created = await f.launch(user, input);
   assert.deepEqual(created, { workspace_id: uuid(8), conversation_id: input.conversationId,
-    correlation_id: uuid(9), content_locale: 'vi', status: 'designing', replayed: false });
+    correlation_id: uuid(9), content_locale: 'vi', status: 'designing', launch_brief: designBrief, replayed: false });
   assert.deepEqual({ filters: f.state.filters, accepted: f.state.accepted, admissions: f.state.admissions },
     { filters: 1, accepted: 1, admissions: 1 });
   const inserted = f.state.sql.findIndex(sql => sql.includes('INSERT INTO lesson_author_workspaces'));
@@ -89,9 +100,60 @@ test('one public Create atomically creates a workspace shell and exactly one V2 
   assert.doesNotMatch(f.state.sql[inserted]!, /'designing'/);
   const replayed = await f.launch(user, input);
   assert.equal(replayed.replayed, true);
+  assert.deepEqual(replayed.launch_brief, designBrief);
   assert.deepEqual({ filters: f.state.filters, accepted: f.state.accepted, admissions: f.state.admissions },
     { filters: 1, accepted: 1, admissions: 1 });
   assert.deepEqual(f.state.replayContexts[1], { source_document_ids: input.sourceDocumentIds, user_message_id: null });
+});
+
+test('QLT-6: the launch brief is written once with the shell and is part of the request identity', async () => {
+  const f = fixture();
+  await f.launch(user, input);
+  assert.match(f.state.sql.find(sql => sql.includes('INSERT INTO lesson_author_workspaces'))!, /launch_brief\)[\s\S]*\$14::jsonb/);
+  assert.deepEqual(JSON.parse(String(f.state.inserts[0]![13])), { ...designBrief, version: 1 });
+  // The request hash the shell stores is the one prepared with the brief.
+  assert.deepEqual(f.state.briefs, [designBrief]);
+  assert.equal(f.state.inserts[0]![10], requestHashOf(designBrief));
+
+  const preserve = fixture();
+  const brief: LessonAuthorLaunchBrief = { design_mode: 'preserve_source', learner_audience: null, course_purpose: null };
+  const created = await preserve.launch(user, { ...input, brief });
+  assert.deepEqual(created.launch_brief, brief);
+  assert.deepEqual(JSON.parse(String(preserve.state.inserts[0]![13])),
+    { design_mode: 'preserve_source', learner_audience: null, course_purpose: null, version: 1 });
+});
+
+test('QLT-6: the same operation with a different brief is a conflict; nothing is prepared, written or admitted', async () => {
+  const f = fixture();
+  await f.launch(user, input);
+  const before = structuredClone(f.inspect());
+  for (const brief of [
+    { ...designBrief, course_purpose: 'Một mục đích khác cho cùng thao tác này.' },
+    { ...designBrief, learner_audience: 'Quản lý cấp trung' },
+    { design_mode: 'preserve_source', learner_audience: null, course_purpose: null },
+  ] as LessonAuthorLaunchBrief[]) {
+    await assert.rejects(f.launch(user, { ...input, brief }), { code: 'WORKSPACE_CREATE_CONFLICT', statusCode: 409 });
+  }
+  assert.deepEqual(f.inspect(), before);
+  assert.deepEqual({ prepares: f.state.prepares, admissions: f.state.admissions, inserts: f.state.inserts.length },
+    { prepares: 1, admissions: 1, inserts: 1 });
+  // An identical replay still succeeds afterwards.
+  assert.equal((await f.launch(user, input)).replayed, true);
+});
+
+test('QLT-6: a brief the controller did not clean never reaches preparation or the database', async () => {
+  for (const brief of [
+    { design_mode: 'verbatim', learner_audience: null, course_purpose: null },
+    { design_mode: 'instructional_design', learner_audience: '  Nhân viên  ', course_purpose: 'Mục đích hợp lệ.' },
+    { design_mode: 'instructional_design', learner_audience: null, course_purpose: 'Mục đích hợp lệ.' },
+    { design_mode: 'preserve_source', learner_audience: '', course_purpose: null },
+    { ...designBrief, version: 1 },
+  ]) {
+    const f = fixture();
+    await assert.rejects(f.launch(user, { ...input, brief: brief as never }),
+      { code: 'WORKSPACE_CREATE_INPUT_INVALID', statusCode: 400 });
+    assert.deepEqual({ prepares: f.state.prepares, sql: f.state.sql.length }, { prepares: 0, sql: 0 });
+  }
 });
 
 test('failed V2 admission rolls back the workspace shell and event', async () => {

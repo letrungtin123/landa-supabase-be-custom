@@ -6,6 +6,7 @@ import {
 } from './lesson-author-workspace.logic.js';
 import { buildWorkspaceArchitecturePreview } from './lesson-author-workspace-preview.logic.js';
 import { readIdmAuthorGuidance } from './lesson-author-idm-guidance.logic.js';
+import { LaunchBriefStoredInvalidError, readStoredLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 export interface WorkspaceReadOwner {
   tenantId: string;
@@ -38,7 +39,7 @@ const EVENTS = ['workspace_created', 'architecture_started', 'architecture_progr
 // same PostgreSQL statement snapshot, without locking a running worker.
 const OWNED = `WITH owned AS (
   SELECT w.id,w.tenant_id,w.course_id,w.conversation_id,w.correlation_id,w.contract_version,
-    w.content_locale,w.status,w.event_head,w.updated_at,course.display_name AS course_display_name
+    w.content_locale,w.status,w.event_head,w.updated_at,w.launch_brief,course.display_name AS course_display_name
   FROM lesson_author_workspaces w
   JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
     AND c.user_id=w.requested_by AND c.course_id=w.course_id AND c.bot_id=w.bot_id
@@ -81,13 +82,20 @@ function timestamp(value: unknown): string {
   if (!Number.isFinite(date.getTime())) invalid();
   return date.toISOString();
 }
+/** QLT-6: the brief the author started AI ID with, without its storage version; null before QLT-6. */
+function launchBrief(value: unknown) {
+  try { return readStoredLaunchBrief(value); } catch (error) {
+    if (error instanceof LaunchBriefStoredInvalidError) return invalid();
+    throw error;
+  }
+}
 function workspace(row: Record<string, unknown>) {
   if (row.contract_version !== WORKSPACE_CONTRACT_VERSION) invalid();
   return {
     workspace_id: id(row.id), contract_version: WORKSPACE_CONTRACT_VERSION,
     correlation_id: id(row.correlation_id), content_locale: workspaceLocale(row.content_locale),
     status: enumeration(row.status, STATES), last_event_sequence: integer(row.event_head),
-    updated_at: timestamp(row.updated_at),
+    updated_at: timestamp(row.updated_at), launch_brief: launchBrief(row.launch_brief),
   };
 }
 function architecturePreview(value: unknown) {

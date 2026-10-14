@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { lessonAuthorSourceSnapshotHash, type LessonAuthorSnapshotDocument } from './lesson-author-source-snapshot.logic.js';
+import { LaunchBriefStoredInvalidError, readStoredLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import {
   prepareOrchestrationV2Admission,
   type OrchestrationV2AdmissionConfig,
@@ -59,7 +60,7 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
   ): Promise<OrchestrationV2AdmissionReceipt> {
     return deps.db.transaction(async tx => {
       if (!await deps.canEdit(tx, target)) fail('ORCHESTRATION_V2_ADMISSION_FORBIDDEN');
-      const workspace = await tx.query(`SELECT w.id,w.status,w.kb_id,w.source_snapshot_hash,w.source_document_ids
+      const workspace = await tx.query(`SELECT w.id,w.status,w.kb_id,w.source_snapshot_hash,w.source_document_ids,w.launch_brief
         FROM lesson_author_workspaces w
         JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.user_id=w.requested_by
           AND c.course_id=w.course_id AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -74,6 +75,12 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
         || !['designing', 'needs_action'].includes(String(w.status))) fail('ORCHESTRATION_V2_ADMISSION_STATE_INVALID');
       const kbId = w.kb_id as string;
       const sourceDocumentIds = w.source_document_ids as string[];
+      const launchBrief = (() => {
+        try { return readStoredLaunchBrief(w.launch_brief); } catch (error) {
+          if (error instanceof LaunchBriefStoredInvalidError) return fail('ORCHESTRATION_V2_ADMISSION_STATE_INVALID');
+          throw error;
+        }
+      })();
 
       const documents = await tx.query(`SELECT d.id::text AS document_id,d.name,d.status,d.type,d.updated_at,d.source_info
         FROM kb_documents d WHERE d.tenant_id=$1 AND d.kb_id=$2 AND d.id=ANY($3::uuid[])
@@ -96,7 +103,7 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
       if (sourceHash !== w.source_snapshot_hash) fail('ORCHESTRATION_V2_ADMISSION_SOURCE_CHANGED');
       const prepared = prepareOrchestrationV2Admission({
         workspace_id: target.workspaceId, tenant_id: target.tenantId, course_id: target.courseId,
-        source_snapshot_hash: sourceHash, source_document_ids: sourceDocumentIds,
+        source_snapshot_hash: sourceHash, source_document_ids: sourceDocumentIds, launch_brief: launchBrief,
       }, config);
 
       const existing = await tx.query(`SELECT id::text,source_snapshot_id::text,bootstrap_hash,runtime_config_hash,model,

@@ -420,3 +420,30 @@ test('graph rejects corrupt state, premature structure, missing nodes and unsort
     await assert.rejects(f.repo.graph(owner, workspaceId), code('WORKSPACE_READ_CONTRACT_INVALID'));
   }
 });
+
+test('QLT-6: every workspace read exposes the launch brief without its version; NULL (before QLT-6) reads null', async () => {
+  const design = { design_mode: 'instructional_design', learner_audience: 'Nhân viên mới',
+    course_purpose: 'Giúp nhân viên mới hiểu công ty trong tuần đầu.' };
+  const preserve = { design_mode: 'preserve_source', learner_audience: null, course_purpose: null };
+  for (const [stored, expected] of [[{ ...design, version: 1 }, design], [{ ...preserve, version: 1 }, preserve],
+    [null, null]] as const) {
+    const f = fixture({ ...summary(), launch_brief: stored });
+    const status = await f.repo.status(owner, workspaceId);
+    assert.deepEqual(status.launch_brief, expected);
+    if (expected) assert.deepEqual(Object.keys(status.launch_brief!), ['design_mode', 'learner_audience', 'course_purpose']);
+    f.row({ ...common, launch_brief: stored, first_sequence: '1', events: [] });
+    assert.deepEqual((await f.repo.events(owner, workspaceId, 3)).launch_brief, expected);
+    f.row({ ...common, launch_brief: stored, overview_ready: false, structure_ready: false, cursor_exists: true,
+      graph_node_count: '0', nodes: [] });
+    assert.deepEqual((await f.repo.graph(owner, workspaceId)).launch_brief, expected);
+    f.row({ ...detail(), launch_brief: stored });
+    assert.deepEqual((await f.repo.detail(owner, workspaceId, nodeId, 1)).launch_brief, expected);
+    assert.match(f.calls[0]!.sql, /w\.event_head,w\.updated_at,w\.launch_brief,/);
+  }
+  // A stored brief of any other shape fails closed instead of reaching the dashboard.
+  for (const stored of [design, { ...design, version: 2 }, { ...preserve, version: 1, learner_audience: '' },
+    { ...design, version: 1, extra: 'x' }, { ...design, version: 1, course_purpose: '  ' }, 'brief']) {
+    const f = fixture({ ...summary(), launch_brief: stored });
+    await assert.rejects(f.repo.status(owner, workspaceId), code('WORKSPACE_READ_CONTRACT_INVALID'));
+  }
+});

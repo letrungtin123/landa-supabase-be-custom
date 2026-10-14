@@ -87,3 +87,35 @@ test('any insert/readback failure rolls back all admission evidence', async () =
   await assert.rejects(f.repo.admit(target, config), /task insert failed/);
   assert.deepEqual(f.events, ['BEGIN', 'ROLLBACK']);
 });
+
+test('QLT-6: the bootstrap hash binds the launch brief; a workspace without one keeps its pre-QLT-6 hash', async () => {
+  const input = { workspace_id: target.workspaceId, tenant_id: target.tenantId, course_id: target.courseId,
+    source_snapshot_hash: sourceHash, source_document_ids: [doc.document_id] };
+  const brief = { design_mode: 'instructional_design' as const, learner_audience: 'Nhân viên mới',
+    course_purpose: 'Giúp nhân viên mới hiểu công ty.' };
+  const legacy = prepareOrchestrationV2Admission(input, config);
+  assert.equal(prepareOrchestrationV2Admission({ ...input, launch_brief: null }, config).bootstrap_hash, legacy.bootstrap_hash);
+  const designed = prepareOrchestrationV2Admission({ ...input, launch_brief: brief }, config);
+  const preserved = prepareOrchestrationV2Admission({ ...input, launch_brief: { design_mode: 'preserve_source',
+    learner_audience: null, course_purpose: null } }, config);
+  assert.equal(new Set([legacy.bootstrap_hash, designed.bootstrap_hash, preserved.bootstrap_hash]).size, 3);
+  assert.equal(designed.source_task_contract_hash, legacy.source_task_contract_hash);
+  assert.throws(() => prepareOrchestrationV2Admission({ ...input, launch_brief: { ...brief, learner_audience: ' x ' } },
+    config), { code: 'ORCHESTRATION_V2_ADMISSION_INVALID' });
+
+  // The repository reads the stored brief of the locked workspace and admits with it.
+  const f = fixture([[{ ...workspace, launch_brief: { ...brief, version: 1 } }], [doc], [], [{ id: uuid(20) }],
+    [{ id: uuid(21) }], [{ id: uuid(22) }], [{ id: uuid(23) }]]);
+  const receipt = await f.repo.admit(target, config);
+  assert.equal(receipt.bootstrap_hash, designed.bootstrap_hash);
+  assert.match(f.queries[0]!.sql, /w\.launch_brief/);
+  // An existing run admitted with another brief is a conflict, and a malformed stored brief never admits.
+  const conflict = fixture([[{ ...workspace, launch_brief: { ...brief, version: 1 } }], [doc],
+    [{ id: uuid(21), source_snapshot_id: uuid(20), bootstrap_hash: legacy.bootstrap_hash,
+      runtime_config_hash: config.runtime_config_hash, model: config.model, tenant_concurrency_limit: 16,
+      workspace_concurrency_limit: 4 }]]);
+  await assert.rejects(conflict.repo.admit(target, config), { code: 'ORCHESTRATION_V2_ADMISSION_CONFLICT' });
+  const malformed = fixture([[{ ...workspace, launch_brief: { ...brief, version: 2 } }]]);
+  await assert.rejects(malformed.repo.admit(target, config), { code: 'ORCHESTRATION_V2_ADMISSION_STATE_INVALID' });
+  assert.deepEqual(malformed.events, ['BEGIN', 'ROLLBACK']);
+});

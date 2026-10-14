@@ -151,6 +151,7 @@ import { handleAdminReportTurn, type ReportChatSideEvent } from './report-chat-t
 import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
 import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-notes.logic.js';
 import { assertChatCourseAccess } from './chat-course-scope.service.js';
+import { withLaunchBriefIdentity, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -1762,6 +1763,8 @@ export interface ChatStreamOptions {
   canAccessReports?: boolean;
   reportActorRole?: UserRole;
   reportFilters?: ReportChatFilterInput;
+  /** QLT-6: the validated workspace launch brief; only part of the request identity hash. */
+  launchBrief?: LessonAuthorLaunchBrief;
 }
 
 /** Short admission lock shared with old chat; never held during queued generation. */
@@ -1857,8 +1860,10 @@ export async function prepareDurableBlueprint(
   const hash = generationSnapshotHash;
   const identity: Omit<PreparedGenerationJob, 'idempotencyKey' | 'correlationId'> = {
     tenantId, userId, conversationId, courseId: ctx.courseId!, botId: ctx.botId, kbId: ctx.botKbId,
-    requestHash: hash({ content: trimmed, locale, editor: editor?.context ?? {}, mentions,
-      sources: sources.map(s => s.document_id), course: ctx.courseId, bot: ctx.botId, kb: ctx.botKbId }),
+    // QLT-6: the same workspace operation with a different launch brief is a different request.
+    requestHash: hash(withLaunchBriefIdentity({ content: trimmed, locale, editor: editor?.context ?? {}, mentions,
+      sources: sources.map(s => s.document_id), course: ctx.courseId, bot: ctx.botId, kb: ctx.botKbId },
+    options.launchBrief)),
     sourceSnapshotHash: createLessonAuthorBlueprintSourceSnapshotHash(ctx, ctx.botKbId, sources),
     courseOutlineHash: createHash('sha256').update(course.outline).digest('hex'),
     runtimeConfigHash: hash({ policy: policy.prompt, history, model: settings.lessonAuthorModel,
