@@ -159,7 +159,8 @@ export async function executeOrchestrationV2PlanningTask(
       // snapshot fails the task without any provider call (spec §12.4).
       const input = await db(() => planning.loadIdmSkeletonInput(lease));
       return buildIdmCourseSkeletonRequest({
-        locale: authority.locale, course_title: input.course_title, source_documents: authority.source_documents,
+        locale: authority.locale, course_title: input.course_title, course_description: input.course_description,
+        source_documents: authority.source_documents,
         source_facts: input.source_facts, input_tokens: input.input_tokens,
         max_output_tokens: lease.max_output_tokens, provider_max_attempts: lease.provider_max_attempts,
         remaining_ms: input.remaining_ms,
@@ -183,7 +184,7 @@ export async function executeOrchestrationV2PlanningTask(
     }
     await withTransientTransactionRetry(
       () => planning.completeSkeleton(lease, response, scopes, runtime.budgets, settleProvider,
-        runtime.pipeline), signal);
+        runtime.pipeline, idm?.project_context), signal);
     return 'course_skeleton';
   }
   if (lease.kind === 'chapter_blueprint') {

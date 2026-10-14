@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  IDM_CONTRACT_VERSION,
   IDM_SINGLE_TASK_MAX_SOURCE_CHARS,
   boundIdmRemainingBudgetMs,
   buildIdmCourseSkeletonRequest,
@@ -24,6 +25,7 @@ import { readOrchestrationV2CourseSkeletonResponse } from './lesson-author-orche
 import { ORCHESTRATION_V2_IDM_EXECUTION_POLICY } from './lesson-author-orchestration-v2-execution.config.js';
 import {
   IDM_FIXTURE_DOCUMENT_ID,
+  IDM_FIXTURE_PURPOSE,
   IDM_PYTHON_AVAILABLE,
   idmFixture,
   idmGoldenCourseDesign,
@@ -230,6 +232,7 @@ test('course skeleton request carries the exact Python shape, bounded budgets an
   const { facts } = idmFixture();
   const request = buildIdmCourseSkeletonRequest({
     locale: 'vi', course_title: `  ${'Khoá '.repeat(150)}  `,
+    course_description: '<p>Khoá học <b>hội nhập</b> dành cho&nbsp;nhân viên mới</p>',
     source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: '  ', type: 'file' }],
     source_facts: facts, input_tokens: 1_800_000, max_output_tokens: 65_536, provider_max_attempts: 2,
     remaining_ms: 700_000,
@@ -239,14 +242,16 @@ test('course skeleton request carries the exact Python shape, bounded budgets an
   assert.equal(request.pipeline_version, 'idm-1');
   assert.deepEqual(request.token_allowance, { input_tokens: 1_800_000, output_tokens: 131_072 });
   assert.equal(request.remaining_budget_ms, 600_000);
-  assert.equal(idmTextLength(request.project_context.course_title_hint!), 499);
+  // QLT-5: the CMS name is capped at its 255-character column; the description is plain text.
+  assert.equal(idmTextLength(request.project_context.course_title_hint!), 254);
+  assert.equal(request.project_context.course_description, 'Khoá học hội nhập dành cho nhân viên mới');
   assert.deepEqual(request.project_context.source_documents,
     [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: IDM_FIXTURE_DOCUMENT_ID, type: 'file' }]);
-  assert.deepEqual({ ...request.project_context, course_title_hint: null, source_documents: [] }, {
-    locale: 'vi', course_title_hint: null, source_documents: [], target_audience: null, learning_objectives: [],
-    duration_target_minutes: null });
+  assert.deepEqual({ ...request.project_context, course_title_hint: null, course_description: null,
+    source_documents: [] }, { locale: 'vi', course_title_hint: null, course_description: null, source_documents: [],
+    target_audience: null, learning_objectives: [], duration_target_minutes: null });
   assert.deepEqual(request.source_facts, facts);
-  const lowBudgetRequest = { locale: 'vi' as const, course_title: null,
+  const lowBudgetRequest = { locale: 'vi' as const, course_title: null, course_description: null,
     source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }], source_facts: facts,
     input_tokens: 1_800_000, max_output_tokens: 65_536, provider_max_attempts: 2 };
   // Python's 30 s floor is never granted past the lease: below it the task fails before dispatch.
@@ -259,6 +264,7 @@ test('course skeleton request carries the exact Python shape, bounded budgets an
   assert.throws(() => buildIdmCourseSkeletonRequest({ ...lowBudgetRequest, remaining_ms: Number.NaN }),
     invalidAt('idm.remaining_budget_ms'));
   assert.equal(lowBudget.project_context.course_title_hint, null);
+  assert.equal(lowBudget.project_context.course_description, null);
   assert.equal(buildIdmCourseSkeletonRequest({ ...lowBudgetInput(facts), remaining_ms: 500_000 }).remaining_budget_ms,
     485_000);
   const huge = [{ ...facts[0]!, fact_key: 'huge-1', fact_text: 'x'.repeat(IDM_SINGLE_TASK_MAX_SOURCE_CHARS) },
@@ -284,7 +290,7 @@ test('IDM remaining budget never outlives the Node transport timeout', () => {
 });
 
 function lowBudgetInput(facts: ReturnType<typeof idmFixture>['facts']) {
-  return { locale: 'vi' as const, course_title: 'Khoá học', source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID,
+  return { locale: 'vi' as const, course_title: 'Khoá học', course_description: 'Khoá học dành cho', source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID,
     name: 'nguon.pdf', type: 'file' }], source_facts: facts, input_tokens: 1_800_000, max_output_tokens: 65_536,
   provider_max_attempts: 2, remaining_ms: 600_000 };
 }
@@ -307,7 +313,7 @@ test('Python golden course design parses in Node with hash, scope-key and invari
         content_chars: owned.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) };
     });
     const idm = buildIdmCourseSkeletonRequest({ locale: 'vi', course_title: 'Xử lý khiếu nại khách hàng',
-      source_documents: [{ document_id: golden.facts[0]!.document_id, name: 'quy-trinh-khieu-nai.pdf', type: 'file' }],
+      course_description: String(golden.project_context.course_description), source_documents: [{ document_id: golden.facts[0]!.document_id, name: 'quy-trinh-khieu-nai.pdf', type: 'file' }],
       source_facts: golden.facts, input_tokens: 1_800_000, max_output_tokens: 65_536, provider_max_attempts: 2,
       remaining_ms: 600_000 });
     const request = { tenant_id: '00000000-0000-4000-8000-000000000004', kb_id: '00000000-0000-4000-8000-000000000008',
@@ -334,6 +340,12 @@ test('Python golden course design parses in Node with hash, scope-key and invari
     assert.deepEqual(view.dispositionCounts,
       { course: 36, reference_job_aid: 10, nice_to_know: 1, remove: 4, hold: 6, noise: 4 });
     assert.equal(design.project_context.course_title_hint, 'Xử lý khiếu nại khách hàng');
+    // QLT-5: Python answers contract 2 with the description it was sent and the purpose it designed for.
+    assert.equal(design.idm_contract_version, IDM_CONTRACT_VERSION);
+    assert.equal(design.project_context.course_description, golden.project_context.course_description);
+    assert.deepEqual(design.project_context, idm.project_context);
+    assert.equal(design.purpose?.profile, 'compliance');
+    assert.deepEqual(design.purpose?.template_gaps, []);
     const plan = planIdmChapterShards(envelope.skeleton, design, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning,
       orchestrationV2Hash({ skeleton: envelope.skeleton, idm: design }));
     assert.deepEqual(plan.chapter_tasks.map(task => [task.task_key, task.shard_plan?.source_scope_ids.length]), [
@@ -346,3 +358,42 @@ test('Python golden course design parses in Node with hash, scope-key and invari
     tampered.dispositions[0].disposition = 'course';
     assert.throws(() => readIdmCourseDesign(tampered), invalidAt('idm.design_hash'));
   });
+
+test('contract-1 designs stored before QLT-5 still read and verify their hash', () => {
+  const legacy = idmFixture();
+  assert.equal(legacy.design.idm_contract_version, 1);
+  assert.equal(Object.hasOwn(legacy.design, 'purpose'), false);
+  assert.equal(Object.hasOwn(legacy.design.project_context, 'course_description'), false);
+  assert.deepEqual(readIdmCourseDesign(JSON.parse(JSON.stringify(legacy.design))), legacy.design);
+  const current = idmFixture(undefined, { contract: 2 });
+  const parsed = readIdmCourseDesign(JSON.parse(JSON.stringify(current.design)));
+  assert.deepEqual(parsed, current.design);
+  assert.deepEqual(parsed.purpose, IDM_FIXTURE_PURPOSE);
+  assert.equal(parsed.project_context.course_description, 'Khoá học dành cho nhân viên mới.');
+});
+
+test('a design never mixes the contract-1 and contract-2 shapes', () => {
+  const edit = (contract: 1 | 2, change: (design: Mutable) => void) => {
+    const design = structuredClone(idmFixture(undefined, { contract }).design) as Mutable;
+    change(design);
+    return rehashIdmDesign(design as IdmCourseDesignV1);
+  };
+  assert.throws(() => readIdmCourseDesign(edit(1, design => { design.purpose = IDM_FIXTURE_PURPOSE; })), invalidAt('idm'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { delete design.purpose; })), invalidAt('idm'));
+  assert.throws(() => readIdmCourseDesign(edit(1, design => { design.project_context.course_description = null; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { delete design.project_context.course_description; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.idm_contract_version = 3; })),
+    invalidAt('idm.idm_contract_version'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.purpose.profile = 'marketing'; })),
+    invalidAt('idm.purpose.profile'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.purpose.template_gaps[0].section_key = 'Org'; })),
+    invalidAt('idm.purpose.template_gaps[0].section_key'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.purpose.summary = 'ngắn'; })),
+    invalidAt('idm.purpose.summary'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => {
+    design.project_context.course_description = 'x'.repeat(2_001);
+  })), invalidAt('idm.project_context.course_description'));
+  assert.doesNotThrow(() => readIdmCourseDesign(edit(2, design => { design.project_context.course_description = null; })));
+});

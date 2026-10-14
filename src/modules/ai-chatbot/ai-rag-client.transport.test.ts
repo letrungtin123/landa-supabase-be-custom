@@ -133,7 +133,8 @@ test('meta comparison flags contract drift, an unready schema and a malformed sh
   const contracts = { ...client.EXPECTED_RAG_SERVICE_CONTRACTS };
   assert.deepEqual(client.compareRagServiceMeta({ build_sha: 'abc', contracts, schema_check: { status: 'ok' } }),
     { buildSha: 'abc', schemaStatus: 'ok', mismatches: [] });
-  assert.deepEqual(client.compareRagServiceMeta({ build_sha: 'x y', contracts: { ...contracts, idm_contract_version: 2 },
+  assert.equal(contracts.idm_contract_version, 2, 'QLT-5: course description and purpose (contract 2)');
+  assert.deepEqual(client.compareRagServiceMeta({ build_sha: 'x y', contracts: { ...contracts, idm_contract_version: 1 },
     schema_check: { status: 'failed' } }), { buildSha: 'unknown', schemaStatus: 'failed',
     mismatches: ['idm_contract_version'] });
   assert.equal(client.compareRagServiceMeta(null).mismatches.length,

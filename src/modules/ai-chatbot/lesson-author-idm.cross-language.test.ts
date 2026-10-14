@@ -187,7 +187,8 @@ class Chain {
       name: 'quy-trinh-khieu-nai.pdf', type: 'file', status: 'learned' }];
     if (sql.includes('a.artifact_kind=\'source_catalog\'')) return [this.sourceCatalog()];
     if (sql.includes('SELECT t.input_tokens')) return [{ input_tokens: this.current.inputTokens,
-      remaining_ms: 590_000, course_title: 'Xử lý khiếu nại khách hàng' }];
+      remaining_ms: 590_000, course_title: 'Xử lý khiếu nại khách hàng',
+      course_description: `<p>${String(this.golden.project_context.course_description)}</p>` }];
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: this.facts.length,
       content_chars: this.facts.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) }];
     if (sql.includes('fact_key=ANY($5::text[])')) return this.factsFor(params[4] as string[], sql.includes('fact_hash'));
@@ -594,10 +595,19 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       const { brief_hash: briefHash, ...brief } = contract.idm_unit_brief!;
       assert.equal(briefHash, hash(brief));
     }
+    // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
+    assert.equal(design.idm_contract_version, 2);
+    assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);
+    assert.equal(design.purpose?.profile, 'compliance');
+    assert.ok(design.notes.course.includes('Mục đích khoá học: Quy trình, quy định, tuân thủ, an toàn'));
 
     // (d) Apply compile parity: the Apply identity (with notes) equals the published inventory.
     assert.equal(apply.inventory_hash, publication.inventory_hash);
     assert.equal(apply.validation_contract, 'workspace-scoped-apply-2');
+    // QLT-5: the AI course title follows the author intent, but Apply never renames the CMS course.
+    assert.notEqual(design.project_context.course_title_hint, publication.nodes.find(node => node.kind === 'course')
+      ?.baseline?.title);
+    assert.equal(apply.writes.some(write => (write.kind as string) === 'course'), false);
     const chapterWrite = apply.writes.find(write => write.kind === 'chapter')!;
     assert.equal(chapterWrite.author_metadata.implementation_notes,
       design.notes.modules[design.modules[chapters.length - 1]!.module_key]);

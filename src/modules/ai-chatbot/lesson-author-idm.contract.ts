@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
 
 /**
  * Strict TypeScript mirror of `landa-ai-rag/app/idm/contracts.py` (spec §6, §12.2).
@@ -12,11 +13,18 @@ import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2
  * Python `len`), non-integer numbers, unknown enum members and strings that
  * still carry leading/trailing whitespace. Any violation throws `IdmError` with
  * code `IDM_CONTRACT_INVALID` and the JSON path of the first offending value.
+ *
+ * Contract 2 (QLT-5) adds `project_context.course_description` and the
+ * design's `purpose`. Designs stored under contract 1 still read: the reader
+ * accepts exactly one of the two shapes and returns it unchanged (absent keys
+ * stay absent), so `design_hash` still verifies.
  */
 
 export const IDM_PIPELINE_VERSION = 'idm-1' as const;
 export const IDM_LEGACY_PIPELINE_VERSION = 'v2-legacy' as const;
-export const IDM_CONTRACT_VERSION = 1 as const;
+export const IDM_CONTRACT_VERSION = 2 as const;
+/** Contract versions a stored course design may carry (1 = before QLT-5). */
+export const IDM_READABLE_CONTRACT_VERSIONS = [1, IDM_CONTRACT_VERSION] as const;
 export const IDM_PROMPT_POLICY_VERSION = 'idm-prompt-1' as const;
 export const IDM_SCOPE_KEY_PREFIX = 'idmcb_';
 /** Python `IDM_SINGLE_TASK_MAX_SOURCE_CHARS`; Node checks it before calling Python (spec §12.4). */
@@ -75,6 +83,10 @@ export const IDM_JUDGE_CRITERIA = ['Q1_support_sufficient', 'Q2_not_copied', 'Q3
   'Q4_feedback_teaches', 'Q5_grounded_criteria', 'Q6_alignment', 'Q7_cognitive_load', 'Q8_language',
   'Q9_traceability'] as const;
 export const IDM_JUDGE_SEVERITIES = ['pass', 'minor', 'major', 'critical'] as const;
+export const IDM_PURPOSE_PROFILES = ['onboarding', 'product', 'compliance', 'sales', 'soft_skills', 'general'] as const;
+export const IDM_PURPOSE_CONFIDENCES = ['high', 'medium', 'low'] as const;
+export const IDM_PURPOSE_ORIGINS = ['author_intent', 'ai_inferred', 'deterministic_fallback'] as const;
+export const IDM_PURPOSE_EVIDENCE = ['title', 'description', 'source'] as const;
 const LOCALES = ['vi', 'en'] as const;
 
 export type IdmIntent = typeof IDM_INTENTS[number];
@@ -97,6 +109,8 @@ export type IdmStageOrigin = typeof IDM_STAGE_ORIGINS[number];
 export type IdmComponentType = typeof IDM_COMPONENT_TYPES[number];
 export type IdmJudgeCriterion = typeof IDM_JUDGE_CRITERIA[number];
 export type IdmJudgeSeverity = typeof IDM_JUDGE_SEVERITIES[number];
+export type IdmPurposeProfile = typeof IDM_PURPOSE_PROFILES[number];
+export type IdmContractVersion = typeof IDM_READABLE_CONTRACT_VERSIONS[number];
 
 // --- Models (spec §6.2-§6.8) ---------------------------------------------------------------
 export interface IdmSourceDocumentRefV1 { document_id: string; name: string; type: string | null }
@@ -104,6 +118,8 @@ export interface IdmSourceDocumentRefV1 { document_id: string; name: string; typ
 export interface IdmProjectContextV1 {
   locale: 'vi' | 'en';
   course_title_hint: string | null;
+  /** Contract 2: the CMS course description (author intent); absent in a contract-1 context. */
+  course_description?: string | null;
   source_documents: IdmSourceDocumentRefV1[];
   target_audience: string | null;
   learning_objectives: string[];
@@ -197,12 +213,28 @@ export interface IdmHoldItemV1 {
 
 export interface IdmAuthorNotesV1 { course: string; modules: Record<string, string>; lessons: Record<string, string> }
 
+/** A required part of the purpose's course pattern the source lacks; `note` is plain author text. */
+export interface IdmTemplateGapV1 { section_key: string; note: string }
+
+/** Mirror of Python `IdmPurposeV1` (QLT-5): the course purpose the pipeline designed for. */
+export interface IdmPurposeV1 {
+  profile: IdmPurposeProfile;
+  summary: string;
+  confidence: typeof IDM_PURPOSE_CONFIDENCES[number];
+  origin: typeof IDM_PURPOSE_ORIGINS[number];
+  evidence: Array<typeof IDM_PURPOSE_EVIDENCE[number]>;
+  signals: string[];
+  template_gaps: IdmTemplateGapV1[];
+}
+
 export interface IdmCourseDesignV1 {
   pipeline_version: typeof IDM_PIPELINE_VERSION;
-  idm_contract_version: typeof IDM_CONTRACT_VERSION;
+  idm_contract_version: IdmContractVersion;
   prompt_policy_version: typeof IDM_PROMPT_POLICY_VERSION;
   source_snapshot_hash: string;
   project_context: IdmProjectContextV1;
+  /** Contract 2; absent in a design stored by contract 1. */
+  purpose?: IdmPurposeV1;
   target_audience: IdmAudienceV1;
   learning_objectives: IdmLearningObjectiveV1[];
   must_dos: IdmMustDoV1[];
@@ -416,6 +448,7 @@ const SCOPE_KEY = /^idmcb_[0-9a-f]{32}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMPONENT_PLAN_ID = /^cp2_[a-f0-9]{32}$/;
 const PRACTICE_ID = /^pt_[1-9]$/;
+const PATTERN_SECTION_KEY = /^[a-z][a-z_]{1,39}$/;
 const DETERMINISTIC_CODE = /^[A-Z][A-Z0-9_]{0,95}$/;
 const UNBOUNDED = Number.MAX_SAFE_INTEGER;
 
@@ -458,6 +491,11 @@ function object(value: unknown, path: string, keys: readonly string[]): Record<s
   const actual = Object.keys(record);
   if (actual.length !== keys.length || actual.some(key => !keys.includes(key))) invalid(path);
   return record;
+}
+
+/** Whether `value` is an object carrying `key` (selects the contract-2 shape of a versioned model). */
+function hasKey(value: unknown, key: string): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, key);
 }
 
 /** IDM-model string: already stripped by pydantic, so no edge whitespace survives. */
@@ -523,17 +561,45 @@ const sourceDocument: Reader<IdmSourceDocumentRefV1> = (value, path) => {
     name: text(item.name, `${path}.name`, 1, 255), type: nullableText(item.type, `${path}.type`, 40) };
 };
 
-const projectContext: Reader<IdmProjectContextV1> = (value, path) => {
-  const item = object(value, path, ['locale', 'course_title_hint', 'source_documents', 'target_audience',
-    'learning_objectives', 'duration_target_minutes']);
+const PROJECT_CONTEXT_KEYS_V1 = ['locale', 'course_title_hint', 'source_documents', 'target_audience',
+  'learning_objectives', 'duration_target_minutes'] as const;
+
+/** `shape` pins the contract of a stored design; a module context built from either design takes either. */
+function projectContext(value: unknown, path: string, shape: IdmContractVersion | 'either' = 'either'): IdmProjectContextV1 {
+  const described = hasKey(value, 'course_description');
+  if ((shape === 1 && described) || (shape === 2 && !described)) invalid(path);
+  const item = object(value, path, described ? [...PROJECT_CONTEXT_KEYS_V1, 'course_description']
+    : PROJECT_CONTEXT_KEYS_V1);
   return {
     locale: oneOf(item.locale, `${path}.locale`, LOCALES),
     course_title_hint: nullableText(item.course_title_hint, `${path}.course_title_hint`, 500),
+    ...(described ? { course_description: nullableText(item.course_description, `${path}.course_description`,
+      2_000) } : {}),
     source_documents: list(item.source_documents, `${path}.source_documents`, 1, 20, sourceDocument),
     target_audience: nullableText(item.target_audience, `${path}.target_audience`, 2_000),
     learning_objectives: list(item.learning_objectives, `${path}.learning_objectives`, 0, 8, line(500)),
     duration_target_minutes: nullable((entry, at) => integer(entry, at, 5, 600))(
       item.duration_target_minutes, `${path}.duration_target_minutes`),
+  };
+};
+
+const templateGap: Reader<IdmTemplateGapV1> = (value, path) => {
+  const item = object(value, path, ['section_key', 'note']);
+  return { section_key: text(item.section_key, `${path}.section_key`, 0, 40, PATTERN_SECTION_KEY),
+    note: text(item.note, `${path}.note`, 1, 300) };
+};
+
+const purpose: Reader<IdmPurposeV1> = (value, path) => {
+  const item = object(value, path, ['profile', 'summary', 'confidence', 'origin', 'evidence', 'signals',
+    'template_gaps']);
+  return {
+    profile: oneOf(item.profile, `${path}.profile`, IDM_PURPOSE_PROFILES),
+    summary: text(item.summary, `${path}.summary`, 10, 500),
+    confidence: oneOf(item.confidence, `${path}.confidence`, IDM_PURPOSE_CONFIDENCES),
+    origin: oneOf(item.origin, `${path}.origin`, IDM_PURPOSE_ORIGINS),
+    evidence: list(item.evidence, `${path}.evidence`, 0, 3, (entry, at) => oneOf(entry, at, IDM_PURPOSE_EVIDENCE)),
+    signals: list(item.signals, `${path}.signals`, 0, 8, line(40)),
+    template_gaps: list(item.template_gaps, `${path}.template_gaps`, 0, 12, templateGap),
   };
 };
 
@@ -686,21 +752,25 @@ const authorNotes: Reader<IdmAuthorNotesV1> = (value, path) => {
     lessons: dictionary(item.lessons, `${path}.lessons`, anyKey, line(2_000)) };
 };
 
-const COURSE_DESIGN_KEYS = ['pipeline_version', 'idm_contract_version', 'prompt_policy_version', 'source_snapshot_hash',
-  'project_context', 'target_audience', 'learning_objectives', 'must_dos', 'blocks', 'lo_links', 'blueprint',
-  'blocked_must_do_ids', 'hold_items', 'modules', 'block_scopes', 'dispositions', 'notes', 'stage_origins',
+const COURSE_DESIGN_KEYS_V1 = ['pipeline_version', 'idm_contract_version', 'prompt_policy_version',
+  'source_snapshot_hash', 'project_context', 'target_audience', 'learning_objectives', 'must_dos', 'blocks', 'lo_links',
+  'blueprint', 'blocked_must_do_ids', 'hold_items', 'modules', 'block_scopes', 'dispositions', 'notes', 'stage_origins',
   'design_hash'] as const;
 
 function courseDesign(value: unknown, path: string): IdmCourseDesignV1 {
-  const item = object(value, path, COURSE_DESIGN_KEYS);
-  if (item.idm_contract_version !== IDM_CONTRACT_VERSION) invalid(`${path}.idm_contract_version`);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(path);
+  const version = (value as Record<string, unknown>).idm_contract_version;
+  if (!(IDM_READABLE_CONTRACT_VERSIONS as readonly unknown[]).includes(version)) invalid(`${path}.idm_contract_version`);
+  const contract = version as IdmContractVersion;
+  const item = object(value, path, contract === 1 ? COURSE_DESIGN_KEYS_V1 : [...COURSE_DESIGN_KEYS_V1, 'purpose']);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
-    idm_contract_version: IDM_CONTRACT_VERSION,
+    idm_contract_version: contract,
     prompt_policy_version: oneOf(item.prompt_policy_version, `${path}.prompt_policy_version`,
       [IDM_PROMPT_POLICY_VERSION] as const),
     source_snapshot_hash: sha256(item.source_snapshot_hash, `${path}.source_snapshot_hash`),
-    project_context: projectContext(item.project_context, `${path}.project_context`),
+    project_context: projectContext(item.project_context, `${path}.project_context`, contract),
+    ...(contract === 1 ? {} : { purpose: purpose(item.purpose, `${path}.purpose`) }),
     target_audience: audience(item.target_audience, `${path}.target_audience`),
     learning_objectives: list(item.learning_objectives, `${path}.learning_objectives`, 1, 8, learningObjective),
     must_dos: list(item.must_dos, `${path}.must_dos`, 1, 40, mustDo),
@@ -993,11 +1063,14 @@ export function boundIdmRemainingBudgetMs(remainingBudgetMs: number, transportTi
 /**
  * Build the `idm` field of an IDM course-skeleton request. Throws
  * `IDM_SOURCE_EXCEEDS_SINGLE_TASK_CAPACITY` before any provider dispatch when
- * the snapshot cannot fit one Python course-design task.
+ * the snapshot cannot fit one Python course-design task. The CMS course name
+ * and description are the author intent (QLT-5), sanitised here; the returned
+ * design must carry this exact `project_context` (`completeSkeleton`).
  */
 export function buildIdmCourseSkeletonRequest(input: {
   locale: 'vi' | 'en';
   course_title: string | null;
+  course_description: string | null;
   source_documents: ReadonlyArray<{ document_id: string; name: string; type: string | null }>;
   source_facts: readonly OrchestrationV2SourceFact[];
   input_tokens: number;
@@ -1018,7 +1091,7 @@ export function buildIdmCourseSkeletonRequest(input: {
     pipeline_version: IDM_PIPELINE_VERSION,
     project_context: {
       locale: input.locale,
-      course_title_hint: boundedHint(input.course_title, 500),
+      ...idmAuthorIntent(input),
       source_documents: input.source_documents.map(document => ({
         document_id: document.document_id,
         name: boundedHint(document.name, 255) ?? document.document_id,
@@ -1032,7 +1105,7 @@ export function buildIdmCourseSkeletonRequest(input: {
     token_allowance: idmTokenAllowance(input, 'idm.token_allowance'),
     remaining_budget_ms: remaining,
   };
-  projectContext(request.project_context, 'idm.project_context');
+  projectContext(request.project_context, 'idm.project_context', IDM_CONTRACT_VERSION);
   return request;
 }
 

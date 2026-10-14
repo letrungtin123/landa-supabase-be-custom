@@ -28,6 +28,7 @@ import {
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { createSourceSnapshotRepositoryV2 } from './lesson-author-orchestration-v2-source.repository.js';
 import {
+  IDM_CONTRACT_VERSION,
   IDM_LEGACY_PIPELINE_VERSION,
   IDM_PIPELINE_VERSION,
   IDM_SINGLE_TASK_MAX_FACTS,
@@ -36,6 +37,7 @@ import {
   idmTextLength,
   readIdmCourseDesign,
   type IdmCourseDesignV1,
+  type IdmProjectContextV1,
   type OrchestrationV2RunPipeline,
 } from './lesson-author-idm.contract.js';
 import {
@@ -282,13 +284,15 @@ export function createOrchestrationV2PlanningRepository(
 
   /**
    * IDM course-skeleton input (spec §12.4): live-lease task budget and deadline,
-   * the course name as title hint, and every persisted snapshot fact in snapshot
-   * order. Capacity is measured in SQL first so an oversize snapshot is rejected
-   * before its rows are loaded or any provider call is made.
+   * the course name and description as the author intent (QLT-5, read live and
+   * sanitised by the request builder), and every persisted snapshot fact in
+   * snapshot order. Capacity is measured in SQL first so an oversize snapshot is
+   * rejected before its rows are loaded or any provider call is made.
    */
   async function loadIdmSkeletonInput(lease: OrchestrationV2TaskLease): Promise<{
     source_facts: OrchestrationV2SourceFact[];
     course_title: string | null;
+    course_description: string | null;
     input_tokens: number;
     remaining_ms: number;
   }> {
@@ -296,7 +300,7 @@ export function createOrchestrationV2PlanningRepository(
     return db.transaction(async tx => {
       const task = await tx.query(`SELECT t.input_tokens,
           floor(extract(epoch FROM (t.deadline_at-clock_timestamp()))*1000)::integer AS remaining_ms,
-          course.display_name AS course_title
+          course.display_name AS course_title,course.description AS course_description
         FROM lesson_author_workspace_v2_tasks t
         LEFT JOIN courses course ON course.id=t.course_id AND course.tenant_id=t.tenant_id AND course.deleted_at IS NULL
         WHERE ${liveLeaseSql('t')}`,
@@ -330,6 +334,7 @@ export function createOrchestrationV2PlanningRepository(
           locator: record(fact.locator) ?? fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID'),
         })),
         course_title: typeof row?.course_title === 'string' ? row.course_title : null,
+        course_description: typeof row?.course_description === 'string' ? row.course_description : null,
         input_tokens: inputTokens,
         remaining_ms: remainingMs,
       };
@@ -385,11 +390,18 @@ export function createOrchestrationV2PlanningRepository(
     response: OrchestrationV2CourseSkeletonResponse,
     budgets: OrchestrationV2PlanningBudgets,
     settleProvider: SettleProvider,
+    sentProjectContext?: IdmProjectContextV1,
   ): Promise<void> {
     const snapshotFacts = await loadSnapshotFactLengths(lease);
     const { design, view } = (() => {
       try {
         const parsed = readIdmCourseDesign(response.idm);
+        // QLT-5: the design must be built from the author intent this attempt sent (the course name and
+        // description are read live), never from another request's.
+        if (sentProjectContext && (parsed.idm_contract_version !== IDM_CONTRACT_VERSION
+          || orchestrationV2Hash(parsed.project_context) !== orchestrationV2Hash(sentProjectContext))) {
+          throw new IdmError('IDM_CONTRACT_INVALID', 'idm.project_context');
+        }
         return { design: parsed, view: assertIdmCourseDesignInvariants({ design: parsed, skeleton: response.skeleton,
           sourceSnapshotHash: lease.source_snapshot_hash, snapshotFacts }) };
       } catch (error) {
@@ -417,11 +429,14 @@ export function createOrchestrationV2PlanningRepository(
     budgets: OrchestrationV2PlanningBudgets,
     settleProvider: SettleProvider,
     pipeline: OrchestrationV2RunPipeline = IDM_LEGACY_PIPELINE_VERSION,
+    sentProjectContext?: IdmProjectContextV1,
   ): Promise<void> {
     if (lease.kind !== 'course_skeleton' || response.skeleton.source_snapshot_hash !== lease.source_snapshot_hash) {
       fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
     }
-    if (pipeline === IDM_PIPELINE_VERSION) return completeIdmSkeleton(lease, response, budgets, settleProvider);
+    if (pipeline === IDM_PIPELINE_VERSION) {
+      return completeIdmSkeleton(lease, response, budgets, settleProvider, sentProjectContext);
+    }
     if (pipeline !== IDM_LEGACY_PIPELINE_VERSION) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
     const skeletonHash = orchestrationV2Hash(response.skeleton);
     const plan = planOrchestrationV2ChapterShards(response.skeleton, scopes, budgets, skeletonHash);

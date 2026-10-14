@@ -16,6 +16,7 @@ import {
   type IdmCourseDesignV1,
   type IdmDispositionV1,
   type IdmModulePlanV1,
+  type IdmPurposeV1,
 } from './lesson-author-idm.contract.js';
 
 /** Synthetic offline IDM fixtures for tests; no customer content and no provider output. */
@@ -40,12 +41,23 @@ export function rehashIdmDesign(design: IdmCourseDesignV1): IdmCourseDesignV1 {
   return copy;
 }
 
+/** The purpose a contract-2 fixture design carries (QLT-5): onboarding with one pattern gap. */
+export const IDM_FIXTURE_PURPOSE: IdmPurposeV1 = Object.freeze({
+  profile: 'onboarding', summary: 'Giúp nhân viên mới làm quen với công ty mẫu.', confidence: 'high',
+  origin: 'author_intent', evidence: ['title'], signals: ['onboarding'],
+  template_gaps: [{ section_key: 'organisation', note: 'Tài liệu chưa có phần: Cơ cấu tổ chức và người liên hệ — cần bổ sung.' }],
+}) as IdmPurposeV1;
+
 /**
  * Build a self-consistent IDM course design plus its projected skeleton. Every
  * block is a course block; one nice-to-know block, one held block and one noise
- * fact are appended to exercise dispositions outside the course.
+ * fact are appended to exercise dispositions outside the course. `contract` 1
+ * (the default) is the shape stored before QLT-5; 2 adds the course description
+ * and the purpose.
  */
-export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[150], [90, 60]]]]): IdmFixture {
+export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[150], [90, 60]]]],
+  options: { contract?: 1 | 2 } = {}): IdmFixture {
+  const contract = options.contract ?? 1;
   const hash = IDM_FIXTURE_SNAPSHOT_HASH;
   const facts: OrchestrationV2SourceFact[] = [];
   const blocks: IdmContentBlockV1[] = [];
@@ -100,11 +112,13 @@ export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[
   dispositions.push({ fact_key: addFact(25), disposition: 'noise', block_id: null, reason: 'page_furniture' });
   const lessonKeys = modules.flatMap(module => module.lessons.map(lesson => lesson.lesson_key));
   const unsealed = {
-    pipeline_version: 'idm-1' as const, idm_contract_version: 1 as const, prompt_policy_version: 'idm-prompt-1' as const,
+    pipeline_version: 'idm-1' as const, idm_contract_version: contract, prompt_policy_version: 'idm-prompt-1' as const,
     source_snapshot_hash: hash,
     project_context: { locale: 'vi' as const, course_title_hint: 'Khoá học mẫu',
+      ...(contract === 2 ? { course_description: 'Khoá học dành cho nhân viên mới.' } : {}),
       source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }],
       target_audience: null, learning_objectives: [], duration_target_minutes: null },
+    ...(contract === 2 ? { purpose: structuredClone(IDM_FIXTURE_PURPOSE) } : {}),
     target_audience: { description: 'Nhân viên tuyến đầu cần áp dụng quy trình.', origin: 'ai_proposed' as const },
     learning_objectives: [{ lo_id: 'lo_1', statement: 'Người học có thể áp dụng quy trình mẫu', bloom: 'apply' as const,
       origin: 'ai_proposed' as const }],
