@@ -599,6 +599,13 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       // QLT-5 C: and its content mode (keep for the golden compliance course).
       assert.equal(brief.fidelity_mode, design.purpose!.fidelity_mode);
     }
+    // QLT-5 D: only the FAQ unit (lsn_003 unit 2) carries the W4 FAQ plan and its W1 material, and Python accepted it.
+    const faqBriefs = result.contracts.map(contract => contract.idm_unit_brief!).filter(brief => brief.faq_material);
+    assert.equal(faqBriefs.length, 1);
+    assert.deepEqual(faqBriefs[0]!.components.find(slot => slot.type === 'la_faq')!.faq_items!
+      .map(item => [item.question_type, item.origin]),
+    [['common_mistake', 'source'], ['what_if', 'source'], ['common_mistake', 'distractor']]);
+    assert.equal(faqBriefs[0]!.faq_material!.blocks[0]!.support_role, 'common_mistake');
     // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
     assert.equal(design.idm_contract_version, 2);
     assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);

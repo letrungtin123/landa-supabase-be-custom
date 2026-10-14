@@ -93,6 +93,9 @@ export const IDM_PURPOSE_ORIGINS = ['author_intent', 'ai_inferred', 'determinist
 export const IDM_PURPOSE_EVIDENCE = ['title', 'description', 'source'] as const;
 /** Python `FidelityMode` (QLT-5 C): how closely learner text follows the source wording. */
 export const IDM_FIDELITY_MODES = ['keep', 'structured', 'explain'] as const;
+/** QLT-5 D (Python `FaqQuestionType`, `FaqItemOrigin`): the server's plan of one FAQ item. */
+export const IDM_FAQ_QUESTION_TYPES = ['why', 'what_if', 'common_mistake', 'how_to_apply', 'comparison', 'recall'] as const;
+export const IDM_FAQ_ITEM_ORIGINS = ['source', 'distractor', 'ai_drafted'] as const;
 const LOCALES = ['vi', 'en'] as const;
 
 export type IdmIntent = typeof IDM_INTENTS[number];
@@ -117,6 +120,8 @@ export type IdmJudgeCriterion = typeof IDM_JUDGE_CRITERIA[number];
 export type IdmJudgeSeverity = typeof IDM_JUDGE_SEVERITIES[number];
 export type IdmPurposeProfile = typeof IDM_PURPOSE_PROFILES[number];
 export type IdmFidelityMode = typeof IDM_FIDELITY_MODES[number];
+export type IdmFaqQuestionType = typeof IDM_FAQ_QUESTION_TYPES[number];
+export type IdmFaqItemOrigin = typeof IDM_FAQ_ITEM_ORIGINS[number];
 export type IdmContractVersion = typeof IDM_READABLE_CONTRACT_VERSIONS[number];
 
 // --- Models (spec §6.2-§6.8) ---------------------------------------------------------------
@@ -279,6 +284,16 @@ export interface IdmPracticeTaskV1 {
 
 export interface IdmSupportItemV1 { kind: IdmSupportKind; brief: string; block_id: string }
 
+/**
+ * Mirror of Python `IdmFaqItemPlanV1` (QLT-5 D): the question type of one FAQ item, the facts its answer is built on
+ * and where its point comes from. Written by the server at W4 for an la_faq slot, never by authors.
+ */
+export interface IdmFaqItemPlanV1 {
+  question_type: IdmFaqQuestionType;
+  anchor_fact_keys: string[];
+  origin: IdmFaqItemOrigin;
+}
+
 /** Mirror of Python `ArchitectureComponentAuthorReviewV2` (blank values normalised to null). */
 export interface IdmComponentAuthorReviewV1 {
   purpose: string | null;
@@ -306,6 +321,8 @@ export interface IdmComponentDesignV1 {
   practice_id: string | null;
   support_items: IdmSupportItemV1[];
   author_review: IdmComponentAuthorReviewV1;
+  /** QLT-5 D: the plan of an la_faq slot; absent on every other slot and in designs stored before it. */
+  faq_items?: IdmFaqItemPlanV1[];
 }
 
 export interface IdmUnitDesignV1 {
@@ -352,7 +369,27 @@ export interface IdmBriefComponentV1 {
   treatments: IdmTreatmentRefV1[];
   owned_fact_keys: string[];
   supporting_fact_keys: string[];
+  /** QLT-5 D: the design component's FAQ plan, only on an la_faq slot that has one. */
+  faq_items?: IdmFaqItemPlanV1[];
 }
+
+/** Mirror of Python `IdmFaqBlockNoteV1` (QLT-5 D): what W1 found about one block of a unit with an FAQ. */
+export interface IdmFaqBlockNoteV1 {
+  block_id: string;
+  name: string;
+  intent: IdmIntent;
+  content_kind: IdmContentKind;
+  support_role: IdmSupportRole | null;
+  issues: IdmIssueV1[];
+  gaps: IdmGapV1[];
+  sme_questions: string[];
+}
+
+/** Mirror of Python `IdmFaqPracticeNoteV1`: a lesson practice and its feedback focus ("why wrong" basis). */
+export interface IdmFaqPracticeNoteV1 { practice_id: string; sentence: string; feedback_focus: IdmFeedbackFocusV1 }
+
+/** Mirror of Python `IdmFaqMaterialV1`: the raw material of a unit's FAQ (real confusions, never facts). */
+export interface IdmFaqMaterialV1 { blocks: IdmFaqBlockNoteV1[]; practices: IdmFaqPracticeNoteV1[] }
 
 export interface IdmUnitBriefV1 {
   pipeline_version: typeof IDM_PIPELINE_VERSION;
@@ -374,6 +411,8 @@ export interface IdmUnitBriefV1 {
   components: IdmBriefComponentV1[];
   lesson_context_facts: IdmContextFactV1[];
   job_aid_signpost: string | null;
+  /** QLT-5 D: present only for a unit with an la_faq slot. */
+  faq_material?: IdmFaqMaterialV1 | null;
   brief_hash: string;
 }
 
@@ -850,6 +889,18 @@ const supportItem: Reader<IdmSupportItemV1> = (value, path) => {
     block_id: blockId(item.block_id, `${path}.block_id`) };
 };
 
+const faqItemPlan: Reader<IdmFaqItemPlanV1> = (value, path) => {
+  const item = object(value, path, ['question_type', 'anchor_fact_keys', 'origin']);
+  return { question_type: oneOf(item.question_type, `${path}.question_type`, IDM_FAQ_QUESTION_TYPES),
+    anchor_fact_keys: list(item.anchor_fact_keys, `${path}.anchor_fact_keys`, 1, 6, factKey),
+    origin: oneOf(item.origin, `${path}.origin`, IDM_FAQ_ITEM_ORIGINS) };
+};
+
+/** `faq_items` is optional (QLT-5 D): a component without a plan has no such key, so it reads and hashes as before. */
+function faqItems(value: unknown, item: Record<string, unknown>, path: string): { faq_items?: IdmFaqItemPlanV1[] } {
+  return hasKey(value, 'faq_items') ? { faq_items: list(item.faq_items, `${path}.faq_items`, 0, 6, faqItemPlan) } : {};
+}
+
 /** `ArchitectureComponentAuthorReviewV2`: each value null or a Python-stripped, non-blank string. */
 const authorReview: Reader<IdmComponentAuthorReviewV1> = (value, path) => {
   const item = object(value, path, ['purpose', 'example_scenario', 'visual_asset', 'user_behavior_navigation']);
@@ -880,9 +931,11 @@ const mediaBrief: Reader<IdmMediaBriefV1> = (value, path) => {
   };
 };
 
+const COMPONENT_DESIGN_KEYS = ['component_index', 'type', 'role', 'title', 'rationale', 'block_ids', 'practice_id',
+  'support_items', 'author_review'] as const;
+
 const componentDesign: Reader<IdmComponentDesignV1> = (value, path) => {
-  const item = object(value, path, ['component_index', 'type', 'role', 'title', 'rationale', 'block_ids',
-    'practice_id', 'support_items', 'author_review']);
+  const item = object(value, path, [...COMPONENT_DESIGN_KEYS, ...(hasKey(value, 'faq_items') ? ['faq_items'] : [])]);
   return {
     component_index: integer(item.component_index, `${path}.component_index`, 1, 4),
     type: oneOf(item.type, `${path}.type`, IDM_COMPONENT_TYPES),
@@ -893,6 +946,7 @@ const componentDesign: Reader<IdmComponentDesignV1> = (value, path) => {
     practice_id: nullableText(item.practice_id, `${path}.practice_id`, 4, PRACTICE_ID),
     support_items: list(item.support_items, `${path}.support_items`, 0, 6, supportItem),
     author_review: authorReview(item.author_review, `${path}.author_review`),
+    ...faqItems(value, item, path),
   };
 };
 
@@ -961,9 +1015,11 @@ const contextFact: Reader<IdmContextFactV1> = (value, path) => {
     fact_text: text(item.fact_text, `${path}.fact_text`, 1, 32_768) };
 };
 
+const BRIEF_COMPONENT_KEYS = ['component_plan_id', 'type', 'role', 'title', 'support_items', 'practice', 'treatments',
+  'owned_fact_keys', 'supporting_fact_keys'] as const;
+
 const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
-  const item = object(value, path, ['component_plan_id', 'type', 'role', 'title', 'support_items', 'practice',
-    'treatments', 'owned_fact_keys', 'supporting_fact_keys']);
+  const item = object(value, path, [...BRIEF_COMPONENT_KEYS, ...(hasKey(value, 'faq_items') ? ['faq_items'] : [])]);
   return {
     component_plan_id: text(item.component_plan_id, `${path}.component_plan_id`, 0, 36, COMPONENT_PLAN_ID),
     type: oneOf(item.type, `${path}.type`, IDM_COMPONENT_TYPES),
@@ -974,15 +1030,46 @@ const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
     treatments: list(item.treatments, `${path}.treatments`, 0, 24, treatmentRef),
     owned_fact_keys: list(item.owned_fact_keys, `${path}.owned_fact_keys`, 0, 32_768, factKey),
     supporting_fact_keys: list(item.supporting_fact_keys, `${path}.supporting_fact_keys`, 0, 32_768, factKey),
+    ...faqItems(value, item, path),
   };
+};
+
+const faqBlockNote: Reader<IdmFaqBlockNoteV1> = (value, path) => {
+  const item = object(value, path, ['block_id', 'name', 'intent', 'content_kind', 'support_role', 'issues', 'gaps',
+    'sme_questions']);
+  return {
+    block_id: blockId(item.block_id, `${path}.block_id`),
+    name: text(item.name, `${path}.name`, 1, 180),
+    intent: oneOf(item.intent, `${path}.intent`, IDM_INTENTS),
+    content_kind: oneOf(item.content_kind, `${path}.content_kind`, IDM_CONTENT_KINDS),
+    support_role: item.support_role === null ? null : oneOf(item.support_role, `${path}.support_role`, IDM_SUPPORT_ROLES),
+    issues: list(item.issues, `${path}.issues`, 0, 16, issue),
+    gaps: list(item.gaps, `${path}.gaps`, 0, 8, gap),
+    sme_questions: list(item.sme_questions, `${path}.sme_questions`, 0, 8, line(400)),
+  };
+};
+
+const faqPracticeNote: Reader<IdmFaqPracticeNoteV1> = (value, path) => {
+  const item = object(value, path, ['practice_id', 'sentence', 'feedback_focus']);
+  return { practice_id: text(item.practice_id, `${path}.practice_id`, 0, 4, PRACTICE_ID),
+    sentence: text(item.sentence, `${path}.sentence`, 10, 280),
+    feedback_focus: feedbackFocus(item.feedback_focus, `${path}.feedback_focus`) };
+};
+
+const faqMaterial: Reader<IdmFaqMaterialV1> = (value, path) => {
+  const item = object(value, path, ['blocks', 'practices']);
+  return { blocks: list(item.blocks, `${path}.blocks`, 0, 24, faqBlockNote),
+    practices: list(item.practices, `${path}.practices`, 0, 3, faqPracticeNote) };
 };
 
 function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitBriefV1, 'brief_hash'> {
   const purposeful = hasKey(value, 'purpose_profile');
   // QLT-5 C: a contract-2 brief may carry the content mode; a brief built before it reads unchanged.
   const moded = purposeful && hasKey(value, 'fidelity_mode');
-  const keys = [...(purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1), ...(moded ? ['fidelity_mode'] : [])]
-    .filter(key => sealed || key !== 'brief_hash');
+  // QLT-5 D: only a unit with an la_faq slot carries its FAQ material.
+  const material = hasKey(value, 'faq_material');
+  const keys = [...(purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1), ...(moded ? ['fidelity_mode'] : []),
+    ...(material ? ['faq_material'] : [])].filter(key => sealed || key !== 'brief_hash');
   const item = object(value, path, keys);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
@@ -1006,6 +1093,7 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
     components: list(item.components, `${path}.components`, 1, 4, briefComponent),
     lesson_context_facts: list(item.lesson_context_facts, `${path}.lesson_context_facts`, 0, 80, contextFact),
     job_aid_signpost: nullableText(item.job_aid_signpost, `${path}.job_aid_signpost`, 300),
+    ...(material ? { faq_material: nullable(faqMaterial)(item.faq_material, `${path}.faq_material`) } : {}),
   };
 }
 

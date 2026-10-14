@@ -481,3 +481,71 @@ test('QLT-5 C: the design purpose may carry a content mode and the blueprint the
   assert.throws(() => readIdmCourseDesign(edit(2, design => { design.blueprint[0].treatment = 'paraphrase'; })),
     invalidAt('idm.blueprint[0].treatment'));
 });
+
+test('QLT-5 D: the FAQ plan of a design component and the FAQ material of a brief are optional and hash-bound', () => {
+  const shard = shardDesign();
+  const planned = structuredClone(shard) as Mutable;
+  planned.lessons[0].units[0].components.push({ component_index: 2, type: 'la_faq', role: 'clarify',
+    title: 'Những nhầm lẫn khi phân loại', rationale: 'Làm rõ lỗi hay gặp.', block_ids: ['cb_0004'], practice_id: null,
+    support_items: [], author_review: { purpose: 'Làm rõ lỗi hay gặp', example_scenario: null, visual_asset: null,
+      user_behavior_navigation: null },
+    faq_items: [{ question_type: 'common_mistake', anchor_fact_keys: ['d1-c3-f2'], origin: 'distractor' },
+      { question_type: 'why', anchor_fact_keys: ['d1-c3-f2'], origin: 'source' }] });
+  const sealed = sealShard(planned);
+  const read = readIdmShardDesign(JSON.parse(JSON.stringify(sealed)));
+  assert.deepEqual(read, sealed);
+  assert.deepEqual(read.lessons[0]!.units[0]!.components[1]!.faq_items!.map(item => item.question_type),
+    ['common_mistake', 'why']);
+  // A component without a plan keeps its old shape (no key), so stored designs still verify their hash.
+  assert.equal(Object.hasOwn(read.lessons[0]!.units[0]!.components[0]!, 'faq_items'), false);
+  const faq = 'idm_design.lessons[0].units[0].components[1]';
+  const tampered: Mutable = structuredClone(sealed);
+  tampered.lessons[0].units[0].components[1].faq_items[0].origin = 'source';
+  assert.throws(() => readIdmShardDesign(tampered), invalidAt('idm_design.design_hash'));
+  const edited = (edit: (value: Mutable) => void) => {
+    const copy = structuredClone(planned);
+    edit(copy);
+    return sealShard(copy);
+  };
+  assert.throws(() => readIdmShardDesign(edited(value => {
+    value.lessons[0].units[0].components[1].faq_items[0].question_type = 'trivia';
+  })), invalidAt(`${faq}.faq_items[0].question_type`));
+  assert.throws(() => readIdmShardDesign(edited(value => {
+    value.lessons[0].units[0].components[1].faq_items[0].anchor_fact_keys = [];
+  })), invalidAt(`${faq}.faq_items[0].anchor_fact_keys`));
+
+  const base: Omit<IdmUnitBriefV1, 'brief_hash'> = {
+    pipeline_version: 'idm-1', course_title: 'Xử lý khiếu nại', target_audience: 'Nhân viên CSKH',
+    purpose_profile: 'compliance', purpose_summary: 'Xử lý khiếu nại đúng quy trình.', fidelity_mode: 'keep',
+    module_title: 'Phân loại', lesson_title: 'Phân loại khiếu nại', lesson_objective: 'Phân loại theo nhóm',
+    lesson_practice_sentences: [], previous_lesson_title: null, next_lesson_title: null,
+    unit_segment: 'practice_feedback', unit_purpose: 'Phân loại được khiếu nại.', job_aid_signpost: null,
+    components: [{ component_plan_id: `cp2_${'c'.repeat(32)}`, type: 'la_faq', role: 'clarify', title: 'Nhầm lẫn',
+      support_items: [], practice: null, treatments: [], owned_fact_keys: [], supporting_fact_keys: ['d1-c3-f2'],
+      faq_items: [{ question_type: 'what_if', anchor_fact_keys: ['d1-c3-f2'], origin: 'source' }] }],
+    lesson_context_facts: [],
+    faq_material: { blocks: [{ block_id: 'cb_0004', name: 'Khiếu nại có những nhóm nào?', intent: 'know',
+      content_kind: 'concept', support_role: 'common_mistake',
+      issues: [{ type: 'unclear', note: 'Ranh giới nhóm chưa rõ.', fact_keys: ['d1-c3-f2'] }],
+      gaps: [{ type: 'missing_common_mistake', note: 'Nguồn không nêu lỗi.' }],
+      sme_questions: ['Khiếu nại về giao hàng trễ thuộc nhóm nào?'] }],
+    practices: [{ practice_id: 'pt_1', sentence: 'Cho một khiếu nại, người học phân loại để xử lý đúng.',
+      feedback_focus: { criterion: 'Đúng nhóm', rationale: 'Theo bảng phân loại', improvement: 'Đối chiếu bảng' } }] },
+  };
+  const brief = sealIdmUnitBrief(base);
+  assert.deepEqual(readIdmUnitBrief(JSON.parse(JSON.stringify(brief))), brief);
+  assert.throws(() => readIdmUnitBrief({ ...brief, faq_material: null }), invalidAt('idm_unit_brief.brief_hash'));
+  assert.equal(sealIdmUnitBrief({ ...base, faq_material: null }).faq_material, null);
+  assert.throws(() => sealIdmUnitBrief({ ...base, faq_material: { ...base.faq_material!, practices: [
+    ...base.faq_material!.practices, ...base.faq_material!.practices, ...base.faq_material!.practices,
+    ...base.faq_material!.practices] } }), invalidAt('idm_unit_brief.faq_material.practices'));
+  assert.throws(() => sealIdmUnitBrief({ ...base, components: [{ ...base.components[0]!, faq_items: [{
+    question_type: 'why', anchor_fact_keys: ['d1-c3-f2'], origin: 'invented' as never }] }] }),
+  invalidAt('idm_unit_brief.components[0].faq_items[0].origin'));
+  // A brief built before QLT-5 D (no plan, no material) reads unchanged.
+  const { faq_material: _material, ...older } = base;
+  const { faq_items: _items, ...plainSlot } = base.components[0]!;
+  const legacy = sealIdmUnitBrief({ ...older, components: [plainSlot] });
+  assert.equal(Object.hasOwn(legacy, 'faq_material'), false);
+  assert.equal(Object.hasOwn(legacy.components[0]!, 'faq_items'), false);
+});

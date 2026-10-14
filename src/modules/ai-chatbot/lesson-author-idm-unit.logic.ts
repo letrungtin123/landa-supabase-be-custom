@@ -12,7 +12,10 @@ import {
   sealIdmUnitBrief,
   type IdmContextFactV1,
   type IdmCourseDesignV1,
+  type IdmFaqMaterialV1,
+  type IdmLessonDesignV1,
   type IdmUnitBriefV1,
+  type IdmUnitDesignV1,
   type IdmUnitSegment,
 } from './lesson-author-idm.contract.js';
 import { idmUnitDesignAt } from './lesson-author-idm-architecture.logic.js';
@@ -30,6 +33,8 @@ export const IDM_EXPLAIN_BUDGET_PERCENT = 135;
 export const IDM_CONTEXT_FACTS_MAX = 80;
 export const IDM_CONTEXT_FACTS_MAX_CHARS = 24_000;
 const MAX_PRACTICE_SENTENCES = 3;
+/** Python `IdmFaqMaterialV1.practices` bound. */
+const MAX_FAQ_PRACTICES = 3;
 
 const contractInvalid = (): never => { throw new IdmError('IDM_SHARD_DESIGN_INVALID'); };
 
@@ -123,6 +128,29 @@ export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment
 }
 
 /**
+ * QLT-5 D (Python `IdmFaqMaterialV1`): the raw material of a unit's FAQ, only for a unit with an la_faq slot (null
+ * otherwise, and the brief then has no `faq_material` key): what W1 found about each block of the unit (its role,
+ * the source issues and gaps, the open SME questions) and the feedback focus of the lesson's practices, the "why
+ * wrong" basis of the misconceptions behind their wrong options. Copied as stored, so the Python bounds hold.
+ */
+export function idmFaqMaterial(design: IdmCourseDesignV1, lesson: IdmLessonDesignV1,
+  unit: IdmUnitDesignV1): IdmFaqMaterialV1 | null {
+  if (!unit.components.some(component => component.type === 'la_faq')) return null;
+  const blocks = new Map(design.blocks.map(block => [block.block_id, block]));
+  return {
+    blocks: unit.block_ids.map(blockId => {
+      const block = blocks.get(blockId) ?? contractInvalid();
+      return { block_id: blockId, name: block.name, intent: block.intent, content_kind: block.content_kind,
+        support_role: block.support_role, issues: block.issues.map(item => ({ ...item, fact_keys: [...item.fact_keys] })),
+        gaps: block.gaps.map(item => ({ ...item })), sme_questions: [...block.sme_questions] };
+    }),
+    practices: lesson.practice_tasks.filter(practice => !practice.hold).slice(0, MAX_FAQ_PRACTICES)
+      .map(practice => ({ practice_id: practice.practice_id, sentence: practice.sentence,
+        feedback_focus: { ...practice.feedback_focus } })),
+  };
+}
+
+/**
  * Build the W5 brief of one unit (spec §6.8, §8.3). The unit and lesson design are
  * located through `assembly.idm` by architecture index; component slots are the
  * contract's own plans so owned/supporting facts match the contract exactly.
@@ -164,8 +192,12 @@ export function buildIdmUnitBrief(input: {
       }),
       owned_fact_keys: [...plan.source_fact_ids],
       supporting_fact_keys: [...plan.supporting_evidence_fact_ids],
+      // QLT-5 D: the server's plan of an la_faq slot (absent on every other slot, as in Python).
+      ...(component.faq_items?.length ? { faq_items: component.faq_items.map(item => ({ ...item,
+        anchor_fact_keys: [...item.anchor_fact_keys] })) } : {}),
     };
   });
+  const faqMaterial = idmFaqMaterial(design, lessonDesign, unit);
   // Lesson context: facts of the lesson's other units, the criteria facts of this
   // unit's practices first, bounded to 80 facts / 24,000 characters.
   const unitKeys = new Set(input.unit_fact_keys);
@@ -207,5 +239,6 @@ export function buildIdmUnitBrief(input: {
     components,
     lesson_context_facts: contextFacts,
     job_aid_signpost: null,
+    ...(faqMaterial ? { faq_material: faqMaterial } : {}),
   });
 }

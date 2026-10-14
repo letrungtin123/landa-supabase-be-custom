@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { LessonAuthorProposal } from '../course-authoring/course-authoring.service.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
-import { idmDesignHash, idmPythonWordCount } from './lesson-author-idm.contract.js';
+import { idmDesignHash, idmPythonWordCount, type IdmCourseDesignV1 } from './lesson-author-idm.contract.js';
 import {
   assembleIdmOrchestrationArchitecture,
   assertIdmShardDesign,
@@ -10,7 +10,7 @@ import {
 } from './lesson-author-idm-architecture.logic.js';
 import { idmScopeViewOf, remapFactsToBlockScopes } from './lesson-author-idm-scope-view.logic.js';
 import { exceedsIdmOutputBudget, idmPythonHtmlVisibleText, idmUnitOutputBudget } from './lesson-author-idm-unit.logic.js';
-import { idmFixture, idmShardFixtures, IDM_FIXTURE_SNAPSHOT_HASH } from './lesson-author-idm.fixture.js';
+import { idmFixture, idmShardFixtures, IDM_FIXTURE_SNAPSHOT_HASH, rehashIdmDesign } from './lesson-author-idm.fixture.js';
 import {
   assembleOrchestrationV2Architecture,
   readOrchestrationV2ArchitectureAssembly,
@@ -200,6 +200,78 @@ test('IDM unit contract carries a sealed brief inside the contract hash; require
   assert.equal(idmUnitOutputBudget({ unit_segment: 'job_aid', components: [{ ...brief.components[0]!,
     treatments: Array.from({ length: 20 }, (_, index) => ({ block_id: `cb_${String(index + 1).padStart(4, '0')}`,
       treatment: 'keep' as const, detail_level: 'd' })) }] }).max_words, 1_600);
+});
+
+/**
+ * QLT-5 D: chapter 1, lesson 1, unit 1 of the fixture with an la_faq slot planned at W4, W1 notes on its block and a
+ * held and an active practice in its lesson.
+ */
+function idmFaqUnit() {
+  const base = idmFixture();
+  const design = structuredClone(base.design) as Mutable;
+  const block = design.blocks[0];
+  block.support_role = 'common_mistake';
+  block.issues = [{ type: 'unclear', note: 'Ranh giới bước chưa rõ.', fact_keys: [block.fact_keys[0]] }];
+  block.gaps = [{ type: 'missing_exception', note: 'Nguồn không nêu ngoại lệ.' }];
+  block.sme_questions = ['Bước này có ngoại lệ nào không?'];
+  const fixture = { ...base, design: rehashIdmDesign(design as IdmCourseDesignV1) };
+  const shards = idmShardFixtures(fixture);
+  const first = shards[0]!;
+  const lesson = first.shard.idm_design.lessons[0];
+  const feedback = { criterion: 'Đúng thứ tự bước', rationale: 'Bước sau cần kết quả bước trước',
+    improvement: 'Đối chiếu quy trình mẫu' };
+  const practice = (id: string, hold: boolean) => ({ practice_id: id, sentence: 'Cho một tình huống, người học chọn bước '
+    + 'tiếp theo để xử lý đúng.', context_input: 'Một tình huống', learner_action: 'Chọn bước', result: 'Bước đúng',
+  bloom: 'apply', criteria_fact_keys: [block.fact_keys[0]], scenario_origin: 'ai_drafted', hold,
+  hold_question: hold ? 'SME xác nhận tiêu chí?' : null, feedback_focus: feedback });
+  lesson.practice_tasks = [practice('pt_1', true), practice('pt_2', false)];
+  const unit = lesson.units[0];
+  const faqItems = [{ question_type: 'common_mistake', anchor_fact_keys: [block.fact_keys[0]], origin: 'ai_drafted' },
+    { question_type: 'how_to_apply', anchor_fact_keys: [...block.fact_keys], origin: 'source' }];
+  const review = unit.components[0].author_review;
+  unit.components.push({ component_index: 2, type: 'la_faq', role: 'clarify', title: 'Những điểm dễ nhầm',
+    rationale: 'Làm rõ điểm dễ nhầm.', block_ids: [...unit.block_ids], practice_id: null, support_items: [],
+    author_review: review, faq_items: faqItems });
+  const projected = first.shard.lessons[0].units[0];
+  projected.component_plan.push({ ...projected.component_plan[0], type: 'la_faq', title: 'Những điểm dễ nhầm',
+    rationale: 'Làm rõ điểm dễ nhầm.' });
+  const { design_hash: _stale, ...unsealed } = first.shard.idm_design;
+  first.shard.idm_design.design_hash = idmDesignHash(unsealed);
+  first.artifact_hash = hash({ contract_version: 2, shard: first.shard });
+  const view = idmScopeViewOf(fixture.design);
+  const assembly = assembleIdmOrchestrationArchitecture(fixture.skeleton, view,
+    shards.map(item => ({ artifact_hash: item.artifact_hash, shard: item.shard as never })));
+  const contractOf = (unitPath: string, scopes: readonly string[]) => {
+    const keys = new Set(view.design.block_scopes.filter(scope => scopes.includes(scope.scope_key))
+      .flatMap(scope => scope.fact_keys));
+    return prepareOrchestrationV2UnitGenerationContract({ assembly, unit_path: unitPath,
+      source_facts: remapFactsToBlockScopes(fixture.facts.filter(fact => keys.has(fact.fact_key)), view),
+      idm: { design: fixture.design, lesson_facts: fixture.facts.filter(fact => keys.has(fact.fact_key)) } });
+  };
+  const chapter = assembly.architecture.chapters[0]!;
+  return { fixture, faqItems, feedback,
+    faq: contractOf('chapter_1.lesson_1.unit_1', chapter.lessons[0]!.units[0]!.source_scope_ids),
+    plain: contractOf('chapter_1.lesson_2.unit_1', chapter.lessons[1]!.units[0]!.source_scope_ids) };
+}
+
+test('QLT-5 D: an FAQ unit brief carries the W4 FAQ plan and the W1 notes of its blocks; other briefs do not', () => {
+  const { fixture, faqItems, feedback, faq, plain } = idmFaqUnit();
+  const brief = faq.idm_unit_brief!;
+  assert.deepEqual(brief.components.map(slot => slot.type), ['html', 'la_faq']);
+  assert.deepEqual(brief.components[1]!.faq_items, faqItems);
+  assert.equal(Object.hasOwn(brief.components[0]!, 'faq_items'), false);
+  const block = fixture.design.blocks[0]!;
+  assert.deepEqual(brief.faq_material, {
+    blocks: [{ block_id: block.block_id, name: block.name, intent: 'do', content_kind: 'procedure',
+      support_role: 'common_mistake', issues: block.issues, gaps: block.gaps, sme_questions: block.sme_questions }],
+    // Only the active practice: a held practice has no question whose wrong options carry misconceptions.
+    practices: [{ practice_id: 'pt_2', sentence: 'Cho một tình huống, người học chọn bước tiếp theo để xử lý đúng.',
+      feedback_focus: feedback }],
+  });
+  assert.equal(brief.brief_hash, hash((({ brief_hash: _hash, ...rest }) => rest)(brief)));
+  const other = plain.idm_unit_brief!;
+  assert.equal(Object.hasOwn(other, 'faq_material'), false);
+  assert.ok(other.components.every(slot => !Object.hasOwn(slot, 'faq_items')));
 });
 
 function unitResponse(contract: ReturnType<typeof idmUnit>['contract'], html: string, quality: unknown,
