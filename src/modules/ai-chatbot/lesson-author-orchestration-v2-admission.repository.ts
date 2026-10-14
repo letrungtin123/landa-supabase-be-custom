@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { lessonAuthorSourceSnapshotHash, type LessonAuthorSnapshotDocument } from './lesson-author-source-snapshot.logic.js';
-import { LaunchBriefStoredInvalidError, readStoredLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { assertLaunchModeAvailable, LaunchBriefStoredInvalidError, readStoredLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { IDM_PIPELINE_VERSION } from './lesson-author-idm.contract.js';
 import {
   prepareOrchestrationV2Admission,
   type OrchestrationV2AdmissionConfig,
@@ -81,6 +82,9 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
           throw error;
         }
       })();
+      // QLT-6: only the IDM pipeline keeps a document as it is; the launch already refused it, this closes the race
+      // with a rollout flag change between that check and this admission (the whole Create rolls back).
+      if (launchBrief) assertLaunchModeAvailable(launchBrief, config.pipeline === IDM_PIPELINE_VERSION);
 
       const documents = await tx.query(`SELECT d.id::text AS document_id,d.name,d.status,d.type,d.updated_at,d.source_info
         FROM kb_documents d WHERE d.tenant_id=$1 AND d.kb_id=$2 AND d.id=ANY($3::uuid[])

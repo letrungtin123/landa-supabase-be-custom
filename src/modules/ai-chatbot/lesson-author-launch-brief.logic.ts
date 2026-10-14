@@ -7,7 +7,9 @@ import { sanitizeIdmAuthorText } from './lesson-author-idm-intent.logic.js';
  * - `instructional_design`: the full IDM design. The author must enter the learner
  *   audience and the course purpose; the CMS course description stays background.
  * - `preserve_source`: a ready-made document kept word for word. The two texts must
- *   not be sent (the panel hides them).
+ *   not be sent (the panel hides them). Only the IDM pipeline can keep a document:
+ *   a create that would run on the legacy V2 pipeline or the old V1 path is refused
+ *   (`LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE`) instead of designing a course.
  *
  * Texts are cleaned like the QLT-5 author intent (HTML and control characters
  * removed, whitespace collapsed) and are data for the AI, never instructions.
@@ -28,12 +30,14 @@ export const LESSON_AUTHOR_LAUNCH_AUDIENCE_REQUIRED = 'LESSON_AUTHOR_LAUNCH_AUDI
 export const LESSON_AUTHOR_LAUNCH_PURPOSE_REQUIRED = 'LESSON_AUTHOR_LAUNCH_PURPOSE_REQUIRED';
 export const LESSON_AUTHOR_LAUNCH_BRIEF_TOO_LONG = 'LESSON_AUTHOR_LAUNCH_BRIEF_TOO_LONG';
 export const LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED = 'LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED';
+export const LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE = 'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE';
 export type LaunchBriefErrorCode =
   | typeof LESSON_AUTHOR_LAUNCH_MODE_INVALID
   | typeof LESSON_AUTHOR_LAUNCH_AUDIENCE_REQUIRED
   | typeof LESSON_AUTHOR_LAUNCH_PURPOSE_REQUIRED
   | typeof LESSON_AUTHOR_LAUNCH_BRIEF_TOO_LONG
-  | typeof LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED;
+  | typeof LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED
+  | typeof LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE;
 
 /** HTTP 400 messages `[vi, en]`, plain words for authors. */
 export const LAUNCH_BRIEF_ERROR_MESSAGES: Readonly<Record<LaunchBriefErrorCode, readonly [string, string]>> = Object.freeze({
@@ -52,6 +56,9 @@ export const LAUNCH_BRIEF_ERROR_MESSAGES: Readonly<Record<LaunchBriefErrorCode, 
   LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED: [
     'Chế độ giữ nguyên nội dung tài liệu không dùng đối tượng học và mục đích khoá học. Hãy bỏ hai thông tin này rồi thử lại.',
     'Keeping the document content as it is does not use the learner audience or the course purpose. Remove them and try again.'],
+  LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE: [
+    'Chế độ giữ nguyên nội dung tài liệu chưa được bật cho đơn vị của bạn. Hãy chọn thiết kế bài giảng từ tài liệu thô, hoặc liên hệ quản trị viên để bật chế độ này.',
+    'Keeping the document content as it is is not turned on for your organization yet. Choose to design a course from raw material, or ask your administrator to turn it on.'],
 });
 
 /** The brief as the API exposes it and the AI receives it (cleaned texts; null in preserve_source). */
@@ -149,6 +156,14 @@ export function isNormalizedLaunchBrief(value: unknown): value is LessonAuthorLa
   return brief.design_mode === 'instructional_design'
     && cleanText(brief.learner_audience, LAUNCH_BRIEF_AUDIENCE_MAX_CHARS)
     && cleanText(brief.course_purpose, LAUNCH_BRIEF_PURPOSE_MAX_CHARS);
+}
+
+/**
+ * Refuse a launch mode the selected pipeline cannot run (before anything is
+ * created): keeping a document as it is needs the IDM pipeline.
+ */
+export function assertLaunchModeAvailable(brief: LessonAuthorLaunchBrief, idmPipeline: boolean): void {
+  if (brief.design_mode === 'preserve_source' && !idmPipeline) fail(LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE);
 }
 
 /** The jsonb written once at workspace creation. */

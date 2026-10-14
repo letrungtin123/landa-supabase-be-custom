@@ -17,14 +17,15 @@ const input = { courseId: 'course-v1:test+1+2026', conversationId: uuid(3), oper
 /** Stand-in for chat.service's request identity: the launch brief is part of it (QLT-6). */
 const requestHashOf = (brief: unknown) => createHash('sha256').update(JSON.stringify(brief ?? null)).digest('hex');
 
-function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean } = {}) {
+/** `idm`: whether the tenant is admitted to the IDM pipeline (QLT-6 keep-as-is needs it); `absent` omits the dependency. */
+function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean; idm?: boolean | 'absent' } = {}) {
   let workspace: any = options.legacyWorkspace ? { id: uuid(8), conversation_id: input.conversationId, correlation_id: uuid(9),
     content_locale: input.locale, status: 'designing', request_hash: hash('a'), source_document_ids: input.sourceDocumentIds,
     launch_brief: null } : null;
   let runId: string | null = null;
   let events = 0;
   const state = { filters: 0, accepted: 0, admissions: 0, prepares: 0, replayContexts: [] as unknown[], sql: [] as string[],
-    inserts: [] as unknown[][], briefs: [] as unknown[] };
+    inserts: [] as unknown[][], briefs: [] as unknown[], idm: options.idm !== false };
   const prepared = (brief: unknown) => ({
     identity: { tenantId: user.tenantId!, userId: user.id, conversationId: input.conversationId,
       courseId: input.courseId, botId: uuid(6), kbId: uuid(7), requestHash: requestHashOf(brief),
@@ -81,6 +82,9 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean }
         bootstrap_hash: hash('e'), source_snapshot_hash: hash('b') };
     },
     id: (() => { const ids = [uuid(9), uuid(8)]; return () => ids.shift() ?? uuid(99); })(),
+    ...(options.idm === 'absent' ? {} : { idmPipelineFor: (tenantId: string) => {
+      assert.equal(tenantId, user.tenantId); return state.idm;
+    } }),
   });
   return { launch, state, inspect: () => ({ workspace, runId, events }) };
 }
@@ -155,6 +159,26 @@ test('QLT-6: a brief the controller did not clean never reaches preparation or t
     assert.deepEqual({ prepares: f.state.prepares, sql: f.state.sql.length }, { prepares: 0, sql: 0 });
   }
 });
+
+test('QLT-6: keeping a document needs the IDM pipeline: refused before anything is prepared, written or admitted',
+  async () => {
+    const kept: LessonAuthorLaunchBrief = { design_mode: 'preserve_source', learner_audience: null, course_purpose: null };
+    for (const idm of [false, 'absent'] as const) {
+      const f = fixture({ idm });
+      await assert.rejects(f.launch(user, { ...input, brief: kept }), { code: 'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE' });
+      assert.deepEqual({ prepares: f.state.prepares, admissions: f.state.admissions, inserts: f.state.inserts.length,
+        filters: f.state.filters }, { prepares: 0, admissions: 0, inserts: 0, filters: 0 });
+      assert.ok(f.state.sql.every(sql => /^\s*SELECT/.test(sql)), 'only the replay lookup ran');
+      // The design mode is unaffected on the legacy pipeline.
+      assert.equal((await f.launch(user, input)).replayed, false);
+    }
+    // An admitted kept workspace still replays after the rollout flag is turned off.
+    const f = fixture();
+    assert.equal((await f.launch(user, { ...input, brief: kept })).replayed, false);
+    f.state.idm = false;
+    assert.equal((await f.launch(user, { ...input, brief: kept })).replayed, true);
+    assert.equal(f.state.admissions, 1);
+  });
 
 test('failed V2 admission rolls back the workspace shell and event', async () => {
   const f = fixture({ failAdmission: true });

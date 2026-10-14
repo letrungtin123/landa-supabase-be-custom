@@ -24,7 +24,9 @@ import { createWorkspaceApplyRepository } from './lesson-author-workspace-apply.
 import { createWorkspaceAcceptance } from './lesson-author-workspace-storyboard.repository.js';
 import { createOrchestrationV2AdmissionRepository } from './lesson-author-orchestration-v2-admission.repository.js';
 import { createOrchestrationV2AdmissionService } from './lesson-author-orchestration-v2-admission.service.js';
-import { loadOrchestrationV2AdmissionRuntime, orchestrationV2IdmAdmissionWarning } from './lesson-author-orchestration-v2-execution.config.js';
+import {
+  loadOrchestrationV2AdmissionRuntime, orchestrationV2IdmAdmissionWarning, selectOrchestrationV2AdmissionPipeline,
+} from './lesson-author-orchestration-v2-execution.config.js';
 import { verifyOrchestrationV2Schema } from './lesson-author-orchestration-v2-schema.repository.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
 import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
@@ -298,6 +300,8 @@ const orchestrationV2Admit = createOrchestrationV2AdmissionService({
 const workspaceV2Launch = createWorkspaceV2LaunchService({
   query, db: { transaction: withDatabaseTransaction }, AppError,
   prepareDurableBlueprint, withLessonAuthorConversationLock, admit: orchestrationV2Admit,
+  // QLT-6: only a run admitted to the IDM pipeline can keep its document as it is.
+  idmPipelineFor: tenantId => selectOrchestrationV2AdmissionPipeline(tenantId, orchestrationV2IdmPolicy) === 'idm-1',
   report: event => console.info('[LessonAuthorOrchestrationV2Admission]', JSON.stringify(event)),
 });
 const orchestrationV2LaunchEnabled = () => env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED

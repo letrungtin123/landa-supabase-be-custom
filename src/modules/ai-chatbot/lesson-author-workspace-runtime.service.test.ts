@@ -47,3 +47,14 @@ test('create before runtime readiness rejects without preparing a message, quota
   const f=fixture();await assert.rejects(f.runtime.createLessonAuthorWorkspace({} as any,{} as any),{code:'WORKSPACE_EXECUTION_DISABLED'});
   assert.equal(f.state.queries,0);assert.equal(f.state.schema,0);
 });
+test('QLT-6 part 2: the V1 create path refuses to keep a document as it is before preparing anything',async()=>{
+  const f=fixture();f.env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED=true;await f.runtime.startLessonAuthorWorkspaceWorker();
+  const user={id:'00000000-0000-4000-8000-000000000001',tenantId:'00000000-0000-4000-8000-000000000002',role:'staff',sessionMode:'normal'};
+  const input={courseId:'course-v1:test+1',conversationId:'00000000-0000-4000-8000-000000000003',
+    operationId:'00000000-0000-4000-8000-000000000004',sourceDocumentIds:['00000000-0000-4000-8000-000000000005'],
+    locale:'vi' as const,brief:{design_mode:'preserve_source' as const,learner_audience:null,course_purpose:null}};
+  const queries=f.state.queries;
+  await assert.rejects(f.runtime.createLessonAuthorWorkspace(user as any,input),{code:'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'});
+  assert.equal(f.state.queries,queries);
+  await f.runtime.stopLessonAuthorWorkspaceWorker();
+});

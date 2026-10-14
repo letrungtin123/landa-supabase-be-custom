@@ -119,3 +119,23 @@ test('QLT-6: the bootstrap hash binds the launch brief; a workspace without one 
   await assert.rejects(malformed.repo.admit(target, config), { code: 'ORCHESTRATION_V2_ADMISSION_STATE_INVALID' });
   assert.deepEqual(malformed.events, ['BEGIN', 'ROLLBACK']);
 });
+
+test('QLT-6 part 2: admission keeps a document only on the IDM pipeline; the whole create rolls back otherwise', async () => {
+  const kept = { ...workspace, launch_brief: { design_mode: 'preserve_source', learner_audience: null,
+    course_purpose: null, version: 1 } };
+  for (const pipeline of [undefined, 'v2-legacy'] as const) {
+    const refused = fixture([[kept]]);
+    await assert.rejects(refused.repo.admit(target, { ...config, ...(pipeline ? { pipeline } : {}) }),
+      { code: 'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE' });
+    assert.deepEqual(refused.events, ['BEGIN', 'ROLLBACK']);
+    refused.assertDone();
+  }
+  const admitted = fixture([[kept], [doc], [], [{ id: uuid(20) }], [{ id: uuid(21) }], [{ id: uuid(22) }],
+    [{ id: uuid(23) }]]);
+  assert.equal((await admitted.repo.admit(target, { ...config, pipeline: 'idm-1' })).created, true);
+  // The pipeline is not part of the bootstrap hash (the runtime hash already identifies it).
+  const input = { workspace_id: target.workspaceId, tenant_id: target.tenantId, course_id: target.courseId,
+    source_snapshot_hash: sourceHash, source_document_ids: [doc.document_id] };
+  assert.equal(prepareOrchestrationV2Admission(input, { ...config, pipeline: 'idm-1' }).bootstrap_hash,
+    prepareOrchestrationV2Admission(input, config).bootstrap_hash);
+});

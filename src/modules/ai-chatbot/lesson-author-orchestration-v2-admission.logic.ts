@@ -1,5 +1,6 @@
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { isNormalizedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import type { OrchestrationV2RunPipeline } from './lesson-author-idm.contract.js';
 
 export interface OrchestrationV2AdmissionAuthority {
   workspace_id: string;
@@ -18,6 +19,11 @@ export interface OrchestrationV2AdmissionConfig {
   tenant_concurrency_limit: number;
   workspace_concurrency_limit: number;
   routing_shard_count: number;
+  /**
+   * QLT-6: the pipeline the runtime hash selects. Not part of the bootstrap hash (the
+   * runtime hash already is); admission refuses a kept-document brief outside IDM.
+   */
+  pipeline?: OrchestrationV2RunPipeline;
 }
 
 export interface PreparedOrchestrationV2Admission {

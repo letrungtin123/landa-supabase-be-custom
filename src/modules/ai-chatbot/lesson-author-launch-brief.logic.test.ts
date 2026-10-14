@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
 import {
+  assertLaunchModeAvailable,
   isLaunchBriefErrorCode,
   isNormalizedLaunchBrief,
   LAUNCH_BRIEF_AUDIENCE_MAX_CHARS,
@@ -131,7 +132,8 @@ test('QLT-6: replay identity: the same brief matches, another brief or a NULL ro
 
 test('QLT-6: every launch brief code has a plain message in both languages', () => {
   const codes = ['LESSON_AUTHOR_LAUNCH_MODE_INVALID', 'LESSON_AUTHOR_LAUNCH_AUDIENCE_REQUIRED',
-    'LESSON_AUTHOR_LAUNCH_PURPOSE_REQUIRED', 'LESSON_AUTHOR_LAUNCH_BRIEF_TOO_LONG', 'LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED'];
+    'LESSON_AUTHOR_LAUNCH_PURPOSE_REQUIRED', 'LESSON_AUTHOR_LAUNCH_BRIEF_TOO_LONG', 'LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED',
+    'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'];
   assert.deepEqual(Object.keys(LAUNCH_BRIEF_ERROR_MESSAGES).sort(), [...codes].sort());
   for (const value of codes) {
     assert.ok(isLaunchBriefErrorCode(value));
@@ -141,4 +143,13 @@ test('QLT-6: every launch brief code has a plain message in both languages', () 
   }
   assert.equal(isLaunchBriefErrorCode('WORKSPACE_CREATE_INPUT_INVALID'), false);
   assert.equal(isLaunchBriefErrorCode('toString'), false);
+});
+
+test('QLT-6 part 2: keeping a document needs the IDM pipeline; designing a course does not', () => {
+  assert.doesNotThrow(() => assertLaunchModeAvailable(preserve, true));
+  assert.throws(() => assertLaunchModeAvailable(preserve, false), code('LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'));
+  assert.doesNotThrow(() => assertLaunchModeAvailable(design, false));
+  const [vi, en] = LAUNCH_BRIEF_ERROR_MESSAGES.LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE;
+  assert.match(vi, /thiết kế bài giảng từ tài liệu thô/);
+  assert.match(en, /design a course from raw material/);
 });

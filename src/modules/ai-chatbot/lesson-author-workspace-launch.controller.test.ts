@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import type { AuthUser } from '../../types/express.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { createWorkspaceLaunchHandlers, type WorkspaceLaunchInput, type WorkspaceLaunchResult } from './lesson-author-workspace-launch.controller.js';
+import { LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError } from './lesson-author-launch-brief.logic.js';
 
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const user:AuthUser={id:id(1),tenantId:id(2),role:'staff',username:'fixture',sessionMode:'normal'};
@@ -167,6 +168,15 @@ test('QLT-6: a service-level brief rejection keeps its 400 code; a malformed sto
   await rejecting.create({user,params,body,query:{ui_locale:'en'}} as unknown as Request,
     {setHeader(){},status(n:number){status=n;return this;},json(v:unknown){payload=v;return this;}} as unknown as Response);
   assert.equal(status,400);assert.equal(payload.code,'LESSON_AUTHOR_LAUNCH_BRIEF_NOT_ALLOWED');
+  // QLT-6 part 2: a kept-document launch on a pipeline that cannot keep it is a 400 with a plain message too.
+  const unavailable=createWorkspaceLaunchHandlers({readEnabled:()=>true,executionReady:()=>true,db:{async transaction(work){return work({query:async()=>({rows:[],rowCount:0})} as GenerationJobSql);}},
+    report:()=>undefined,create:async()=>{throw new LaunchBriefError('LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE');}});
+  for(const ui of ['en','vi']){
+    await unavailable.create({user,params,body:{...baseBody,design_mode:'preserve_source'},query:{ui_locale:ui}} as unknown as Request,
+      {setHeader(){},status(n:number){status=n;return this;},json(v:unknown){payload=v;return this;}} as unknown as Response);
+    assert.equal(status,400);assert.equal(payload.code,'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE');
+    assert.equal(payload.message,LAUNCH_BRIEF_ERROR_MESSAGES.LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE[ui==='en'?1:0]);
+  }
   for(const stored of [{...brief},{...brief,version:2},{...brief,version:1,learner_audience:''},'brief',
     {design_mode:'preserve_source',learner_audience:'',course_purpose:null,version:1}]){
     f.state.storedBrief=stored;const r=await f.invoke('latest');

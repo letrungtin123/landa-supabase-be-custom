@@ -16,7 +16,7 @@ import { verifyWorkspaceSchema } from './lesson-author-workspace-schema.reposito
 import { generationSnapshotHash as hash, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
 import type { GenerationJobSql, GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
-import { isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 /** Injectable composition seam; production exports below retain their signatures.
  * Importing this module performs no config/connection/service initialization. */
@@ -218,6 +218,8 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
     ||![user.id,user.tenantId,input.conversationId,input.operationId].every(id=>UUID.test(id))
     ||!input.sourceDocumentIds.length||input.sourceDocumentIds.length>5||new Set(input.sourceDocumentIds).size!==input.sourceDocumentIds.length
     ||input.sourceDocumentIds.some(id=>!UUID.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
+  // QLT-6: this V1 path designs a course with the old blueprint generator; it can never keep a document as it is.
+  assertLaunchModeAvailable(input.brief,false);
   const tenantId=user.tenantId,content=input.locale==='en'?'Create lesson content from the selected documents.':'Tạo nội dung bài học từ tài liệu đã chọn.';
   return withLessonAuthorConversationLock(input.conversationId,async()=>{
     const prior=await query<GenerationJobRow>(`SELECT * FROM lesson_author_generation_jobs WHERE tenant_id=$1 AND conversation_id=$2 AND requested_by=$3 AND idempotency_key=$4`,

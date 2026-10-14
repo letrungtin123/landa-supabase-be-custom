@@ -77,6 +77,7 @@ export function createOrchestrationV2AdmissionService(deps: Dependencies) {
       tenant_concurrency_limit: config.tenant_concurrency_limit,
       workspace_concurrency_limit: config.workspace_concurrency_limit,
       routing_shard_count: config.routing_shard_count,
+      pipeline: runtime.pipeline,
     });
   };
 }

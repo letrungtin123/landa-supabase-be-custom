@@ -7,7 +7,7 @@ import type { prepareDurableBlueprint, withLessonAuthorConversationLock } from '
 import type { OrchestrationV2AdmissionReceipt } from './lesson-author-orchestration-v2-admission.repository.js';
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
 import {
-  isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
+  assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
 } from './lesson-author-launch-brief.logic.js';
 
 type Query = (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -36,6 +36,11 @@ export interface WorkspaceV2LaunchDependencies {
     conversationId: string;
     userId: string;
   }): Promise<OrchestrationV2AdmissionReceipt>;
+  /**
+   * QLT-6: whether this tenant's runs are admitted to the IDM pipeline, the only one
+   * that can keep a document as it is. Absent means no (fail closed).
+   */
+  idmPipelineFor?(tenantId: string): boolean;
   id?: () => string;
   report?(event: Record<string, unknown>): void;
 }
@@ -95,6 +100,9 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       const replay = await findReplay(tenantId, user.id, input);
       // QLT-6: the same operation with another launch brief is another request (checked again under lock below).
       if (replay && !sameLaunchBrief(replay.launch_brief, input.brief)) fail('WORKSPACE_CREATE_CONFLICT');
+      // QLT-6: a new workspace that would keep its document needs the IDM pipeline: refused (a 400 with its own
+      // plain message) before anything is prepared or written. A replay of an admitted workspace still replays.
+      if (!replay) assertLaunchModeAvailable(input.brief, deps.idmPipelineFor?.(tenantId) === true);
       const candidate = await deps.prepareDurableBlueprint(input.conversationId, user.id, tenantId, content, {
         target: 'lesson_author', courseId: input.courseId, mode: 'course_blueprint', locale: input.locale,
         sourceDocuments: input.sourceDocumentIds.map(document_id => ({ document_id })), launchBrief: input.brief,

@@ -30,6 +30,7 @@ const executionRuntime = {
   planning_budgets: {},
   inventory_budgets: {},
   allowed_component_types: new Set(['html']),
+  pipeline: 'v2-legacy',
 } as unknown as OrchestrationV2ExecutionRuntime;
 
 test('admission service verifies schema once and freezes only server-owned runtime configuration', async () => {
@@ -60,6 +61,8 @@ test('admission service verifies schema once and freezes only server-owned runti
   assert.deepEqual(admitted[0]!.config, {
     runtime_config_hash: hash('c'), model: 'gemini-test', source_snapshot_budget_ms: 600_000,
     tenant_concurrency_limit: 16, workspace_concurrency_limit: 4, routing_shard_count: 4_096,
+    // QLT-6: the selected pipeline reaches admission (a kept-document brief needs IDM); it is not hashed.
+    pipeline: 'v2-legacy',
   });
 });
 
