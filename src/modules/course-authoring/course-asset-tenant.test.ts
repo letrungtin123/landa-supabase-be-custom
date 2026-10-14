@@ -76,6 +76,12 @@ test('createAssetRecord inserts only when the course belongs to the tenant', asy
   );
   const created = await createAssetRecord(COURSE_A, TENANT_A, 'ok.pdf', 'application/pdf', 1, `${TENANT_A}/courses/${COURSE_A}/ok.pdf`, 'ok', STAFF_A);
   assert.equal(created.course_id, COURSE_A);
+  // The in-memory double cannot type-check SQL: PostgreSQL refused the untyped
+  // version (every upload failed with "inconsistent types deduced for
+  // parameter $1"), so each parameter used twice keeps one explicit type.
+  const insert = calls.find((call) => /INSERT INTO course_assets/.test(call.sql))!.sql;
+  assert.match(insert, /SELECT \$1::varchar, \$2::uuid, \$3::varchar, \$4::varchar, \$5::bigint, \$6::text, \$7::text, \$8::uuid/);
+  assert.match(insert, /c\.id = \$1::varchar AND c\.tenant_id = \$2::uuid/);
 });
 
 test('learners see only reference files whose tenant matches the course', async (t) => {

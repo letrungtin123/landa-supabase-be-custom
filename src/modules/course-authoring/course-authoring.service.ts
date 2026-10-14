@@ -1683,10 +1683,13 @@ export async function createAssetRecord(
   uploadedBy: string,
 ): Promise<AssetRecord> {
   // The course must belong to the asset's tenant; otherwise nothing is inserted.
+  // Every parameter is typed: $1 and $2 appear twice, and an untyped SELECT-list
+  // parameter is deduced as text while `c.id = $1` deduces varchar, which
+  // PostgreSQL refuses ("inconsistent types deduced for parameter $1").
   const result = await query<AssetRecord>(
     `INSERT INTO course_assets (course_id, tenant_id, display_name, content_type, file_size, storage_path, url, uploaded_by)
-     SELECT $1, $2, $3, $4, $5, $6, $7, $8
-     WHERE EXISTS (SELECT 1 FROM courses c WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL)
+     SELECT $1::varchar, $2::uuid, $3::varchar, $4::varchar, $5::bigint, $6::text, $7::text, $8::uuid
+     WHERE EXISTS (SELECT 1 FROM courses c WHERE c.id = $1::varchar AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL)
      RETURNING id, course_id, display_name, content_type, file_size, storage_path, url, thumbnail_url, is_locked, created_at AS date_added`,
     [courseId, tenantId, displayName, contentType, fileSize, storagePath, url, uploadedBy],
   );
