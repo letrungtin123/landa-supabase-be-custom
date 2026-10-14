@@ -28,6 +28,9 @@ import {
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { createSourceSnapshotRepositoryV2 } from './lesson-author-orchestration-v2-source.repository.js';
 import {
+  LaunchBriefStoredInvalidError, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
+} from './lesson-author-launch-brief.logic.js';
+import {
   IDM_CONTRACT_VERSION,
   IDM_LEGACY_PIPELINE_VERSION,
   IDM_PIPELINE_VERSION,
@@ -285,14 +288,15 @@ export function createOrchestrationV2PlanningRepository(
   /**
    * IDM course-skeleton input (spec §12.4): live-lease task budget and deadline,
    * the course name and description as the author intent (QLT-5, read live and
-   * sanitised by the request builder), and every persisted snapshot fact in
-   * snapshot order. Capacity is measured in SQL first so an oversize snapshot is
+   * sanitised by the request builder), the workspace's write-once launch brief
+   * (QLT-6; null before it), and every persisted snapshot fact in snapshot order. Capacity is measured in SQL first so an oversize snapshot is
    * rejected before its rows are loaded or any provider call is made.
    */
   async function loadIdmSkeletonInput(lease: OrchestrationV2TaskLease): Promise<{
     source_facts: OrchestrationV2SourceFact[];
     course_title: string | null;
     course_description: string | null;
+    launch_brief: LessonAuthorLaunchBrief | null;
     input_tokens: number;
     remaining_ms: number;
   }> {
@@ -300,8 +304,10 @@ export function createOrchestrationV2PlanningRepository(
     return db.transaction(async tx => {
       const task = await tx.query(`SELECT t.input_tokens,
           floor(extract(epoch FROM (t.deadline_at-clock_timestamp()))*1000)::integer AS remaining_ms,
-          course.display_name AS course_title,course.description AS course_description
+          course.display_name AS course_title,course.description AS course_description,workspace.launch_brief
         FROM lesson_author_workspace_v2_tasks t
+        JOIN lesson_author_workspaces workspace ON workspace.id=t.workspace_id AND workspace.tenant_id=t.tenant_id
+          AND workspace.course_id=t.course_id
         LEFT JOIN courses course ON course.id=t.course_id AND course.tenant_id=t.tenant_id AND course.deleted_at IS NULL
         WHERE ${liveLeaseSql('t')}`,
       [lease.task_id, lease.run_id, lease.workspace_id, lease.tenant_id, lease.lease_token]);
@@ -309,6 +315,12 @@ export function createOrchestrationV2PlanningRepository(
       const inputTokens = Number(row?.input_tokens), remainingMs = Number(row?.remaining_ms);
       if (task.rows.length !== 1 || !Number.isSafeInteger(inputTokens) || inputTokens < 1
         || !Number.isSafeInteger(remainingMs) || remainingMs < 1) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
+      const launchBrief = (() => {
+        try { return readStoredLaunchBrief(row.launch_brief); } catch (error) {
+          if (error instanceof LaunchBriefStoredInvalidError) return fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
+          throw error;
+        }
+      })();
       const scope = [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id];
       const size = await tx.query(`SELECT count(*)::integer AS fact_count,
           coalesce(sum(char_length(fact_text)),0)::bigint AS content_chars
@@ -335,6 +347,7 @@ export function createOrchestrationV2PlanningRepository(
         })),
         course_title: typeof row?.course_title === 'string' ? row.course_title : null,
         course_description: typeof row?.course_description === 'string' ? row.course_description : null,
+        launch_brief: launchBrief,
         input_tokens: inputTokens,
         remaining_ms: remainingMs,
       };

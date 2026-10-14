@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
+import { LESSON_AUTHOR_DESIGN_MODES, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 
 /**
  * Strict TypeScript mirror of `landa-ai-rag/app/idm/contracts.py` (spec §6, §12.2).
@@ -22,13 +23,19 @@ import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
  * in contract 2, the optional `purpose.fidelity_mode` and brief `fidelity_mode`
  * (the content mode; absent or null reads as "structured") and the `explain`
  * treatment.
+ *
+ * Contract 3 (QLT-6) adds the launch brief to `project_context` (`design_mode`,
+ * `learner_audience`, `course_purpose`; null for a workspace started before it),
+ * the "author" audience origin, the "purpose" purpose evidence and the unit
+ * brief's `design_mode`. Contract-1 and contract-2 designs and briefs read
+ * unchanged, exactly as stored (no key is added), so their hashes still verify.
  */
 
 export const IDM_PIPELINE_VERSION = 'idm-1' as const;
 export const IDM_LEGACY_PIPELINE_VERSION = 'v2-legacy' as const;
-export const IDM_CONTRACT_VERSION = 2 as const;
-/** Contract versions a stored course design may carry (1 = before QLT-5). */
-export const IDM_READABLE_CONTRACT_VERSIONS = [1, IDM_CONTRACT_VERSION] as const;
+export const IDM_CONTRACT_VERSION = 3 as const;
+/** Contract versions a stored course design may carry (1 = before QLT-5, 2 = before QLT-6). */
+export const IDM_READABLE_CONTRACT_VERSIONS = [1, 2, IDM_CONTRACT_VERSION] as const;
 export const IDM_PROMPT_POLICY_VERSION = 'idm-prompt-1' as const;
 export const IDM_SCOPE_KEY_PREFIX = 'idmcb_';
 /** Python `IDM_SINGLE_TASK_MAX_SOURCE_CHARS`; Node checks it before calling Python (spec §12.4). */
@@ -81,6 +88,10 @@ export const IDM_COMPONENT_ROLES = ['explain', 'show', 'practice', 'clarify', 's
 export const IDM_UNIT_SEGMENTS = ['context_explain', 'example', 'practice_feedback', 'summary_apply', 'job_aid'] as const;
 export const IDM_SCENARIO_ORIGINS = ['source', 'ai_drafted', 'none'] as const;
 export const IDM_ORIGINS = ['client', 'ai_proposed'] as const;
+/** Python `AudienceOrigin`: "author" (contract 3) is the audience the author entered when starting AI ID. */
+export const IDM_AUDIENCE_ORIGINS = ['client', 'ai_proposed', 'author'] as const;
+/** Python `DesignMode` (contract 3): how the author started AI ID. */
+export const IDM_DESIGN_MODES = LESSON_AUTHOR_DESIGN_MODES;
 export const IDM_STAGE_ORIGINS = ['provider', 'partial_fallback', 'deterministic_fallback'] as const;
 export const IDM_COMPONENT_TYPES = ['html', 'problem', 'la_faq', 'la_sortable', 'la_crossword', 'la_diagram'] as const;
 export const IDM_JUDGE_CRITERIA = ['Q1_support_sufficient', 'Q2_not_copied', 'Q3_practice_complete',
@@ -90,7 +101,7 @@ export const IDM_JUDGE_SEVERITIES = ['pass', 'minor', 'major', 'critical'] as co
 export const IDM_PURPOSE_PROFILES = ['onboarding', 'product', 'compliance', 'sales', 'soft_skills', 'general'] as const;
 export const IDM_PURPOSE_CONFIDENCES = ['high', 'medium', 'low'] as const;
 export const IDM_PURPOSE_ORIGINS = ['author_intent', 'ai_inferred', 'deterministic_fallback'] as const;
-export const IDM_PURPOSE_EVIDENCE = ['title', 'description', 'source'] as const;
+export const IDM_PURPOSE_EVIDENCE = ['title', 'description', 'source', 'purpose'] as const;
 /** Python `FidelityMode` (QLT-5 C): how closely learner text follows the source wording. */
 export const IDM_FIDELITY_MODES = ['keep', 'structured', 'explain'] as const;
 /** QLT-5 D (Python `FaqQuestionType`, `FaqItemOrigin`): the server's plan of one FAQ item. */
@@ -114,6 +125,8 @@ export type IdmComponentRole = typeof IDM_COMPONENT_ROLES[number];
 export type IdmUnitSegment = typeof IDM_UNIT_SEGMENTS[number];
 export type IdmScenarioOrigin = typeof IDM_SCENARIO_ORIGINS[number];
 export type IdmOrigin = typeof IDM_ORIGINS[number];
+export type IdmAudienceOrigin = typeof IDM_AUDIENCE_ORIGINS[number];
+export type IdmDesignMode = typeof IDM_DESIGN_MODES[number];
 export type IdmStageOrigin = typeof IDM_STAGE_ORIGINS[number];
 export type IdmComponentType = typeof IDM_COMPONENT_TYPES[number];
 export type IdmJudgeCriterion = typeof IDM_JUDGE_CRITERIA[number];
@@ -132,6 +145,10 @@ export interface IdmProjectContextV1 {
   course_title_hint: string | null;
   /** Contract 2: the CMS course description (author intent); absent in a contract-1 context. */
   course_description?: string | null;
+  /** Contract 3 (QLT-6): the launch brief; all three absent in a contract-1/2 context, null without a brief. */
+  design_mode?: IdmDesignMode | null;
+  learner_audience?: string | null;
+  course_purpose?: string | null;
   source_documents: IdmSourceDocumentRefV1[];
   target_audience: string | null;
   learning_objectives: string[];
@@ -159,7 +176,7 @@ export interface IdmContentBlockV1 {
 export interface IdmLearningObjectiveV1 { lo_id: string; statement: string; bloom: IdmBloom; origin: IdmOrigin }
 export interface IdmMustDoV1 { must_do_id: string; lo_id: string; statement: string; kind: 'do' | 'decide'; bloom: IdmBloom }
 export interface IdmBlockLoLinkV1 { block_id: string; lo_id: string; relation: IdmLoRelation }
-export interface IdmAudienceV1 { description: string; origin: IdmOrigin }
+export interface IdmAudienceV1 { description: string; origin: IdmAudienceOrigin }
 export interface IdmSeparatePartV1 { name: string; intent: IdmIntent; fact_keys: string[] }
 
 export interface IdmBlueprintRowV1 {
@@ -400,6 +417,8 @@ export interface IdmUnitBriefV1 {
   purpose_summary?: string | null;
   /** QLT-5 C: the design purpose's content mode (null without one); absent in a brief built before it. */
   fidelity_mode?: IdmFidelityMode | null;
+  /** Contract 3 (QLT-6): how the author started AI ID (null without a brief); absent in an older brief. */
+  design_mode?: IdmDesignMode | null;
   module_title: string;
   lesson_title: string;
   lesson_objective: string;
@@ -616,13 +635,20 @@ const sourceDocument: Reader<IdmSourceDocumentRefV1> = (value, path) => {
 
 const PROJECT_CONTEXT_KEYS_V1 = ['locale', 'course_title_hint', 'source_documents', 'target_audience',
   'learning_objectives', 'duration_target_minutes'] as const;
+/** Contract 3 (QLT-6) launch-brief keys; present together or not at all. */
+const PROJECT_CONTEXT_BRIEF_KEYS = ['design_mode', 'learner_audience', 'course_purpose'] as const;
 
-/** `shape` pins the contract of a stored design; a module context built from either design takes either. */
+/**
+ * `shape` pins the contract of a stored design; a module context built from any design takes any. The shape
+ * follows the keys: `design_mode` = contract 3 (with the description), `course_description` alone = 2, neither = 1.
+ */
 function projectContext(value: unknown, path: string, shape: IdmContractVersion | 'either' = 'either'): IdmProjectContextV1 {
   const described = hasKey(value, 'course_description');
-  if ((shape === 1 && described) || (shape === 2 && !described)) invalid(path);
-  const item = object(value, path, described ? [...PROJECT_CONTEXT_KEYS_V1, 'course_description']
-    : PROJECT_CONTEXT_KEYS_V1);
+  const briefed = hasKey(value, 'design_mode');
+  const actual: IdmContractVersion = briefed ? 3 : described ? 2 : 1;
+  if (shape !== 'either' && shape !== actual) invalid(path);
+  const item = object(value, path, [...PROJECT_CONTEXT_KEYS_V1, ...(actual >= 2 ? ['course_description'] : []),
+    ...(briefed ? PROJECT_CONTEXT_BRIEF_KEYS : [])]);
   return {
     locale: oneOf(item.locale, `${path}.locale`, LOCALES),
     course_title_hint: nullableText(item.course_title_hint, `${path}.course_title_hint`, 500),
@@ -633,6 +659,11 @@ function projectContext(value: unknown, path: string, shape: IdmContractVersion 
     learning_objectives: list(item.learning_objectives, `${path}.learning_objectives`, 0, 8, line(500)),
     duration_target_minutes: nullable((entry, at) => integer(entry, at, 5, 600))(
       item.duration_target_minutes, `${path}.duration_target_minutes`),
+    ...(briefed ? {
+      design_mode: item.design_mode === null ? null : oneOf(item.design_mode, `${path}.design_mode`, IDM_DESIGN_MODES),
+      learner_audience: nullableText(item.learner_audience, `${path}.learner_audience`, 300),
+      course_purpose: nullableText(item.course_purpose, `${path}.course_purpose`, 500),
+    } : {}),
   };
 };
 
@@ -654,7 +685,7 @@ const purpose: Reader<IdmPurposeV1> = (value, path) => {
     summary: text(item.summary, `${path}.summary`, 10, 500),
     confidence: oneOf(item.confidence, `${path}.confidence`, IDM_PURPOSE_CONFIDENCES),
     origin: oneOf(item.origin, `${path}.origin`, IDM_PURPOSE_ORIGINS),
-    evidence: list(item.evidence, `${path}.evidence`, 0, 3, (entry, at) => oneOf(entry, at, IDM_PURPOSE_EVIDENCE)),
+    evidence: list(item.evidence, `${path}.evidence`, 0, 4, (entry, at) => oneOf(entry, at, IDM_PURPOSE_EVIDENCE)),
     signals: list(item.signals, `${path}.signals`, 0, 8, line(40)),
     template_gaps: list(item.template_gaps, `${path}.template_gaps`, 0, 12, templateGap),
     ...(moded ? { fidelity_mode: nullable(fidelityMode)(item.fidelity_mode, `${path}.fidelity_mode`) } : {}),
@@ -714,7 +745,7 @@ const loLink: Reader<IdmBlockLoLinkV1> = (value, path) => {
 const audience: Reader<IdmAudienceV1> = (value, path) => {
   const item = object(value, path, ['description', 'origin']);
   return { description: text(item.description, `${path}.description`, 10, 2_000),
-    origin: oneOf(item.origin, `${path}.origin`, IDM_ORIGINS) };
+    origin: oneOf(item.origin, `${path}.origin`, IDM_AUDIENCE_ORIGINS) };
 };
 
 // --- W2 ----------------------------------------------------------------------------------------
@@ -1068,8 +1099,11 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
   const moded = purposeful && hasKey(value, 'fidelity_mode');
   // QLT-5 D: only a unit with an la_faq slot carries its FAQ material.
   const material = hasKey(value, 'faq_material');
+  // Contract 3 (QLT-6): a brief built from a contract-3 design carries the design mode.
+  const designed = purposeful && hasKey(value, 'design_mode');
   const keys = [...(purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1), ...(moded ? ['fidelity_mode'] : []),
-    ...(material ? ['faq_material'] : [])].filter(key => sealed || key !== 'brief_hash');
+    ...(material ? ['faq_material'] : []), ...(designed ? ['design_mode'] : [])]
+    .filter(key => sealed || key !== 'brief_hash');
   const item = object(value, path, keys);
   return {
     pipeline_version: oneOf(item.pipeline_version, `${path}.pipeline_version`, [IDM_PIPELINE_VERSION] as const),
@@ -1081,6 +1115,8 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
       purpose_summary: nullableText(item.purpose_summary, `${path}.purpose_summary`, 500),
     } : {}),
     ...(moded ? { fidelity_mode: nullable(fidelityMode)(item.fidelity_mode, `${path}.fidelity_mode`) } : {}),
+    ...(designed ? { design_mode: item.design_mode === null ? null
+      : oneOf(item.design_mode, `${path}.design_mode`, IDM_DESIGN_MODES) } : {}),
     module_title: text(item.module_title, `${path}.module_title`, 1, 500),
     lesson_title: text(item.lesson_title, `${path}.lesson_title`, 1, 180),
     lesson_objective: text(item.lesson_objective, `${path}.lesson_objective`, 1, 500),
@@ -1183,13 +1219,17 @@ export function boundIdmRemainingBudgetMs(remainingBudgetMs: number, transportTi
  * Build the `idm` field of an IDM course-skeleton request. Throws
  * `IDM_SOURCE_EXCEEDS_SINGLE_TASK_CAPACITY` before any provider dispatch when
  * the snapshot cannot fit one Python course-design task. The CMS course name
- * and description are the author intent (QLT-5), sanitised here; the returned
- * design must carry this exact `project_context` (`completeSkeleton`).
+ * and description are the author intent (QLT-5), sanitised here; the launch
+ * brief (QLT-6) was cleaned once at launch and is sent as stored (null fields
+ * for a workspace started before QLT-6). The returned design must carry this
+ * exact `project_context` (`completeSkeleton`).
  */
 export function buildIdmCourseSkeletonRequest(input: {
   locale: 'vi' | 'en';
   course_title: string | null;
   course_description: string | null;
+  /** The workspace launch brief; null (or absent) for a workspace created before QLT-6. */
+  launch_brief?: LessonAuthorLaunchBrief | null;
   source_documents: ReadonlyArray<{ document_id: string; name: string; type: string | null }>;
   source_facts: readonly OrchestrationV2SourceFact[];
   input_tokens: number;
@@ -1219,6 +1259,9 @@ export function buildIdmCourseSkeletonRequest(input: {
       target_audience: null,
       learning_objectives: [],
       duration_target_minutes: null,
+      design_mode: input.launch_brief?.design_mode ?? null,
+      learner_audience: input.launch_brief?.learner_audience ?? null,
+      course_purpose: input.launch_brief?.course_purpose ?? null,
     },
     source_facts: facts,
     token_allowance: idmTokenAllowance(input, 'idm.token_allowance'),

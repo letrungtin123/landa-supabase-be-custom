@@ -48,15 +48,27 @@ export const IDM_FIXTURE_PURPOSE: IdmPurposeV1 = Object.freeze({
   template_gaps: [{ section_key: 'organisation', note: 'Tài liệu chưa có phần: Cơ cấu tổ chức và người liên hệ — cần bổ sung.' }],
 }) as IdmPurposeV1;
 
+/** The launch brief a contract-3 fixture design carries (QLT-6, instructional design). */
+export const IDM_FIXTURE_LAUNCH_BRIEF = Object.freeze({
+  design_mode: 'instructional_design', learner_audience: 'Nhân viên mới của công ty mẫu',
+  course_purpose: 'Giúp nhân viên mới hiểu công ty và biết cần liên hệ ai trong tuần đầu.',
+}) as { design_mode: 'instructional_design'; learner_audience: string | null; course_purpose: string | null };
+
+/** The purpose of a contract-3 fixture: the author's purpose is the summary and the strongest evidence. */
+export const IDM_FIXTURE_BRIEFED_PURPOSE: IdmPurposeV1 = Object.freeze({
+  ...IDM_FIXTURE_PURPOSE, summary: IDM_FIXTURE_LAUNCH_BRIEF.course_purpose!, evidence: ['purpose', 'title'],
+  fidelity_mode: 'explain',
+}) as IdmPurposeV1;
+
 /**
  * Build a self-consistent IDM course design plus its projected skeleton. Every
  * block is a course block; one nice-to-know block, one held block and one noise
  * fact are appended to exercise dispositions outside the course. `contract` 1
  * (the default) is the shape stored before QLT-5; 2 adds the course description
- * and the purpose.
+ * and the purpose; 3 (QLT-6) adds the launch brief and the author's audience.
  */
 export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[150], [90, 60]]]],
-  options: { contract?: 1 | 2 } = {}): IdmFixture {
+  options: { contract?: 1 | 2 | 3 } = {}): IdmFixture {
   const contract = options.contract ?? 1;
   const hash = IDM_FIXTURE_SNAPSHOT_HASH;
   const facts: OrchestrationV2SourceFact[] = [];
@@ -115,11 +127,15 @@ export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[
     pipeline_version: 'idm-1' as const, idm_contract_version: contract, prompt_policy_version: 'idm-prompt-1' as const,
     source_snapshot_hash: hash,
     project_context: { locale: 'vi' as const, course_title_hint: 'Khoá học mẫu',
-      ...(contract === 2 ? { course_description: 'Khoá học dành cho nhân viên mới.' } : {}),
+      ...(contract >= 2 ? { course_description: 'Khoá học dành cho nhân viên mới.' } : {}),
       source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }],
-      target_audience: null, learning_objectives: [], duration_target_minutes: null },
-    ...(contract === 2 ? { purpose: structuredClone(IDM_FIXTURE_PURPOSE) } : {}),
-    target_audience: { description: 'Nhân viên tuyến đầu cần áp dụng quy trình.', origin: 'ai_proposed' as const },
+      target_audience: null, learning_objectives: [], duration_target_minutes: null,
+      ...(contract === 3 ? structuredClone(IDM_FIXTURE_LAUNCH_BRIEF) : {}) },
+    ...(contract >= 2 ? { purpose: structuredClone(contract === 3 ? IDM_FIXTURE_BRIEFED_PURPOSE : IDM_FIXTURE_PURPOSE) }
+      : {}),
+    target_audience: contract === 3
+      ? { description: IDM_FIXTURE_LAUNCH_BRIEF.learner_audience!, origin: 'author' as const }
+      : { description: 'Nhân viên tuyến đầu cần áp dụng quy trình.', origin: 'ai_proposed' as const },
     learning_objectives: [{ lo_id: 'lo_1', statement: 'Người học có thể áp dụng quy trình mẫu', bloom: 'apply' as const,
       origin: 'ai_proposed' as const }],
     must_dos: lessonKeys.map((_, index) => ({ must_do_id: `md_${index + 1}`, lo_id: 'lo_1',

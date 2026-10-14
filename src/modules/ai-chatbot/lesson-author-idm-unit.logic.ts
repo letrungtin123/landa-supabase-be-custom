@@ -226,6 +226,9 @@ export function buildIdmUnitBrief(input: {
     purpose_summary: design.purpose?.summary ?? null,
     // QLT-5 C: the content mode the writer, its checks and the W5 budget follow (null: today's rules).
     fidelity_mode: design.purpose?.fidelity_mode ?? null,
+    // QLT-6 (contract 3): how the author started AI ID reaches the writer; absent for an older design.
+    ...(Object.hasOwn(design.project_context, 'design_mode')
+      ? { design_mode: design.project_context.design_mode ?? null } : {}),
     module_title: idmStripWhitespace(chapter.title),
     lesson_title: idmStripWhitespace(lesson.title),
     lesson_objective: idmStripWhitespace(lesson.objective),

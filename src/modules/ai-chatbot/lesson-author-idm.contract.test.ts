@@ -31,9 +31,13 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { readOrchestrationV2CourseSkeletonResponse } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { ORCHESTRATION_V2_IDM_EXECUTION_POLICY } from './lesson-author-orchestration-v2-execution.config.js';
 import {
+  IDM_BRIDGE_AVAILABLE,
+  IDM_FIXTURE_BRIEFED_PURPOSE,
   IDM_FIXTURE_DOCUMENT_ID,
+  IDM_FIXTURE_LAUNCH_BRIEF,
   IDM_FIXTURE_PURPOSE,
   IDM_PYTHON_AVAILABLE,
+  idmBridge,
   idmFixture,
   idmGoldenCourseDesign,
   idmGoldenSource,
@@ -256,7 +260,8 @@ test('course skeleton request carries the exact Python shape, bounded budgets an
     [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: IDM_FIXTURE_DOCUMENT_ID, type: 'file' }]);
   assert.deepEqual({ ...request.project_context, course_title_hint: null, course_description: null,
     source_documents: [] }, { locale: 'vi', course_title_hint: null, course_description: null, source_documents: [],
-    target_audience: null, learning_objectives: [], duration_target_minutes: null });
+    target_audience: null, learning_objectives: [], duration_target_minutes: null,
+    design_mode: null, learner_audience: null, course_purpose: null });
   assert.deepEqual(request.source_facts, facts);
   const lowBudgetRequest = { locale: 'vi' as const, course_title: null, course_description: null,
     source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }], source_facts: facts,
@@ -391,7 +396,10 @@ test('a design never mixes the contract-1 and contract-2 shapes', () => {
     invalidAt('idm.project_context'));
   assert.throws(() => readIdmCourseDesign(edit(2, design => { delete design.project_context.course_description; })),
     invalidAt('idm.project_context'));
+  // QLT-6: version 3 is readable, but only with the launch-brief keys; an unknown version never is.
   assert.throws(() => readIdmCourseDesign(edit(2, design => { design.idm_contract_version = 3; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => { design.idm_contract_version = 4; })),
     invalidAt('idm.idm_contract_version'));
   assert.throws(() => readIdmCourseDesign(edit(2, design => { design.purpose.profile = 'marketing'; })),
     invalidAt('idm.purpose.profile'));
@@ -549,3 +557,185 @@ test('QLT-5 D: the FAQ plan of a design component and the FAQ material of a brie
   assert.equal(Object.hasOwn(legacy, 'faq_material'), false);
   assert.equal(Object.hasOwn(legacy.components[0]!, 'faq_items'), false);
 });
+
+// --- QLT-6: contract 3 (launch brief) -------------------------------------------------------------
+
+test('QLT-6: designs of contracts 1, 2 and 3 read exactly as stored and never mix shapes', () => {
+  for (const contract of [1, 2, 3] as const) {
+    const fixture = idmFixture(undefined, { contract });
+    const read = readIdmCourseDesign(JSON.parse(JSON.stringify(fixture.design)));
+    assert.deepEqual(read, fixture.design);
+    assert.equal(read.idm_contract_version, contract);
+    assert.equal(Object.hasOwn(read.project_context, 'design_mode'), contract === 3);
+    assert.equal(Object.hasOwn(read.project_context, 'course_description'), contract >= 2);
+  }
+  const briefed = readIdmCourseDesign(idmFixture(undefined, { contract: 3 }).design);
+  assert.deepEqual([briefed.project_context.design_mode, briefed.project_context.learner_audience,
+    briefed.project_context.course_purpose], [IDM_FIXTURE_LAUNCH_BRIEF.design_mode,
+    IDM_FIXTURE_LAUNCH_BRIEF.learner_audience, IDM_FIXTURE_LAUNCH_BRIEF.course_purpose]);
+  assert.deepEqual(briefed.target_audience, { description: IDM_FIXTURE_LAUNCH_BRIEF.learner_audience, origin: 'author' });
+  assert.deepEqual(briefed.purpose, IDM_FIXTURE_BRIEFED_PURPOSE);
+  const edit = (contract: 2 | 3, change: (design: Mutable) => void) => {
+    const design = structuredClone(idmFixture(undefined, { contract }).design) as Mutable;
+    change(design);
+    return rehashIdmDesign(design as IdmCourseDesignV1);
+  };
+  // A contract-3 design without the brief keys, a contract-2 design with them, or a partial brief is invalid.
+  assert.throws(() => readIdmCourseDesign(edit(3, design => { delete design.project_context.design_mode; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => { delete design.project_context.course_purpose; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(2, design => {
+    Object.assign(design.project_context, { design_mode: null, learner_audience: null, course_purpose: null });
+  })), invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => { delete design.project_context.course_description; })),
+    invalidAt('idm.project_context'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => { design.project_context.design_mode = 'verbatim'; })),
+    invalidAt('idm.project_context.design_mode'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => {
+    design.project_context.learner_audience = 'x'.repeat(301);
+  })), invalidAt('idm.project_context.learner_audience'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => {
+    design.project_context.course_purpose = 'x'.repeat(501);
+  })), invalidAt('idm.project_context.course_purpose'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => { design.target_audience.origin = 'teacher'; })),
+    invalidAt('idm.target_audience.origin'));
+  assert.throws(() => readIdmCourseDesign(edit(3, design => {
+    design.purpose.evidence = ['purpose', 'title', 'description', 'source', 'title'];
+  })), invalidAt('idm.purpose.evidence'));
+  // A run started before QLT-6 sends contract 3 with null brief fields; that design reads too.
+  const unbriefed = edit(3, design => {
+    Object.assign(design.project_context, { design_mode: null, learner_audience: null, course_purpose: null });
+  });
+  assert.equal(readIdmCourseDesign(unbriefed).project_context.design_mode, null);
+  // The brief is bound by design_hash like every other field.
+  const tampered = structuredClone(idmFixture(undefined, { contract: 3 }).design) as Mutable;
+  tampered.project_context.course_purpose = 'Mục đích khác do ai đó sửa.';
+  assert.throws(() => readIdmCourseDesign(tampered), invalidAt('idm.design_hash'));
+});
+
+test('QLT-6: the module context carries a contract-3 project context; contract-1/2 contexts still read', () => {
+  for (const contract of [1, 2, 3] as const) {
+    const fixture = idmFixture(undefined, { contract });
+    const plans = planIdmChapterShards(fixture.skeleton, fixture.design, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning,
+      'a'.repeat(64));
+    const shard = plans.chapter_tasks[0]!.shard_plan!;
+    const context = buildIdmModuleContext({ design: fixture.design, lessons: idmShardLessonsOf(fixture.design, shard),
+      allowed_component_types: ['html', 'problem'], input_tokens: 400_000, max_output_tokens: 65_536,
+      provider_max_attempts: 2, remaining_ms: 500_000 });
+    assert.deepEqual(context.project_context, fixture.design.project_context);
+    assert.deepEqual(readIdmModuleContext(JSON.parse(JSON.stringify(context))), context);
+    if (contract === 3) assert.equal(context.target_audience.origin, 'author');
+  }
+});
+
+test('QLT-6: a unit brief carries the design mode only when built from a contract-3 design, bound by brief_hash', () => {
+  const base = {
+    pipeline_version: 'idm-1' as const, course_title: 'Hội nhập', target_audience: 'Nhân viên mới',
+    purpose_profile: 'onboarding' as const, purpose_summary: 'Giúp nhân viên mới hiểu công ty.',
+    fidelity_mode: 'explain' as const, module_title: 'Công ty là ai', lesson_title: 'Lịch sử',
+    lesson_objective: 'Giới thiệu công ty', lesson_practice_sentences: [], previous_lesson_title: null,
+    next_lesson_title: null, unit_segment: 'context_explain' as const, unit_purpose: 'Giới thiệu lịch sử công ty.',
+    job_aid_signpost: null,
+    components: [{ component_plan_id: `cp2_${'b'.repeat(32)}`, type: 'html' as const, role: 'explain' as const,
+      title: 'Lịch sử', support_items: [], practice: null, treatments: [], owned_fact_keys: ['f1'],
+      supporting_fact_keys: [] }],
+    lesson_context_facts: [],
+  };
+  const designed = sealIdmUnitBrief({ ...base, design_mode: 'instructional_design' });
+  assert.equal(designed.design_mode, 'instructional_design');
+  assert.deepEqual(readIdmUnitBrief(JSON.parse(JSON.stringify(designed))), designed);
+  assert.throws(() => readIdmUnitBrief({ ...designed, design_mode: 'preserve_source' }),
+    invalidAt('idm_unit_brief.brief_hash'));
+  assert.equal(sealIdmUnitBrief({ ...base, design_mode: null }).design_mode, null);
+  assert.throws(() => sealIdmUnitBrief({ ...base, design_mode: 'verbatim' as never }),
+    invalidAt('idm_unit_brief.design_mode'));
+  // A contract-1 brief (no purpose fields) never carries it; a contract-2 brief reads unchanged without it.
+  const { purpose_profile: _profile, purpose_summary: _summary, fidelity_mode: _mode, ...older } = base;
+  assert.throws(() => sealIdmUnitBrief({ ...older, design_mode: 'instructional_design' }), invalidAt('idm_unit_brief'));
+  assert.equal(Object.hasOwn(sealIdmUnitBrief(base), 'design_mode'), false);
+});
+
+test('QLT-6: the course-skeleton request sends the stored launch brief as project_context data (contract 3)', () => {
+  const { facts } = idmFixture();
+  const common = { locale: 'vi' as const, course_title: 'QC check', course_description: 'Khoá học dành cho',
+    source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }], source_facts: facts,
+    input_tokens: 1_800_000, max_output_tokens: 65_536, provider_max_attempts: 2, remaining_ms: 600_000 };
+  const designed = buildIdmCourseSkeletonRequest({ ...common, launch_brief: { design_mode: 'instructional_design',
+    learner_audience: 'Nhân viên mới', course_purpose: 'Giúp nhân viên mới hiểu công ty và cách làm việc.' } });
+  assert.deepEqual([designed.project_context.design_mode, designed.project_context.learner_audience,
+    designed.project_context.course_purpose],
+  ['instructional_design', 'Nhân viên mới', 'Giúp nhân viên mới hiểu công ty và cách làm việc.']);
+  assert.deepEqual([designed.project_context.course_title_hint, designed.project_context.course_description],
+    ['QC check', 'Khoá học dành cho']);
+  const preserved = buildIdmCourseSkeletonRequest({ ...common, launch_brief: { design_mode: 'preserve_source',
+    learner_audience: null, course_purpose: null } });
+  assert.deepEqual([preserved.project_context.design_mode, preserved.project_context.learner_audience,
+    preserved.project_context.course_purpose], ['preserve_source', null, null]);
+  // A workspace created before QLT-6 (NULL brief) still sends the contract-3 keys, as null.
+  for (const legacy of [buildIdmCourseSkeletonRequest(common),
+    buildIdmCourseSkeletonRequest({ ...common, launch_brief: null })]) {
+    assert.deepEqual([legacy.project_context.design_mode, legacy.project_context.learner_audience,
+      legacy.project_context.course_purpose], [null, null, null]);
+  }
+  assert.equal(IDM_CONTRACT_VERSION, 3);
+  assert.throws(() => buildIdmCourseSkeletonRequest({ ...common, launch_brief: { design_mode: 'instructional_design',
+    learner_audience: 'x'.repeat(301), course_purpose: 'Mục đích hợp lệ của khoá học.' } }),
+  invalidAt('idm.project_context.learner_audience'));
+});
+
+function goldenSkeletonRequest(golden: ReturnType<typeof idmGoldenSource>,
+  launchBrief: Parameters<typeof buildIdmCourseSkeletonRequest>[0]['launch_brief']) {
+  const scopes = [...new Set(golden.facts.map(fact => fact.scope_key))].map(scopeKey => {
+    const owned = golden.facts.filter(fact => fact.scope_key === scopeKey);
+    return { scope_key: scopeKey, title: scopeKey, source_ref: owned[0]!.source_ref, fact_count: owned.length,
+      content_chars: owned.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) };
+  });
+  const idm = buildIdmCourseSkeletonRequest({ locale: 'vi', course_title: 'Xử lý khiếu nại khách hàng',
+    course_description: String(golden.project_context.course_description), launch_brief: launchBrief,
+    source_documents: [{ document_id: golden.facts[0]!.document_id, name: 'quy-trinh-khieu-nai.pdf', type: 'file' }],
+    source_facts: golden.facts, input_tokens: 1_800_000, max_output_tokens: 65_536, provider_max_attempts: 2,
+    remaining_ms: 600_000 });
+  return { tenant_id: '00000000-0000-4000-8000-000000000004', kb_id: '00000000-0000-4000-8000-000000000008',
+    conversation_id: '00000000-0000-4000-8000-000000000009', target: 'lesson_author', model: 'gemini-3.8-flash',
+    max_output_tokens: 65_536, embedding_model: 'gemini-embedding-001', embedding_dimensions: 768,
+    system_prompt: 'Server-owned AI ID orchestration V2 contract.', user_message: 'Build the admitted course.',
+    history: [], source_documents: [{ document_id: golden.facts[0]!.document_id,
+      kb_id: '00000000-0000-4000-8000-000000000008', name: 'quy-trinh-khieu-nai.pdf', type: 'file', status: 'learned' }],
+    course_context: null, locale: 'vi', correlation_id: '00000000-0000-4000-8000-000000000010',
+    api_key: 'offline-test-key', contract_version: 2, source_snapshot_hash: golden.snapshot_hash,
+    scope_catalog: scopes, source_authority: { mode: 'model_designed', source: 'none', complete: true, confidence: 0,
+      structure_hash: 'e'.repeat(64), reason_codes: [], chapters: [] }, max_attempts: 2, idm };
+}
+
+test('QLT-6: Python designs for the audience and purpose the author entered and echoes the exact brief',
+  { skip: IDM_PYTHON_AVAILABLE ? false : 'landa-ai-rag/.venv-dev is not available' }, () => {
+    const golden = idmGoldenSource();
+    const purpose = 'Giúp nhân viên chăm sóc khách hàng xử lý khiếu nại đúng quy trình và quy định của công ty.';
+    const request = goldenSkeletonRequest(golden, { design_mode: 'instructional_design',
+      learner_audience: 'Nhân viên chăm sóc khách hàng mới', course_purpose: purpose });
+    const { response } = idmGoldenCourseDesign(request);
+    const design = readIdmCourseDesign(response.idm);
+    assert.equal(design.idm_contract_version, 3);
+    // completeSkeleton parity: the design carries exactly the project_context Node sent.
+    assert.equal(orchestrationV2Hash(design.project_context), orchestrationV2Hash(request.idm.project_context));
+    assert.deepEqual(design.target_audience, { description: 'Nhân viên chăm sóc khách hàng mới', origin: 'author' });
+    assert.equal(design.purpose?.summary, purpose);
+    assert.equal(design.purpose?.profile, 'compliance');
+    assert.equal(design.purpose?.evidence[0], 'purpose');
+    assert.ok(design.notes.course.includes('• Đối tượng học (tác giả nhập): Nhân viên chăm sóc khách hàng mới.'));
+    assert.ok(design.notes.course.includes(`• Mục đích khoá học (tác giả nhập): ${purpose}`));
+    assert.ok(design.notes.course.includes('• Khoá học được thiết kế theo dạng: Quy trình, quy định, tuân thủ, an toàn'));
+  });
+
+test('QLT-6: a preserve_source course skeleton fails in Python with a stable 422 before any provider call',
+  { skip: IDM_BRIDGE_AVAILABLE ? false : 'landa-ai-rag/.venv-dev or tests/idm_contract_bridge.py is not available' },
+  () => {
+    const golden = idmGoldenSource();
+    const request = goldenSkeletonRequest(golden, { design_mode: 'preserve_source', learner_audience: null,
+      course_purpose: null });
+    const [result] = idmBridge([{ stage: 'course_skeleton', request }]);
+    assert.equal(result!.status, 422);
+    assert.equal(result!.response.detail.code, 'ORCHESTRATION_V2_PRESERVE_SOURCE_NOT_READY');
+    assert.deepEqual(result!.calls, []);
+  });

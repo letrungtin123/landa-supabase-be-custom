@@ -208,7 +208,9 @@ test('admission service + repository persist the selected runtime hash without a
 
 // --- Planning service: course-skeleton request ----------------------------------------------------
 function planningServiceFixture(input: { facts?: OrchestrationV2SourceFact[]; courseTitle?: string | null;
-  courseDescription?: string | null; loadError?: Error } = {}) {
+  courseDescription?: string | null; loadError?: Error;
+  launchBrief?: { design_mode: 'instructional_design' | 'preserve_source'; learner_audience: string | null;
+    course_purpose: string | null } | null } = {}) {
   const { facts } = idmFixture();
   const events: string[] = [];
   const requests: Array<Record<string, unknown>> = [];
@@ -230,7 +232,7 @@ function planningServiceFixture(input: { facts?: OrchestrationV2SourceFact[]; co
       return { source_facts: input.facts ?? facts, course_title: input.courseTitle === undefined ? '  Khoá học IDM  '
         : input.courseTitle, course_description: input.courseDescription === undefined
         ? '<p>Khoá học dành cho&nbsp;nhân viên <b>mới</b></p>' : input.courseDescription,
-      input_tokens: 1_800_000, remaining_ms: 400_000 };
+      launch_brief: input.launchBrief ?? null, input_tokens: 1_800_000, remaining_ms: 400_000 };
     },
     completeSkeleton: async (...args: unknown[]) => { events.push('complete-skeleton'); completions.push(args); },
   };
@@ -276,7 +278,8 @@ test('IDM skeleton request adds the §12.4 idm field built from the persisted sn
     project_context: { locale: 'vi', course_title_hint: 'Khoá học IDM',
       course_description: 'Khoá học dành cho nhân viên mới',
       source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }],
-      target_audience: null, learning_objectives: [], duration_target_minutes: null },
+      target_audience: null, learning_objectives: [], duration_target_minutes: null,
+      design_mode: null, learner_audience: null, course_purpose: null },
     source_facts: f.facts,
     token_allowance: { input_tokens: 1_800_000, output_tokens: 131_072 },
     remaining_budget_ms: 385_000,
@@ -290,7 +293,20 @@ test('IDM skeleton request adds the §12.4 idm field built from the persisted sn
   await runSkeleton(untitled, 'idm-1');
   assert.deepEqual(Object.fromEntries(Object.entries((untitled.requests[0]!.idm as {
     project_context: Record<string, unknown> }).project_context).filter(([key]) => key.startsWith('course_'))),
-  { course_title_hint: null, course_description: null });
+  { course_title_hint: null, course_description: null, course_purpose: null });
+  // QLT-6: the workspace's launch brief reaches Python as project_context data, beside the CMS name and description.
+  for (const launchBrief of [{ design_mode: 'instructional_design' as const, learner_audience: 'Nhân viên mới',
+    course_purpose: 'Giúp nhân viên mới hiểu công ty.' }, { design_mode: 'preserve_source' as const,
+    learner_audience: null, course_purpose: null }]) {
+    const briefed = planningServiceFixture({ launchBrief });
+    await runSkeleton(briefed, 'idm-1');
+    const context = (briefed.requests[0]!.idm as { project_context: Record<string, unknown> }).project_context;
+    assert.deepEqual([context.design_mode, context.learner_audience, context.course_purpose],
+      [launchBrief.design_mode, launchBrief.learner_audience, launchBrief.course_purpose]);
+    assert.deepEqual([context.course_title_hint, context.course_description],
+      ['Khoá học IDM', 'Khoá học dành cho nhân viên mới']);
+    assert.deepEqual(briefed.completions[0]![6], context);
+  }
 });
 
 test('oversize IDM sources fail before the dispatch fence and without calling Python', async () => {
@@ -456,13 +472,17 @@ test('IDM completeSkeleton fails with IDM_COURSE_DESIGN_INVALID before any durab
 });
 
 test('IDM completeSkeleton rejects a design built from another author intent than the attempt sent', async () => {
-  const fixture = idmFixture(undefined, { contract: 2 });
+  const fixture = idmFixture(undefined, { contract: 3 });
   const response: OrchestrationV2CourseSkeletonResponse = { contract_version: 2, skeleton: fixture.skeleton,
     idm: JSON.parse(JSON.stringify(fixture.design)) };
   const sent = fixture.design.project_context;
   for (const [name, context] of [
     ['changed description', { ...sent, course_description: 'Khoá học bán hàng cho nhà đầu tư.' }],
     ['changed name', { ...sent, course_title_hint: 'Bán hàng' }],
+    // QLT-6: and the launch brief this attempt sent.
+    ['changed purpose', { ...sent, course_purpose: 'Giúp nhân viên bán hàng chốt đơn nhanh hơn.' }],
+    ['changed audience', { ...sent, learner_audience: 'Quản lý cấp trung' }],
+    ['changed mode', { ...sent, design_mode: 'preserve_source', learner_audience: null, course_purpose: null }],
   ] as const) {
     const f = sqlFixture(snapshotRows(fixture.snapshotFacts));
     await assert.rejects(f.repository.completeSkeleton(lease(), response, legacyScopes,
@@ -470,12 +490,14 @@ test('IDM completeSkeleton rejects a design built from another author intent tha
     { code: 'IDM_COURSE_DESIGN_INVALID', path: 'idm.project_context' }, name);
     assert.equal(f.succeeded.length, 0, name);
   }
-  // A contract-1 design is a stale answer for a contract-2 request.
-  const legacy = idmFixture();
-  const stale = sqlFixture(snapshotRows(legacy.snapshotFacts));
-  await assert.rejects(stale.repository.completeSkeleton(lease(), { contract_version: 2, skeleton: legacy.skeleton,
-    idm: legacy.design }, legacyScopes, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning, async () => undefined,
-  'idm-1', legacy.design.project_context), { code: 'IDM_COURSE_DESIGN_INVALID', path: 'idm.project_context' });
+  // A contract-1 or contract-2 design is a stale answer for a contract-3 request.
+  for (const contract of [1, 2] as const) {
+    const legacy = idmFixture(undefined, { contract });
+    const stale = sqlFixture(snapshotRows(legacy.snapshotFacts));
+    await assert.rejects(stale.repository.completeSkeleton(lease(), { contract_version: 2, skeleton: legacy.skeleton,
+      idm: legacy.design }, legacyScopes, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning, async () => undefined,
+    'idm-1', legacy.design.project_context), { code: 'IDM_COURSE_DESIGN_INVALID', path: 'idm.project_context' });
+  }
   const ok = sqlFixture(snapshotRows(fixture.snapshotFacts));
   await ok.repository.completeSkeleton(lease(), response, legacyScopes, ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning,
     async () => undefined, 'idm-1', structuredClone(sent));
@@ -503,10 +525,11 @@ test('legacy completeSkeleton ignores a stray idm key and keeps the legacy artif
 test('IDM skeleton input loads budget, course title and every fact in snapshot order with a SQL capacity guard', async () => {
   const fixture = idmFixture();
   const rows = fixture.facts.map(fact => ({ ...fact }));
+  let storedBrief: unknown = null;
   const handler = (contentChars: number) => (sql: string) => {
     if (sql.includes('SELECT t.input_tokens')) {
       return [{ input_tokens: 1_800_000, remaining_ms: 412_345, course_title: 'Khoá học IDM',
-        course_description: 'Khoá học dành cho' }];
+        course_description: 'Khoá học dành cho', launch_brief: storedBrief }];
     }
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: rows.length, content_chars: String(contentChars) }];
     if (sql.includes('SELECT document_id::text,fact_key,scope_key,fact_text')) return rows;
@@ -515,9 +538,20 @@ test('IDM skeleton input loads budget, course title and every fact in snapshot o
   const ok = sqlFixture(handler(1_000));
   const input = await ok.repository.loadIdmSkeletonInput(lease());
   assert.deepEqual(input, { source_facts: fixture.facts, course_title: 'Khoá học IDM',
-    course_description: 'Khoá học dành cho', input_tokens: 1_800_000, remaining_ms: 412_345 });
+    course_description: 'Khoá học dành cho', launch_brief: null, input_tokens: 1_800_000, remaining_ms: 412_345 });
   assert.match(ok.queries[0]!.sql, /LEFT JOIN courses course ON course.id=t.course_id AND course.tenant_id=t.tenant_id/);
   assert.match(ok.queries[0]!.sql, /course\.display_name AS course_title,course\.description AS course_description/);
+  // QLT-6: the write-once launch brief of the lease's own workspace (tenant and course bound), without its version.
+  assert.match(ok.queries[0]!.sql,
+    /JOIN lesson_author_workspaces workspace ON workspace\.id=t\.workspace_id AND workspace\.tenant_id=t\.tenant_id\s+AND workspace\.course_id=t\.course_id/);
+  const brief = { design_mode: 'instructional_design', learner_audience: 'Nhân viên mới',
+    course_purpose: 'Giúp nhân viên mới hiểu công ty.' };
+  storedBrief = { ...brief, version: 1 };
+  assert.deepEqual((await sqlFixture(handler(1_000)).repository.loadIdmSkeletonInput(lease())).launch_brief, brief);
+  storedBrief = { ...brief, version: 9 };
+  await assert.rejects(sqlFixture(handler(1_000)).repository.loadIdmSkeletonInput(lease()),
+    { code: 'ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID' });
+  storedBrief = null;
   assert.match(ok.queries[2]!.sql, /ORDER BY ordinal/);
   const over = sqlFixture(handler(384_001));
   await assert.rejects(over.repository.loadIdmSkeletonInput(lease()), { code: 'IDM_SOURCE_EXCEEDS_SINGLE_TASK_CAPACITY' });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
-import { idmTextLength, readIdmCourseDesign, type IdmCourseDesignV1 } from './lesson-author-idm.contract.js';
+import { IDM_CONTRACT_VERSION, idmTextLength, readIdmCourseDesign, type IdmCourseDesignV1 } from './lesson-author-idm.contract.js';
 import {
   IDM_BRIDGE_AVAILABLE,
   idmBridge,
@@ -63,6 +63,8 @@ const PLANNING_RUNTIME = { embedding_model: 'gemini-embedding-001', embedding_di
   budgets: ORCHESTRATION_V2_IDM_EXECUTION_POLICY.planning, pipeline: 'idm-1' as const,
   allowed_component_types: new Set<string>(TYPES) };
 const NO_SETTLE = async () => undefined;
+/** A chain variant: held practices (Python module answers) and the workspace's stored launch brief (QLT-6). */
+type Variant = { hold_lessons: string[]; launch_brief?: Row | null };
 
 function lease(kind: OrchestrationV2TaskLease['kind'], snapshotHash: string,
   overrides: Partial<OrchestrationV2TaskLease> = {}): OrchestrationV2TaskLease {
@@ -100,7 +102,7 @@ class Chain {
   sql: string[] = [];
   private next = 1_000;
 
-  constructor(readonly golden: IdmGoldenSource, readonly variant: { hold_lessons: string[] }) {
+  constructor(readonly golden: IdmGoldenSource, readonly variant: Variant) {
     this.facts = golden.facts.map(fact => ({ ...fact, fact_hash: hash(`${fact.fact_key}:${fact.fact_text}`) }));
     this.documentId = golden.facts[0]!.document_id;
   }
@@ -188,7 +190,8 @@ class Chain {
     if (sql.includes('a.artifact_kind=\'source_catalog\'')) return [this.sourceCatalog()];
     if (sql.includes('SELECT t.input_tokens')) return [{ input_tokens: this.current.inputTokens,
       remaining_ms: 590_000, course_title: 'Xử lý khiếu nại khách hàng',
-      course_description: `<p>${String(this.golden.project_context.course_description)}</p>` }];
+      course_description: `<p>${String(this.golden.project_context.course_description)}</p>`,
+      launch_brief: this.variant.launch_brief ?? null }];
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: this.facts.length,
       content_chars: this.facts.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) }];
     if (sql.includes('fact_key=ANY($5::text[])')) return this.factsFor(params[4] as string[], sql.includes('fact_hash'));
@@ -284,7 +287,7 @@ async function twoPass<T>(run: (answer: (request: Row) => Promise<unknown>) => P
   return run(async () => decode(result!.response, request));
 }
 
-async function runChain(t: TestContext, golden: IdmGoldenSource, variant: { hold_lessons: string[] }) {
+async function runChain(t: TestContext, golden: IdmGoldenSource, variant: Variant) {
   const pg = await import('pg');
   t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
@@ -329,7 +332,7 @@ async function runChain(t: TestContext, golden: IdmGoldenSource, variant: { hold
       input_context_hash: task.input_context_hash }), planning(), chain.worker(), {
       chapter: async (request: Row, execution: { beforeProviderDispatch: () => Promise<void> }) => {
         await execution.beforeProviderDispatch(); return answer(request);
-      } } as never, PLANNING_RUNTIME, NO_SETTLE, signal), 'chapter_shard', variant,
+      } } as never, PLANNING_RUNTIME, NO_SETTLE, signal), 'chapter_shard', { hold_lessons: variant.hold_lessons },
     (raw, request) => readOrchestrationV2ChapterShardResponse(raw, request.skeleton, request.shard_plan), shardRequests);
     const stored = chain.artifacts.at(-1)!;
     assert.equal(stored.artifact.artifact_kind, 'chapter_blueprint');
@@ -607,8 +610,14 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     [['common_mistake', 'source'], ['what_if', 'source'], ['common_mistake', 'distractor']]);
     assert.equal(faqBriefs[0]!.faq_material!.blocks[0]!.support_role, 'common_mistake');
     // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
-    assert.equal(design.idm_contract_version, 2);
+    assert.equal(design.idm_contract_version, IDM_CONTRACT_VERSION);
     assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);
+    // QLT-6: a workspace created before the launch brief (NULL column) reaches Python with null brief fields
+    // and is designed exactly as before (AI-proposed audience, model or classifier purpose summary).
+    assert.deepEqual([design.project_context.design_mode, design.project_context.learner_audience,
+      design.project_context.course_purpose], [null, null, null]);
+    assert.equal(design.target_audience.origin, 'ai_proposed');
+    for (const contract of result.contracts) assert.equal(contract.idm_unit_brief!.design_mode, null);
     assert.equal(design.purpose?.profile, 'compliance');
     assert.equal(design.purpose?.fidelity_mode, 'keep');
     assert.ok(design.notes.course.includes('Mục đích khoá học: Quy trình, quy định, tuân thủ, an toàn'));
@@ -651,7 +660,23 @@ test('IDM cross-language chain with a held practice ends needs_action through th
   { skip: IDM_BRIDGE_AVAILABLE ? false : 'landa-ai-rag/.venv-dev or tests/idm_contract_bridge.py is not available',
     timeout: 300_000 }, async t => {
     const golden = idmGoldenSource();
-    const { finalization, chain, assembly } = await runChain(t, golden, { hold_lessons: ['lsn_002'] });
+    // QLT-6: this run's workspace was started in "Thiết kế bài giảng" mode with the author's audience and purpose.
+    const coursePurpose = 'Giúp nhân viên chăm sóc khách hàng xử lý khiếu nại đúng quy trình và quy định của công ty.';
+    const { finalization, chain, assembly, design, contracts } = await runChain(t, golden, { hold_lessons: ['lsn_002'],
+      launch_brief: { design_mode: 'instructional_design', learner_audience: 'Nhân viên chăm sóc khách hàng mới',
+        course_purpose: coursePurpose, version: 1 } });
+    assert.deepEqual([design.project_context.design_mode, design.project_context.learner_audience,
+      design.project_context.course_purpose],
+    ['instructional_design', 'Nhân viên chăm sóc khách hàng mới', coursePurpose]);
+    assert.deepEqual(design.target_audience, { description: 'Nhân viên chăm sóc khách hàng mới', origin: 'author' });
+    assert.equal(design.purpose?.summary, coursePurpose);
+    assert.ok(design.notes.course.includes('• Đối tượng học (tác giả nhập): Nhân viên chăm sóc khách hàng mới.'));
+    assert.ok(design.notes.course.includes(`• Mục đích khoá học (tác giả nhập): ${coursePurpose}`));
+    for (const contract of contracts) {
+      const brief = contract.idm_unit_brief!;
+      assert.deepEqual([brief.design_mode, brief.target_audience, brief.purpose_summary],
+        ['instructional_design', 'Nhân viên chăm sóc khách hàng mới', coursePurpose]);
+    }
     assert.equal(assembly.assessment_obligation_count, 1);
     assert.equal(chain.obligationRows.length, 1);
     assert.equal(chain.obligationRows[0]!.unit_path, 'chapter_1.lesson_2.unit_1');
