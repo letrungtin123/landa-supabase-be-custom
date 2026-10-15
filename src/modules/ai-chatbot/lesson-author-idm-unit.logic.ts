@@ -35,6 +35,8 @@ export const IDM_CONTEXT_FACTS_MAX_CHARS = 24_000;
 const MAX_PRACTICE_SENTENCES = 3;
 /** Python `IdmFaqMaterialV1.practices` bound. */
 const MAX_FAQ_PRACTICES = 3;
+/** Python `IdmFaqMaterialV1.open_questions` bound (QLT-7). */
+const MAX_FAQ_OPEN_QUESTIONS = 8;
 
 const contractInvalid = (): never => { throw new IdmError('IDM_SHARD_DESIGN_INVALID'); };
 
@@ -132,6 +134,8 @@ export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment
  * otherwise, and the brief then has no `faq_material` key): what W1 found about each block of the unit (its role,
  * the source issues and gaps, the open SME questions) and the feedback focus of the lesson's practices, the "why
  * wrong" basis of the misconceptions behind their wrong options. Copied as stored, so the Python bounds hold.
+ * QLT-7: `open_questions` adds the SME questions still open for the lesson (its held practices and the Hold items
+ * of its Must Dos), which the FAQ must leave unanswered; the key is left out when there is none.
  */
 export function idmFaqMaterial(design: IdmCourseDesignV1, lesson: IdmLessonDesignV1,
   unit: IdmUnitDesignV1): IdmFaqMaterialV1 | null {
@@ -147,7 +151,24 @@ export function idmFaqMaterial(design: IdmCourseDesignV1, lesson: IdmLessonDesig
     practices: lesson.practice_tasks.filter(practice => !practice.hold).slice(0, MAX_FAQ_PRACTICES)
       .map(practice => ({ practice_id: practice.practice_id, sentence: practice.sentence,
         feedback_focus: { ...practice.feedback_focus } })),
+    ...idmOpenQuestions(design, lesson),
   };
+}
+
+/** The open SME questions of a lesson (QLT-7): its held practices' questions, then the Hold items whose block serves
+ * one of the lesson's Must Dos or blocks it; without repeats, at most 8 (Python `IdmFaqMaterialV1.open_questions`). */
+function idmOpenQuestions(design: IdmCourseDesignV1, lesson: IdmLessonDesignV1): { open_questions?: string[] } {
+  const plan = design.modules.flatMap(module => module.lessons).find(item => item.lesson_key === lesson.lesson_key);
+  const mustDos = new Set(plan ? [plan.primary_must_do_id, ...plan.secondary_must_do_ids]
+    .filter((id): id is string => typeof id === 'string') : []);
+  const rows = new Map(design.blueprint.map(row => [row.block_id, row]));
+  const questions = [
+    ...lesson.practice_tasks.filter(practice => practice.hold).map(practice => practice.hold_question),
+    ...design.hold_items.filter(item => [...item.blocked_must_do_ids, ...(rows.get(item.block_id)?.must_do_ids ?? [])]
+      .some(id => mustDos.has(id))).map(item => item.sme_question),
+  ].map(question => idmStripWhitespace(question ?? '')).filter(question => question.length > 0);
+  const unique = [...new Set(questions)].slice(0, MAX_FAQ_OPEN_QUESTIONS);
+  return unique.length ? { open_questions: unique } : {};
 }
 
 /**

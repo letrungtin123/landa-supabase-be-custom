@@ -267,6 +267,9 @@ test('QLT-5 D: an FAQ unit brief carries the W4 FAQ plan and the W1 notes of its
     // Only the active practice: a held practice has no question whose wrong options carry misconceptions.
     practices: [{ practice_id: 'pt_2', sentence: 'Cho một tình huống, người học chọn bước tiếp theo để xử lý đúng.',
       feedback_focus: feedback }],
+    // QLT-7: the held practice's SME question and the Hold item of the lesson's Must Do (md_1) stay open: the FAQ
+    // is told not to answer them.
+    open_questions: ['SME xác nhận tiêu chí?', 'Quy định nào đang áp dụng?'],
   });
   assert.equal(brief.brief_hash, hash((({ brief_hash: _hash, ...rest }) => rest)(brief)));
   const other = plain.idm_unit_brief!;

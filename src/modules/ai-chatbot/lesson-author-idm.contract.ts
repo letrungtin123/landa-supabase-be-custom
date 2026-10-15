@@ -405,8 +405,16 @@ export interface IdmFaqBlockNoteV1 {
 /** Mirror of Python `IdmFaqPracticeNoteV1`: a lesson practice and its feedback focus ("why wrong" basis). */
 export interface IdmFaqPracticeNoteV1 { practice_id: string; sentence: string; feedback_focus: IdmFeedbackFocusV1 }
 
-/** Mirror of Python `IdmFaqMaterialV1`: the raw material of a unit's FAQ (real confusions, never facts). */
-export interface IdmFaqMaterialV1 { blocks: IdmFaqBlockNoteV1[]; practices: IdmFaqPracticeNoteV1[] }
+/**
+ * Mirror of Python `IdmFaqMaterialV1`: the raw material of a unit's FAQ (real confusions, never facts).
+ * `open_questions` (QLT-7, contract 3): the SME questions of the lesson's Hold items and held practices, which the
+ * FAQ must leave unanswered; absent when there is none, so a brief without them reads and hashes as before.
+ */
+export interface IdmFaqMaterialV1 {
+  blocks: IdmFaqBlockNoteV1[];
+  practices: IdmFaqPracticeNoteV1[];
+  open_questions?: string[];
+}
 
 export interface IdmUnitBriefV1 {
   pipeline_version: typeof IDM_PIPELINE_VERSION;
@@ -1088,9 +1096,11 @@ const faqPracticeNote: Reader<IdmFaqPracticeNoteV1> = (value, path) => {
 };
 
 const faqMaterial: Reader<IdmFaqMaterialV1> = (value, path) => {
-  const item = object(value, path, ['blocks', 'practices']);
+  const opened = hasKey(value, 'open_questions');
+  const item = object(value, path, opened ? ['blocks', 'practices', 'open_questions'] : ['blocks', 'practices']);
   return { blocks: list(item.blocks, `${path}.blocks`, 0, 24, faqBlockNote),
-    practices: list(item.practices, `${path}.practices`, 0, 3, faqPracticeNote) };
+    practices: list(item.practices, `${path}.practices`, 0, 3, faqPracticeNote),
+    ...(opened ? { open_questions: list(item.open_questions, `${path}.open_questions`, 0, 8, line(400)) } : {}) };
 };
 
 function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitBriefV1, 'brief_hash'> {

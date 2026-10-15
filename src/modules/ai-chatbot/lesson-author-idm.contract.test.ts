@@ -550,6 +550,16 @@ test('QLT-5 D: the FAQ plan of a design component and the FAQ material of a brie
   assert.throws(() => sealIdmUnitBrief({ ...base, components: [{ ...base.components[0]!, faq_items: [{
     question_type: 'why', anchor_fact_keys: ['d1-c3-f2'], origin: 'invented' as never }] }] }),
   invalidAt('idm_unit_brief.components[0].faq_items[0].origin'));
+  // QLT-7: the open SME questions of the lesson travel in the material; without them the key is absent and the
+  // brief hashes as before.
+  const opened = sealIdmUnitBrief({ ...base, faq_material: { ...base.faq_material!,
+    open_questions: ['Bước 3 có ngoại lệ nào không?'] } });
+  assert.deepEqual(readIdmUnitBrief(JSON.parse(JSON.stringify(opened))), opened);
+  assert.notEqual(opened.brief_hash, brief.brief_hash);
+  assert.equal(Object.hasOwn(brief.faq_material!, 'open_questions'), false);
+  assert.throws(() => sealIdmUnitBrief({ ...base, faq_material: { ...base.faq_material!,
+    open_questions: Array.from({ length: 9 }, (_, index) => `Câu hỏi còn mở số ${index + 1}?`) } }),
+  invalidAt('idm_unit_brief.faq_material.open_questions'));
   // A brief built before QLT-5 D (no plan, no material) reads unchanged.
   const { faq_material: _material, ...older } = base;
   const { faq_items: _items, ...plainSlot } = base.components[0]!;
