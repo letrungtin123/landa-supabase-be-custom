@@ -110,13 +110,25 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       // QLT-5 C: and its content mode (keep for the golden compliance course).
       assert.equal(brief.fidelity_mode, design.purpose!.fidelity_mode);
     }
-    // QLT-5 D: only the FAQ unit (lsn_003 unit 2) carries the W4 FAQ plan and its W1 material, and Python accepted it.
+    // QLT-5 D: the FAQ unit (lsn_003 unit 2) carries the W4 FAQ plan and its W1 material, and Python accepted it.
+    // QLT-8: the FAQ floor adds one more FAQ (a quarter of a module's learning units), with its own plan.
     const faqBriefs = result.contracts.map(contract => contract.idm_unit_brief!).filter(brief => brief.faq_material);
-    assert.equal(faqBriefs.length, 1);
-    assert.deepEqual(faqBriefs[0]!.components.find(slot => slot.type === 'la_faq')!.faq_items!
-      .map(item => [item.question_type, item.origin]),
-    [['common_mistake', 'source'], ['what_if', 'source'], ['common_mistake', 'distractor']]);
-    assert.equal(faqBriefs[0]!.faq_material!.blocks[0]!.support_role, 'common_mistake');
+    assert.equal(faqBriefs.length, 2);
+    const plans = faqBriefs.map(brief => brief.components.find(slot => slot.type === 'la_faq')!.faq_items!
+      .map(item => [item.question_type, item.origin]));
+    const planned = plans.findIndex(plan => JSON.stringify(plan) === JSON.stringify(
+      [['common_mistake', 'source'], ['what_if', 'source'], ['common_mistake', 'distractor']]));
+    assert.ok(planned >= 0);
+    assert.equal(faqBriefs[planned]!.faq_material!.blocks[0]!.support_role, 'common_mistake');
+    const added = faqBriefs[1 - planned]!.components.find(slot => slot.type === 'la_faq')!;
+    assert.ok(added.title.startsWith('Hỏi đáp: ') && added.faq_items!.length >= 2);
+    // QLT-9: every single-choice slot carries its W4 key letter to Python, which accepted the briefs.
+    const problems = result.contracts.flatMap(contract => contract.idm_unit_brief!.components)
+      .filter(slot => slot.type === 'problem');
+    assert.ok(problems.length > 0);
+    assert.ok(problems.every(slot => Number.isInteger(slot.key_letter) && slot.key_letter! >= 0 && slot.key_letter! <= 3));
+    assert.ok(result.contracts.flatMap(contract => contract.idm_unit_brief!.components)
+      .filter(slot => slot.type !== 'problem').every(slot => !('key_letter' in slot)));
     // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
     assert.equal(design.idm_contract_version, IDM_CONTRACT_VERSION);
     assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);

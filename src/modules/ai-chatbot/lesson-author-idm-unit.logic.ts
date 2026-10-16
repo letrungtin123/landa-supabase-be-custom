@@ -216,6 +216,8 @@ export function buildIdmUnitBrief(input: {
       // QLT-5 D: the server's plan of an la_faq slot (absent on every other slot, as in Python).
       ...(component.faq_items?.length ? { faq_items: component.faq_items.map(item => ({ ...item,
         anchor_fact_keys: [...item.anchor_fact_keys] })) } : {}),
+      // QLT-9: the W4 letter of a single-choice key (absent on other slots and in older designs).
+      ...(component.key_letter !== undefined ? { key_letter: component.key_letter } : {}),
     };
   });
   const faqMaterial = idmFaqMaterial(design, lessonDesign, unit);

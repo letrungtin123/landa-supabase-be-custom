@@ -340,6 +340,8 @@ export interface IdmComponentDesignV1 {
   author_review: IdmComponentAuthorReviewV1;
   /** QLT-5 D: the plan of an la_faq slot; absent on every other slot and in designs stored before it. */
   faq_items?: IdmFaqItemPlanV1[];
+  /** QLT-9: the letter (0 = A) of a single-choice key, set by W4; absent on other slots and in older designs. */
+  key_letter?: number;
 }
 
 export interface IdmUnitDesignV1 {
@@ -388,6 +390,8 @@ export interface IdmBriefComponentV1 {
   supporting_fact_keys: string[];
   /** QLT-5 D: the design component's FAQ plan, only on an la_faq slot that has one. */
   faq_items?: IdmFaqItemPlanV1[];
+  /** QLT-9: the design component's key letter, only on a problem slot that has one. */
+  key_letter?: number;
 }
 
 /** Mirror of Python `IdmFaqBlockNoteV1` (QLT-5 D): what W1 found about one block of a unit with an FAQ. */
@@ -940,6 +944,16 @@ function faqItems(value: unknown, item: Record<string, unknown>, path: string): 
   return hasKey(value, 'faq_items') ? { faq_items: list(item.faq_items, `${path}.faq_items`, 0, 6, faqItemPlan) } : {};
 }
 
+/** `key_letter` is optional (QLT-9): the W4 letter of a single-choice key, 0 (A) to 3 (D); absent keys read and hash
+ * as before. */
+function keyLetter(value: unknown, item: Record<string, unknown>, path: string): { key_letter?: number } {
+  return hasKey(value, 'key_letter') ? { key_letter: integer(item.key_letter, `${path}.key_letter`, 0, 3) } : {};
+}
+
+function optionalKeys(value: unknown): string[] {
+  return ['faq_items', 'key_letter'].filter(key => hasKey(value, key));
+}
+
 /** `ArchitectureComponentAuthorReviewV2`: each value null or a Python-stripped, non-blank string. */
 const authorReview: Reader<IdmComponentAuthorReviewV1> = (value, path) => {
   const item = object(value, path, ['purpose', 'example_scenario', 'visual_asset', 'user_behavior_navigation']);
@@ -974,7 +988,7 @@ const COMPONENT_DESIGN_KEYS = ['component_index', 'type', 'role', 'title', 'rati
   'support_items', 'author_review'] as const;
 
 const componentDesign: Reader<IdmComponentDesignV1> = (value, path) => {
-  const item = object(value, path, [...COMPONENT_DESIGN_KEYS, ...(hasKey(value, 'faq_items') ? ['faq_items'] : [])]);
+  const item = object(value, path, [...COMPONENT_DESIGN_KEYS, ...optionalKeys(value)]);
   return {
     component_index: integer(item.component_index, `${path}.component_index`, 1, 4),
     type: oneOf(item.type, `${path}.type`, IDM_COMPONENT_TYPES),
@@ -986,6 +1000,7 @@ const componentDesign: Reader<IdmComponentDesignV1> = (value, path) => {
     support_items: list(item.support_items, `${path}.support_items`, 0, 6, supportItem),
     author_review: authorReview(item.author_review, `${path}.author_review`),
     ...faqItems(value, item, path),
+    ...keyLetter(value, item, path),
   };
 };
 
@@ -1058,7 +1073,7 @@ const BRIEF_COMPONENT_KEYS = ['component_plan_id', 'type', 'role', 'title', 'sup
   'owned_fact_keys', 'supporting_fact_keys'] as const;
 
 const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
-  const item = object(value, path, [...BRIEF_COMPONENT_KEYS, ...(hasKey(value, 'faq_items') ? ['faq_items'] : [])]);
+  const item = object(value, path, [...BRIEF_COMPONENT_KEYS, ...optionalKeys(value)]);
   return {
     component_plan_id: text(item.component_plan_id, `${path}.component_plan_id`, 0, 36, COMPONENT_PLAN_ID),
     type: oneOf(item.type, `${path}.type`, IDM_COMPONENT_TYPES),
@@ -1070,6 +1085,7 @@ const briefComponent: Reader<IdmBriefComponentV1> = (value, path) => {
     owned_fact_keys: list(item.owned_fact_keys, `${path}.owned_fact_keys`, 0, 32_768, factKey),
     supporting_fact_keys: list(item.supporting_fact_keys, `${path}.supporting_fact_keys`, 0, 32_768, factKey),
     ...faqItems(value, item, path),
+    ...keyLetter(value, item, path),
   };
 };
 

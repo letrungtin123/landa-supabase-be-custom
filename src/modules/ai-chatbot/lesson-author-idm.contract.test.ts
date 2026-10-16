@@ -568,6 +568,30 @@ test('QLT-5 D: the FAQ plan of a design component and the FAQ material of a brie
   assert.equal(Object.hasOwn(legacy.components[0]!, 'faq_items'), false);
 });
 
+test('QLT-9: the W4 key letter of a single-choice slot is optional, bounded, hash-bound and reaches the brief', () => {
+  const shard = shardDesign();
+  const keyed = structuredClone(shard) as Mutable;
+  const slot = keyed.lessons[0].units[0].components.findIndex((component: Mutable) => component.type === 'problem');
+  const index = slot >= 0 ? slot : 0;
+  keyed.lessons[0].units[0].components[index].key_letter = 3;
+  const sealed = sealShard(keyed);
+  const read = readIdmShardDesign(JSON.parse(JSON.stringify(sealed)));
+  assert.deepEqual(read, sealed);
+  assert.equal(read.lessons[0]!.units[0]!.components[index]!.key_letter, 3);
+  // A design written before QLT-9 has no key and verifies its hash as before.
+  assert.equal(Object.hasOwn(readIdmShardDesign(sealShard(structuredClone(shard))).lessons[0]!.units[0]!.components[0]!,
+    'key_letter'), false);
+  const at = `idm_design.lessons[0].units[0].components[${index}].key_letter`;
+  for (const bad of [4, -1, 1.5, '2', null]) {
+    const copy = structuredClone(keyed);
+    copy.lessons[0].units[0].components[index].key_letter = bad;
+    assert.throws(() => readIdmShardDesign(sealShard(copy)), invalidAt(at));
+  }
+  const tampered: Mutable = structuredClone(sealed);
+  tampered.lessons[0].units[0].components[index].key_letter = 1;
+  assert.throws(() => readIdmShardDesign(tampered), invalidAt('idm_design.design_hash'));
+});
+
 // --- QLT-6: contract 3 (launch brief) -------------------------------------------------------------
 
 test('QLT-6: designs of contracts 1, 2 and 3 read exactly as stored and never mix shapes', () => {
