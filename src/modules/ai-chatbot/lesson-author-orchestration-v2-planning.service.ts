@@ -159,7 +159,9 @@ export async function executeOrchestrationV2PlanningTask(
       // snapshot fails the task without any provider call (spec §12.4).
       const input = await db(() => planning.loadIdmSkeletonInput(lease));
       return buildIdmCourseSkeletonRequest({
-        locale: authority.locale, course_title: input.course_title, course_description: input.course_description,
+        // Owner 2026-10-16: the course description is no longer AI ID context; the author's launch brief
+        // (learners, purpose) and the course name are.
+        locale: authority.locale, course_title: input.course_title, course_description: null,
         launch_brief: input.launch_brief,
         source_documents: authority.source_documents,
         source_facts: input.source_facts, input_tokens: input.input_tokens,

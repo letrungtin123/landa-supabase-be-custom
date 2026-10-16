@@ -287,15 +287,15 @@ export function createOrchestrationV2PlanningRepository(
 
   /**
    * IDM course-skeleton input (spec §12.4): live-lease task budget and deadline,
-   * the course name and description as the author intent (QLT-5, read live and
-   * sanitised by the request builder), the workspace's write-once launch brief
+   * the course name as the author intent (QLT-5, read live and sanitised by the
+   * request builder; owner 2026-10-16: the course description is no longer
+   * AI ID context and is not read), the workspace's write-once launch brief
    * (QLT-6; null before it), and every persisted snapshot fact in snapshot order. Capacity is measured in SQL first so an oversize snapshot is
    * rejected before its rows are loaded or any provider call is made.
    */
   async function loadIdmSkeletonInput(lease: OrchestrationV2TaskLease): Promise<{
     source_facts: OrchestrationV2SourceFact[];
     course_title: string | null;
-    course_description: string | null;
     launch_brief: LessonAuthorLaunchBrief | null;
     input_tokens: number;
     remaining_ms: number;
@@ -304,7 +304,7 @@ export function createOrchestrationV2PlanningRepository(
     return db.transaction(async tx => {
       const task = await tx.query(`SELECT t.input_tokens,
           floor(extract(epoch FROM (t.deadline_at-clock_timestamp()))*1000)::integer AS remaining_ms,
-          course.display_name AS course_title,course.description AS course_description,workspace.launch_brief
+          course.display_name AS course_title,workspace.launch_brief
         FROM lesson_author_workspace_v2_tasks t
         JOIN lesson_author_workspaces workspace ON workspace.id=t.workspace_id AND workspace.tenant_id=t.tenant_id
           AND workspace.course_id=t.course_id
@@ -346,7 +346,6 @@ export function createOrchestrationV2PlanningRepository(
           locator: record(fact.locator) ?? fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID'),
         })),
         course_title: typeof row?.course_title === 'string' ? row.course_title : null,
-        course_description: typeof row?.course_description === 'string' ? row.course_description : null,
         launch_brief: launchBrief,
         input_tokens: inputTokens,
         remaining_ms: remainingMs,

@@ -208,7 +208,7 @@ test('admission service + repository persist the selected runtime hash without a
 
 // --- Planning service: course-skeleton request ----------------------------------------------------
 function planningServiceFixture(input: { facts?: OrchestrationV2SourceFact[]; courseTitle?: string | null;
-  courseDescription?: string | null; loadError?: Error;
+  loadError?: Error;
   launchBrief?: { design_mode: 'instructional_design' | 'preserve_source'; learner_audience: string | null;
     course_purpose: string | null } | null } = {}) {
   const { facts } = idmFixture();
@@ -230,9 +230,7 @@ function planningServiceFixture(input: { facts?: OrchestrationV2SourceFact[]; co
       events.push('idm-input');
       if (input.loadError) throw input.loadError;
       return { source_facts: input.facts ?? facts, course_title: input.courseTitle === undefined ? '  Khoá học IDM  '
-        : input.courseTitle, course_description: input.courseDescription === undefined
-        ? '<p>Khoá học dành cho&nbsp;nhân viên <b>mới</b></p>' : input.courseDescription,
-      launch_brief: input.launchBrief ?? null, input_tokens: 1_800_000, remaining_ms: 400_000 };
+        : input.courseTitle, launch_brief: input.launchBrief ?? null, input_tokens: 1_800_000, remaining_ms: 400_000 };
     },
     completeSkeleton: async (...args: unknown[]) => { events.push('complete-skeleton'); completions.push(args); },
   };
@@ -275,8 +273,9 @@ test('IDM skeleton request adds the §12.4 idm field built from the persisted sn
   const request = f.requests[0]!;
   assert.deepEqual(request.idm, {
     pipeline_version: 'idm-1',
+    // Owner 2026-10-16: the course description is no longer AI ID context, so it is never sent.
     project_context: { locale: 'vi', course_title_hint: 'Khoá học IDM',
-      course_description: 'Khoá học dành cho nhân viên mới',
+      course_description: null,
       source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }],
       target_audience: null, learning_objectives: [], duration_target_minutes: null,
       design_mode: null, learner_audience: null, course_purpose: null },
@@ -289,12 +288,12 @@ test('IDM skeleton request adds the §12.4 idm field built from the persisted sn
   assert.equal(f.completions[0]![5], 'idm-1');
   // QLT-5: the stored design must carry exactly the author intent this attempt sent.
   assert.deepEqual(f.completions[0]![6], (request.idm as { project_context: unknown }).project_context);
-  const untitled = planningServiceFixture({ courseTitle: null, courseDescription: '  <p> </p> ' });
+  const untitled = planningServiceFixture({ courseTitle: null });
   await runSkeleton(untitled, 'idm-1');
   assert.deepEqual(Object.fromEntries(Object.entries((untitled.requests[0]!.idm as {
     project_context: Record<string, unknown> }).project_context).filter(([key]) => key.startsWith('course_'))),
   { course_title_hint: null, course_description: null, course_purpose: null });
-  // QLT-6: the workspace's launch brief reaches Python as project_context data, beside the CMS name and description.
+  // QLT-6: the workspace's launch brief reaches Python as project_context data, beside the CMS name.
   for (const launchBrief of [{ design_mode: 'instructional_design' as const, learner_audience: 'Nhân viên mới',
     course_purpose: 'Giúp nhân viên mới hiểu công ty.' }, { design_mode: 'preserve_source' as const,
     learner_audience: null, course_purpose: null }]) {
@@ -303,8 +302,7 @@ test('IDM skeleton request adds the §12.4 idm field built from the persisted sn
     const context = (briefed.requests[0]!.idm as { project_context: Record<string, unknown> }).project_context;
     assert.deepEqual([context.design_mode, context.learner_audience, context.course_purpose],
       [launchBrief.design_mode, launchBrief.learner_audience, launchBrief.course_purpose]);
-    assert.deepEqual([context.course_title_hint, context.course_description],
-      ['Khoá học IDM', 'Khoá học dành cho nhân viên mới']);
+    assert.deepEqual([context.course_title_hint, context.course_description], ['Khoá học IDM', null]);
     assert.deepEqual(briefed.completions[0]![6], context);
   }
 });
@@ -529,7 +527,7 @@ test('IDM skeleton input loads budget, course title and every fact in snapshot o
   const handler = (contentChars: number) => (sql: string) => {
     if (sql.includes('SELECT t.input_tokens')) {
       return [{ input_tokens: 1_800_000, remaining_ms: 412_345, course_title: 'Khoá học IDM',
-        course_description: 'Khoá học dành cho', launch_brief: storedBrief }];
+        launch_brief: storedBrief }];
     }
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: rows.length, content_chars: String(contentChars) }];
     if (sql.includes('SELECT document_id::text,fact_key,scope_key,fact_text')) return rows;
@@ -538,9 +536,11 @@ test('IDM skeleton input loads budget, course title and every fact in snapshot o
   const ok = sqlFixture(handler(1_000));
   const input = await ok.repository.loadIdmSkeletonInput(lease());
   assert.deepEqual(input, { source_facts: fixture.facts, course_title: 'Khoá học IDM',
-    course_description: 'Khoá học dành cho', launch_brief: null, input_tokens: 1_800_000, remaining_ms: 412_345 });
+    launch_brief: null, input_tokens: 1_800_000, remaining_ms: 412_345 });
   assert.match(ok.queries[0]!.sql, /LEFT JOIN courses course ON course.id=t.course_id AND course.tenant_id=t.tenant_id/);
-  assert.match(ok.queries[0]!.sql, /course\.display_name AS course_title,course\.description AS course_description/);
+  // Owner 2026-10-16: the course description is not read for AI ID any more.
+  assert.match(ok.queries[0]!.sql, /course\.display_name AS course_title,workspace\.launch_brief/);
+  assert.doesNotMatch(ok.queries[0]!.sql, /description/);
   // QLT-6: the write-once launch brief of the lease's own workspace (tenant and course bound), without its version.
   assert.match(ok.queries[0]!.sql,
     /JOIN lesson_author_workspaces workspace ON workspace\.id=t\.workspace_id AND workspace\.tenant_id=t\.tenant_id\s+AND workspace\.course_id=t\.course_id/);
@@ -581,7 +581,7 @@ test('offline IDM-2 chain: snapshot rows → Node request → Python course desi
         payload: { contract_version: 2, source_snapshot_hash: golden.snapshot_hash, source_authority: sourceAuthority,
           scopes: catalog } }];
       if (sql.includes('SELECT t.input_tokens')) return [{ input_tokens: 1_800_000, remaining_ms: 590_000,
-        course_title: 'Xử lý khiếu nại khách hàng', course_description: golden.project_context.course_description }];
+        course_title: 'Xử lý khiếu nại khách hàng' }];
       if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: golden.facts.length,
         content_chars: snapshotFacts.reduce((sum, fact) => sum + fact.fact_chars, 0) }];
       if (sql.includes('SELECT document_id::text,fact_key,scope_key,fact_text')) return golden.facts.map(fact => ({ ...fact }));
@@ -614,7 +614,7 @@ test('offline IDM-2 chain: snapshot rows → Node request → Python course desi
       shard_plans: Array<{ chapter_key: string; shard_count: number; source_scope_ids: string[] }>;
       skeleton: { chapters: Array<{ chapter_key: string; source_scope_ids: string[] }> } };
     assert.equal(payload.idm.project_context.course_title_hint, 'Xử lý khiếu nại khách hàng');
-    assert.equal(payload.idm.project_context.course_description, golden.project_context.course_description);
+    assert.equal(payload.idm.project_context.course_description, null);
     assert.deepEqual(payload.idm.project_context, (idmRequest as { project_context: unknown }).project_context);
     assert.equal(payload.idm.purpose?.profile, 'compliance');
     assert.equal(payload.scopes.length, 10);

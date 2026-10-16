@@ -129,9 +129,10 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     assert.ok(problems.every(slot => Number.isInteger(slot.key_letter) && slot.key_letter! >= 0 && slot.key_letter! <= 3));
     assert.ok(result.contracts.flatMap(contract => contract.idm_unit_brief!.components)
       .filter(slot => slot.type !== 'problem').every(slot => !('key_letter' in slot)));
-    // QLT-5: the sanitised CMS description reached Python and the design records the purpose it followed.
+    // QLT-5: the design records the purpose it followed. Owner 2026-10-16: the course description is no longer AI ID
+    // context, so Python never receives it.
     assert.equal(design.idm_contract_version, IDM_CONTRACT_VERSION);
-    assert.equal(design.project_context.course_description, chain.golden.project_context.course_description);
+    assert.equal(design.project_context.course_description, null);
     // QLT-6: a workspace created before the launch brief (NULL column) reaches Python with null brief fields
     // and is designed exactly as before (AI-proposed audience, model or classifier purpose summary).
     assert.deepEqual([design.project_context.design_mode, design.project_context.learner_audience,

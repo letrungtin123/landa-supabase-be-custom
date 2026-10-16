@@ -183,8 +183,6 @@ export class Chain {
     if (sql.includes('a.artifact_kind=\'source_catalog\'')) return [this.sourceCatalog()];
     if (sql.includes('SELECT t.input_tokens')) return [{ input_tokens: this.current.inputTokens,
       remaining_ms: 590_000, course_title: String(this.golden.project_context.course_title_hint),
-      course_description: this.golden.project_context.course_description
-        ? `<p>${String(this.golden.project_context.course_description)}</p>` : null,
       launch_brief: this.variant.launch_brief ?? null }];
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: this.facts.length,
       content_chars: this.facts.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) }];
