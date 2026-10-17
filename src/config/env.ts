@@ -328,6 +328,12 @@ export const env = {
   AI_RAG_STORAGE_SIGNED_URL_ORIGIN: optionalOrigin('AI_RAG_STORAGE_SIGNED_URL_ORIGIN'),
   AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),
+  // Chat answers this API process streams at once, per tenant and in total.
+  // A turn over either limit is refused at once with 429 AI_BUSY.
+  AI_CHAT_TENANT_CONCURRENCY: optionalBoundedInt('AI_CHAT_TENANT_CONCURRENCY', 8, 1, 1_024),
+  AI_CHAT_GLOBAL_CONCURRENCY: optionalBoundedInt('AI_CHAT_GLOBAL_CONCURRENCY', 48, 1, 4_096),
+  // A chat answer from the provider (retries included) stops after this long.
+  AI_CHAT_ANSWER_DEADLINE_MS: optionalBoundedInt('AI_CHAT_ANSWER_DEADLINE_MS', 180_000, 10_000, 900_000),
   // A source-backed Blueprint may use the provider's full 65,536-token
   // response window and has one validation retry available.
   AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE', 250_000, 1_000, 2_000_000),

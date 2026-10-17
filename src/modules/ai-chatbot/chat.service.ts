@@ -51,6 +51,15 @@ import {
 import type { AiOperation, AiUsage } from './ai-engine.types.js';
 import { addAiUsage, aiUsageFromGeminiMetadata, createStreamUsageTracker } from './ai-usage.logic.js';
 import {
+  abortableSleep,
+  chatAnswerSignal,
+  chatRetryDelayMs,
+  createChatProviderMeter,
+  mayRetryChatAttempt,
+  stoppedByDeadline,
+  type ChatProviderMeter,
+} from './chat-provider-turn.logic.js';
+import {
   getTenantAiRuntimeSettings,
 } from './ai-settings.service.js';
 import {
@@ -1734,9 +1743,6 @@ function sanitizeGeminiError(err: any): Error {
   return new Error('Đã xảy ra lỗi khi xử lý tin nhắn. Vui lòng thử lại.');
 }
 
-/** Helper: sleep for retry */
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 function logLessonAuthorFlow(stage: string, details: Record<string, unknown> = {}): void {
   console.log(`[LessonAuthorFlow] ${stage}`, details);
 }
@@ -1766,6 +1772,8 @@ export interface ChatStreamOptions {
   reportFilters?: ReportChatFilterInput;
   /** QLT-6: the validated workspace launch brief; only part of the request identity hash. */
   launchBrief?: LessonAuthorLaunchBrief;
+  /** Aborted when the client leaves: the chat answer stops calling the provider. */
+  abortSignal?: AbortSignal;
 }
 
 /** Short admission lock shared with old chat; never held during queued generation. */
@@ -8338,6 +8346,9 @@ export async function sendMessageStream(
   let aiReservationEmbeddingModel: string | null = null;
   let aiReservationFinalized = false;
   let lessonAuthorCorrelationId: string | null = null;
+  // Provider calls of the chat answer (section 6), for metering a stopped or failed answer.
+  let chatProviderMeter: ChatProviderMeter | null = null;
+  let chatProviderService: string | null = null;
   const finalizeAiReservation = async (
     usage: AiUsage,
     source: Record<string, unknown>,
@@ -9539,6 +9550,15 @@ export async function sendMessageStream(
     let geminiTurnUsage: AiUsage | null = null;
     let chatSources: Array<Record<string, unknown>> = [];
     let chatRetrieval: RagRetrievalDiagnostics | null = null;
+    // H10: the answer stops when the client leaves or the deadline passes.
+    // Every provider call that started is metered, even when it is stopped.
+    const answerSignal = chatAnswerSignal(options.abortSignal, env.AI_CHAT_ANSWER_DEADLINE_MS);
+    const providerMeter = createChatProviderMeter({
+      inputTokens: () => estimateTokensFromText(enrichedPrompt, currentTurnText, sourceDocumentContext),
+      estimateTokens: (text) => estimateTokensFromText(text),
+    });
+    chatProviderMeter = providerMeter;
+    chatProviderService = aiSettings.activeEngine;
 
     if (aiSettings.activeEngine === 'self_built_rag') {
       logChatCourseFlow('rag_chat_start', {
@@ -9548,6 +9568,7 @@ export async function sendMessageStream(
         has_course_context: hasCourseContext,
         source_documents: sourceDocuments.length,
       });
+      const ragCall = providerMeter.start();
       const ragResponse = await sendRagChat({
         tenant_id: ctx.tenantId,
         kb_id: ctx.botKbId,
@@ -9565,9 +9586,16 @@ export async function sendMessageStream(
         source_documents: toRagSourceDocuments(sourceDocuments),
         course_context: ragCourseContext,
         locale: requestedLocale,
+      }, { signal: answerSignal }).catch((error: unknown) => {
+        // A failed answer that the service still billed reports its usage.
+        if (error instanceof RagServiceError && error.usage) ragCall.setUsage(normalizeAiUsage(error.usage));
+        ragCall.fail(answerSignal.aborted);
+        throw error;
       });
       fullResponse = ragResponse.text ?? '';
       chatUsage = ragResponse.usage ?? null;
+      ragCall.addOutput(fullResponse);
+      if (chatUsage) ragCall.setUsage(normalizeAiUsage(chatUsage));
       chatSources = ragResponse.sources ?? [];
       chatRetrieval = ragResponse.retrieval ?? null;
       if (fullResponse) {
@@ -9588,8 +9616,7 @@ export async function sendMessageStream(
       for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
         try {
           if (attempt > 0) {
-            const suggestedDelay = parseRetryDelay(lastError);
-            const delay = suggestedDelay || (GEMINI_RETRY_DELAY_MS * attempt);
+            const delay = chatRetryDelayMs(attempt, parseRetryDelay(lastError), GEMINI_RETRY_DELAY_MS);
             logChatCourseFlow('retry_wait', {
               conversation_id: conversationId,
               attempt,
@@ -9597,7 +9624,9 @@ export async function sendMessageStream(
               wait_seconds: Math.round(delay / 1000),
               last_error: lastError?.message ?? null,
             });
-            await sleep(delay);
+            await abortableSleep(delay, answerSignal);
+            // A buffered answer (never sent yet) starts over instead of appending to the failed attempt.
+            fullResponse = '';
           }
 
           if (hasCourseContext) {
@@ -9609,6 +9638,7 @@ export async function sendMessageStream(
             });
             // ── Two-step flow: forced function calling (mode=ANY) ──
             // Gemini MUST choose: get_lesson_content OR respond_directly
+            const routerCall = providerMeter.start();
             const firstResponse = await aiClient.models.generateContent({
               model: aiSettings.chatModel,
               contents: history,
@@ -9617,9 +9647,11 @@ export async function sendMessageStream(
                 maxOutputTokens,
                 tools: [COURSE_TOOLS] as any,
                 toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
+                abortSignal: answerSignal,
               },
-            });
+            }).catch((error: unknown) => { routerCall.fail(answerSignal.aborted); throw error; });
             geminiTurnUsage = addAiUsage(geminiTurnUsage, aiUsageFromGeminiMetadata(firstResponse.usageMetadata));
+            routerCall.setUsage(aiUsageFromGeminiMetadata(firstResponse.usageMetadata));
 
             const fnCallPart = firstResponse.candidates?.[0]?.content?.parts?.find((part: any) => part.functionCall) as any;
             const fnCall = fnCallPart?.functionCall ?? firstResponse.functionCalls?.[0];
@@ -9647,25 +9679,33 @@ export async function sendMessageStream(
               });
 
               // Step 2: streaming with function result (no tools needed)
-              const secondResponse = await aiClient.models.generateContentStream({
-                model: aiSettings.chatModel,
-                contents: [
-                  ...history,
-                  { role: 'model', parts: [fnCallPart ?? { functionCall: fnCall }] },
-                  { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
-                ],
-                config: { systemInstruction: enrichedPrompt, maxOutputTokens },
-              });
-
-              const secondUsage = createStreamUsageTracker();
+              const secondCall = providerMeter.start();
+              let secondUsage: ReturnType<typeof createStreamUsageTracker> | null = null;
               try {
+                const secondResponse = await aiClient.models.generateContentStream({
+                  model: aiSettings.chatModel,
+                  contents: [
+                    ...history,
+                    { role: 'model', parts: [fnCallPart ?? { functionCall: fnCall }] },
+                    { role: 'user', parts: [{ functionResponse: { name: 'get_lesson_content', response: { content: lessonContent } } }] },
+                  ],
+                  config: { systemInstruction: enrichedPrompt, maxOutputTokens, abortSignal: answerSignal },
+                });
+                const secondTracker = createStreamUsageTracker();
+                secondUsage = secondTracker;
                 for await (const chunk of secondResponse) {
-                  secondUsage.observe(chunk);
+                  secondTracker.observe(chunk);
                   const text = chunk.text ?? '';
+                  secondCall.addOutput(text);
                   appendChatChunk(text);
                 }
+              } catch (error) {
+                secondCall.fail(answerSignal.aborted);
+                throw error;
               } finally {
-                geminiTurnUsage = addAiUsage(geminiTurnUsage, secondUsage.usage());
+                const secondUsed = secondUsage?.usage() ?? null;
+                geminiTurnUsage = addAiUsage(geminiTurnUsage, secondUsed);
+                secondCall.setUsage(secondUsed);
               }
             } else {
               // respond_directly OR no function call → not about course content
@@ -9678,22 +9718,31 @@ export async function sendMessageStream(
                 systemInstruction: enrichedPrompt,
                 maxOutputTokens,
                 ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
+                abortSignal: answerSignal,
               };
-              const fallbackResponse = await aiClient.models.generateContentStream({
-                model: aiSettings.chatModel,
-                contents: history,
-                config: fallbackConfig,
-              });
-
-              const fallbackUsage = createStreamUsageTracker();
+              const fallbackCall = providerMeter.start();
+              let fallbackUsage: ReturnType<typeof createStreamUsageTracker> | null = null;
               try {
+                const fallbackResponse = await aiClient.models.generateContentStream({
+                  model: aiSettings.chatModel,
+                  contents: history,
+                  config: fallbackConfig,
+                });
+                const fallbackTracker = createStreamUsageTracker();
+                fallbackUsage = fallbackTracker;
                 for await (const chunk of fallbackResponse) {
-                  fallbackUsage.observe(chunk);
+                  fallbackTracker.observe(chunk);
                   const text = chunk.text ?? '';
+                  fallbackCall.addOutput(text);
                   appendChatChunk(text);
                 }
+              } catch (error) {
+                fallbackCall.fail(answerSignal.aborted);
+                throw error;
               } finally {
-                geminiTurnUsage = addAiUsage(geminiTurnUsage, fallbackUsage.usage());
+                const fallbackUsed = fallbackUsage?.usage() ?? null;
+                geminiTurnUsage = addAiUsage(geminiTurnUsage, fallbackUsed);
+                fallbackCall.setUsage(fallbackUsed);
               }
             }
           } else {
@@ -9707,22 +9756,31 @@ export async function sendMessageStream(
               systemInstruction: enrichedPrompt,
               maxOutputTokens,
               ...(fileSearchTools.length > 0 ? { tools: fileSearchTools } : {}),
+              abortSignal: answerSignal,
             };
-            const response = await aiClient.models.generateContentStream({
-              model: aiSettings.chatModel,
-              contents: history,
-              config,
-            });
-
-            const streamUsage = createStreamUsageTracker();
+            const directCall = providerMeter.start();
+            let streamUsage: ReturnType<typeof createStreamUsageTracker> | null = null;
             try {
+              const response = await aiClient.models.generateContentStream({
+                model: aiSettings.chatModel,
+                contents: history,
+                config,
+              });
+              const streamTracker = createStreamUsageTracker();
+              streamUsage = streamTracker;
               for await (const chunk of response) {
-                streamUsage.observe(chunk);
+                streamTracker.observe(chunk);
                 const text = chunk.text ?? '';
+                directCall.addOutput(text);
                 appendChatChunk(text);
               }
+            } catch (error) {
+              directCall.fail(answerSignal.aborted);
+              throw error;
             } finally {
-              geminiTurnUsage = addAiUsage(geminiTurnUsage, streamUsage.usage());
+              const streamUsed = streamUsage?.usage() ?? null;
+              geminiTurnUsage = addAiUsage(geminiTurnUsage, streamUsed);
+              directCall.setUsage(streamUsed);
             }
           }
 
@@ -9732,14 +9790,23 @@ export async function sendMessageStream(
         } catch (err: any) {
           lastError = err;
           const status = err?.status || err?.code || 0;
-          // Only retry on 503 (service unavailable) or 429 (rate limited)
-          if (status !== 503 && status !== 429) break;
-          if (attempt === GEMINI_MAX_RETRIES) break;
+          // Only provider overload (503/429) is retried; never once the answer
+          // was stopped or text reached the client (a retry would repeat it).
+          if (!mayRetryChatAttempt({
+            status,
+            attempt,
+            maxRetries: GEMINI_MAX_RETRIES,
+            stopped: answerSignal.aborted,
+            textSentToClient: !shouldBufferLessonAuthorChat && fullResponse.length > 0,
+          })) break;
         }
       }
     }
 
     if (lastError && !fullResponse) {
+      if (stoppedByDeadline(answerSignal)) {
+        throw new AppError('Trợ lý AI trả lời quá lâu. Vui lòng thử lại sau ít phút.', 504, 'AI_CHAT_TIMEOUT');
+      }
       throw lastError;
     }
 
@@ -9803,18 +9870,23 @@ export async function sendMessageStream(
         target: ctx.target,
       });
     }
+    const stoppedUsage = providerMeter.anyStopped() ? providerMeter.billedUsage() : null;
     await finalizeAiReservation(
-      chatUsage
-        ? normalizeAiUsage(chatUsage)
-        : geminiTurnUsage
-          ? normalizeAiUsage(geminiTurnUsage)
-          : estimateAiTurnUsage([enrichedPrompt, currentTurnText, sourceDocumentContext], assistantContent || fullResponse),
+      stoppedUsage
+        // Stopped part-way (client left or deadline): every call that started, as billed.
+        ? normalizeAiUsage(stoppedUsage)
+        : chatUsage
+          ? normalizeAiUsage(chatUsage)
+          : geminiTurnUsage
+            ? normalizeAiUsage(geminiTurnUsage)
+            : estimateAiTurnUsage([enrichedPrompt, currentTurnText, sourceDocumentContext], assistantContent || fullResponse),
       { service: aiSettings.activeEngine, operation: 'chat' },
       {
         source_document_count: sourceDocuments.length,
         has_course_context: hasCourseContext,
         rag_source_count: chatSources.length,
         ...(chatRetrieval ? { rag_retrieval: chatRetrieval } : {}),
+        ...(stoppedUsage ? { stopped_early: true } : {}),
       },
     );
 
@@ -9835,6 +9907,19 @@ export async function sendMessageStream(
     });
     onDone();
   } catch (err: any) {
+    // A chat answer whose provider calls started is paid for, even when it
+    // failed or was stopped; only an answer that never reached the provider
+    // returns its reservation.
+    const billedUsage = chatProviderMeter?.billedUsage() ?? null;
+    if (billedUsage && aiReservationId && aiReservationTenantId && !aiReservationFinalized) {
+      await finalizeAiReservation(
+        normalizeAiUsage(billedUsage),
+        { service: chatProviderService, operation: 'chat' },
+        { failed_after_billing: true, ...(chatProviderMeter?.anyStopped() ? { stopped_early: true } : {}) },
+      ).catch((finalizeErr: any) => {
+        console.error('[AI Chatbot] Failed to settle a billed chat answer:', finalizeErr?.message || String(finalizeErr));
+      });
+    }
     if (aiReservationId && aiReservationTenantId && !aiReservationFinalized) {
       await releaseTenantAiTokenReservation(aiReservationId, aiReservationTenantId).catch((releaseErr: any) => {
         console.error('[AI Chatbot] Failed to release token reservation:', releaseErr?.message || String(releaseErr));

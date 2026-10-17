@@ -540,12 +540,13 @@ async function sendRagJson<T>(
   }
 }
 
-export async function sendRagChat(request: RagChatRequest): Promise<RagChatResponse> {
+/** `signal` stops the request (the chat answer was stopped by the client or its deadline). */
+export async function sendRagChat(request: RagChatRequest, options: { signal?: AbortSignal } = {}): Promise<RagChatResponse> {
   const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
   return postRagJson<RagChatResponse>('/v1/chat', {
     ...request,
     api_key: apiKey,
-  });
+  }, env.AI_RAG_REQUEST_TIMEOUT_MS, options.signal);
 }
 
 export async function generateRagLessonAuthorProposal(
