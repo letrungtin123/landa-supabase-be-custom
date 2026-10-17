@@ -1,6 +1,7 @@
 import { query } from '../../config/database.js';
-import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { cacheJson, getCacheJson, getCacheVersion, setCacheJson } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { isTenantModuleEnabled } from '../../middleware/tenant-module-state.js';
 import {
   criteriaRequiresCourses,
   minimumMappedCourses,
@@ -9,6 +10,8 @@ import {
 } from './badge-criteria.js';
 import {
   buildBadgeAwardCandidates,
+  buildBadgeOverview,
+  cacheableBadgeOverview,
   evaluateBadgeRule,
   type BadgeProgress as EvaluationBadgeProgress,
   type CompletedCourseFact,
@@ -47,6 +50,9 @@ export type BadgeEvaluationOverview = {
   pending_popups: UserBadgeRow[];
   progress: Record<string, BadgeProgress>;
 };
+
+/** Module code that turns badges on for a tenant. */
+export const BADGE_MODULE_CODE = 'badge_management';
 
 export const EMPTY_BADGE_OVERVIEW: BadgeEvaluationOverview = {
   badge_definitions: [],
@@ -158,15 +164,22 @@ async function getEffectiveBadgeRulesFromDb(tenantId: string): Promise<Effective
   return rules;
 }
 
-export async function getEffectiveBadgeRules(tenantId: string): Promise<EffectiveBadgeRule[]> {
-  if (!(await isBadgeManagementModuleEnabled(tenantId))) return [];
-
-  const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
+/** Rules of one tenant badge-cache version (bumped by every rule, module and course change). */
+function loadCachedBadgeRules(tenantId: string, version: string): Promise<EffectiveBadgeRule[]> {
   return cacheJson(
     cacheKeys.tenantResource(tenantId, 'effective-badge-rules', version),
     CACHE_TTL.badges,
     () => getEffectiveBadgeRulesFromDb(tenantId),
   );
+}
+
+export async function getEffectiveBadgeRules(tenantId: string): Promise<EffectiveBadgeRule[]> {
+  // Cached module state (bumped on every tenant module change), same rule as
+  // isBadgeManagementModuleEnabled.
+  if (!(await isTenantModuleEnabled(tenantId, BADGE_MODULE_CODE))) return [];
+
+  const version = await getCacheVersion(...cacheVersions.tenantBadges(tenantId));
+  return loadCachedBadgeRules(tenantId, version);
 }
 
 export async function getEffectiveBadgeDefinitions(tenantId: string) {
@@ -178,12 +191,6 @@ export async function getEffectiveBadgeDefinitions(tenantId: string) {
     ...definition
   }) => definition);
 }
-
-function toTime(value: string | Date): number {
-  const timestamp = value instanceof Date ? value.getTime() : Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : Number.NaN;
-}
-
 
 async function loadCompletedCourses(userId: string, tenantId: string): Promise<CompletedCourseFact[]> {
   const result = await query<CompletedCourseFact>(
@@ -279,62 +286,94 @@ async function insertValidatedBadgeAwards(
   return result.rows;
 }
 
-export async function evaluateUserBadges(userId: string, tenantId: string): Promise<BadgeEvaluationOverview> {
-  const rules = await getEffectiveBadgeRules(tenantId);
+/** Where the last overview of a user is kept (Redis by default; tests pass their own). */
+export interface BadgeOverviewCache {
+  version: (...segments: readonly unknown[]) => Promise<string>;
+  read: (key: string) => Promise<{ hit: true; value: BadgeEvaluationOverview } | { hit: false; value?: undefined }>;
+  write: (key: string, value: BadgeEvaluationOverview, ttlSeconds: number) => Promise<void>;
+}
+
+const redisBadgeOverviewCache: BadgeOverviewCache = {
+  version: getCacheVersion,
+  read: (key) => getCacheJson<BadgeEvaluationOverview>(key),
+  write: (key, value, ttlSeconds) => setCacheJson(key, value, ttlSeconds),
+};
+
+/**
+ * Evaluates (and awards) the user's badges, or returns the overview of the
+ * last evaluation when nothing it depends on changed since: the key carries
+ * the tenant badge version (rules, module, courses) and the user's badge
+ * version, bumped after every change of the user's completed courses,
+ * profile or badges (see invalidateUserBadgeCaches). The kept copy says
+ * newly_earned: [] — what a new evaluation would answer then.
+ */
+export async function evaluateUserBadges(
+  userId: string,
+  tenantId: string,
+  cache: BadgeOverviewCache = redisBadgeOverviewCache,
+): Promise<BadgeEvaluationOverview> {
+  if (!(await isTenantModuleEnabled(tenantId, BADGE_MODULE_CODE))) return EMPTY_BADGE_OVERVIEW;
+
+  const [rulesVersion, userVersion] = await Promise.all([
+    cache.version(...cacheVersions.tenantBadges(tenantId)),
+    cache.version(...cacheVersions.userBadges(userId)),
+  ]);
+  const key = cacheKeys.learnerResource(tenantId, userId, 'badge-overview', [rulesVersion, userVersion]);
+  const kept = await cache.read(key);
+  if (kept.hit) return kept.value;
+
+  const overview = await evaluateUserBadgesFromDb(userId, tenantId, rulesVersion);
+  await cache.write(key, cacheableBadgeOverview(overview), CACHE_TTL.badgeOverview);
+  return overview;
+}
+
+async function evaluateUserBadgesFromDb(
+  userId: string,
+  tenantId: string,
+  rulesVersion: string,
+): Promise<BadgeEvaluationOverview> {
+  // Definitions, progress and popups use the same cached rules as the award
+  // check; the award itself is validated against the database again.
+  const rules = await loadCachedBadgeRules(tenantId, rulesVersion);
   if (rules.length === 0) return EMPTY_BADGE_OVERVIEW;
 
-  const [completedCourses, profileData, existingResult] = await Promise.all([
+  const [completedCourses, profileData, ownedResult] = await Promise.all([
     loadCompletedCourses(userId, tenantId),
     loadProfile(userId, tenantId),
-    query<{ badge_id: string }>(
-      'SELECT badge_id FROM user_badges WHERE user_id = $1',
+    query<UserBadgeRow>(
+      `SELECT badge_id, is_shown, earned_at
+       FROM user_badges
+       WHERE user_id = $1
+       ORDER BY earned_at DESC, badge_id`,
       [userId],
     ),
   ]);
-  const existingIds = new Set(existingResult.rows.map((row) => row.badge_id));
+  const existingIds = new Set(ownedResult.rows.map((row) => row.badge_id));
   const awardCandidates = rules.filter((rule) => {
     const result = evaluateBadgeRule(rule, completedCourses, profileData);
     return result.achieved && !existingIds.has(rule.id);
   });
+  // Writes only when a badge is actually earned now.
   const newlyEarned = await insertValidatedBadgeAwards(userId, tenantId, awardCandidates);
 
-  // Reload from DB so definitions, progress and popups follow the latest committed configuration.
-  const currentRules = await getEffectiveBadgeRulesFromDb(tenantId);
-  if (currentRules.length === 0) return EMPTY_BADGE_OVERVIEW;
-
-  const effectiveIds = currentRules.map((rule) => rule.id);
+  const effectiveIds = rules.map((rule) => rule.id);
   const effectiveIdSet = new Set(effectiveIds);
-  const progressMap: Record<string, BadgeProgress> = {};
-  for (const rule of currentRules) {
-    progressMap[rule.id] = evaluateBadgeRule(rule, completedCourses, profileData).progress;
-  }
+  const earnedRows = newlyEarned.length > 0
+    ? (await query<UserBadgeRow>(
+        `SELECT badge_id, is_shown, earned_at
+         FROM user_badges
+         WHERE user_id = $1 AND badge_id = ANY($2::varchar[])
+         ORDER BY earned_at DESC, badge_id`,
+        [userId, effectiveIds],
+      )).rows
+    // Same rows and order as that query: nothing was inserted since.
+    : ownedResult.rows.filter((row) => effectiveIdSet.has(row.badge_id));
 
-  const earnedResult = await query<UserBadgeRow>(
-    `SELECT badge_id, is_shown, earned_at
-     FROM user_badges
-     WHERE user_id = $1 AND badge_id = ANY($2::varchar[])
-     ORDER BY earned_at DESC, badge_id`,
-    [userId, effectiveIds],
-  );
-
-  const sortOrder = new Map(currentRules.map((rule) => [rule.id, rule.sort_order]));
-  const pendingPopups = earnedResult.rows
-    .filter((badge) => !badge.is_shown)
-    .sort((a, b) => {
-      const timeDiff = toTime(a.earned_at) - toTime(b.earned_at);
-      return timeDiff || (sortOrder.get(a.badge_id) || 0) - (sortOrder.get(b.badge_id) || 0);
-    });
-
-  return {
-    badge_definitions: currentRules.map(({
-      criteria: _criteria,
-      mapped_courses: _mappedCourses,
-      rule_version: _ruleVersion,
-      ...definition
-    }) => definition),
-    earned_badges: earnedResult.rows,
-    newly_earned: newlyEarned.filter((badge) => effectiveIdSet.has(badge.badge_id)),
-    pending_popups: pendingPopups,
-    progress: progressMap,
-  };
+  return buildBadgeOverview({
+    rules,
+    completedCourses,
+    profile: profileData,
+    earnedRows,
+    newlyEarned,
+  });
 }

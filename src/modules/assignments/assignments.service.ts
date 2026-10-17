@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getClient, query } from '../../config/database.js';
+import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
 import {
   buildFileName,
   buildStoragePath,
@@ -1255,6 +1256,8 @@ export async function submitAssignment(
     client.release();
   }
 
+  // The submission can complete the course: badges are evaluated again.
+  await invalidateUserBadgeCaches([user.id]);
   await Promise.all(oldStoragePaths.map(path => deleteFile(path).catch(() => undefined)));
   return getLearnerAssignment(assignmentId, user);
 }

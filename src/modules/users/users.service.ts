@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query, withDatabaseTransaction } from '../../config/database.js';
+import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
 import { hashPassword } from '../../utils/password.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { normalizeEmail } from '../../utils/email.js';
@@ -488,6 +489,8 @@ async function updateUserInTransaction(
   if (sessionEndReason) await recordUserSessionRevocation(userId, sessionEndReason);
   // In-process fast path kept for role changes (same instant semantics).
   if (roleChanged) blacklistUser(userId);
+  // Profile badges read phone and avatar_url (bumped after the commit).
+  if (input.phone !== undefined || input.avatar_url !== undefined) await invalidateUserBadgeCaches([userId]);
 
   return result.rows[0];
 }
@@ -595,6 +598,8 @@ export async function updateProfile(
     params,
   );
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  // Profile badges read these fields.
+  await invalidateUserBadgeCaches([userId]);
   return result.rows[0];
 }
 
@@ -615,6 +620,8 @@ export async function updateAvatar(userId: string, avatarUrl: string) {
   if (result.rowCount === 0) {
     throw new AppError('Tài khoản đang bị xóa hoặc không còn hoạt động', 409);
   }
+  // Profile badges read avatar_url.
+  await invalidateUserBadgeCaches([userId]);
 }
 
 /**

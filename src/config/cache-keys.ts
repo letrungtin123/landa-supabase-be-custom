@@ -15,6 +15,9 @@ export const CACHE_TTL = {
   library: 120,
   courseModal: 600,
   badges: 600,
+  // Last badge overview of a user: every change it depends on bumps a
+  // version; the TTL only bounds changes made outside the API (manual SQL).
+  badgeOverview: 300,
   news: 120,
   emailTemplates: 300,
   aiConfig: 300,
@@ -74,6 +77,8 @@ export const cacheVersions = {
     ['user', userId, 'membership'] as const,
   userCourseProgress: (userId: string, courseId: string) =>
     ['user', userId, 'course', courseId, 'progress'] as const,
+  userBadges: (userId: string) =>
+    ['user', userId, 'badges'] as const,
   bot: (botId: string) =>
     ['bot', botId] as const,
   modules: () =>

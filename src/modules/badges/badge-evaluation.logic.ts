@@ -114,6 +114,77 @@ export function evaluateBadgeRule(
   }
 }
 
+/** One user_badges row as the learner endpoints return it. */
+export type EarnedBadgeRow = {
+  badge_id: string;
+  is_shown: boolean;
+  earned_at: string | Date;
+};
+
+/** A rule as loaded for a tenant; only id and sort_order are read here besides the criteria. */
+export type OverviewBadgeRule = EvaluatableBadgeRule & {
+  id: string;
+  sort_order: number;
+  rule_version: string;
+};
+
+export type BadgeOverview<Rule extends OverviewBadgeRule, Row extends EarnedBadgeRow> = {
+  badge_definitions: Array<Omit<Rule, 'criteria' | 'mapped_courses' | 'rule_version'>>;
+  earned_badges: Row[];
+  newly_earned: Row[];
+  pending_popups: Row[];
+  progress: Record<string, BadgeProgress>;
+};
+
+/**
+ * The learner badge overview. `earnedRows` are the user's badges of the
+ * effective rules, ordered by earned_at DESC, badge_id (as read from the
+ * database); `newlyEarned` are the rows this evaluation inserted.
+ */
+export function buildBadgeOverview<Rule extends OverviewBadgeRule, Row extends EarnedBadgeRow>(input: {
+  rules: Rule[];
+  completedCourses: CompletedCourseFact[];
+  profile: UserProfile;
+  earnedRows: Row[];
+  newlyEarned: Row[];
+}): BadgeOverview<Rule, Row> {
+  const { rules, completedCourses, profile, earnedRows, newlyEarned } = input;
+  const effectiveIdSet = new Set(rules.map((rule) => rule.id));
+  const progressMap: Record<string, BadgeProgress> = {};
+  for (const rule of rules) {
+    progressMap[rule.id] = evaluateBadgeRule(rule, completedCourses, profile).progress;
+  }
+
+  const sortOrder = new Map(rules.map((rule) => [rule.id, rule.sort_order]));
+  const pendingPopups = earnedRows
+    .filter((badge) => !badge.is_shown)
+    .sort((a, b) => {
+      const timeDiff = toTime(a.earned_at) - toTime(b.earned_at);
+      return timeDiff || (sortOrder.get(a.badge_id) || 0) - (sortOrder.get(b.badge_id) || 0);
+    });
+
+  return {
+    badge_definitions: rules.map(({
+      criteria: _criteria,
+      mapped_courses: _mappedCourses,
+      rule_version: _ruleVersion,
+      ...definition
+    }) => definition),
+    earned_badges: earnedRows,
+    newly_earned: newlyEarned.filter((badge) => effectiveIdSet.has(badge.badge_id)),
+    pending_popups: pendingPopups,
+    progress: progressMap,
+  };
+}
+
+/**
+ * What is kept between evaluations: a later read inserted nothing, so it
+ * reports no newly earned badge (the same answer a new evaluation gives).
+ */
+export function cacheableBadgeOverview<T extends { newly_earned: unknown[] }>(overview: T): T {
+  return { ...overview, newly_earned: [] };
+}
+
 export function buildBadgeAwardCandidates(rules: AwardCandidateRule[]): BadgeAwardCandidate[] {
   return rules.map((rule) => ({
     badge_id: rule.id,

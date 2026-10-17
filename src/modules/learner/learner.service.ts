@@ -6,7 +6,7 @@
 import { query } from '../../config/database.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
-import { invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
+import { invalidateUserBadgeCaches, invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
@@ -1270,6 +1270,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
     await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
     await recalculateEnrollmentProgress(existing.rows[0].id, courseId);
     await invalidateUserCourseProgressCache(userId, courseId);
+    await invalidateUserBadgeCaches([userId]);
     return { enrollment_id: existing.rows[0].id, already_enrolled: false };
   }
 
@@ -1378,6 +1379,8 @@ export async function markBlocksComplete(
   // Tính lại progress: completed_leaves / total_leaves
   const progress = await recalculateEnrollmentProgress(enrollmentId, courseId);
   await invalidateUserCourseProgressCache(userId, courseId);
+  // Badges depend on completed courses only: re-evaluate when that changed.
+  if (progress.completion_changed) await invalidateUserBadgeCaches([userId]);
 
   return {
     marked,
@@ -1490,6 +1493,8 @@ export async function updateBadgeShown(userId: string, badgeId: string, isShown:
     'UPDATE user_badges SET is_shown = $1 WHERE user_id = $2 AND badge_id = $3',
     [isShown, userId, badgeId],
   );
+  // The kept overview lists this badge as a pending popup.
+  await invalidateUserBadgeCaches([userId]);
 }
 
 // ── Notifications ──
