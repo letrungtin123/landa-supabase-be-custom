@@ -415,7 +415,7 @@ export const env = {
   REPORT_AI_MODEL: optionalString('REPORT_AI_MODEL', 'gemini-3.8-flash'),
 
   // Gemini temp directory (optional — default ./tmp/gemini)
-  GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
+  GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_LESSON_AUTHOR_MODEL: process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
 

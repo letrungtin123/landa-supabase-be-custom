@@ -176,7 +176,7 @@ export async function createTenant(
        ON CONFLICT (tenant_id) DO NOTHING`,
       [
         tenant.id,
-        process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.5-flash',
+        process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
         process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
       ],
     );
