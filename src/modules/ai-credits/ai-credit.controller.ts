@@ -37,8 +37,7 @@ export async function getUsage(req: Request, res: Response, next: NextFunction):
   try {
     const tenantId = req.user?.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant context', 400); return; }
-    // Tenant admins only: learner_plus shares staff routes but not billing data.
-    if (req.user?.role === 'learner_plus') { sendError(res, 'Bạn không có quyền xem mức dùng AI', 403); return; }
+    // Access (AI Chatbot module rule, never learners) is checked by the route: ai-credit.access.ts.
     sendSuccess(res, await service.getTenantAiUsage(tenantId, queryMonth(req)));
   } catch (error) { next(error); }
 }

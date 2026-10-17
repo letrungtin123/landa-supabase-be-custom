@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
+import { aiUsageAccess } from './ai-credit.access.js';
 import * as controller from './ai-credit.controller.js';
 
 const router = Router();
 
-// Tenant admins: the AI usage page of their tenant (a superadmin sees the tenant chosen in the switcher).
-router.get('/usage', authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'), controller.getUsage);
+// The AI usage of a tenant (AI Chatbot > overview; a superadmin sees the tenant chosen in the switcher).
+// Same rule as the AI Chatbot module pages, never learner_plus or learner (ai-credit.access.ts).
+router.get('/usage', authenticate, tenantContext, ...aiUsageAccess, controller.getUsage);
 
 // Superadmin: plans, plan per tenant, top-ups, FX, overview and reconciliation (platform billing).
 const admin = Router();
