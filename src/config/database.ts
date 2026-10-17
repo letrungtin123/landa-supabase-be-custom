@@ -50,6 +50,27 @@ export async function query<T extends pg.QueryResultRow = any>(
     : pool.query<T>(text, params);
 }
 
+/** Work registered by afterCommit() for the transaction that owns the client. */
+const afterCommitWork = new WeakMap<pg.PoolClient, Array<() => Promise<void>>>();
+
+/**
+ * Runs `work` once the surrounding withDatabaseTransaction() has committed,
+ * or right away when there is none (autocommit). Dropped on rollback. Meant
+ * for cache invalidation, which must not run before other requests can see
+ * the new data. Legacy getClient() + BEGIN transactions are not tracked:
+ * their callers invalidate after their own COMMIT.
+ */
+export async function afterCommit(work: () => Promise<void>): Promise<void> {
+  const activeClient = transactionClientStorage.getStore();
+  if (!activeClient) {
+    await work();
+    return;
+  }
+  const pending = afterCommitWork.get(activeClient);
+  if (pending) pending.push(work);
+  else afterCommitWork.set(activeClient, [work]);
+}
+
 /**
  * Executes a unit of work atomically. Nested calls reuse the surrounding
  * transaction; only the outermost owner is allowed to BEGIN/COMMIT/ROLLBACK.
@@ -61,17 +82,22 @@ export async function withDatabaseTransaction<T>(
   if (existingClient) return work(existingClient);
 
   const client = await pool.connect();
+  let result: T;
+  let committedWork: Array<() => Promise<void>> = [];
   try {
     await client.query('BEGIN');
-    const result = await transactionClientStorage.run(client, () => work(client));
+    result = await transactionClientStorage.run(client, () => work(client));
     await client.query('COMMIT');
-    return result;
+    committedWork = afterCommitWork.get(client) ?? [];
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;
   } finally {
+    afterCommitWork.delete(client);
     client.release();
   }
+  for (const job of committedWork) await job();
+  return result;
 }
 
 /**
