@@ -40,3 +40,30 @@ test('LISTEN failure is a transport signal, never a guessed document result', as
   assert.deepEqual(observed, [null]);
   await hub.stop();
 });
+
+class RecordingListenClient extends EventEmitter {
+  queries: string[] = [];
+  releases: Array<Error | undefined> = [];
+  async query(sql: string) { this.queries.push(sql); return { rows: [], rowCount: 0 }; }
+  release(error?: Error) { this.releases.push(error); }
+}
+
+test('a broken LISTEN connection is discarded and a new one is taken after the backoff', async () => {
+  let now = 5_000;
+  const clients: RecordingListenClient[] = [];
+  const hub = createSourceDocumentHub({
+    getClient: async () => { const next = new RecordingListenClient(); clients.push(next); return next as never; },
+    now: () => now,
+  });
+  const observed: unknown[] = [];
+  await hub.subscribe(documentId, value => observed.push(value));
+  const failure = new Error('synthetic connection reset');
+  clients[0].emit('error', failure);
+  assert.deepEqual(observed, [null]);
+  assert.deepEqual(clients[0].releases, [failure]);
+  await assert.rejects(hub.subscribe(documentId, () => {}), /SOURCE_STREAM_LISTEN_RETRY_PENDING/);
+  now += 1_001;
+  await hub.subscribe(documentId, () => {});
+  assert.equal(clients.length, 2);
+  await hub.stop();
+});

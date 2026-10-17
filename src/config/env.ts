@@ -197,6 +197,16 @@ export const env = {
 
   // Database
   DATABASE_URL: required('DATABASE_URL'),
+  // Connections of this process's pool. Every PM2 app has its own pool:
+  // keep (sum of all pools) below the server's max_connections.
+  DB_POOL_MAX: optionalBoundedInt('DB_POOL_MAX', 20, 1, 200),
+  // PostgreSQL ends a session that stays idle inside an open transaction this
+  // long (a leaked client or a stuck await holding locks). 0 turns it off.
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: optionalBoundedInt('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 0, 3_600_000),
+  // Optional lock wait limit for every statement. Unset (0) by default: it
+  // would turn ordinary lock waits into errors. Code that needs one sets
+  // SET LOCAL lock_timeout itself.
+  DB_LOCK_TIMEOUT_MS: optionalBoundedInt('DB_LOCK_TIMEOUT_MS', 0, 0, 600_000),
 
   // JWT
   JWT_SECRET: required('JWT_SECRET'),
