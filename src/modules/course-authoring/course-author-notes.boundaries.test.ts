@@ -9,6 +9,7 @@ import test from 'node:test';
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const learner = read('../learner/learner.service.ts');
 const learnerRow = read('../learner/learner-block-row.logic.ts');
+const learnerTree = read('../learner/learner-course-blocks.logic.ts');
 const controller = read('./course-authoring.controller.ts');
 const routes = read('./course-authoring.routes.ts');
 const service = read('./course-authoring.service.ts');
@@ -16,14 +17,26 @@ const transfer = read('./course-outline-transfer.service.ts');
 const courses = read('../courses/courses.service.ts');
 const chat = read('../ai-chatbot/chat.service.ts');
 
-test('learner tree and block detail serialize every row through the stripping boundary', () => {
+test('learner tree and block detail serialize every row through the stripping boundary', async () => {
   assert.match(learnerRow, /export function toLearnerBlockRow\(input: any\) \{\n  const row = input && typeof input === 'object' \? withoutAuthorOnlyBlockMetadata\(input\) : input;/);
-  assert.equal((learner.match(/\$\{metaCol\} AS metadata/g) ?? []).length, 3, 'tree (enrolled + not enrolled) and detail');
-  assert.match(learner, /const blocks = result\.rows\.map\(toLearnerBlockRow\);/);
+  // Block detail.
+  assert.equal((learner.match(/\$\{metaCol\} AS metadata/g) ?? []).length, 1, 'block detail');
   assert.match(learner, /return toLearnerBlockRow\(result\.rows\[0\]\);/);
-  // Grading reads published metadata but never returns it.
-  assert.equal((learner.match(/b\.published_metadata AS metadata/g) ?? []).length, 1);
+  // Course tree: one shared published copy per course version, built from
+  // every row of the published tree query through the same boundary.
+  assert.match(learner, /return buildLearnerCourseStructure\(result\.rows\);/);
+  assert.match(learnerTree, /const blocks = rows\.map\(\(row\) => toLearnerBlockRow\(row\)/);
+  // The shared tree and grading read published metadata; grading never returns it.
+  assert.equal((learner.match(/b\.published_metadata AS metadata/g) ?? []).length, 2, 'shared tree and grading');
   assert.doesNotMatch(learner, /return \{[^}]*metadata: block\.metadata/);
+
+  const { COURSE_AUTHOR_NOTES_KEY } = await import('./course-author-notes.logic.js');
+  const { buildLearnerCourseStructure } = await import('../learner/learner-course-blocks.logic.js');
+  const { blocks } = buildLearnerCourseStructure([{
+    id: 'unit-1', block_type: 'vertical',
+    metadata: { [COURSE_AUTHOR_NOTES_KEY]: { version: 1 }, workspace_storyboard: { objective: 'x' }, kept: true },
+  }]);
+  assert.deepEqual(blocks[0]?.metadata, { kept: true }, 'the shared tree drops author-only keys');
 });
 
 test('CMS reads, browser writes, transfers, exports and chat prompts cannot expose or forge notes', () => {

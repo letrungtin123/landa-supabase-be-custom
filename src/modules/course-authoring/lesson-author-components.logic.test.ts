@@ -228,7 +228,8 @@ test('production adapter retains tenant scope, lock, permissions and transaction
   assert.match(apply, /throw normalizedError/);
   assert.ok(apply.indexOf('applyGeneratedUnitComponents') < apply.indexOf("'transaction_prepared'"));
   const transaction = readFileSync(new URL('../../config/database.ts', import.meta.url), 'utf8');
-  assert.match(transaction, /const result = await transactionClientStorage.run\(client, \(\) => work\(client\)\);[\s\S]*client.query\('COMMIT'\)/);
+  // `result` is declared before the try since afterCommit() work runs after the release.
+  assert.match(transaction, /(?:const )?result = await transactionClientStorage.run\(client, \(\) => work\(client\)\);[\s\S]*client.query\('COMMIT'\)/);
   assert.match(transaction, /catch \(error\)[\s\S]*client.query\('ROLLBACK'\)/);
 });
 
