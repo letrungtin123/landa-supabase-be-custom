@@ -1297,6 +1297,22 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
 // ── Block Completion ──
 
 /**
+ * A learner revisiting completed units keeps the admin's "last activity"
+ * moving, at most once per 5 minutes per enrollment. One indexed UPDATE of a
+ * fixed-size timestamp column; progress, is_completed and every cache
+ * version stay as they are (no cached answer contains last_activity_at).
+ */
+async function touchEnrollmentLastActivity(enrollmentId: string): Promise<void> {
+  await query(
+    `UPDATE course_progress
+     SET last_activity_at = now()
+     WHERE enrollment_id = $1::uuid
+       AND (last_activity_at IS NULL OR last_activity_at < now() - interval '5 minutes')`,
+    [enrollmentId],
+  );
+}
+
+/**
  * Đánh dấu blocks hoàn thành (batch).
  * Only blocks the enrollment has not completed yet are written; progress is
  * recalculated (and the progress cache version bumped) only when a row was
@@ -1364,9 +1380,12 @@ export async function markBlocksComplete(
   );
   const { marked, missing } = planBlockCompletion(activeBlocks.rows);
 
-  // Nothing new (all already completed, or no valid leaf): no write, no
-  // recalculation, no cache bump.
-  if (missing.length === 0) return { marked, newly_completed: 0 };
+  // Nothing new (all already completed, or no valid leaf): no completion
+  // write, no recalculation, no cache bump; only "last activity" moves.
+  if (missing.length === 0) {
+    await touchEnrollmentLastActivity(enrollmentId);
+    return { marked, newly_completed: 0 };
+  }
 
   const inserted = await query<{ block_id: string }>(
     `INSERT INTO block_completions (enrollment_id, block_id)
