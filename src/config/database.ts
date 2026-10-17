@@ -54,16 +54,32 @@ export async function query<T extends pg.QueryResultRow = any>(
 const afterCommitWork = new WeakMap<pg.PoolClient, Array<() => Promise<void>>>();
 
 /**
+ * Runs one post-commit job. The data is already committed, so a failure is
+ * logged (tag and error kind only) and never fails the request: a client
+ * retry would otherwise repeat committed work.
+ */
+async function runCommittedWork(work: () => Promise<void>): Promise<void> {
+  try {
+    await work();
+  } catch (err) {
+    const kind = err instanceof Error ? err.name : typeof err;
+    const code = (err as { code?: unknown } | null)?.code;
+    console.error(`[DB] after-commit work failed (${kind}${typeof code === 'string' ? ` ${code}` : ''})`);
+  }
+}
+
+/**
  * Runs `work` once the surrounding withDatabaseTransaction() has committed,
  * or right away when there is none (autocommit). Dropped on rollback. Meant
  * for cache invalidation, which must not run before other requests can see
- * the new data. Legacy getClient() + BEGIN transactions are not tracked:
- * their callers invalidate after their own COMMIT.
+ * the new data. Failures are logged, never thrown. Legacy getClient() + BEGIN
+ * transactions are not tracked: their callers invalidate after their own
+ * COMMIT.
  */
 export async function afterCommit(work: () => Promise<void>): Promise<void> {
   const activeClient = transactionClientStorage.getStore();
   if (!activeClient) {
-    await work();
+    await runCommittedWork(work);
     return;
   }
   const pending = afterCommitWork.get(activeClient);
@@ -96,7 +112,8 @@ export async function withDatabaseTransaction<T>(
     afterCommitWork.delete(client);
     client.release();
   }
-  for (const job of committedWork) await job();
+  // Every job runs even when an earlier one failed; none can fail the request now.
+  for (const job of committedWork) await runCommittedWork(job);
   return result;
 }
 
