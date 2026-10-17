@@ -5,6 +5,8 @@
 
 import { createHmac } from 'crypto';
 import { GoogleGenAI } from '@google/genai';
+import type { AiUsage } from './ai-engine.types.js';
+import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
 import { getClient, query } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import fs from 'fs/promises';
@@ -133,7 +135,7 @@ export async function getGeminiClient(tenantId: string): Promise<GoogleGenAI> {
 export async function transcribeAudioFile(
   localFilePath: string,
   aiClient: GoogleGenAI,
-): Promise<string> {
+): Promise<{ text: string; usage: AiUsage | null }> {
   const filesApi = (aiClient as any).files;
   const modelsApi = (aiClient as any).models;
   if (!filesApi?.upload || !filesApi?.delete || !modelsApi?.generateContent) {
@@ -181,7 +183,7 @@ export async function transcribeAudioFile(
       console.warn('[Gemini] Transcription response did not contain usable text', summarizeGeminiTranscriptionResponse(response));
       throw new Error('Gemini không trả về transcript hợp lệ.');
     }
-    return text;
+    return { text, usage: aiUsageFromGeminiMetadata(response.usageMetadata) };
   } finally {
     if (uploaded?.name) await filesApi.delete({ name: uploaded.name }).catch(() => undefined);
   }

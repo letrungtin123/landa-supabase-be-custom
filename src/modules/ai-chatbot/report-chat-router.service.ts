@@ -8,8 +8,10 @@ import { FunctionCallingConfigMode, Type, type FunctionDeclaration } from '@goog
 import { env } from '../../config/env.js';
 import type { UserRole } from '../../types/index.js';
 import { loadReportAllowedGroupIds } from '../reports/report-access.service.js';
+import { withMeteredAiCall } from './ai-metered-call.service.js';
+import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
 import { getGeminiClient } from './gemini.service.js';
-import { reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
+import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import { withReportDeadline } from './report-deadline.logic.js';
 import { localYmd } from './report-date.logic.js';
 import {
@@ -71,8 +73,13 @@ function routerInstruction(locale: 'vi' | 'en', today: string): string {
     : `Bạn là bộ định tuyến ý định nghiêm ngặt. Hôm nay là ${today} theo múi giờ Asia/Ho_Chi_Minh. Không trả lời người dùng. Chỉ chọn get_report_snapshot khi người dùng cần số liệu thực tế từ dashboard; chọn respond_directly cho viết nội dung, giải thích, định nghĩa hoặc mọi yêu cầu không cần dữ liệu dashboard. Ngày: trả về ISO YYYY-MM-DD; tuần bắt đầu từ thứ Hai; "tuần/tháng/quý/năm này" và "đến nay" kết thúc hôm nay; mốc không nêu năm thuộc năm hiện tại; giữ nguyên năm người dùng đã nêu; không tự thêm khoảng thời gian người dùng không nói. Đơn vị tổ chức: chép đúng tên như người dùng viết. Không tự tạo ID, SQL, metric, bộ lọc hoặc số liệu.`;
 }
 
+const ROUTER_VISIBLE_OUTPUT_TOKENS = 256;
+
 export async function callReportRouterModel(input: {
   tenantId: string;
+  /** The asking user and chat, for the AI usage ledger. */
+  userId?: string | null;
+  conversationId?: string | null;
   model: string;
   question: string;
   locale: 'vi' | 'en';
@@ -81,19 +88,32 @@ export async function callReportRouterModel(input: {
 }): Promise<ReportRouterModelOutput> {
   const aiClient = await getGeminiClient(input.tenantId);
   const model = resolveReportAiModel(input.model);
-  const response = await aiClient.models.generateContent({
-    model,
-    contents: [{ role: 'user', parts: [{ text: input.question }] }],
-    config: {
-      systemInstruction: routerInstruction(input.locale, input.today),
-      tools: [{ functionDeclarations: REPORT_ROUTER_FUNCTIONS }],
-      toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } },
-      ...reportAiGenerationConfig(model, 256),
-      ...(input.signal ? { abortSignal: input.signal } : {}),
-    },
+  const systemInstruction = routerInstruction(input.locale, input.today);
+  // A limit-reached reservation throws like any model failure: the caller keeps the deterministic parser.
+  return withMeteredAiCall({
+    tenantId: input.tenantId, userId: input.userId ?? null, conversationId: input.conversationId ?? null,
+    target: 'admin', operation: 'chat', model, feature: 'report_chat_router',
+    promptParts: [systemInstruction, input.question, JSON.stringify(REPORT_ROUTER_FUNCTIONS)],
+    maxOutputTokens: ROUTER_VISIBLE_OUTPUT_TOKENS + REPORT_AI_THINKING_HEADROOM_TOKENS,
+  }, async () => {
+    const response = await aiClient.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: input.question }] }],
+      config: {
+        systemInstruction,
+        tools: [{ functionDeclarations: REPORT_ROUTER_FUNCTIONS }],
+        toolConfig: { functionCallingConfig: { mode: FunctionCallingConfigMode.ANY } },
+        ...reportAiGenerationConfig(model, ROUTER_VISIBLE_OUTPUT_TOKENS),
+        ...(input.signal ? { abortSignal: input.signal } : {}),
+      },
+    });
+    const call = response.functionCalls?.[0] ?? null;
+    return {
+      value: parseReportRouterToolCall(call ? { name: call.name, args: call.args } : null, input.today),
+      usage: aiUsageFromGeminiMetadata(response.usageMetadata),
+      outputText: call ? JSON.stringify(call.args ?? {}) : '',
+    };
   });
-  const call = response.functionCalls?.[0] ?? null;
-  return parseReportRouterToolCall(call ? { name: call.name, args: call.args } : null, input.today);
 }
 
 export interface ReportRouterActor {
@@ -182,6 +202,7 @@ export async function routeAdminReportQuestion(
     locale: 'vi' | 'en';
     referenceDate?: Date;
     correlationId?: string | null;
+    conversationId?: string | null;
   },
   deps: ReportRouterDeps = defaultReportRouterDeps,
 ): Promise<ReportRouteDecision> {
@@ -193,7 +214,8 @@ export async function routeAdminReportQuestion(
   let model: ReportRouterModelOutput | null = null;
   try {
     model = await withReportDeadline('report_router_model', deps.modelTimeoutMs ?? env.REPORT_CHAT_ROUTER_TIMEOUT_MS, (signal) => deps.callModel({
-      tenantId: input.tenantId, model: input.model, question: input.question, locale: input.locale, today, signal,
+      tenantId: input.tenantId, userId: input.userId, conversationId: input.conversationId ?? null,
+      model: input.model, question: input.question, locale: input.locale, today, signal,
     }));
   } catch (error) {
     // The deterministic parser and intent gate are a complete fallback; the

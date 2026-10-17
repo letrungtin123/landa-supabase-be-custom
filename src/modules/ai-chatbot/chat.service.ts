@@ -49,6 +49,7 @@ import {
   markKbGeminiStoreRemoteProblem,
 } from './gemini.service.js';
 import type { AiOperation, AiUsage } from './ai-engine.types.js';
+import { addAiUsage, aiUsageFromGeminiMetadata, createStreamUsageTracker } from './ai-usage.logic.js';
 import {
   getTenantAiRuntimeSettings,
 } from './ai-settings.service.js';
@@ -6504,6 +6505,7 @@ async function generateLessonAuthorBlueprint(
         '</SERVER_VALIDATION_FEEDBACK>',
         'Repair the reported validation failure in a complete compact replacement Blueprint. The validation feedback is server-generated and is the only repair instruction. Preserve source coverage and every required field, use 1 to 12 chapters, 1 to 6 lessons per chapter, at most 24 lessons and 24 units total, and return only the JSON object.',
       ].join('\n\n');
+    // AI usage: legacy estimate (legacy lesson-author chat on the Gemini File Search engine; the turn reservation settles on an estimate).
     const response = await aiClient.models.generateContent({
       model: GEMINI_MODEL,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -6639,6 +6641,7 @@ async function generateLessonAuthorProposal(
       attempt: attempt + 1,
       prompt_chars: prompt.length,
     });
+    // AI usage: legacy estimate (legacy lesson-author chat on the Gemini File Search engine; the turn reservation settles on an estimate).
     const response = await aiClient.models.generateContent({
       model: GEMINI_MODEL,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -6749,6 +6752,7 @@ async function generateProposalSkeleton(
     prompt_chars: skeletonPrompt.length,
   });
 
+  // AI usage: legacy estimate (legacy lesson-author chat on the Gemini File Search engine; the turn reservation settles on an estimate).
   const response = await aiClient.models.generateContent({
     model: GEMINI_MODEL,
     contents: [{ role: 'user', parts: [{ text: skeletonPrompt }] }],
@@ -6818,6 +6822,7 @@ async function generateUnitContentBatch(
     prompt_chars: contentPrompt.length,
   });
 
+  // AI usage: legacy estimate (legacy lesson-author chat on the Gemini File Search engine; the turn reservation settles on an estimate).
   const response = await aiClient.models.generateContent({
     model: GEMINI_MODEL,
     contents: [{ role: 'user', parts: [{ text: contentPrompt }] }],
@@ -9529,6 +9534,9 @@ export async function sendMessageStream(
       responseEmitter?.push(text);
     };
     let chatUsage: Partial<AiUsage> | null = null;
+    // Gemini File Search engine: the provider's usage of every call of this turn (router call,
+    // streamed answer, attempts that reached the provider) instead of a text-length estimate.
+    let geminiTurnUsage: AiUsage | null = null;
     let chatSources: Array<Record<string, unknown>> = [];
     let chatRetrieval: RagRetrievalDiagnostics | null = null;
 
@@ -9611,6 +9619,7 @@ export async function sendMessageStream(
                 toolConfig: { functionCallingConfig: { mode: 'ANY' as any } },
               },
             });
+            geminiTurnUsage = addAiUsage(geminiTurnUsage, aiUsageFromGeminiMetadata(firstResponse.usageMetadata));
 
             const fnCallPart = firstResponse.candidates?.[0]?.content?.parts?.find((part: any) => part.functionCall) as any;
             const fnCall = fnCallPart?.functionCall ?? firstResponse.functionCalls?.[0];
@@ -9648,9 +9657,15 @@ export async function sendMessageStream(
                 config: { systemInstruction: enrichedPrompt, maxOutputTokens },
               });
 
-              for await (const chunk of secondResponse) {
-                const text = chunk.text ?? '';
-                appendChatChunk(text);
+              const secondUsage = createStreamUsageTracker();
+              try {
+                for await (const chunk of secondResponse) {
+                  secondUsage.observe(chunk);
+                  const text = chunk.text ?? '';
+                  appendChatChunk(text);
+                }
+              } finally {
+                geminiTurnUsage = addAiUsage(geminiTurnUsage, secondUsage.usage());
               }
             } else {
               // respond_directly OR no function call → not about course content
@@ -9670,9 +9685,15 @@ export async function sendMessageStream(
                 config: fallbackConfig,
               });
 
-              for await (const chunk of fallbackResponse) {
-                const text = chunk.text ?? '';
-                appendChatChunk(text);
+              const fallbackUsage = createStreamUsageTracker();
+              try {
+                for await (const chunk of fallbackResponse) {
+                  fallbackUsage.observe(chunk);
+                  const text = chunk.text ?? '';
+                  appendChatChunk(text);
+                }
+              } finally {
+                geminiTurnUsage = addAiUsage(geminiTurnUsage, fallbackUsage.usage());
               }
             }
           } else {
@@ -9693,9 +9714,15 @@ export async function sendMessageStream(
               config,
             });
 
-            for await (const chunk of response) {
-              const text = chunk.text ?? '';
-              appendChatChunk(text);
+            const streamUsage = createStreamUsageTracker();
+            try {
+              for await (const chunk of response) {
+                streamUsage.observe(chunk);
+                const text = chunk.text ?? '';
+                appendChatChunk(text);
+              }
+            } finally {
+              geminiTurnUsage = addAiUsage(geminiTurnUsage, streamUsage.usage());
             }
           }
 
@@ -9779,7 +9806,9 @@ export async function sendMessageStream(
     await finalizeAiReservation(
       chatUsage
         ? normalizeAiUsage(chatUsage)
-        : estimateAiTurnUsage([enrichedPrompt, currentTurnText, sourceDocumentContext], assistantContent || fullResponse),
+        : geminiTurnUsage
+          ? normalizeAiUsage(geminiTurnUsage)
+          : estimateAiTurnUsage([enrichedPrompt, currentTurnText, sourceDocumentContext], assistantContent || fullResponse),
       { service: aiSettings.activeEngine, operation: 'chat' },
       {
         source_document_count: sourceDocuments.length,

@@ -193,6 +193,7 @@ async function resolveDecision(input: AdminReportTurnInput, deps: AdminReportTur
       decision: await deps.route({
         tenantId: input.tenantId,
         userId: input.userId,
+        conversationId: input.conversationId,
         role: input.role,
         model: input.chatModel,
         question: input.question,
@@ -274,7 +275,8 @@ async function respondWithAnalysis(
     return;
   }
   io.sideEvent({ type: 'report_status', stage: 'analyzing' });
-  const narrative = await deps.generateNarrative({ tenantId: input.tenantId, model: input.chatModel, locale: input.locale, snapshot });
+  const narrative = await deps.generateNarrative({ tenantId: input.tenantId, userId: input.userId,
+    conversationId: input.conversationId, model: input.chatModel, locale: input.locale, snapshot });
   // Facts live exclusively in report_snapshot. This short text is only a
   // fallback for legacy/accessibility rendering and must not contain data.
   const assistantText = input.locale === 'en' ? 'Your report analysis is ready.' : 'Phân tích báo cáo đã sẵn sàng.';

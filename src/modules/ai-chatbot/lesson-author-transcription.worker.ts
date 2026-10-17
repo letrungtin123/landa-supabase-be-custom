@@ -10,6 +10,7 @@ import {
   downloadLessonAuthorPrivateFileToTemp,
   uploadLessonAuthorPrivateFileFromPath,
 } from '../../config/storage.js';
+import { withMeteredAiCall } from './ai-metered-call.service.js';
 import { getGeminiClient, transcribeAudioFile } from './gemini.service.js';
 import {
   claimDueLessonAuthorTranscriptionJobs,
@@ -51,6 +52,10 @@ async function assertLease(job: LessonAuthorTranscriptionJob): Promise<void> {
     throw new Error('Transcription job lease bị mất.');
   }
 }
+
+/** Gemini counts audio at about 32 tokens per second; a transcript is far shorter than its audio. */
+const AUDIO_INPUT_TOKENS_PER_SECOND = 32;
+const TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND = 8;
 
 async function probeVideo(filePath: string): Promise<number> {
   const { stdout } = await execFile(env.FFPROBE_PATH, [
@@ -103,16 +108,24 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
     await fs.mkdir(env.LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR, { recursive: true });
     videoTempPath = await downloadLessonAuthorPrivateFileToTemp(job.source_storage_path, env.LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR);
     await assertLease(job);
-    await probeVideo(videoTempPath);
+    const durationSeconds = await probeVideo(videoTempPath);
 
     audioTempPath = path.resolve(env.LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR, `${job.id}.mp3`);
     await extractAudio(videoTempPath, audioTempPath);
     await assertLease(job);
 
-    const transcript = normalizeTranscriptText(
-      await transcribeAudioFile(audioTempPath, await getGeminiClient(job.tenant_id)),
-      env.LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS,
-    );
+    const audioPath = audioTempPath;
+    const transcribed = await withMeteredAiCall({
+      tenantId: job.tenant_id, userId: job.requested_by, conversationId: job.conversation_id,
+      target: 'lesson_author', operation: 'lesson_author', model: env.GEMINI_TRANSCRIPTION_MODEL,
+      feature: 'video_transcription', promptParts: [], longRunning: true,
+      extraInputTokens: Math.ceil(durationSeconds * AUDIO_INPUT_TOKENS_PER_SECOND),
+      maxOutputTokens: Math.ceil(durationSeconds * TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND) + 1_024,
+    }, async () => {
+      const result = await transcribeAudioFile(audioPath, await getGeminiClient(job.tenant_id));
+      return { value: result.text, usage: result.usage, outputText: result.text };
+    });
+    const transcript = normalizeTranscriptText(transcribed, env.LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS);
     await assertLease(job);
 
     transcriptTempPath = path.resolve(env.LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR, `${job.id}.transcript.txt`);

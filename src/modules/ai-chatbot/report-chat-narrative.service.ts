@@ -6,8 +6,10 @@
 import { Type } from '@google/genai';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
+import { withMeteredAiCall } from './ai-metered-call.service.js';
+import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
 import { getGeminiClient } from './gemini.service.js';
-import { reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
+import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import type { ReportChatSnapshot } from './report-chat.service.js';
 import { withReportDeadline } from './report-deadline.logic.js';
 import { isUnaccentedVietnamese, VIETNAMESE_DIACRITICS_INSTRUCTION } from './report-locale-text.logic.js';
@@ -71,6 +73,9 @@ function fallbackReportNarrative(snapshot: ReportChatSnapshot, locale: 'vi' | 'e
 
 export interface ReportNarrativeGenerateInput {
   tenantId: string;
+  /** The asking user and chat, for the AI usage ledger. */
+  userId?: string | null;
+  conversationId?: string | null;
   model: string;
   systemInstruction: string;
   payload: string;
@@ -83,30 +88,41 @@ export interface ReportNarrativeDeps {
   timeoutMs: number;
 }
 
+const NARRATIVE_VISIBLE_OUTPUT_TOKENS = 800;
+
 async function generateWithGemini(input: ReportNarrativeGenerateInput): Promise<string> {
   const aiClient = await getGeminiClient(input.tenantId);
   const model = resolveReportAiModel(input.model);
-  const response = await aiClient.models.generateContent({
-    model,
-    contents: [{ role: 'user', parts: [{ text: input.payload }] }],
-    config: {
-      systemInstruction: input.systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          selected_signal_ids: { type: Type.ARRAY, items: { type: Type.STRING } },
-          interpretation: { type: Type.ARRAY, items: { type: Type.STRING } },
-          recommended_actions: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { signal_id: { type: Type.STRING, nullable: true }, priority: { type: Type.STRING }, action: { type: Type.STRING } }, required: ['signal_id', 'priority', 'action'] } },
-          limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
+  // A limit-reached reservation throws like any model failure: the caller keeps the rule-based narrative.
+  return withMeteredAiCall({
+    tenantId: input.tenantId, userId: input.userId ?? null, conversationId: input.conversationId ?? null,
+    target: 'admin', operation: 'chat', model, feature: 'report_chat_narrative',
+    promptParts: [input.systemInstruction, input.payload],
+    maxOutputTokens: NARRATIVE_VISIBLE_OUTPUT_TOKENS + REPORT_AI_THINKING_HEADROOM_TOKENS,
+  }, async () => {
+    const response = await aiClient.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: input.payload }] }],
+      config: {
+        systemInstruction: input.systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            selected_signal_ids: { type: Type.ARRAY, items: { type: Type.STRING } },
+            interpretation: { type: Type.ARRAY, items: { type: Type.STRING } },
+            recommended_actions: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { signal_id: { type: Type.STRING, nullable: true }, priority: { type: Type.STRING }, action: { type: Type.STRING } }, required: ['signal_id', 'priority', 'action'] } },
+            limitations: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['selected_signal_ids', 'interpretation', 'recommended_actions', 'limitations'],
         },
-        required: ['selected_signal_ids', 'interpretation', 'recommended_actions', 'limitations'],
-      },
-      ...reportAiGenerationConfig(model, 800),
-      abortSignal: input.signal,
-    } as any,
+        ...reportAiGenerationConfig(model, NARRATIVE_VISIBLE_OUTPUT_TOKENS),
+        abortSignal: input.signal,
+      } as any,
+    });
+    const text = response.text || '{}';
+    return { value: text, usage: aiUsageFromGeminiMetadata(response.usageMetadata), outputText: text };
   });
-  return response.text || '{}';
 }
 
 export const defaultReportNarrativeDeps: ReportNarrativeDeps = {
@@ -120,6 +136,8 @@ export const defaultReportNarrativeDeps: ReportNarrativeDeps = {
  */
 export async function generateReportNarrative(input: {
   tenantId: string;
+  userId?: string | null;
+  conversationId?: string | null;
   model: string;
   locale: 'vi' | 'en';
   snapshot: ReportChatSnapshot;
@@ -135,7 +153,8 @@ export async function generateReportNarrative(input: {
   try {
     // The client lookup is inside the deadline too: the chat turn never waits on Gemini.
     const text = await withReportDeadline('report_chat_narrative', timeoutMs, (signal) => generate({
-      tenantId: input.tenantId, model: input.model, systemInstruction, payload, signal,
+      tenantId: input.tenantId, userId: input.userId ?? null, conversationId: input.conversationId ?? null,
+      model: input.model, systemInstruction, payload, signal,
     }));
     const narrative = ReportNarrativeSchema.parse(JSON.parse(text || '{}'));
     const prose = [...narrative.interpretation, ...narrative.recommended_actions.map((item) => item.action), ...narrative.limitations];

@@ -10,11 +10,17 @@ export type AiChatTarget = typeof CHAT_TARGETS[number];
 export const AI_OPERATIONS = ['chat', 'lesson_author', 'indexing'] as const;
 export type AiOperation = typeof AI_OPERATIONS[number];
 
+/**
+ * Provider usage as the provider bills it: inputTokens include tool-use prompt
+ * tokens, outputTokens include thinking tokens (both billed at their rate).
+ */
 export interface AiUsage {
   inputTokens: number;
   outputTokens: number;
   embeddingTokens: number;
   totalTokens: number;
+  /** Part of inputTokens served from the provider's context cache (billed at the cache rate). */
+  cachedInputTokens?: number;
 }
 
 export interface TenantAiRuntimeSettings {

@@ -14,6 +14,7 @@ import {
   releaseTenantAiTokenReservation,
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
+import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
 import { getGeminiClient } from './gemini.service.js';
 import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
 import { isUnaccentedVietnamese, VIETNAMESE_DIACRITICS_INSTRUCTION } from './report-locale-text.logic.js';
@@ -75,15 +76,10 @@ async function generateWithGemini(input: ReportPdfAiGenerateInput): Promise<{ te
       abortSignal: input.signal,
     },
   });
-  const usage = response.usageMetadata;
   return {
     text: response.text ?? '',
     finishReason: response.candidates?.[0]?.finishReason ?? null,
-    usage: usage ? {
-      inputTokens: usage.promptTokenCount ?? 0,
-      outputTokens: (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0),
-      totalTokens: usage.totalTokenCount ?? undefined,
-    } : null,
+    usage: aiUsageFromGeminiMetadata(response.usageMetadata),
   };
 }
 
@@ -154,7 +150,9 @@ export function createReportPdfAiNarrativeWriter(
       }
       const usedInput = response.usage?.inputTokens ?? inputTokens;
       const usedOutput = response.usage?.outputTokens ?? estimateTokensFromText(response.text);
-      const usage: AiUsage = { inputTokens: usedInput, outputTokens: usedOutput, embeddingTokens: 0, totalTokens: response.usage?.totalTokens ?? usedInput + usedOutput };
+      const usage: AiUsage = { inputTokens: usedInput, outputTokens: usedOutput, embeddingTokens: 0,
+        totalTokens: response.usage?.totalTokens ?? usedInput + usedOutput,
+        ...(response.usage?.cachedInputTokens ? { cachedInputTokens: response.usage.cachedInputTokens } : {}) };
       await deps.finalize({ reservationId, tenantId: context.tenantId, usage, metadata: { report_pdf: true } });
       reservationId = null;
       let parsed: unknown = null;

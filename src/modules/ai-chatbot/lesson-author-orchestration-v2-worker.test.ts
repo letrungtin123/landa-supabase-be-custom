@@ -89,6 +89,9 @@ test('worker bounds and usage contracts are strict and provider kinds are explic
   assert.equal(isOrchestrationV2ProviderTask('course_skeleton'), true);
   assert.equal(isOrchestrationV2ProviderTask('source_snapshot'), false);
   assert.deepEqual(orchestrationV2ObservedUsage({ inputTokens: 10, outputTokens: 2 }), { inputTokens: 10, outputTokens: 2 });
+  // AI credits P0: the AI service may report the cache-billed part of the input.
+  assert.deepEqual(orchestrationV2ObservedUsage({ inputTokens: 10, outputTokens: 2, embeddingTokens: 0, totalTokens: 12, cachedInputTokens: 4 }),
+    { inputTokens: 10, outputTokens: 2, embeddingTokens: 0, totalTokens: 12, cachedInputTokens: 4 });
   assert.throws(() => orchestrationV2ObservedUsage({ secret: 1 }),
     { code: 'ORCHESTRATION_V2_WORKER_PAYLOAD_INVALID' });
 });

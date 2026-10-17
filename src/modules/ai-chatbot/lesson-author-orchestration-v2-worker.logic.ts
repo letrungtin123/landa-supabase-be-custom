@@ -39,7 +39,8 @@ export function orchestrationV2ObservedUsage(value: unknown): Readonly<Record<st
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new OrchestrationV2WorkerContractError('ORCHESTRATION_V2_WORKER_PAYLOAD_INVALID');
   }
-  const allowed = new Set(['inputTokens', 'outputTokens', 'embeddingTokens', 'totalTokens']);
+  // cachedInputTokens: the cache-billed part of inputTokens (optional; older AI services omit it).
+  const allowed = new Set(['inputTokens', 'outputTokens', 'embeddingTokens', 'totalTokens', 'cachedInputTokens']);
   const output: Record<string, number> = {};
   for (const [key, raw] of Object.entries(value)) {
     if (!allowed.has(key) || !integer(raw as number, 0, Number.MAX_SAFE_INTEGER)) {

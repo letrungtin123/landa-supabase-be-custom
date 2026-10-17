@@ -90,11 +90,13 @@ export function normalizeAiUsage(input: Partial<AiUsage> | null | undefined): Ai
     0,
     toSafeNonNegativeInteger(input?.totalTokens ?? inputTokens + outputTokens + embeddingTokens),
   );
+  const cachedInputTokens = Math.min(inputTokens, toSafeNonNegativeInteger(input?.cachedInputTokens));
   return {
     inputTokens,
     outputTokens,
     embeddingTokens,
     totalTokens,
+    ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
   };
 }
 
@@ -303,6 +305,8 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
         reserved_tokens: reservedTokens,
         ...(budgetOverageTokens > 0 ? { budget_overage_tokens: budgetOverageTokens } : {}),
       },
+      // Until the ledger has its own column: the cache-billed part of input_tokens.
+      ...(usage.cachedInputTokens ? { usage_detail: { cached_input_tokens: usage.cachedInputTokens } } : {}),
     };
 
     await query(

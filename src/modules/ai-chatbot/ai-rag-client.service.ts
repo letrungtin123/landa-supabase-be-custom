@@ -317,7 +317,7 @@ function readSafeUsage(value: unknown): Partial<AiUsage> | undefined {
   const raw = asRecord(value);
   if (!raw) return undefined;
   const usage: Partial<AiUsage> = {};
-  for (const field of ['inputTokens', 'outputTokens', 'embeddingTokens', 'totalTokens'] as const) {
+  for (const field of ['inputTokens', 'outputTokens', 'embeddingTokens', 'totalTokens', 'cachedInputTokens'] as const) {
     const candidate = raw[field];
     if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) {
       usage[field] = Math.floor(candidate);
