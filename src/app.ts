@@ -11,6 +11,7 @@ import { isShuttingDown } from './config/process-lifecycle.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
+import { useJsonBodyParsers } from './middleware/body-limits.js';
 
 // Routes
 import authRoutes from './modules/auth/auth.routes.js';
@@ -94,7 +95,8 @@ app.use(cors({
   exposedHeaders: ['Accept-Ranges', 'Content-Range', 'Content-Length', 'Content-Type', 'Content-Disposition', 'ETag', 'Last-Modified', 'Cache-Control'],
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// Small JSON limits on sign-in and learner routes, 10 MB elsewhere (middleware/body-limits.ts).
+useJsonBodyParsers(app);
 app.use(express.urlencoded({ extended: true }));
 
 // ── Rate Limiting — brute-force protection ──
