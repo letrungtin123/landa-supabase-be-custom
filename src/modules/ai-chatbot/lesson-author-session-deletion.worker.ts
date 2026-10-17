@@ -6,6 +6,7 @@ import {
   requeueLessonAuthorSessionDeletionJobs,
   runLessonAuthorSessionDeletion,
 } from './lesson-author-session.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 function jobId(payload: Record<string, unknown>): string {
   const value = typeof payload.jobId === 'string' ? payload.jobId.trim() : '';
@@ -24,7 +25,7 @@ export async function startLessonAuthorSessionDeletionWorker(): Promise<void> {
     catch (error) { console.error('[LessonAuthorSessionDelete] max retry handler failed', error); }
   });
   await requeueLessonAuthorSessionDeletionJobs().catch(error => console.error('[LessonAuthorSessionDelete] startup recovery failed', error));
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     void requeueLessonAuthorSessionDeletionJobs().catch(error => console.error('[LessonAuthorSessionDelete] recovery failed', error));
-  }, env.DELETION_REQUEUE_INTERVAL_MS).unref();
+  }, env.DELETION_REQUEUE_INTERVAL_MS).unref());
 }

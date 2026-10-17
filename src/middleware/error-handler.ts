@@ -14,6 +14,8 @@ import {
   TENANT_DATA_QUOTA_RECONCILING_SQLSTATE,
 } from '../modules/tenants/tenant-data-quota.constants.js';
 
+export const PAYLOAD_TOO_LARGE_CODE = 'PAYLOAD_TOO_LARGE';
+
 /**
  * Custom error class cho business logic errors.
  */
@@ -60,6 +62,17 @@ export function errorHandler(err: Error, _req: Request, res: Response, _next: Ne
       success: false,
       code: TENANT_DATA_QUOTA_RECONCILING_CODE,
       message: TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
+    });
+    return;
+  }
+
+  // A JSON body over its route's limit (middleware/body-limits.ts). It used
+  // to fall through to the 500 below, with a stack trace in the log.
+  if ((err as { type?: string }).type === 'entity.too.large') {
+    res.status(413).json({
+      success: false,
+      code: PAYLOAD_TOO_LARGE_CODE,
+      message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.',
     });
     return;
   }

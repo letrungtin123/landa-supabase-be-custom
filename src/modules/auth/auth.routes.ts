@@ -10,6 +10,7 @@ import {
   loginAccountLimiter,
   loginIpLimiter,
   passwordChangeLimiter,
+  refreshIpLimiter,
   refreshTokenLimiter,
 } from '../../middleware/auth-rate-limit.js';
 import {
@@ -28,10 +29,11 @@ import {
 const router = Router();
 
 // Public endpoints
-// Sign-in: the per-IP limit, then failed attempts per typed account.
+// Sign-in: refused attempts per IP, then failed attempts per typed account.
+// Neither sign-in nor refresh counts against the general per-IP API limit.
 router.post('/login', loginIpLimiter, loginAccountLimiter, loginController);
-// Refresh has its own budget per refresh token (never the sign-in bucket).
-router.post('/refresh', refreshTokenLimiter, refreshController);
+// Refresh: refused refreshes per IP, then its own budget per refresh token.
+router.post('/refresh', refreshIpLimiter, refreshTokenLimiter, refreshController);
 router.post('/ott/exchange', accountActionLimiter, exchangeOTTController);
 
 // Logout revokes the refresh token in the body even when the access token is

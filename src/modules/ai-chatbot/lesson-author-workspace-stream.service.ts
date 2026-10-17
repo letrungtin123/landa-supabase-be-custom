@@ -1,4 +1,5 @@
 import { getClient } from '../../config/database.js';
+import { listenRetryDelayMs } from './lesson-author-listen-retry.logic.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANNEL = 'lesson_author_workspace_event';
@@ -12,12 +13,16 @@ type Listener = (hint: WorkspaceCommitHint | null) => void;
  * notifies streams to reconnect/replay rather than pretending the provider
  * failed or running a timer per workspace.
  */
-export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getClient } = {}) {
+export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getClient; now?: () => number } = {}) {
   const acquire = dependencies.getClient ?? getClient;
+  const now = dependencies.now ?? (() => Date.now());
   const listeners = new Map<string, Set<Listener>>();
-  let client: Awaited<ReturnType<typeof getClient>> | null = null;
+  // The pool connection that holds LISTEN; release() hands it back exactly once.
+  let connection: { client: Awaited<ReturnType<typeof getClient>>; release: (error?: Error) => void } | null = null;
   let connecting: Promise<void> | null = null;
   let unavailable = false;
+  let consecutiveFailures = 0;
+  let retryAt = 0;
 
   function deliver(workspaceId: string, hint: WorkspaceCommitHint | null) {
     for (const listener of listeners.get(workspaceId)?.values() ?? []) {
@@ -37,23 +42,48 @@ export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getC
       return { workspaceId: value.workspace_id, sequence: value.sequence as number };
     } catch { return null; }
   }
+  function noteFailure() {
+    consecutiveFailures += 1;
+    retryAt = now() + listenRetryDelayMs(consecutiveFailures);
+  }
   async function ensure(): Promise<void> {
-    if (client) return;
+    if (connection) return;
     if (connecting) return connecting;
+    // After a failure the next LISTEN attempt waits (the stream answers 503 and the browser retries).
+    if (now() < retryAt) throw new Error('WORKSPACE_STREAM_LISTEN_RETRY_PENDING');
     connecting = (async () => {
-      const next = await acquire();
+      let next: Awaited<ReturnType<typeof getClient>>;
+      try { next = await acquire(); } catch (error) { noteFailure(); throw error; }
+      let released = false;
+      const release = (error?: Error) => {
+        if (released) return;
+        released = true;
+        // With an error the pool closes the connection instead of reusing it.
+        if (error) next.release(error); else next.release();
+      };
       next.on('notification', message => {
         if (message.channel !== CHANNEL) return;
         const hint = readPayload(message.payload);
         if (hint) deliver(hint.workspaceId, hint);
       });
-      next.on('error', () => { client = null; fail(); });
+      next.on('error', (error: Error) => {
+        if (connection?.client === next) connection = null;
+        release(error);
+        noteFailure();
+        fail();
+      });
       try {
         await next.query(`LISTEN ${CHANNEL}`);
       } catch (error) {
-        next.release(); throw error;
+        // The error listener above may already have released and counted it.
+        if (!released) {
+          release(error instanceof Error ? error : new Error(String(error)));
+          noteFailure();
+        }
+        throw error;
       }
-      client = next; unavailable = false;
+      if (released) throw new Error('WORKSPACE_STREAM_LISTEN_RETRY_PENDING');
+      connection = { client: next, release }; unavailable = false; consecutiveFailures = 0;
     })().finally(() => { connecting = null; });
     return connecting;
   }
@@ -69,9 +99,10 @@ export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getC
       };
     },
     async stop() {
-      const current = client; client = null; listeners.clear(); unavailable = false;
+      const current = connection; connection = null; listeners.clear(); unavailable = false;
+      consecutiveFailures = 0; retryAt = 0;
       if (!current) return;
-      try { await current.query(`UNLISTEN ${CHANNEL}`); } catch { /* close/release below */ }
+      try { await current.client.query(`UNLISTEN ${CHANNEL}`); } catch { /* release below */ }
       current.release();
     },
   };

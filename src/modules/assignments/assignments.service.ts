@@ -7,6 +7,7 @@ import {
   deleteFile,
   downloadFileBuffer,
   fixMulterFilename,
+  uploadCourseAssetFileFromPath,
   uploadFile,
 } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -254,6 +255,35 @@ function toAssignmentAuditSnapshot(row: any, courseName?: string): AssignmentAud
   };
 }
 
+export interface AssignmentFileUploaders {
+  fromPath: (storagePath: string, filePath: string, contentType: string) => Promise<unknown>;
+  fromBuffer: (storagePath: string, buffer: Buffer, contentType: string) => Promise<unknown>;
+}
+
+const defaultAssignmentFileUploaders: AssignmentFileUploaders = {
+  fromPath: uploadCourseAssetFileFromPath,
+  fromBuffer: uploadFile,
+};
+
+/**
+ * Learner submissions arrive as temp files (assignments.routes.ts) and are
+ * streamed to Storage, so a submission deadline does not hold every file in
+ * the heap; admin uploads still arrive in memory. An empty file has nothing
+ * to stream and keeps the buffer upload.
+ */
+export async function storeAssignmentFile(
+  storagePath: string,
+  file: Pick<Express.Multer.File, 'path' | 'buffer' | 'size' | 'mimetype'>,
+  uploaders: AssignmentFileUploaders = defaultAssignmentFileUploaders,
+): Promise<void> {
+  const contentType = file.mimetype || 'application/octet-stream';
+  if (file.path && file.size > 0) {
+    await uploaders.fromPath(storagePath, file.path, contentType);
+    return;
+  }
+  await uploaders.fromBuffer(storagePath, file.buffer ?? Buffer.alloc(0), contentType);
+}
+
 async function uploadAssignmentFiles(
   files: Express.Multer.File[] | undefined,
   tenantId: string,
@@ -280,7 +310,7 @@ async function uploadAssignmentFiles(
         storageName,
         `${courseId}/${assignmentId}/${submissionId}/${kind}/${uploadedBy}`,
       );
-      await uploadFile(storagePath, file.buffer, file.mimetype || 'application/octet-stream');
+      await storeAssignmentFile(storagePath, file);
       uploaded.push({
         id,
         original_name: originalName,

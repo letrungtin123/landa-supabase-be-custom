@@ -5,6 +5,7 @@ import {
   requeuePendingDeletionJobs,
   runDeletionJob,
 } from './course-deletion.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 function parseJobId(data: Record<string, any>): string {
   const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
@@ -41,9 +42,9 @@ export async function startCourseDeletionWorker(): Promise<void> {
     console.error('[CourseDeleteWorker] Failed to requeue pending jobs:', err);
   });
 
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     requeuePendingDeletionJobs().catch((error) => {
       console.error('[CourseDeleteWorker] Periodic requeue failed:', error);
     });
-  }, env.DELETION_REQUEUE_INTERVAL_MS).unref();
+  }, env.DELETION_REQUEUE_INTERVAL_MS).unref());
 }

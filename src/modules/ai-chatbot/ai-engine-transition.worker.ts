@@ -28,6 +28,7 @@ import {
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
 import { indexRagDocument } from './ai-rag-client.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 interface AiEngineTransitionJob {
   id: string;
@@ -695,8 +696,8 @@ export async function startAiEngineTransitionWorker(): Promise<void> {
     return;
   }
   await drainDueTransitions();
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     void drainDueTransitions();
-  }, env.AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS).unref();
+  }, env.AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS).unref());
   console.log('[AiEngineTransitionWorker] Durable AI engine transition worker started');
 }

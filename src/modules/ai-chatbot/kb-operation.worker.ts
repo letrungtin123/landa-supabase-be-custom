@@ -36,6 +36,7 @@ import {
 import { AppError } from '../../middleware/error-handler.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 let drainInFlight = false;
 
@@ -263,6 +264,14 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
   // it; a whole-KB delete is exclusive. This prevents a late Gemini upload
   // from recreating remote state after a delete worker has started.
   let lockClient: Awaited<ReturnType<typeof getClient>> | null = null;
+  // The lock connection idles for minutes during the remote call. If it
+  // breaks, PostgreSQL has already dropped the session lock; the connection
+  // must then be discarded, never returned to the pool.
+  let lockConnectionError: Error | null = null;
+  const onLockConnectionError = (error: Error) => {
+    lockConnectionError = error;
+    console.warn(`[KbOperationWorker] Lock connection for ${job.id} failed: ${errorMessage(error)}`);
+  };
   const lockFunction = job.operation === 'knowledgebase_delete'
     ? 'pg_advisory_lock'
     : 'pg_advisory_lock_shared';
@@ -272,6 +281,7 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
 
   try {
     lockClient = await getClient();
+    lockClient.on('error', onLockConnectionError);
     await lockClient.query(`SELECT ${lockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
     await assertLease(job);
     if (job.operation === 'document_upload'
@@ -309,10 +319,19 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
       + `${outcome.terminal ? ' (terminal)' : ' (will retry)'}: ${errorMessage(error)}`);
   } finally {
     if (lockClient) {
-      try {
-        await lockClient.query(`SELECT ${unlockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
-      } catch { /* connection cleanup releases a session lock if needed */ }
-      lockClient.release();
+      let releaseError: Error | null = lockConnectionError;
+      if (!releaseError) {
+        try {
+          await lockClient.query(`SELECT ${unlockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
+        } catch (error) {
+          // An unlock that did not run must not hand a session lock to the next pool user.
+          releaseError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      lockClient.off('error', onLockConnectionError);
+      // release(error) closes the connection (and with it any session lock).
+      if (releaseError) lockClient.release(releaseError);
+      else lockClient.release();
     }
     clearInterval(heartbeat);
   }
@@ -348,8 +367,8 @@ export async function startKbOperationWorker(): Promise<void> {
     return;
   }
   await drainDueKbOperations();
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     void drainDueKbOperations();
-  }, env.KB_OPERATION_WORKER_POLL_INTERVAL_MS).unref();
+  }, env.KB_OPERATION_WORKER_POLL_INTERVAL_MS).unref());
   console.log('[KbOperationWorker] Durable KB operation recovery started');
 }

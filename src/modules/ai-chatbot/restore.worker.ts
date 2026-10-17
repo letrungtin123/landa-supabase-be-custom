@@ -11,6 +11,7 @@ import {
   restoreKnowledgebase,
 } from './kb.service.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 interface RestoreJob {
   jobId: string;
@@ -85,9 +86,9 @@ export async function startRestoreWorker(): Promise<void> {
   void redispatchRecoverableKnowledgebaseRestores().catch((error) => {
     console.error('[RestoreWorker] Initial restore recovery failed:', error);
   });
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     void redispatchRecoverableKnowledgebaseRestores().catch((error) => {
       console.error('[RestoreWorker] Restore recovery failed:', error);
     });
-  }, env.KB_RESTORE_RECOVERY_POLL_INTERVAL_MS).unref();
+  }, env.KB_RESTORE_RECOVERY_POLL_INTERVAL_MS).unref());
 }

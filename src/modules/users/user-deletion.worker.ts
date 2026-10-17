@@ -5,6 +5,7 @@ import {
   requeuePendingUserDeletionJobs,
   runUserDeletionJob,
 } from './user-deletion.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 function getJobId(data: Record<string, unknown>): string {
   const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
@@ -34,9 +35,9 @@ export async function startUserDeletionWorker(): Promise<void> {
     console.error('[UserDelete] Startup requeue failed:', error);
   });
 
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     requeuePendingUserDeletionJobs().catch((error) => {
       console.error('[UserDelete] Periodic requeue failed:', error);
     });
-  }, env.DELETION_REQUEUE_INTERVAL_MS).unref();
+  }, env.DELETION_REQUEUE_INTERVAL_MS).unref());
 }

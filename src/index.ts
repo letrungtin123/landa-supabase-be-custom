@@ -1,8 +1,11 @@
+import type { Server } from 'node:http';
 import app from './app.js';
 import { env } from './config/env.js';
+import { createGracefulShutdown } from './config/graceful-shutdown.js';
+import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js';
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
-import { getClient, query } from './config/database.js';
+import { getClient, pool, query } from './config/database.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
@@ -18,9 +21,15 @@ import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-tr
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
 import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/lesson-author-session-deletion.worker.js';
-import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
+import { startEmailOutboxRabbitConsumer, stopEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
+import { workspaceCommitHub } from './modules/ai-chatbot/lesson-author-workspace-stream.service.js';
+import { sourceDocumentHub } from './modules/ai-chatbot/lesson-author-source-stream.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
-import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
+import {
+  assertAuthRevocationRedisReady,
+  cleanupExpiredAuthRevocations,
+  resyncAccessRevocationMirror,
+} from './modules/auth/auth-revocation.service.js';
 import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
 import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
@@ -34,7 +43,14 @@ const DELETION_JOB_RETENTION_BATCH_SIZE = 1000;
 // documented large-upload gateway, while the gateway still enforces short
 // header/body-idle timeouts and the API enforces auth, RBAC, and rate limits.
 const LARGE_ASSET_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
-const REQUEST_HEADERS_TIMEOUT_MS = 60 * 1000;
+// Idle keep-alive sockets stay open longer than the gateways in front of the
+// API keep theirs (nginx/Kong 60 s), so the API never closes a socket a proxy
+// is about to reuse (that race shows up as 502/520). Headers must arrive
+// slightly later than that.
+const KEEP_ALIVE_TIMEOUT_MS = 65 * 1000;
+const REQUEST_HEADERS_TIMEOUT_MS = 66 * 1000;
+
+let httpServer: Server | null = null;
 
 /** Remove only completed deletion metadata; failed jobs remain actionable for retry. */
 async function cleanupCompletedDeletionJobs(): Promise<number> {
@@ -174,11 +190,17 @@ async function bootstrap() {
   if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION) {
     await assertAuthRevocationRedisReady();
   }
+  // Authentication answers from Redis only once the revocations that can
+  // still refuse a token are copied there; until then it reads the database.
+  if (getRedisClient()) {
+    const ready = await resyncAccessRevocationMirror();
+    console.log(`[Auth] Access revocations in Redis: ${ready ? 'ready' : 'not ready yet, the database answers'}`);
+  }
   await startDurableBlueprintWorker();
   await startLessonAuthorWorkspaceWorker();
   await startChapterCheckpointMaintenance();
   // Expired AI token/point reservations are returned in the background (never in the AI call path).
-  startAiTokenReservationSweeper();
+  stopOnShutdown(startAiTokenReservationSweeper());
 
   // 2. Ensure temp dir for Gemini worker
   try {
@@ -226,7 +248,9 @@ async function bootstrap() {
   // receiving it. The public upload gateway is required to apply matching body
   // limits and idle-time protections; do not expose this process directly.
   server.requestTimeout = LARGE_ASSET_REQUEST_TIMEOUT_MS;
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
   server.headersTimeout = REQUEST_HEADERS_TIMEOUT_MS;
+  httpServer = server;
 }
 
 bootstrap().catch(err => {
@@ -235,7 +259,7 @@ bootstrap().catch(err => {
 });
 
 // Dọn refresh tokens hết hạn mỗi 6 giờ
-setInterval(async function cleanupTokens() {
+stopOnShutdown(setInterval(async function cleanupTokens() {
   if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupExpiredTokens();
@@ -245,10 +269,10 @@ setInterval(async function cleanupTokens() {
   } catch (err) {
     console.error('[Cleanup] Error:', err);
   }
-}, 6 * 60 * 60 * 1000);
+}, 6 * 60 * 60 * 1000));
 
 // Keep deletion metadata only for a finite operational support window.
-setInterval(async function cleanupDeletionJobs() {
+stopOnShutdown(setInterval(async function cleanupDeletionJobs() {
   if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupCompletedDeletionJobs();
@@ -256,10 +280,10 @@ setInterval(async function cleanupDeletionJobs() {
   } catch (err) {
     console.error('[Cleanup] Deletion job cleanup error:', err);
   }
-}, 24 * 60 * 60 * 1000);
+}, 24 * 60 * 60 * 1000));
 
 // Access-token revocations only need to live through the maximum access-token TTL.
-setInterval(async function cleanupAccessRevocations() {
+stopOnShutdown(setInterval(async function cleanupAccessRevocations() {
   if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   try {
     const deleted = await cleanupExpiredAuthRevocations();
@@ -267,25 +291,39 @@ setInterval(async function cleanupAccessRevocations() {
   } catch (err) {
     console.error('[Cleanup] Access revocation cleanup error:', err);
   }
-}, 6 * 60 * 60 * 1000);
+}, 6 * 60 * 60 * 1000));
 
 // Dọn audit logs cũ hơn 30 ngày — chạy mỗi 24 giờ
-setInterval(async function cleanupAuditLogs() {
+stopOnShutdown(setInterval(async function cleanupAuditLogs() {
   if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
   await runAuditLogRetentionCleanup('daily');
-}, 24 * 60 * 60 * 1000);
+}, 24 * 60 * 60 * 1000));
 
-// Graceful shutdown
-async function gracefulShutdown(signal: string) {
-  console.log(`[Server] ${signal} received, shutting down...`);
-  await stopLessonAuthorWorkspaceWorker();
-  await stopDurableBlueprintWorker();
-  await stopChapterCheckpointMaintenance();
-  await shutdownReportPdfRenderer();
-  await closeRedis();
-  await closeRabbitMQ();
-  process.exit(0);
-}
+// Graceful shutdown (see config/graceful-shutdown.ts): stop intake, drain
+// in-flight requests (bounded), then close RabbitMQ, Redis and the pool.
+const gracefulShutdown = createGracefulShutdown({
+  getServer: () => httpServer,
+  lifecycle: processLifecycle,
+  stopIntake: [
+    { name: 'lesson-author workspace worker', run: stopLessonAuthorWorkspaceWorker },
+    { name: 'durable Blueprint worker', run: stopDurableBlueprintWorker },
+    { name: 'chapter checkpoint maintenance', run: stopChapterCheckpointMaintenance },
+    { name: 'inline email outbox worker', run: stopEmailOutboxWorker },
+  ],
+  closeResources: [
+    // LISTEN connections first: the pool cannot end while they are checked out.
+    { name: 'lesson-author LISTEN connections', run: () => Promise.all([workspaceCommitHub.stop(), sourceDocumentHub.stop()]) },
+    { name: 'report PDF renderer', run: shutdownReportPdfRenderer },
+    { name: 'RabbitMQ', run: closeRabbitMQ },
+    { name: 'Redis', run: closeRedis },
+    { name: 'database pool', run: () => pool.end() },
+  ],
+  exit: (code) => process.exit(code),
+});
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+// PM2 on Windows cannot deliver signals; with shutdown_with_message it sends this instead.
+process.on('message', (message) => {
+  if (message === 'shutdown') void gracefulShutdown('PM2 shutdown message');
+});

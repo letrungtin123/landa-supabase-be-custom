@@ -27,6 +27,7 @@ import {
   LESSON_AUTHOR_TRANSCRIPT_MIME_TYPE,
   normalizeTranscriptText,
 } from './lesson-author-transcription.logic.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 const execFile = promisify(execFileCallback);
 const FFMPEG_TIMEOUT_MS = 30 * 60_000;
@@ -228,7 +229,7 @@ export async function startLessonAuthorTranscriptionWorker(): Promise<void> {
   }
   await cleanupStaleTempArtifacts();
   await drain();
-  setInterval(() => { void drain(); }, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS).unref();
-  setInterval(() => { void cleanupStaleTempArtifacts(); }, 6 * 60 * 60_000).unref();
+  stopOnShutdown(setInterval(() => { void drain(); }, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS).unref());
+  stopOnShutdown(setInterval(() => { void cleanupStaleTempArtifacts(); }, 6 * 60 * 60_000).unref());
   console.log('[LessonAuthorTranscription] durable worker started');
 }

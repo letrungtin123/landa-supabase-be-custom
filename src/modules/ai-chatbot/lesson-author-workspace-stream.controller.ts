@@ -6,6 +6,7 @@ import { createWorkspaceReadRepository, WorkspaceReadError } from './lesson-auth
 import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import type { WorkspaceCommitHint } from './lesson-author-workspace-stream.service.js';
 import { env } from '../../config/env.js';
+import { onShutdownStart } from '../../config/process-lifecycle.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
@@ -48,6 +49,7 @@ export function createWorkspaceStreamHandler(deps: {
     let correlationId: string | null = null, delivered = 0;
     let stage: WorkspaceStreamDiagnostic['failure_stage'] = 'workspace_stream_auth';
     let unsubscribe: (() => void) | null = null, heartbeat: NodeJS.Timeout | null = null, lease: NodeJS.Timeout | null = null, closed = false;
+    let leaveShutdown: (() => void) | null = null;
     const summary = (event: WorkspaceStreamDiagnostic['event'], internal: string | null = null, external: string | null = null) => {
       try { deps.report({ event, request_id: requestId, correlation_id: correlationId,
         workspace_id: UUID.test(workspaceId ?? '') ? workspaceId : null, conversation_id: UUID.test(conversationId ?? '') ? conversationId : null,
@@ -61,6 +63,7 @@ export function createWorkspaceStreamHandler(deps: {
     const release = () => {
       if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease); heartbeat = null; lease = null;
       const stop = unsubscribe; unsubscribe = null; stop?.();
+      const leave = leaveShutdown; leaveShutdown = null; leave?.();
     };
     const close = (reason: string | null = null) => {
       if (closed) return;
@@ -134,6 +137,8 @@ export function createWorkspaceStreamHandler(deps: {
       heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, HEARTBEAT_MS);
       lease = setTimeout(() => { if (!res.writableEnded) message(res, 'auth_expiring', { delivery_contract_version: 1, workspace_id: workspaceId }); close(); }, env.LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS);
       heartbeat.unref(); lease.unref();
+      // A process shutdown ends the stream like the lease does: the browser reconnects to the next process.
+      leaveShutdown = onShutdownStart(() => { if (!res.writableEnded) message(res, 'auth_expiring', { delivery_contract_version: 1, workspace_id: workspaceId }); close(); });
       summary('workspace_stream_opened');
     } catch (error) {
       const code = error instanceof WorkspaceReadError || error instanceof WorkspaceContractError ? error.code : 'WORKSPACE_STREAM_UNAVAILABLE';

@@ -6,6 +6,10 @@
 import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
+import { AI_BUSY_CODE, AI_BUSY_ERROR, AI_BUSY_RETRY_AFTER_SECONDS, createConcurrencyGate } from './ai-chat-admission.logic.js';
+import { CHAT_ANSWER_STOPPED_BY_CLIENT } from './chat-provider-turn.logic.js';
+import { env } from '../../config/env.js';
+import { trackShutdownWork } from '../../config/process-lifecycle.js';
 import { tryEnqueueDurableBlueprint } from './lesson-author-durable-blueprint.service.js';
 import { respondToGenerationAdmission } from './lesson-author-generation-admission.logic.js';
 import { resolveLessonAuthorAction } from './lesson-author-action.logic.js';
@@ -36,6 +40,11 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const reportPdfLocks = new Set<string>();
 const reportPdfLastExportAt = new Map<string, number>();
 const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
+// Chat answers streamed at once by this process (H10): per tenant and in total.
+const chatAnswerGate = createConcurrencyGate({
+  perKey: env.AI_CHAT_TENANT_CONCURRENCY,
+  total: env.AI_CHAT_GLOBAL_CONCURRENCY,
+});
 
 /** Body `locale` first (validated in sendMessage), then the dashboard's X-UI-Locale header. */
 function readReportRequestLocale(req: Request, bodyLocale: unknown): 'vi' | 'en' {
@@ -669,6 +678,17 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     if (handled) return;
   }
 
+  // Admission before the stream opens, so a busy answer is a plain 429.
+  const releaseChatSlot = chatAnswerGate.tryAcquire(tenantId);
+  if (!releaseChatSlot) {
+    const [status, vi, en] = AI_BUSY_ERROR;
+    res.setHeader('Retry-After', String(AI_BUSY_RETRY_AFTER_SECONDS));
+    res.status(status).json({ success: false, code: AI_BUSY_CODE, message: reportLocale === 'en' ? en : vi });
+    return;
+  }
+  // Also freed when the response closes, whatever path ends the turn.
+  res.once('close', releaseChatSlot);
+
   // Set SSE headers
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -682,6 +702,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     correlation_id: correlationId, conversation_id: conversationId,
   }, record => console.info('[ChatStream]', JSON.stringify(record)));
   let clientDisconnected = false;
+  // Stops the provider calls when the client leaves (metering still settles what started).
+  const answerAbort = new AbortController();
 
   // Helper to write SSE event
   const writeSSE = (data: Record<string, unknown>): boolean => {
@@ -704,7 +726,11 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   };
 
   // Handle real response disconnects. req.close can fire after the request body is read on long SSE responses.
-  const onAborted = () => { clientDisconnected = true; stream.disconnect(); };
+  const onAborted = () => {
+    clientDisconnected = true;
+    stream.disconnect();
+    if (!answerAbort.signal.aborted) answerAbort.abort(new Error(CHAT_ANSWER_STOPPED_BY_CLIENT));
+  };
   const onClosed = () => { if (!res.writableEnded) onAborted(); };
   req.on('aborted', onAborted);
   res.on('close', onClosed);
@@ -721,6 +747,9 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     });
   }
 
+  // A shutdown waits (bounded) for this answer to settle its metering.
+  let answerSettled: () => void = () => {};
+  trackShutdownWork(new Promise<void>((resolve) => { answerSettled = resolve; }));
   try {
   await chatService.sendMessageStream(
     conversationId,
@@ -753,6 +782,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
       canAccessReports,
       reportActorRole: req.user!.role,
       reportFilters: parsedReportFilters,
+      abortSignal: answerAbort.signal,
     },
     (text: string) => {
       if (!clientDisconnected) writeSSE({ type: 'chunk', text });
@@ -778,6 +808,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     },
   );
   } finally {
+    answerSettled();
+    releaseChatSlot();
     stream.dispose();
     req.off('aborted', onAborted);
     res.off('close', onClosed);

@@ -88,6 +88,21 @@ function optionalBoundedInt(key: string, fallback: number, minimum: number, maxi
   return num;
 }
 
+/** A renamed variable: the new name wins; the old name is still honoured when only it is set. */
+function optionalBoundedIntWithLegacyName(
+  key: string,
+  legacyKey: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (!process.env[key]?.trim() && process.env[legacyKey]?.trim()) {
+    console.warn(`[Env] ${legacyKey} is deprecated; it is read as ${key}. Rename it.`);
+    return optionalBoundedInt(legacyKey, fallback, minimum, maximum);
+  }
+  return optionalBoundedInt(key, fallback, minimum, maximum);
+}
+
 function optionalBoolean(key: string, fallback: boolean): boolean {
   const raw = process.env[key]?.trim().toLowerCase();
   if (!raw) return fallback;
@@ -161,18 +176,37 @@ export const env = {
   TRUSTED_PROXY_CIDRS: optionalCsv('TRUSTED_PROXY_CIDRS'),
 
   // Auth rate limits, per 15-minute window. Counters are shared through Redis
-  // when it is available. The per-IP sign-in limit keeps the historical 20.
-  AUTH_LOGIN_IP_MAX_ATTEMPTS: optionalBoundedInt('AUTH_LOGIN_IP_MAX_ATTEMPTS', 20, 1, 10_000),
+  // when it is available.
+  // Refused sign-ins (4xx) per client address, SSO code exchanges included.
+  // Successful sign-ins are not counted, so a whole office behind one NAT can
+  // sign in. The old name AUTH_LOGIN_IP_MAX_ATTEMPTS (it counted every
+  // attempt) is still read as this cap when the new name is not set.
+  AUTH_LOGIN_IP_MAX_FAILURES: optionalBoundedIntWithLegacyName(
+    'AUTH_LOGIN_IP_MAX_FAILURES', 'AUTH_LOGIN_IP_MAX_ATTEMPTS', 300, 1, 100_000,
+  ),
   // Failed sign-ins per typed account (successful sign-ins are not counted).
   AUTH_LOGIN_ACCOUNT_MAX_FAILURES: optionalBoundedInt('AUTH_LOGIN_ACCOUNT_MAX_FAILURES', 10, 1, 1_000),
   // Session refreshes per refresh token (each token is valid for one use).
   AUTH_REFRESH_TOKEN_MAX_ATTEMPTS: optionalBoundedInt('AUTH_REFRESH_TOKEN_MAX_ATTEMPTS', 10, 1, 1_000),
+  // Refused session refreshes (4xx) per client address: a flood of invented
+  // tokens is stopped while valid refreshes of many users behind one NAT pass.
+  AUTH_REFRESH_IP_MAX_FAILURES: optionalBoundedInt('AUTH_REFRESH_IP_MAX_FAILURES', 2_000, 1, 100_000),
   AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS: optionalBoundedInt('AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS', 10, 1, 1_000),
   // One-time sign-in links (create + use) and profile updates, per user or IP.
   AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS: optionalBoundedInt('AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS', 30, 1, 10_000),
 
   // Database
   DATABASE_URL: required('DATABASE_URL'),
+  // Connections of this process's pool. Every PM2 app has its own pool:
+  // keep (sum of all pools) below the server's max_connections.
+  DB_POOL_MAX: optionalBoundedInt('DB_POOL_MAX', 20, 1, 200),
+  // PostgreSQL ends a session that stays idle inside an open transaction this
+  // long (a leaked client or a stuck await holding locks). 0 turns it off.
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: optionalBoundedInt('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 0, 3_600_000),
+  // Optional lock wait limit for every statement. Unset (0) by default: it
+  // would turn ordinary lock waits into errors. Code that needs one sets
+  // SET LOCAL lock_timeout itself.
+  DB_LOCK_TIMEOUT_MS: optionalBoundedInt('DB_LOCK_TIMEOUT_MS', 0, 0, 600_000),
 
   // JWT
   JWT_SECRET: required('JWT_SECRET'),
@@ -188,6 +222,9 @@ export const env = {
   // Supabase Storage
   SUPABASE_URL: required('SUPABASE_URL'),
   SUPABASE_SERVICE_KEY: required('SUPABASE_SERVICE_KEY'),
+  // Storage proxy (/api/storage): how long it waits for Storage to start
+  // answering. A long video body is never cut by it.
+  STORAGE_PROXY_HEADERS_TIMEOUT_MS: optionalBoundedInt('STORAGE_PROXY_HEADERS_TIMEOUT_MS', 15_000, 1_000, 120_000),
 
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
@@ -294,6 +331,12 @@ export const env = {
   AI_RAG_STORAGE_SIGNED_URL_ORIGIN: optionalOrigin('AI_RAG_STORAGE_SIGNED_URL_ORIGIN'),
   AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),
+  // Chat answers this API process streams at once, per tenant and in total.
+  // A turn over either limit is refused at once with 429 AI_BUSY.
+  AI_CHAT_TENANT_CONCURRENCY: optionalBoundedInt('AI_CHAT_TENANT_CONCURRENCY', 8, 1, 1_024),
+  AI_CHAT_GLOBAL_CONCURRENCY: optionalBoundedInt('AI_CHAT_GLOBAL_CONCURRENCY', 48, 1, 4_096),
+  // A chat answer from the provider (retries included) stops after this long.
+  AI_CHAT_ANSWER_DEADLINE_MS: optionalBoundedInt('AI_CHAT_ANSWER_DEADLINE_MS', 180_000, 10_000, 900_000),
   // A source-backed Blueprint may use the provider's full 65,536-token
   // response window and has one validation retry available.
   AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE', 250_000, 1_000, 2_000_000),

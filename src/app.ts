@@ -7,9 +7,11 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
+import { isShuttingDown } from './config/process-lifecycle.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
+import { useJsonBodyParsers } from './middleware/body-limits.js';
 
 // Routes
 import authRoutes from './modules/auth/auth.routes.js';
@@ -64,6 +66,14 @@ if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
   console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
 }
 
+// ── Graceful shutdown ──
+// While the process drains, answers on kept-alive connections tell the client
+// (or the gateway) to open a new connection, which reaches the next process.
+app.use(function closeConnectionWhileShuttingDown(_req, res, next) {
+  if (isShuttingDown()) res.setHeader('Connection', 'close');
+  next();
+});
+
 // ── Security Headers ──
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // cho phép /uploads cross-origin
@@ -85,7 +95,8 @@ app.use(cors({
   exposedHeaders: ['Accept-Ranges', 'Content-Range', 'Content-Length', 'Content-Type', 'Content-Disposition', 'ETag', 'Last-Modified', 'Cache-Control'],
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// Small JSON limits on sign-in and learner routes, 10 MB elsewhere (middleware/body-limits.ts).
+useJsonBodyParsers(app);
 app.use(express.urlencoded({ extended: true }));
 
 // ── Rate Limiting — brute-force protection ──
@@ -115,9 +126,11 @@ app.get('/api/health', async function healthCheck(_req, res) {
 });
 
 // ── API Routes ──
-// The general limit applies to every auth endpoint too (me, profile,
+// The general limit applies to the other auth endpoints too (me, profile,
 // change-password, one-time links); auth.routes.ts adds the stricter
-// per-endpoint limits. The '/api' mount below skips '/auth/*'.
+// per-endpoint limits. Sign-in, refresh and the SSO code exchange are not
+// counted here (they have their own budgets). The '/api' mount below skips
+// '/auth/*'.
 app.use('/api/auth', apiLimiter);
 app.use('/api/auth', authRoutes);
 

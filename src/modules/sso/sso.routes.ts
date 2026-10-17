@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize } from '../../middleware/authorize.js';
+import { ssoExchangeIpLimiter } from '../../middleware/auth-rate-limit.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import {
   deleteConfigController,
@@ -13,7 +14,8 @@ import {
 const router = Router();
 
 router.get('/public/by-domain/:domain', getPublicByDomainController);
-router.post('/exchange/:provider', exchangeController);
+// A sign-in: refused exchanges per IP instead of the general per-IP API limit.
+router.post('/exchange/:provider', ssoExchangeIpLimiter, exchangeController);
 
 router.use(authenticate, tenantContext, authorize('superadmin'));
 router.get('/configs', listConfigsController);

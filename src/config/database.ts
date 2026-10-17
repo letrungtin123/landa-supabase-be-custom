@@ -21,20 +21,41 @@ const transactionClientStorage = new AsyncLocalStorage<pg.PoolClient>();
 
 /**
  * Connection pool — chia sẻ connections cho toàn bộ app.
- * Pool size 20 phù hợp cho server trung bình, tăng nếu cần.
+ * Pool size 20 phù hợp cho server trung bình, tăng nếu cần (DB_POOL_MAX).
  */
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
-  max: 20,                        // Tối đa 20 connections đồng thời
+  max: env.DB_POOL_MAX,           // Mặc định 20 connections đồng thời
   idleTimeoutMillis: 30_000,      // Đóng connection idle sau 30s
   connectionTimeoutMillis: 5_000, // Timeout kết nối 5s
   statement_timeout: 30_000,      // Timeout query 30s — tránh long-running
+  // A transaction left open and idle is ended by PostgreSQL instead of
+  // holding its row/advisory locks (and a pool slot) forever.
+  ...(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS > 0
+    ? { idle_in_transaction_session_timeout: env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS }
+    : {}),
+  ...(env.DB_LOCK_TIMEOUT_MS > 0 ? { lock_timeout: env.DB_LOCK_TIMEOUT_MS } : {}),
 });
 
 // Log connection errors (không crash app)
 pool.on('error', function handlePoolError(err) {
   console.error('[DB] Pool error:', err.message);
 });
+
+/**
+ * pg-pool removes its own 'error' listener while a client is checked out. A
+ * session ended by the server between two queries (idle-in-transaction
+ * timeout, restart, network drop) would then be an unhandled 'error' event and
+ * crash the process. Log it instead: the next query on that client fails and
+ * the pool discards the client on release because it is no longer queryable.
+ */
+export function attachClientErrorLogger(client: { on(event: 'error', listener: (err: Error) => void): unknown }): void {
+  client.on('error', function handleClientError(err) {
+    console.error('[DB] Client connection error (the connection is discarded):', err.message);
+  });
+}
+
+pool.on('connect', attachClientErrorLogger);
 
 /**
  * Thực thi query với parameterized statements (chống SQL injection).

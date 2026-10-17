@@ -1,4 +1,5 @@
 ﻿import type { Request, Response, NextFunction } from 'express';
+import { unlink } from 'node:fs/promises';
 import { AppError } from '../../middleware/error-handler.js';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import type { AuditChange } from '../audit-logs/audit-event.contract.js';
@@ -21,6 +22,21 @@ function tenantId(req: Request): string {
 
 function files(req: Request): Express.Multer.File[] {
   return (req.files as Express.Multer.File[] | undefined) || [];
+}
+
+const TEMP_UPLOAD_UNLINK_RETRY_MS = 1_000;
+
+/** Removes the temp files of a disk upload; one retry for a file Windows still holds open. */
+export async function removeTempUploads(uploaded: Express.Multer.File[]): Promise<void> {
+  await Promise.all(uploaded.filter((item) => item.path).map(async (item) => {
+    try {
+      await unlink(item.path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      await new Promise((resolve) => setTimeout(resolve, TEMP_UPLOAD_UNLINK_RETRY_MS));
+      await unlink(item.path).catch(() => console.warn('[Assignments] Could not remove a temp upload file'));
+    }
+  }));
 }
 
 function file(req: Request): Express.Multer.File | undefined {
@@ -219,7 +235,11 @@ export async function submitAssignment(req: Request, res: Response, next: NextFu
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const result = await service.submitAssignment(req.params.assignmentId, req.user!, parsed.data, files(req));
     sendSuccess(res, result, 'Nop assignment thanh cong');
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  } finally {
+    await removeTempUploads(files(req));
+  }
 }
 
 export async function downloadFile(req: Request, res: Response, next: NextFunction): Promise<void> {

@@ -1,4 +1,5 @@
 import { getClient } from '../../config/database.js';
+import { listenRetryDelayMs } from './lesson-author-listen-retry.logic.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANNEL = 'lesson_author_source_document_event';
@@ -19,12 +20,16 @@ type Listener = (hint: SourceDocumentHint | null) => void;
  * authority; NOTIFY only wakes exact-document subscribers after a committed
  * status transition. Browser count therefore does not create DB listeners.
  */
-export function createSourceDocumentHub(dependencies: { getClient?: typeof getClient } = {}) {
+export function createSourceDocumentHub(dependencies: { getClient?: typeof getClient; now?: () => number } = {}) {
   const acquire = dependencies.getClient ?? getClient;
+  const now = dependencies.now ?? (() => Date.now());
   const listeners = new Map<string, Set<Listener>>();
-  let client: Awaited<ReturnType<typeof getClient>> | null = null;
+  // The pool connection that holds LISTEN; release() hands it back exactly once.
+  let connection: { client: Awaited<ReturnType<typeof getClient>>; release: (error?: Error) => void } | null = null;
   let connecting: Promise<void> | null = null;
   let unavailable = false;
+  let consecutiveFailures = 0;
+  let retryAt = 0;
 
   function deliver(documentId: string, hint: SourceDocumentHint | null) {
     for (const listener of listeners.get(documentId)?.values() ?? []) {
@@ -48,20 +53,48 @@ export function createSourceDocumentHub(dependencies: { getClient?: typeof getCl
         status: value.status as SourceDocumentHint['status'], updatedAt: value.updated_at };
     } catch { return null; }
   }
+  function noteFailure() {
+    consecutiveFailures += 1;
+    retryAt = now() + listenRetryDelayMs(consecutiveFailures);
+  }
   async function ensure(): Promise<void> {
-    if (client) return;
+    if (connection) return;
     if (connecting) return connecting;
+    // After a failure the next LISTEN attempt waits (the stream answers 503 and the browser retries).
+    if (now() < retryAt) throw new Error('SOURCE_STREAM_LISTEN_RETRY_PENDING');
     connecting = (async () => {
-      const next = await acquire();
+      let next: Awaited<ReturnType<typeof getClient>>;
+      try { next = await acquire(); } catch (error) { noteFailure(); throw error; }
+      let released = false;
+      const release = (error?: Error) => {
+        if (released) return;
+        released = true;
+        // With an error the pool closes the connection instead of reusing it.
+        if (error) next.release(error); else next.release();
+      };
       next.on('notification', message => {
         if (message.channel !== CHANNEL) return;
         const hint = readPayload(message.payload);
         if (hint) deliver(hint.documentId, hint);
       });
-      next.on('error', () => { client = null; fail(); });
-      try { await next.query(`LISTEN ${CHANNEL}`); }
-      catch (error) { next.release(); throw error; }
-      client = next; unavailable = false;
+      next.on('error', (error: Error) => {
+        if (connection?.client === next) connection = null;
+        release(error);
+        noteFailure();
+        fail();
+      });
+      try {
+        await next.query(`LISTEN ${CHANNEL}`);
+      } catch (error) {
+        // The error listener above may already have released and counted it.
+        if (!released) {
+          release(error instanceof Error ? error : new Error(String(error)));
+          noteFailure();
+        }
+        throw error;
+      }
+      if (released) throw new Error('SOURCE_STREAM_LISTEN_RETRY_PENDING');
+      connection = { client: next, release }; unavailable = false; consecutiveFailures = 0;
     })().finally(() => { connecting = null; });
     return connecting;
   }
@@ -78,9 +111,10 @@ export function createSourceDocumentHub(dependencies: { getClient?: typeof getCl
       };
     },
     async stop() {
-      const current = client; client = null; listeners.clear(); unavailable = false;
+      const current = connection; connection = null; listeners.clear(); unavailable = false;
+      consecutiveFailures = 0; retryAt = 0;
       if (!current) return;
-      try { await current.query(`UNLISTEN ${CHANNEL}`); } catch { /* release below */ }
+      try { await current.client.query(`UNLISTEN ${CHANNEL}`); } catch { /* release below */ }
       current.release();
     },
   };

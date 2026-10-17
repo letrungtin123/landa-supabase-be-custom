@@ -3,6 +3,7 @@ import type { Request, Response } from 'express';
 import type { AuthUser } from '../../types/express.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import type { SourceDocumentHint } from './lesson-author-source-stream.service.js';
+import { onShutdownStart } from '../../config/process-lifecycle.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
@@ -50,6 +51,7 @@ export function createSourceDocumentStreamHandler(deps: {
     const documentId = req.params.documentId;
     let delivered = 0, closed = false, reading = false, pending = false, transportReady = false;
     let unsubscribe: (() => void) | null = null, heartbeat: NodeJS.Timeout | null = null, lease: NodeJS.Timeout | null = null;
+    let leaveShutdown: (() => void) | null = null;
     const report = (event: SourceStreamDiagnostic['event'], failure: string | null = null) => {
       try { deps.report({ event, request_id: requestId, document_id: UUID.test(documentId ?? '') ? documentId : null,
         tenant_id: user?.tenantId && UUID.test(user.tenantId) ? user.tenantId : null, failure_code: failure,
@@ -62,6 +64,7 @@ export function createSourceDocumentStreamHandler(deps: {
       if (heartbeat) clearInterval(heartbeat); if (lease) clearTimeout(lease);
       heartbeat = null; lease = null;
       const stop = unsubscribe; unsubscribe = null; stop?.();
+      const leave = leaveShutdown; leaveShutdown = null; leave?.();
     };
     const close = (failure: string | null = null) => {
       if (closed) return; closed = true;
@@ -146,7 +149,10 @@ export function createSourceDocumentStreamHandler(deps: {
       if (closed) return;
       heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, HEARTBEAT_MS);
       lease = setTimeout(() => { if (!res.writableEnded) writeEvent(res, 'auth_expiring', { delivery_contract_version: 1, document_id: documentId }); close(); }, AUTH_LEASE_MS);
-      heartbeat.unref(); lease.unref(); report('source_stream_opened');
+      heartbeat.unref(); lease.unref();
+      // A process shutdown ends the stream like the lease does: the browser reconnects to the next process.
+      leaveShutdown = onShutdownStart(() => { if (!res.writableEnded) writeEvent(res, 'auth_expiring', { delivery_contract_version: 1, document_id: documentId }); close(); });
+      report('source_stream_opened');
     } catch {
       if (!res.headersSent) reject(503, 'SOURCE_STREAM_UNAVAILABLE'); else close('SOURCE_STREAM_UNAVAILABLE');
     }

@@ -1,5 +1,9 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
 import { checkPermission } from '../../middleware/authorize.js';
@@ -10,12 +14,28 @@ import * as ctrl from './assignments.controller.js';
 
 const router = Router();
 
+const ASSIGNMENT_UPLOAD_LIMITS = {
+  fileSize: 25 * 1024 * 1024,
+  files: 5,
+};
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 25 * 1024 * 1024,
-    files: 5,
-  },
+  limits: ASSIGNMENT_UPLOAD_LIMITS,
+});
+
+// Learner submissions (up to 5 x 25 MB each, many at a deadline) go to the OS
+// temp dir instead of the heap and are streamed to Storage; the controller
+// removes the temp files when the request ends.
+export const ASSIGNMENT_SUBMISSION_TEMP_DIR = path.join(os.tmpdir(), 'landa-assignment-submissions');
+export const submissionUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      fs.mkdir(ASSIGNMENT_SUBMISSION_TEMP_DIR, { recursive: true }, (error) => cb(error ?? null, ASSIGNMENT_SUBMISSION_TEMP_DIR));
+    },
+    filename: (_req, _file, cb) => cb(null, `${Date.now()}-${randomUUID()}.upload`),
+  }),
+  limits: ASSIGNMENT_UPLOAD_LIMITS,
 });
 
 function blockDemoIframeAssignmentSubmit(req: Request, res: Response, next: NextFunction): void {
@@ -34,7 +54,7 @@ router.get('/files/:fileId', ctrl.downloadFile);
 // Learner-facing APIs.
 router.get('/learner/courses/:courseId', ctrl.listLearnerCourseAssignments);
 router.get('/learner/:assignmentId', ctrl.getLearnerAssignment);
-router.post('/learner/:assignmentId/submit', blockDemoIframeAssignmentSubmit, upload.array('files', 5), ctrl.submitAssignment);
+router.post('/learner/:assignmentId/submit', blockDemoIframeAssignmentSubmit, submissionUpload.array('files', 5), ctrl.submitAssignment);
 
 // Admin-facing APIs.
 router.use(tenantContext);
