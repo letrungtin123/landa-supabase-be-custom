@@ -206,18 +206,33 @@ export const accountActionLimiter = limiter({
 const OWN_BUDGET_POST_PATHS = new Set(['/api/auth/login', '/api/auth/refresh']);
 const SSO_EXCHANGE_PATH = /^\/api\/sso\/exchange\/[^/]+$/;
 
+// The sign-in page reads the tenant's SSO buttons (and the tenant id the SSO
+// code exchange needs) here. Like the public branding by-domain reads, which
+// are mounted before the general limiter, it is cached and not limited per IP.
+const SSO_PUBLIC_CONFIG_PATH = /^\/api\/sso\/public\/by-domain\/[^/]+$/;
+
+function fullRequestPath(req: Pick<Request, 'baseUrl' | 'path'>): string {
+  return `${req.baseUrl}${req.path}`.toLowerCase().replace(/\/+$/, '');
+}
+
 /** Whether a request is one of the sign-in calls with their own budgets (matched like Express routes: case-insensitive, optional trailing slash). */
 export function hasOwnSignInBudget(req: Pick<Request, 'method' | 'baseUrl' | 'path'>): boolean {
   if (req.method !== 'POST') return false;
-  const fullPath = `${req.baseUrl}${req.path}`.toLowerCase().replace(/\/+$/, '');
+  const fullPath = fullRequestPath(req);
   return OWN_BUDGET_POST_PATHS.has(fullPath) || SSO_EXCHANGE_PATH.test(fullPath);
+}
+
+/** The public SSO configuration read by the sign-in page. */
+export function isPublicSsoConfigRead(req: Pick<Request, 'method' | 'baseUrl' | 'path'>): boolean {
+  return (req.method === 'GET' || req.method === 'HEAD') && SSO_PUBLIC_CONFIG_PATH.test(fullRequestPath(req));
 }
 
 /**
  * General API limit (per verified user, else per client IP). It is mounted
  * on `/api/auth` before the auth routes and again on `/api`; the second mount
  * skips `/auth/*` so an auth request is counted once. Sign-in calls with
- * their own budgets are not counted here.
+ * their own budgets and the sign-in page's SSO configuration read are not
+ * counted here.
  */
 export const apiLimiter = limiter({
   prefix: 'api',
@@ -226,7 +241,8 @@ export const apiLimiter = limiter({
   code: 'API_RATE_LIMITED',
   keyGenerator: authenticatedUserOrIpRateLimitKey,
   skip: (req) => (req.baseUrl === '/api' && (req.path === '/auth' || req.path.startsWith('/auth/')))
-    || hasOwnSignInBudget(req),
+    || hasOwnSignInBudget(req)
+    || isPublicSsoConfigRead(req),
   // High-volume limiter: keep today's per-process counters (no Redis round trip per API call).
   sharedStore: false,
 });

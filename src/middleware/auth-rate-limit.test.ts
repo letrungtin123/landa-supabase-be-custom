@@ -7,6 +7,7 @@ import {
   RATE_LIMIT_ERRORS,
   apiLimiter,
   hasOwnSignInBudget,
+  isPublicSsoConfigRead,
   loginAccountLimiter,
   loginAccountRateLimitKey,
   loginIpLimiter,
@@ -143,12 +144,13 @@ function signInApp(): express.Express {
   app.get('/api/auth/me', (_req, res) => { res.json({ ok: true }); });
   app.use('/api', apiLimiter);
   app.post('/api/sso/exchange/:provider', ssoExchangeIpLimiter, answer);
+  app.get('/api/sso/public/by-domain/:domain', (_req, res) => { res.json({ providers: [] }); });
   return app;
 }
 
 const from = (address: string) => ({ 'X-Forwarded-For': address });
 
-test('only POST sign-in, refresh and SSO exchange skip the general limit, matched like Express routes', () => {
+test('sign-in, refresh, the SSO exchange and the sign-in page SSO read skip the general limit, matched like Express routes', () => {
   const at = (method: string, baseUrl: string, path: string) => hasOwnSignInBudget({ method, baseUrl, path });
   assert.equal(at('POST', '/api/auth', '/login'), true);
   assert.equal(at('POST', '/api/auth', '/Refresh/'), true);
@@ -158,6 +160,10 @@ test('only POST sign-in, refresh and SSO exchange skip the general limit, matche
   assert.equal(at('POST', '/api/auth', '/login/extra'), false);
   assert.equal(at('POST', '/api', '/sso/configs/google'), false);
   assert.equal(at('POST', '/api', '/sso/exchange/google/x'), false);
+  const read = (method: string, path: string) => isPublicSsoConfigRead({ method, baseUrl: '/api', path });
+  assert.equal(read('GET', '/sso/public/by-domain/learn.example.com'), true);
+  assert.equal(read('POST', '/sso/public/by-domain/learn.example.com'), false);
+  assert.equal(read('GET', '/sso/configs'), false);
 });
 
 test('many successful sign-ins from one address pass and never use the general per-address budget', async () => {
@@ -170,6 +176,9 @@ test('many successful sign-ins from one address pass and never use the general p
       assert.equal(response.status, 200, `sign-in ${i + 1} of ${attempts}`);
     }
     for (let i = 0; i < API_RATE_LIMIT_MAX + 10; i += 1) {
+      // The sign-in page reads the SSO buttons, then the browser exchanges the code.
+      const page = await fetch(`${server.url}/api/sso/public/by-domain/learn.example.com`, { headers: client });
+      assert.equal(page.status, 200, `SSO configuration read ${i + 1}`);
       const response = await post(`${server.url}/api/sso/exchange/google`, { code: `code-${i}` }, client);
       assert.equal(response.status, 200, `SSO exchange ${i + 1}`);
     }
