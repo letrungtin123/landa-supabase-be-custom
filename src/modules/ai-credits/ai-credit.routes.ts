@@ -19,6 +19,7 @@ admin.get('/fx', controller.listFx);
 admin.put('/fx/:month', controller.setFx);
 admin.get('/overview', controller.overview);
 admin.get('/tenants/:tenantId/usage', controller.tenantUsage);
+admin.get('/tenants/:tenantId/plan', controller.tenantPlan);
 admin.put('/tenants/:tenantId/plan', controller.setTenantPlan);
 admin.post('/tenants/:tenantId/topups', controller.addTopup);
 admin.put('/tenants/:tenantId/months/:month/reconciliation', controller.reconcile);

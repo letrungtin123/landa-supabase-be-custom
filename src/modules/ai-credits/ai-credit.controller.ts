@@ -3,12 +3,15 @@ import type { ZodSchema } from 'zod';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import * as service from './ai-credit.service.js';
-import { createPlanSchema, fxSchema, monthParam, reconcileSchema, setTenantPlanSchema, topupSchema, updatePlanSchema } from './ai-credit.validator.js';
+import {
+  createPlanSchema, fxSchema, idParam, invalidInputBody, monthParam, reconcileSchema, setTenantPlanSchema, topupSchema, updatePlanSchema,
+} from './ai-credit.validator.js';
 
-function parse<T>(schema: ZodSchema<T>, value: unknown, res: Response): T | null {
+/** Parses one input; a refusal answers 400 with AI_CREDIT_INVALID_INPUT and the field (`field` names a route parameter). */
+function parse<T>(schema: ZodSchema<T>, value: unknown, res: Response, field?: string): T | null {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
-    sendError(res, parsed.error.errors[0]?.message || 'Dữ liệu không hợp lệ', 400);
+    res.status(400).json(invalidInputBody(parsed.error, field));
     return null;
   }
   return parsed.data;
@@ -56,20 +59,32 @@ export async function createPlan(req: Request, res: Response, next: NextFunction
 
 export async function updatePlan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const planId = parse(idParam, req.params.planId, res, 'planId');
+    if (!planId) return;
     const input = parse(updatePlanSchema, req.body, res);
     if (!input) return;
-    sendSuccess(res, await service.updateAiCreditPlan(req.params.planId, { ...input, description: input.description ?? null, sort_order: input.sort_order ?? 0 }), 'Đã cập nhật gói');
+    sendSuccess(res, await service.updateAiCreditPlan(planId, { ...input, description: input.description ?? null, sort_order: input.sort_order ?? 0 }), 'Đã cập nhật gói');
+  } catch (error) { next(error); }
+}
+
+export async function tenantPlan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = parse(idParam, req.params.tenantId, res, 'tenantId');
+    if (!tenantId) return;
+    sendSuccess(res, await service.getTenantAiCreditPlan(tenantId));
   } catch (error) { next(error); }
 }
 
 export async function setTenantPlan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = parse(idParam, req.params.tenantId, res, 'tenantId');
+    if (!tenantId) return;
     const input = parse(setTenantPlanSchema, req.body, res);
     if (!input || !req.user) return;
     const actorId = req.user.id;
     const result = await runAuditedTransaction(
-      () => service.setTenantAiCreditPlan(req.params.tenantId, input.plan_id, actorId),
-      (done) => tenantSettingAudit(req, req.params.tenantId, done.tenantName, 'ai_credit_plan', 1),
+      () => service.setTenantAiCreditPlan(tenantId, input.plan_id, actorId),
+      (done) => tenantSettingAudit(req, tenantId, done.tenantName, 'ai_credit_plan', 1),
     );
     sendSuccess(res, result, 'Đã gán gói AI');
   } catch (error) { next(error); }
@@ -77,12 +92,14 @@ export async function setTenantPlan(req: Request, res: Response, next: NextFunct
 
 export async function addTopup(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = parse(idParam, req.params.tenantId, res, 'tenantId');
+    if (!tenantId) return;
     const input = parse(topupSchema, req.body, res);
     if (!input || !req.user) return;
     const actorId = req.user.id;
     const result = await runAuditedTransaction(
-      () => service.addTenantAiCreditTopup(req.params.tenantId, input, actorId),
-      (done) => tenantSettingAudit(req, req.params.tenantId, done.tenantName, 'ai_credit_topup', input.points),
+      () => service.addTenantAiCreditTopup(tenantId, input, actorId),
+      (done) => tenantSettingAudit(req, tenantId, done.tenantName, 'ai_credit_topup', input.points),
     );
     sendSuccess(res, result, 'Đã cộng điểm AI', 201);
   } catch (error) { next(error); }
@@ -94,9 +111,10 @@ export async function listFx(_req: Request, res: Response, next: NextFunction): 
 
 export async function setFx(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const month = parse(monthParam, req.params.month, res);
+    const month = parse(monthParam, req.params.month, res, 'month');
+    if (!month) return;
     const input = parse(fxSchema, req.body, res);
-    if (!month || !input || !req.user) return;
+    if (!input || !req.user) return;
     sendSuccess(res, await service.setAiFxRate(month, input.vnd_per_usd, input.source_note ?? null, req.user.id), 'Đã lưu tỷ giá');
   } catch (error) { next(error); }
 }
@@ -106,18 +124,26 @@ export async function overview(req: Request, res: Response, next: NextFunction):
 }
 
 export async function tenantUsage(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await service.getTenantAiUsage(req.params.tenantId, queryMonth(req))); } catch (error) { next(error); }
+  try {
+    const tenantId = parse(idParam, req.params.tenantId, res, 'tenantId');
+    if (!tenantId) return;
+    // The superadmin view also carries the month's exchange rate and the month it was set for.
+    sendSuccess(res, await service.getTenantAiUsage(tenantId, queryMonth(req), { includeFx: true }));
+  } catch (error) { next(error); }
 }
 
 export async function reconcile(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const month = parse(monthParam, req.params.month, res);
+    const tenantId = parse(idParam, req.params.tenantId, res, 'tenantId');
+    if (!tenantId) return;
+    const month = parse(monthParam, req.params.month, res, 'month');
+    if (!month) return;
     const input = parse(reconcileSchema, req.body, res);
-    if (!month || !input || !req.user) return;
+    if (!input || !req.user) return;
     const actorId = req.user.id;
     const result = await runAuditedTransaction(
-      () => service.reconcileTenantAiMonth(req.params.tenantId, month, input.cost_vnd, input.note ?? null, actorId),
-      (done) => tenantSettingAudit(req, req.params.tenantId, done.tenantName, 'ai_credit_reconciliation', 1),
+      () => service.reconcileTenantAiMonth(tenantId, month, input.cost_vnd, input.note ?? null, actorId),
+      (done) => tenantSettingAudit(req, tenantId, done.tenantName, 'ai_credit_reconciliation', 1),
     );
     sendSuccess(res, result, 'Đã lưu đối soát');
   } catch (error) { next(error); }

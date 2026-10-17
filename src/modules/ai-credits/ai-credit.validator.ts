@@ -1,4 +1,7 @@
-import { z } from 'zod';
+import { z, type ZodError } from 'zod';
+
+/** Every refused input of the AI credit routes: the UI shows a plain message for the named field. */
+export const AI_CREDIT_INVALID_INPUT_CODE = 'AI_CREDIT_INVALID_INPUT';
 
 const planFields = {
   name: z.string().trim().min(1, 'Nhập tên gói').max(120, 'Tên gói tối đa 120 ký tự'),
@@ -38,3 +41,26 @@ export const reconcileSchema = z.object({
 });
 
 export const monthParam = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Tháng không hợp lệ (YYYY-MM)');
+
+export const idParam = z.string().uuid('Mã không hợp lệ');
+
+export interface AiCreditInvalidInput {
+  success: false;
+  message: string;
+  code: typeof AI_CREDIT_INVALID_INPUT_CODE;
+  /** First refused field (body key, or the route parameter name). */
+  field?: string;
+}
+
+/** The 400 body of a refused input: the first issue's message, its field and a stable code. */
+export function invalidInputBody(error: ZodError, field?: string): AiCreditInvalidInput {
+  const issue = error.errors[0];
+  const path = issue?.path[0];
+  const name = field ?? (typeof path === 'string' ? path : undefined);
+  return {
+    success: false,
+    message: issue?.message || 'Dữ liệu không hợp lệ',
+    code: AI_CREDIT_INVALID_INPUT_CODE,
+    ...(name ? { field: name } : {}),
+  };
+}
