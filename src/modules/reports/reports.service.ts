@@ -2553,14 +2553,18 @@ export async function getLearnerDetail(
 // User Badges
 // ═══════════════════════════════════════════════════════════════
 
+type UserBadgeRow = { badge_id: string; earned_at: string; name_override: string | null };
+
+/** Badges of one learner; name_override is the tenant's own display name for the badge, if it set one. */
 export async function getUserBadges(
   username: string,
   tenantId: string,
-): Promise<{ username: string; badges: Array<{ badge_id: string; earned_at: string }> }> {
-  const result = await query<{ badge_id: string; earned_at: string }>(
-    `SELECT ub.badge_id, ub.earned_at
+): Promise<{ username: string; badges: UserBadgeRow[] }> {
+  const result = await query<UserBadgeRow>(
+    `SELECT ub.badge_id, ub.earned_at, NULLIF(BTRIM(tbs.name_override), '') AS name_override
      FROM user_badges ub
      JOIN users u ON u.id = ub.user_id
+     LEFT JOIN tenant_badge_settings tbs ON tbs.tenant_id = u.tenant_id AND tbs.badge_id = ub.badge_id
      WHERE u.username = $1 AND u.tenant_id = $2
      ORDER BY ub.earned_at DESC`,
     [username, tenantId],
