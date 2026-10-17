@@ -2,7 +2,8 @@ import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { AiChatTarget, AiEngine, AiOperation, AiProvider, AiUsage } from './ai-engine.types.js';
-import { calculateAiUsageCostVnd } from './ai-pricing.service.js';
+import { calculateAiUsageCost } from './ai-pricing.service.js';
+import { aiLedgerFeature } from './ai-usage.logic.js';
 import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from './ai-settings.service.js';
 
 export const AI_TOKEN_LIMIT_REACHED_CODE = 'AI_TOKEN_LIMIT_REACHED';
@@ -280,13 +281,13 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
     const row = reservation.rows[0];
     if (!row) return;
 
-    const pricing = await calculateAiUsageCostVnd({
+    const pricing = await calculateAiUsageCost({
       provider: row.provider,
       model: row.model,
       embeddingModel: input.embeddingModel,
       usage,
     }).catch((error) => {
-      console.warn('[AI Token Quota] Unable to resolve VND price card:', error instanceof Error ? error.message : String(error));
+      console.warn('[AI Token Quota] Unable to resolve the price card:', error instanceof Error ? error.message : String(error));
       return fallbackUnpricedCost();
     });
     const reservedTokens = Number(row.estimated_tokens);
@@ -305,9 +306,9 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
         reserved_tokens: reservedTokens,
         ...(budgetOverageTokens > 0 ? { budget_overage_tokens: budgetOverageTokens } : {}),
       },
-      // Until the ledger has its own column: the cache-billed part of input_tokens.
-      ...(usage.cachedInputTokens ? { usage_detail: { cached_input_tokens: usage.cachedInputTokens } } : {}),
     };
+    const cachedInputTokens = usage.cachedInputTokens ?? 0;
+    const feature = aiLedgerFeature(input.metadata, row.operation);
 
     await query(
       `UPDATE ai_token_reservations
@@ -335,6 +336,8 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
            total_tokens = total_tokens + $6::bigint,
            reserved_tokens = GREATEST(0, reserved_tokens - $7::bigint),
            estimated_cost_vnd = estimated_cost_vnd + $8::numeric,
+           estimated_cost_usd = estimated_cost_usd + $9::numeric,
+           cached_input_tokens = cached_input_tokens + $10::bigint,
            revision = revision + 1
        WHERE tenant_id = $1 AND period_start = $2::date`,
       [
@@ -346,18 +349,28 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
         usage.totalTokens,
         row.estimated_tokens,
         pricing.amountVnd,
+        pricing.amountUsd,
+        cachedInputTokens,
       ],
     );
+    // The acting user is copied into the row (actor_*): usage charts keep the
+    // name after the user is deleted (user_id is then set to NULL).
     await query(
       `INSERT INTO ai_token_usage_ledger (
          reservation_id, tenant_id, user_id, conversation_id, target, engine,
          provider, model, operation, period_start, input_tokens, output_tokens,
          embedding_tokens, total_tokens, estimated_cost_usd, estimated_cost_vnd,
-         source, metadata, pricing_snapshot, cost_status
+         source, metadata, pricing_snapshot, cost_status,
+         cached_input_tokens, feature, actor_user_id, actor_name, actor_email
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date,
-               $11::bigint, $12::bigint, $13::bigint, $14::bigint, 0::numeric,
-               $15::numeric, $16::jsonb, $17::jsonb, $18::jsonb, $19)`,
+       SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::text, $7::text, $8::text, $9::text, $10::date,
+              $11::bigint, $12::bigint, $13::bigint, $14::bigint, $20::numeric,
+              $15::numeric, $16::jsonb, $17::jsonb, $18::jsonb, $19::text,
+              $21::bigint, $22::text, $3::uuid,
+              left(coalesce(nullif(btrim(u.full_name), ''), nullif(btrim(u.username), '')), 255),
+              left(nullif(btrim(u.email), ''), 320)
+       FROM (SELECT 1) AS one
+       LEFT JOIN users u ON u.id = $3::uuid`,
       [
         input.reservationId,
         input.tenantId,
@@ -378,17 +391,22 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
         JSON.stringify(metadata),
         JSON.stringify(pricing.pricingSnapshot),
         pricing.status,
+        pricing.amountUsd,
+        cachedInputTokens,
+        feature,
       ],
     );
   });
 }
 
 function fallbackUnpricedCost(): {
+  amountUsd: number;
   amountVnd: number;
   status: 'unpriced';
   pricingSnapshot: Record<string, unknown>;
 } {
   return {
+    amountUsd: 0,
     amountVnd: 0,
     status: 'unpriced',
     pricingSnapshot: {

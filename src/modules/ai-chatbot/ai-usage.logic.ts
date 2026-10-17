@@ -32,6 +32,22 @@ export function aiUsageFromGeminiMetadata(meta: GeminiUsageMetadata | null | und
   return { inputTokens, outputTokens, embeddingTokens: 0, totalTokens, ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}) };
 }
 
+const FEATURE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/**
+ * The ledger's feature label of a settled call: the caller's own label when it
+ * gave one, otherwise what the call type implies (same rules as the backfill of
+ * 20261017_1700_ai_credit_p0b).
+ */
+export function aiLedgerFeature(metadata: Record<string, unknown> | null | undefined, operation: string): string {
+  const own = metadata?.feature;
+  if (typeof own === 'string' && FEATURE_PATTERN.test(own)) return own;
+  if (metadata?.report_pdf === true) return 'report_pdf_narrative';
+  if (operation === 'lesson_author') return 'ai_id';
+  if (operation === 'indexing') return 'document_indexing';
+  return 'chat';
+}
+
 /** Sum of several calls of one turn (router call + streamed answer, retries that reached the provider). */
 export function addAiUsage(total: AiUsage | null, next: AiUsage | null): AiUsage | null {
   if (!next) return total;
