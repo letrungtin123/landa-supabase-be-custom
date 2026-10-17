@@ -16,6 +16,12 @@ import { mediaQuizModeValue, safeJsonParse, scenarioChatString, toLearnerBlockRo
 import { LEARNER_BLOCK_SERIALIZATION_VERSION, problemExplanationHtml, resolveSortableSubmission } from './learner-answer-key.logic.js';
 import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
+  buildLearnerCourseStructure,
+  overlayLearnerBlockCompletions,
+  type LearnerCourseBlocksState,
+  type LearnerCourseStructure,
+} from './learner-course-blocks.logic.js';
+import {
   evaluateUserBadges,
   getEffectiveBadgeDefinitions,
 } from '../badges/badge-evaluation.service.js';
@@ -318,111 +324,91 @@ export async function getCourseBlocks(
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
-  return cacheJson(
-    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe, shape: LEARNER_BLOCK_SERIALIZATION_VERSION }),
+  // Same invalidation as the former per-learner cache: course content and the
+  // tenant's course / category assignments; the learner part also follows
+  // the learner's own progress version.
+  const contentVersion = `${courseVersion}:${coursesVersion}:${categoriesVersion}`;
+
+  // Per learner, never shared: the access check and the completed block ids.
+  const learnerState = await cacheJson(
+    cacheKeys.courseResource(courseId, 'blocks-learner-state', `${contentVersion}:${progressVersion}`, {
+      userId, role, tenantId: tenantId ?? null, demo: isDemoIframe,
+    }),
     CACHE_TTL.courseBlocks,
-    () => getCourseBlocksFromDb(courseId, userId, role, tenantId, isDemoIframe),
+    () => getCourseBlocksLearnerStateFromDb(courseId, userId, role, tenantId, isDemoIframe),
   );
+
+  // One copy per course version for every learner: published blocks with
+  // answer keys removed (user-independent, see learner-answer-key.logic.ts).
+  const structure = await cacheJson(
+    cacheKeys.courseResource(courseId, 'blocks-structure', contentVersion, { shape: LEARNER_BLOCK_SERIALIZATION_VERSION }),
+    CACHE_TTL.courseBlocks,
+    () => getCourseBlocksStructureFromDb(courseId),
+  );
+
+  return overlayLearnerBlockCompletions(structure, learnerState.completed_block_ids);
 }
 
-async function getCourseBlocksFromDb(
+async function getCourseBlocksLearnerStateFromDb(
   courseId: string,
   userId: string,
   role = 'learner',
   tenantId?: string | null,
   isDemoIframe = false,
-) {
+): Promise<LearnerCourseBlocksState> {
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
+  if (isDemoIframe) return { completed_block_ids: [] };
 
-  // Lấy enrollment_id (nếu có) để join block_completions
-  const enrollResult = isDemoIframe
-    ? { rows: [] as Array<{ id: string }> }
-    : await query<{ id: string }>(
-      `SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1`,
-      [courseId, userId],
-    );
-  const enrollmentId = enrollResult.rows[0]?.id ?? null;
+  // The learner's active enrollment (at most one per user and course).
+  const result = await query<{ block_id: string }>(
+    `WITH enrollment AS (
+       SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1
+     )
+     SELECT bc.block_id
+     FROM enrollment e
+     JOIN block_completions bc ON bc.enrollment_id = e.id`,
+    [courseId, userId],
+  );
+  return { completed_block_ids: result.rows.map((row) => row.block_id) };
+}
 
+async function getCourseBlocksStructureFromDb(courseId: string): Promise<LearnerCourseStructure> {
   // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
   // Staff/admin muốn xem draft → dùng CMS route, KHÔNG dùng learner route.
-  const isLearner = true;
-  const publishFilter = 'AND b.is_published = true';
-
   // Learner route must read the immutable published snapshot only.  Falling
   // back to metadata would leak a saved-but-unpublished diagram draft.
-  const dataCol = 'b.published_data';
-  const metaCol = 'b.published_metadata';
-
-  let sql: string;
-  let params: unknown[];
-
-  if (enrollmentId) {
-    sql = `WITH RECURSIVE active_tree AS (
-             SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                    b.published_data, b.published_metadata, b.metadata,
-                    b.sort_order, b.is_published
-             FROM course_blocks b
-             WHERE b.course_id = $1
-               AND b.parent_id IS NULL
-               AND b.deleted_at IS NULL ${publishFilter}
-             UNION ALL
-             SELECT child.id, child.parent_id, child.block_type, child.display_name,
-                    child.published_data, child.published_metadata, child.metadata,
-                    child.sort_order, child.is_published
-             FROM course_blocks child
-             JOIN active_tree parent ON parent.id = child.parent_id
-             WHERE child.deleted_at IS NULL AND child.is_published = true
-           )
-           SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                  ${dataCol} AS data, ${metaCol} AS metadata,
-                  b.sort_order, b.is_published,
-                  CASE WHEN bc.id IS NOT NULL THEN true ELSE false END AS completed
-           FROM active_tree b
-           LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $2
-           ORDER BY b.sort_order`;
-    params = [courseId, enrollmentId];
-  } else {
-    sql = `WITH RECURSIVE active_tree AS (
-             SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                    b.published_data, b.published_metadata, b.metadata,
-                    b.sort_order, b.is_published
-             FROM course_blocks b
-             WHERE b.course_id = $1
-               AND b.parent_id IS NULL
-               AND b.deleted_at IS NULL ${publishFilter}
-             UNION ALL
-             SELECT child.id, child.parent_id, child.block_type, child.display_name,
-                    child.published_data, child.published_metadata, child.metadata,
-                    child.sort_order, child.is_published
-             FROM course_blocks child
-             JOIN active_tree parent ON parent.id = child.parent_id
-             WHERE child.deleted_at IS NULL AND child.is_published = true
-           )
-           SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                  ${dataCol} AS data, ${metaCol} AS metadata,
-                  b.sort_order, b.is_published,
-                  false AS completed
-           FROM active_tree b
-           ORDER BY b.sort_order`;
-    params = [courseId];
-  }
-
-  const result = await query<any>(sql, params);
-
-  const blocks = result.rows.map(toLearnerBlockRow);
-  const root = blocks.find((b: any) => b.block_type === 'course') ?? null;
-
-
-
-  return {
-    root_id: root?.id ?? null,
-    blocks,
-  };
+  const result = await query<Record<string, unknown>>(
+    `WITH RECURSIVE active_tree AS (
+       SELECT b.id, b.parent_id, b.block_type, b.display_name,
+              b.published_data, b.published_metadata,
+              b.sort_order, b.is_published
+       FROM course_blocks b
+       WHERE b.course_id = $1
+         AND b.parent_id IS NULL
+         AND b.deleted_at IS NULL AND b.is_published = true
+       UNION ALL
+       SELECT child.id, child.parent_id, child.block_type, child.display_name,
+              child.published_data, child.published_metadata,
+              child.sort_order, child.is_published
+       FROM course_blocks child
+       JOIN active_tree parent ON parent.id = child.parent_id
+       WHERE child.deleted_at IS NULL AND child.is_published = true
+     )
+     SELECT b.id, b.parent_id, b.block_type, b.display_name,
+            b.published_data AS data, b.published_metadata AS metadata,
+            b.sort_order, b.is_published
+     FROM active_tree b
+     ORDER BY b.sort_order`,
+    [courseId],
+  );
+  return buildLearnerCourseStructure(result.rows);
 }
 
 /**
  * Lấy chi tiết 1 block đơn lẻ.
  * Learner route → LUÔN trả published_data, bất kể role.
+ * The block is cached once for every learner; the access check stays per
+ * learner (cached under the same key parts as the former per-learner copy).
  */
 export async function getBlockDetail(
   blockId: string,
@@ -431,19 +417,23 @@ export async function getBlockDetail(
   tenantId?: string | null,
 ) {
   const version = await getCacheVersion(...cacheVersions.blockContent(blockId));
-  return cacheJson(
-    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}:${LEARNER_BLOCK_SERIALIZATION_VERSION}`),
+  const block = await cacheJson(
+    cacheKeys.blockResource(blockId, `${version}:shared:${LEARNER_BLOCK_SERIALIZATION_VERSION}`),
     CACHE_TTL.blockDetail,
-    () => getBlockDetailFromDb(blockId, userId, role, tenantId),
+    () => getBlockDetailFromDb(blockId),
   );
+  await cacheJson(
+    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}:access`),
+    CACHE_TTL.blockDetail,
+    async () => {
+      await assertLearnerCourseAccess(block.course_id, userId, tenantId, role);
+      return true;
+    },
+  );
+  return block;
 }
 
-async function getBlockDetailFromDb(
-  blockId: string,
-  userId: string,
-  role = 'learner',
-  tenantId?: string | null,
-) {
+async function getBlockDetailFromDb(blockId: string) {
   // Learner route must never fall back to a block's draft columns.
   const dataCol = 'b.published_data';
   const metaCol = 'b.published_metadata';
@@ -471,7 +461,6 @@ async function getBlockDetailFromDb(
   );
 
   if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
-  await assertLearnerCourseAccess(result.rows[0].course_id, userId, tenantId, role);
   return toLearnerBlockRow(result.rows[0]);
 }
 
@@ -970,16 +959,27 @@ export async function getCourseFiles(courseId: string, userId: string, role = 'l
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
-  return cacheJson(
-    cacheKeys.courseResource(courseId, 'files', `${version}:${coursesVersion}:${categoriesVersion}`, { userId, role }),
+  const versionKey = `${version}:${coursesVersion}:${categoriesVersion}`;
+  // Per learner (same key parts as the former per-learner copy): the access check.
+  await cacheJson(
+    cacheKeys.courseResource(courseId, 'files-access', versionKey, { userId, role, tenantId: tenantId ?? null }),
     CACHE_TTL.courseFiles,
-    () => getCourseFilesFromDb(courseId, userId, role, tenantId),
+    async () => {
+      await assertLearnerCourseAccess(courseId, userId, tenantId, role);
+      return true;
+    },
+  );
+  // One list per course for every learner (locked files hidden) and one for staff.
+  const learnerView = isLearnerRole(role);
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'files-list', versionKey, { learnerView }),
+    CACHE_TTL.courseFiles,
+    () => getCourseFilesFromDb(courseId, learnerView),
   );
 }
 
-async function getCourseFilesFromDb(courseId: string, userId: string, role = 'learner', tenantId?: string | null) {
-  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
-  const lockedFilter = isLearnerRole(role) ? 'AND is_locked = false' : '';
+async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
+  const lockedFilter = learnerView ? 'AND is_locked = false' : '';
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
      FROM course_assets
