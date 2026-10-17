@@ -6,6 +6,7 @@ import {
   invalidateCourseReadCaches,
   invalidateTenantBadgeCaches,
   invalidateTenantCourseCaches,
+  invalidateTenantNotificationCaches,
 } from '../../config/cache-invalidation.js';
 import { extractStoragePath } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
@@ -1160,6 +1161,8 @@ async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
 
   if ((deletedCourse.rowCount || 0) > 0) {
     await invalidateTenantBadgeCaches(job.tenant_id);
+    // The course's notifications were deleted with it (unread counts).
+    await invalidateTenantNotificationCaches(job.tenant_id);
   }
 
   return stats;

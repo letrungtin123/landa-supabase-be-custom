@@ -2,6 +2,11 @@ import type { PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getClient, query } from '../../config/database.js';
 import {
+  invalidateTenantNotificationCaches,
+  invalidateUserBadgeCaches,
+  invalidateUserNotificationCaches,
+} from '../../config/cache-invalidation.js';
+import {
   buildFileName,
   buildStoragePath,
   deleteFile,
@@ -571,6 +576,9 @@ export async function createAssignment(
 
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(assignment, course.display_name)));
     await client.query('COMMIT');
+
+    // Learners' unread counts include the new assignment notification.
+    if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
 
     await scheduleCourseProgressRecalculation({
       tenantId,
@@ -1285,6 +1293,8 @@ export async function submitAssignment(
     client.release();
   }
 
+  // The submission can complete the course: badges are evaluated again.
+  await invalidateUserBadgeCaches([user.id]);
   await Promise.all(oldStoragePaths.map(path => deleteFile(path).catch(() => undefined)));
   return getLearnerAssignment(assignmentId, user);
 }
@@ -1519,6 +1529,8 @@ export async function feedbackSubmission(
     client.release();
   }
 
+  // The learner's unread count includes the feedback notification.
+  await invalidateUserNotificationCaches(ctx.learner_id);
   wakeEmailOutboxWorker('assignment-feedback');
 
   return listCourseSubmissions(ctx.course_id, tenantId, { page: '1', page_size: '1', assignment_id: ctx.assignment_id });

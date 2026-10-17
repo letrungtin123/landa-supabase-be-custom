@@ -4,9 +4,13 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
-import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { cacheJson, getCacheVersion, setCacheJson } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
-import { invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
+import {
+  invalidateUserBadgeCaches,
+  invalidateUserCourseProgressCache,
+  invalidateUserNotificationCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
@@ -14,6 +18,13 @@ import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.
 import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
 import { mediaQuizModeValue, safeJsonParse, scenarioChatString, toLearnerBlockRow } from './learner-block-row.logic.js';
 import { LEARNER_BLOCK_SERIALIZATION_VERSION, problemExplanationHtml, resolveSortableSubmission } from './learner-answer-key.logic.js';
+import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
+import {
+  buildLearnerCourseStructure,
+  overlayLearnerBlockCompletions,
+  type LearnerCourseBlocksState,
+  type LearnerCourseStructure,
+} from './learner-course-blocks.logic.js';
 import {
   evaluateUserBadges,
   getEffectiveBadgeDefinitions,
@@ -317,111 +328,91 @@ export async function getCourseBlocks(
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
-  return cacheJson(
-    cacheKeys.courseResource(courseId, 'blocks', `${courseVersion}:${progressVersion}:${coursesVersion}:${categoriesVersion}`, { userId, role, demo: isDemoIframe, shape: LEARNER_BLOCK_SERIALIZATION_VERSION }),
+  // Same invalidation as the former per-learner cache: course content and the
+  // tenant's course / category assignments; the learner part also follows
+  // the learner's own progress version.
+  const contentVersion = `${courseVersion}:${coursesVersion}:${categoriesVersion}`;
+
+  // Per learner, never shared: the access check and the completed block ids.
+  const learnerState = await cacheJson(
+    cacheKeys.courseResource(courseId, 'blocks-learner-state', `${contentVersion}:${progressVersion}`, {
+      userId, role, tenantId: tenantId ?? null, demo: isDemoIframe,
+    }),
     CACHE_TTL.courseBlocks,
-    () => getCourseBlocksFromDb(courseId, userId, role, tenantId, isDemoIframe),
+    () => getCourseBlocksLearnerStateFromDb(courseId, userId, role, tenantId, isDemoIframe),
   );
+
+  // One copy per course version for every learner: published blocks with
+  // answer keys removed (user-independent, see learner-answer-key.logic.ts).
+  const structure = await cacheJson(
+    cacheKeys.courseResource(courseId, 'blocks-structure', contentVersion, { shape: LEARNER_BLOCK_SERIALIZATION_VERSION }),
+    CACHE_TTL.courseBlocks,
+    () => getCourseBlocksStructureFromDb(courseId),
+  );
+
+  return overlayLearnerBlockCompletions(structure, learnerState.completed_block_ids);
 }
 
-async function getCourseBlocksFromDb(
+async function getCourseBlocksLearnerStateFromDb(
   courseId: string,
   userId: string,
   role = 'learner',
   tenantId?: string | null,
   isDemoIframe = false,
-) {
+): Promise<LearnerCourseBlocksState> {
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
+  if (isDemoIframe) return { completed_block_ids: [] };
 
-  // Lấy enrollment_id (nếu có) để join block_completions
-  const enrollResult = isDemoIframe
-    ? { rows: [] as Array<{ id: string }> }
-    : await query<{ id: string }>(
-      `SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1`,
-      [courseId, userId],
-    );
-  const enrollmentId = enrollResult.rows[0]?.id ?? null;
+  // The learner's active enrollment (at most one per user and course).
+  const result = await query<{ block_id: string }>(
+    `WITH enrollment AS (
+       SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1
+     )
+     SELECT bc.block_id
+     FROM enrollment e
+     JOIN block_completions bc ON bc.enrollment_id = e.id`,
+    [courseId, userId],
+  );
+  return { completed_block_ids: result.rows.map((row) => row.block_id) };
+}
 
+async function getCourseBlocksStructureFromDb(courseId: string): Promise<LearnerCourseStructure> {
   // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
   // Staff/admin muốn xem draft → dùng CMS route, KHÔNG dùng learner route.
-  const isLearner = true;
-  const publishFilter = 'AND b.is_published = true';
-
   // Learner route must read the immutable published snapshot only.  Falling
   // back to metadata would leak a saved-but-unpublished diagram draft.
-  const dataCol = 'b.published_data';
-  const metaCol = 'b.published_metadata';
-
-  let sql: string;
-  let params: unknown[];
-
-  if (enrollmentId) {
-    sql = `WITH RECURSIVE active_tree AS (
-             SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                    b.published_data, b.published_metadata, b.metadata,
-                    b.sort_order, b.is_published
-             FROM course_blocks b
-             WHERE b.course_id = $1
-               AND b.parent_id IS NULL
-               AND b.deleted_at IS NULL ${publishFilter}
-             UNION ALL
-             SELECT child.id, child.parent_id, child.block_type, child.display_name,
-                    child.published_data, child.published_metadata, child.metadata,
-                    child.sort_order, child.is_published
-             FROM course_blocks child
-             JOIN active_tree parent ON parent.id = child.parent_id
-             WHERE child.deleted_at IS NULL AND child.is_published = true
-           )
-           SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                  ${dataCol} AS data, ${metaCol} AS metadata,
-                  b.sort_order, b.is_published,
-                  CASE WHEN bc.id IS NOT NULL THEN true ELSE false END AS completed
-           FROM active_tree b
-           LEFT JOIN block_completions bc ON bc.block_id = b.id AND bc.enrollment_id = $2
-           ORDER BY b.sort_order`;
-    params = [courseId, enrollmentId];
-  } else {
-    sql = `WITH RECURSIVE active_tree AS (
-             SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                    b.published_data, b.published_metadata, b.metadata,
-                    b.sort_order, b.is_published
-             FROM course_blocks b
-             WHERE b.course_id = $1
-               AND b.parent_id IS NULL
-               AND b.deleted_at IS NULL ${publishFilter}
-             UNION ALL
-             SELECT child.id, child.parent_id, child.block_type, child.display_name,
-                    child.published_data, child.published_metadata, child.metadata,
-                    child.sort_order, child.is_published
-             FROM course_blocks child
-             JOIN active_tree parent ON parent.id = child.parent_id
-             WHERE child.deleted_at IS NULL AND child.is_published = true
-           )
-           SELECT b.id, b.parent_id, b.block_type, b.display_name,
-                  ${dataCol} AS data, ${metaCol} AS metadata,
-                  b.sort_order, b.is_published,
-                  false AS completed
-           FROM active_tree b
-           ORDER BY b.sort_order`;
-    params = [courseId];
-  }
-
-  const result = await query<any>(sql, params);
-
-  const blocks = result.rows.map(toLearnerBlockRow);
-  const root = blocks.find((b: any) => b.block_type === 'course') ?? null;
-
-
-
-  return {
-    root_id: root?.id ?? null,
-    blocks,
-  };
+  const result = await query<Record<string, unknown>>(
+    `WITH RECURSIVE active_tree AS (
+       SELECT b.id, b.parent_id, b.block_type, b.display_name,
+              b.published_data, b.published_metadata,
+              b.sort_order, b.is_published
+       FROM course_blocks b
+       WHERE b.course_id = $1
+         AND b.parent_id IS NULL
+         AND b.deleted_at IS NULL AND b.is_published = true
+       UNION ALL
+       SELECT child.id, child.parent_id, child.block_type, child.display_name,
+              child.published_data, child.published_metadata,
+              child.sort_order, child.is_published
+       FROM course_blocks child
+       JOIN active_tree parent ON parent.id = child.parent_id
+       WHERE child.deleted_at IS NULL AND child.is_published = true
+     )
+     SELECT b.id, b.parent_id, b.block_type, b.display_name,
+            b.published_data AS data, b.published_metadata AS metadata,
+            b.sort_order, b.is_published
+     FROM active_tree b
+     ORDER BY b.sort_order`,
+    [courseId],
+  );
+  return buildLearnerCourseStructure(result.rows);
 }
 
 /**
  * Lấy chi tiết 1 block đơn lẻ.
  * Learner route → LUÔN trả published_data, bất kể role.
+ * The block is cached once for every learner; the access check stays per
+ * learner (cached under the same key parts as the former per-learner copy).
  */
 export async function getBlockDetail(
   blockId: string,
@@ -430,19 +421,23 @@ export async function getBlockDetail(
   tenantId?: string | null,
 ) {
   const version = await getCacheVersion(...cacheVersions.blockContent(blockId));
-  return cacheJson(
-    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}:${LEARNER_BLOCK_SERIALIZATION_VERSION}`),
+  const block = await cacheJson(
+    cacheKeys.blockResource(blockId, `${version}:shared:${LEARNER_BLOCK_SERIALIZATION_VERSION}`),
     CACHE_TTL.blockDetail,
-    () => getBlockDetailFromDb(blockId, userId, role, tenantId),
+    () => getBlockDetailFromDb(blockId),
   );
+  await cacheJson(
+    cacheKeys.blockResource(blockId, `${version}:${tenantId || 'no-tenant'}:${userId}:${role}:access`),
+    CACHE_TTL.blockDetail,
+    async () => {
+      await assertLearnerCourseAccess(block.course_id, userId, tenantId, role);
+      return true;
+    },
+  );
+  return block;
 }
 
-async function getBlockDetailFromDb(
-  blockId: string,
-  userId: string,
-  role = 'learner',
-  tenantId?: string | null,
-) {
+async function getBlockDetailFromDb(blockId: string) {
   // Learner route must never fall back to a block's draft columns.
   const dataCol = 'b.published_data';
   const metaCol = 'b.published_metadata';
@@ -470,7 +465,6 @@ async function getBlockDetailFromDb(
   );
 
   if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
-  await assertLearnerCourseAccess(result.rows[0].course_id, userId, tenantId, role);
   return toLearnerBlockRow(result.rows[0]);
 }
 
@@ -969,16 +963,27 @@ export async function getCourseFiles(courseId: string, userId: string, role = 'l
     tenantId ? getCacheVersion(...cacheVersions.tenantCourses(tenantId)) : Promise.resolve('0'),
     tenantId ? getCacheVersion(...cacheVersions.tenantCourseCategories(tenantId)) : Promise.resolve('0'),
   ]);
-  return cacheJson(
-    cacheKeys.courseResource(courseId, 'files', `${version}:${coursesVersion}:${categoriesVersion}`, { userId, role }),
+  const versionKey = `${version}:${coursesVersion}:${categoriesVersion}`;
+  // Per learner (same key parts as the former per-learner copy): the access check.
+  await cacheJson(
+    cacheKeys.courseResource(courseId, 'files-access', versionKey, { userId, role, tenantId: tenantId ?? null }),
     CACHE_TTL.courseFiles,
-    () => getCourseFilesFromDb(courseId, userId, role, tenantId),
+    async () => {
+      await assertLearnerCourseAccess(courseId, userId, tenantId, role);
+      return true;
+    },
+  );
+  // One list per course for every learner (locked files hidden) and one for staff.
+  const learnerView = isLearnerRole(role);
+  return cacheJson(
+    cacheKeys.courseResource(courseId, 'files-list', versionKey, { learnerView }),
+    CACHE_TTL.courseFiles,
+    () => getCourseFilesFromDb(courseId, learnerView),
   );
 }
 
-async function getCourseFilesFromDb(courseId: string, userId: string, role = 'learner', tenantId?: string | null) {
-  await assertLearnerCourseAccess(courseId, userId, tenantId, role);
-  const lockedFilter = isLearnerRole(role) ? 'AND is_locked = false' : '';
+async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
+  const lockedFilter = learnerView ? 'AND is_locked = false' : '';
   const result = await query<any>(
     `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
      FROM course_assets
@@ -1269,6 +1274,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
     await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
     await recalculateEnrollmentProgress(existing.rows[0].id, courseId);
     await invalidateUserCourseProgressCache(userId, courseId);
+    await invalidateUserBadgeCaches([userId]);
     return { enrollment_id: existing.rows[0].id, already_enrolled: false };
   }
 
@@ -1291,17 +1297,35 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
 // ── Block Completion ──
 
 /**
+ * A learner revisiting completed units keeps the admin's "last activity"
+ * moving, at most once per 5 minutes per enrollment. One indexed UPDATE of a
+ * fixed-size timestamp column; progress, is_completed and every cache
+ * version stay as they are (no cached answer contains last_activity_at).
+ */
+async function touchEnrollmentLastActivity(enrollmentId: string): Promise<void> {
+  await query(
+    `UPDATE course_progress
+     SET last_activity_at = now()
+     WHERE enrollment_id = $1::uuid
+       AND (last_activity_at IS NULL OR last_activity_at < now() - interval '5 minutes')`,
+    [enrollmentId],
+  );
+}
+
+/**
  * Đánh dấu blocks hoàn thành (batch).
- * Tự động tính lại course progress sau khi mark.
+ * Only blocks the enrollment has not completed yet are written; progress is
+ * recalculated (and the progress cache version bumped) only when a row was
+ * actually inserted. `marked` keeps its meaning (see learner-completion.logic.ts).
  */
 export async function markBlocksComplete(
   userId: string,
   courseId: string,
   blockIds: string[],
-) {
+): Promise<MarkBlocksCompleteResult> {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi tiến độ');
 
-  if (blockIds.length === 0) return { marked: 0 };
+  if (blockIds.length === 0) return { marked: 0, newly_completed: 0 };
 
   // Lấy enrollment
   const enrollment = await query<{ id: string }>(
@@ -1322,7 +1346,8 @@ export async function markBlocksComplete(
 
   const enrollmentId = enrollment.rows[0].id;
 
-  const activeBlocks = await query<{ id: string }>(
+  // Same block filter as before; `completed` tells which ones are already done.
+  const activeBlocks = await query<ActiveBlockCompletionRow>(
     `WITH RECURSIVE ancestors AS (
        SELECT id AS root_id, id, parent_id, deleted_at
        FROM course_blocks
@@ -1332,7 +1357,13 @@ export async function markBlocksComplete(
        FROM course_blocks parent
        JOIN ancestors a ON parent.id = a.parent_id
      )
-     SELECT b.id
+     SELECT b.id,
+            EXISTS (
+              SELECT 1
+              FROM block_completions bc
+              WHERE bc.enrollment_id = $3::uuid
+                AND bc.block_id = b.id
+            ) AS completed
      FROM course_blocks b
      WHERE b.course_id = $1
        AND b.id = ANY($2::uuid[])
@@ -1345,36 +1376,42 @@ export async function markBlocksComplete(
          WHERE a.root_id = b.id
            AND a.deleted_at IS NOT NULL
        )`,
-    [courseId, blockIds],
+    [courseId, blockIds, enrollmentId],
   );
-  const activeBlockIds = activeBlocks.rows.map((row) => row.id);
+  const { marked, missing } = planBlockCompletion(activeBlocks.rows);
 
-  if (activeBlockIds.length === 0) {
-    await recalculateProgress(enrollmentId, courseId);
-    await invalidateUserCourseProgressCache(userId, courseId);
-    return { marked: 0 };
+  // Nothing new (all already completed, or no valid leaf): no completion
+  // write, no recalculation, no cache bump; only "last activity" moves.
+  if (missing.length === 0) {
+    await touchEnrollmentLastActivity(enrollmentId);
+    return { marked, newly_completed: 0 };
   }
 
-  // Batch insert completions (ON CONFLICT skip)
-  const values = activeBlockIds.map((_, i) => `($1, $${i + 2})`).join(', ');
-  await query(
-    `INSERT INTO block_completions (enrollment_id, block_id) VALUES ${values} ON CONFLICT DO NOTHING`,
-    [enrollmentId, ...activeBlockIds],
+  const inserted = await query<{ block_id: string }>(
+    `INSERT INTO block_completions (enrollment_id, block_id)
+     SELECT $1::uuid, block_id
+     FROM unnest($2::uuid[]) AS requested(block_id)
+     ON CONFLICT DO NOTHING
+     RETURNING block_id`,
+    [enrollmentId, missing],
   );
+  const newlyCompleted = inserted.rowCount ?? inserted.rows.length;
+  // A concurrent request inserted them first and recalculates for itself.
+  if (newlyCompleted === 0) return { marked, newly_completed: 0 };
 
   // Tính lại progress: completed_leaves / total_leaves
-  await recalculateProgress(enrollmentId, courseId);
+  const progress = await recalculateEnrollmentProgress(enrollmentId, courseId);
   await invalidateUserCourseProgressCache(userId, courseId);
+  // Badges depend on completed courses only: re-evaluate when that changed.
+  if (progress.completion_changed) await invalidateUserBadgeCaches([userId]);
 
-  return { marked: activeBlockIds.length };
-}
-
-/**
- * Tính lại progress % dựa trên block completions.
- * Chỉ tính leaf blocks (video, html, problem, la_*).
- */
-async function recalculateProgress(enrollmentId: string, courseId: string) {
-  await recalculateEnrollmentProgress(enrollmentId, courseId);
+  return {
+    marked,
+    newly_completed: newlyCompleted,
+    ...(progress.updated
+      ? { progress: progress.progress, is_completed: progress.is_completed, completion_changed: progress.completion_changed }
+      : {}),
+  };
 }
 
 // ── Progress ──
@@ -1479,6 +1516,8 @@ export async function updateBadgeShown(userId: string, badgeId: string, isShown:
     'UPDATE user_badges SET is_shown = $1 WHERE user_id = $2 AND badge_id = $3',
     [isShown, userId, badgeId],
   );
+  // The kept overview lists this badge as a pending popup.
+  await invalidateUserBadgeCaches([userId]);
 }
 
 // ── Notifications ──
@@ -1495,11 +1534,15 @@ export async function getMyNotifications(
   const { page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
 
+  // Total and unread come from the same query (window aggregates over all
+  // of the user's notifications of the tenant).
+  const unreadKey = await unreadNotificationCacheKey(userId, tenantId);
   const result = await query<any>(
     `SELECT n.id, n.title, n.message, n.course_id, n.type, n.metadata, n.created_at,
             nr.is_read, nr.read_at,
             u.full_name AS sent_by_name,
-            COUNT(*) OVER() AS full_count
+            COUNT(*) OVER() AS full_count,
+            COUNT(*) FILTER (WHERE nr.is_read = false) OVER() AS unread_full_count
      FROM notification_recipients nr
      JOIN notifications n ON n.id = nr.notification_id
      LEFT JOIN users u ON u.id = n.sent_by
@@ -1510,26 +1553,54 @@ export async function getMyNotifications(
   );
 
   const total = parseInt(result.rows[0]?.full_count ?? '0');
+  let unreadCount: number;
+  if (result.rows.length > 0) {
+    unreadCount = parseInt(result.rows[0].unread_full_count);
+    // Fresh value for the header badge (GET /notifications/unread-count).
+    await setCacheJson(unreadKey, unreadCount, CACHE_TTL.notificationUnread);
+  } else {
+    // A page past the end has no row to carry the counts.
+    unreadCount = await getUnreadCount(userId, tenantId);
+  }
 
   return {
     data: result.rows.map((r: any) => {
-      const { full_count, ...rest } = r;
+      const { full_count, unread_full_count, ...rest } = r;
       return rest;
     }),
     total,
-    unread_count: 0, // filled below
+    unread_count: unreadCount,
   };
 }
 
-export async function getUnreadCount(userId: string, tenantId: string) {
-  const result = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM notification_recipients nr
-     JOIN notifications n ON n.id = nr.notification_id
-     WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-    [userId, tenantId],
+/**
+ * Key of a user's cached unread count: bumped when the user reads
+ * notifications and when notifications of the tenant are created or deleted;
+ * the short TTL bounds anything else.
+ */
+async function unreadNotificationCacheKey(userId: string, tenantId: string): Promise<string> {
+  const [tenantVersion, userVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.tenantNotifications(tenantId)),
+    getCacheVersion(...cacheVersions.userNotifications(userId)),
+  ]);
+  return cacheKeys.learnerResource(tenantId, userId, 'notifications-unread', [tenantVersion, userVersion]);
+}
+
+export async function getUnreadCount(userId: string, tenantId: string): Promise<number> {
+  return cacheJson(
+    await unreadNotificationCacheKey(userId, tenantId),
+    CACHE_TTL.notificationUnread,
+    async () => {
+      const result = await query<{ count: string }>(
+        `SELECT COUNT(*) AS count
+         FROM notification_recipients nr
+         JOIN notifications n ON n.id = nr.notification_id
+         WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
+        [userId, tenantId],
+      );
+      return parseInt(result.rows[0].count);
+    },
   );
-  return parseInt(result.rows[0].count);
 }
 
 export async function markNotificationRead(userId: string, notificationId: string) {
@@ -1539,6 +1610,7 @@ export async function markNotificationRead(userId: string, notificationId: strin
      WHERE user_id = $1 AND notification_id = $2`,
     [userId, notificationId],
   );
+  await invalidateUserNotificationCaches(userId);
 }
 
 export async function markAllNotificationsRead(userId: string, tenantId: string) {
@@ -1549,6 +1621,7 @@ export async function markAllNotificationsRead(userId: string, tenantId: string)
      WHERE nr.notification_id = n.id AND nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
     [userId, tenantId],
   );
+  await invalidateUserNotificationCaches(userId);
 }
 
 // ══════════════════════════════════════════════════

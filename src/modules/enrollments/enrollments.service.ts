@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
-import { invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
+import { invalidateUserBadgeCaches, invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import {
   assertUserNotActiveDemoIframeAccount,
@@ -233,6 +233,7 @@ export async function enrollUser(
       );
       await recalculateEnrollmentProgress(enrollment.id, courseId);
       await invalidateUserCourseProgressCache(userId, courseId);
+      await invalidateUserBadgeCaches([userId]);
     }
     return { enrollment_id: enrollment.id, already_enrolled: true };
   }
@@ -377,6 +378,8 @@ export async function updateProgress(
      RETURNING cp.progress`,
     [userId, courseId, tenantId, Math.min(100, Math.max(0, progress)), isCompleted],
   );
+  // Inside the caller's audited transaction the bump waits for the commit.
+  if ((result.rowCount ?? 0) > 0) await invalidateUserBadgeCaches([userId]);
   return {
     previousProgress: current.rows[0]?.progress ?? null,
     progress: result.rows[0]?.progress ?? null,

@@ -1,4 +1,4 @@
-import { query } from './database.js';
+import { afterCommit, query } from './database.js';
 import { bumpCacheVersions } from './cache.js';
 import { cacheVersions, normalizeCacheDomain } from './cache-keys.js';
 
@@ -89,4 +89,25 @@ export async function invalidateUserMembershipCaches(userIds: readonly string[])
 
 export async function invalidateUserCourseProgressCache(userId: string, courseId: string): Promise<void> {
   await bumpCacheVersions([cacheVersions.userCourseProgress(userId, courseId)]);
+}
+
+/**
+ * After a change of what a user's badge overview depends on (completed
+ * courses, profile fields, user_badges). Inside withDatabaseTransaction() the
+ * bump waits for the commit; after a legacy getClient() transaction, call it
+ * after COMMIT.
+ */
+export async function invalidateUserBadgeCaches(userIds: readonly string[]): Promise<void> {
+  if (userIds.length === 0) return;
+  await afterCommit(() => bumpCacheVersions(userIds.map((userId) => cacheVersions.userBadges(userId))));
+}
+
+/** After notifications of the tenant were created or deleted (all recipients' unread counts). */
+export async function invalidateTenantNotificationCaches(tenantId: string): Promise<void> {
+  await afterCommit(() => bumpCacheVersions([cacheVersions.tenantNotifications(tenantId)]));
+}
+
+/** After a user marked notifications as read. */
+export async function invalidateUserNotificationCaches(userId: string): Promise<void> {
+  await afterCommit(() => bumpCacheVersions([cacheVersions.userNotifications(userId)]));
 }

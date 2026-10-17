@@ -6,6 +6,8 @@ import type { Request, Response, NextFunction } from 'express';
 import * as learnerService from './learner.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+import { requestUiLocaleOf } from '../../utils/client-error.js';
+import { COMPLETE_BLOCKS_LIMIT_ERROR, MAX_COMPLETE_BLOCK_IDS } from './learner-completion.logic.js';
 
 function demoProgressState() {
   return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
@@ -225,6 +227,11 @@ export async function completeBlocks(req: Request, res: Response, next: NextFunc
       sendError(res, 'Thiếu course_id hoặc block_ids', 400);
       return;
     }
+    if (block_ids.length > MAX_COMPLETE_BLOCK_IDS) {
+      const [status, vi, en] = COMPLETE_BLOCKS_LIMIT_ERROR;
+      sendError(res, requestUiLocaleOf(req) === 'en' ? en : vi, status);
+      return;
+    }
 
     if (isDemoIframeSession(req.user)) {
       sendSuccess(res, { marked: block_ids.length, demo_iframe: true });
@@ -379,13 +386,11 @@ export async function listNotifications(req: Request, res: Response, next: NextF
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
+    // { data, total, unread_count }: the unread count comes from the same query.
     const result = await learnerService.getMyNotifications(req.user.id, tenantId, {
       page: req.query.page ? parseInt(req.query.page as string) : undefined,
       page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
     });
-
-    // Fill unread count
-    result.unread_count = await learnerService.getUnreadCount(req.user.id, tenantId);
 
     sendSuccess(res, result);
   } catch (err) {

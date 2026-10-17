@@ -7,6 +7,7 @@ import { query, getClient } from '../../config/database.js';
 import {
   invalidateTenantCourseCaches,
   invalidateTenantLibraryCaches,
+  invalidateTenantNotificationCaches,
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -706,6 +707,7 @@ export async function addTeamMembers(
     wakeEmailOutboxWorker('team-member-added');
   }
   await invalidateUserMembershipCaches(normalizedUserIds);
+  if (notificationId) await invalidateTenantNotificationCaches(options.tenantId);
 
   return {
     success: true,

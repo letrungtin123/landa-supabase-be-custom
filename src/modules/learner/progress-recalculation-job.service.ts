@@ -1,4 +1,5 @@
 import { query } from '../../config/database.js';
+import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { env } from '../../config/env.js';
 import { QUEUES, publish } from '../../config/rabbitmq/index.js';
 
@@ -386,6 +387,9 @@ export async function runCourseProgressRecalculationJob(jobId: string): Promise<
     }
 
     await updateCourseProgressRecalculationCursor(job.id, result.processed, result.lastEnrollmentId);
+    // Completed courses of this batch may have changed: the tenant's badge
+    // overviews (and rules) are evaluated again on their next read.
+    await invalidateTenantBadgeCaches(job.tenant_id);
     job.last_enrollment_id = result.lastEnrollmentId;
     job.processed_count += result.processed;
 

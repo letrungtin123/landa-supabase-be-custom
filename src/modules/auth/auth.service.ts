@@ -6,6 +6,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
+import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
 import { env } from '../../config/env.js';
 import { compareAgainstDummyPassword, comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
@@ -985,5 +986,7 @@ export async function updateProfile(userId: string, input: {
   );
 
   if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  // Profile badges read these fields.
+  await invalidateUserBadgeCaches([userId]);
   return result.rows[0];
 }

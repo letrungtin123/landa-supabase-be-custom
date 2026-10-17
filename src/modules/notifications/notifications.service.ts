@@ -5,6 +5,7 @@
 // Enrollment is intentionally not required for course notification fanout.
 
 import { query, getClient } from '../../config/database.js';
+import { invalidateTenantNotificationCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
@@ -220,6 +221,7 @@ export async function sendCourseNotification(
     client.release();
   }
 
+  if (recipientCount > 0) await invalidateTenantNotificationCaches(tenantId);
   if (emailJobQueued) {
     wakeEmailOutboxWorker('course-notification');
   }
