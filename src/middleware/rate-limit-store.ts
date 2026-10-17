@@ -4,7 +4,9 @@
 // Counters live in Redis so every API process shares one budget. When Redis
 // is not configured, not ready, failing or slower than the deadline, the call
 // falls back to a per-process MemoryStore: the limit then applies per process,
-// which is still a limit (never an outage and never "no limit").
+// which is still a limit (never an outage and never "no limit"). A slow or
+// failing shared Redis also opens the Redis breaker (config/redis.ts), so the
+// next requests skip Redis instead of each waiting for the deadline.
 //
 // Only plain keyspace commands are used (INCR, PEXPIRE, PTTL, DECR, DEL): the
 // production Redis ACL allows `~landa-backend:*` keys with @read/@write/
@@ -13,7 +15,7 @@
 
 import { MemoryStore, type ClientRateLimitInfo, type Options, type Store } from 'express-rate-limit';
 import { cacheKey } from '../config/cache.js';
-import { getRedisClient } from '../config/redis.js';
+import { getRedisClient, isRedisHealthFailure, markRedisUnhealthy } from '../config/redis.js';
 
 const REDIS_DEADLINE_MS = 500;
 const FALLBACK_LOG_INTERVAL_MS = 60_000;
@@ -36,6 +38,12 @@ export interface SharedRateLimitStoreOptions {
   log?: (event: Record<string, unknown>) => void;
 }
 
+function reportSharedRedisFailure(error: unknown): void {
+  if (isRedisHealthFailure(error)) {
+    markRedisUnhealthy(`rate-limit counter: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function withDeadline<T>(work: Promise<T>, deadlineMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -52,12 +60,15 @@ export class SharedRateLimitStore implements Store {
   private readonly getClient: () => RateLimitCounterClient | null;
   private readonly deadlineMs: number;
   private readonly log: (event: Record<string, unknown>) => void;
+  private readonly onRedisFailure: (error: unknown) => void;
   private lastFallbackLogAt = 0;
 
   constructor(options: SharedRateLimitStoreOptions) {
     this.prefix = options.prefix;
     this.getClient = options.getClient
       ?? (() => getRedisClient() as unknown as RateLimitCounterClient | null);
+    // Only the shared backend client feeds the process-wide Redis breaker.
+    this.onRedisFailure = options.getClient ? () => {} : reportSharedRedisFailure;
     this.deadlineMs = options.deadlineMs ?? REDIS_DEADLINE_MS;
     this.log = options.log ?? ((event) => console.warn('[RateLimit] ' + JSON.stringify(event)));
   }
@@ -84,6 +95,7 @@ export class SharedRateLimitStore implements Store {
       try {
         return await withDeadline(this.incrementInRedis(client, this.redisKey(key)), this.deadlineMs);
       } catch (error) {
+        this.onRedisFailure(error);
         this.reportFallback(error instanceof Error ? error.message : 'error');
       }
     }
@@ -113,6 +125,7 @@ export class SharedRateLimitStore implements Store {
         })(), this.deadlineMs);
         return;
       } catch (error) {
+        this.onRedisFailure(error);
         this.reportFallback(error instanceof Error ? error.message : 'error');
       }
     }
@@ -125,6 +138,7 @@ export class SharedRateLimitStore implements Store {
       try {
         await withDeadline(client.del(this.redisKey(key)), this.deadlineMs);
       } catch (error) {
+        this.onRedisFailure(error);
         this.reportFallback(error instanceof Error ? error.message : 'error');
       }
     }

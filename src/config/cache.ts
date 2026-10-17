@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { env } from './env.js';
-import { disableRedisForProcess, getRedisClient } from './redis.js';
+import { getRedisClient, isRedisConfigured, withRedisDeadline } from './redis.js';
 
 const CACHE_SCHEMA_VERSION = 'v1';
 const DEFAULT_JITTER_RATIO = 0.1;
@@ -9,6 +9,18 @@ type CacheHit<T> = { hit: true; value: T } | { hit: false; value?: undefined };
 
 // Coalesce concurrent misses in one Node process to protect the database from request bursts.
 const inFlightCacheLoads = new Map<string, Promise<unknown>>();
+
+// Cache invalidations (version bumps) that could not reach Redis. A cached
+// value may predate the write that wanted to invalidate it, so this process
+// reads no cached value until every one of them has been replayed. Past the
+// limit they are dropped and reads stay off for the longest cache lifetime
+// this process wrote instead, after which every older value has expired.
+const PENDING_INVALIDATION_LIMIT = 10_000;
+const pendingInvalidations = new Map<string, { segments: readonly unknown[] }>();
+let invalidationsDropped = false;
+let readsPausedUntil = 0;
+let longestTtlSeconds = 0;
+let replayInFlight: Promise<void> | null = null;
 
 function normalizeForHash(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeForHash);
@@ -53,17 +65,71 @@ function ttlWithJitter(ttlSeconds: number): number {
   return base + Math.floor(Math.random() * spread);
 }
 
+function rememberPendingInvalidation(segments: readonly unknown[]): void {
+  if (!isRedisConfigured() || invalidationsDropped) return;
+  const key = cacheVersionKey(...segments);
+  if (!pendingInvalidations.has(key) && pendingInvalidations.size >= PENDING_INVALIDATION_LIMIT) {
+    pendingInvalidations.clear();
+    invalidationsDropped = true;
+    console.warn('[Cache] Too many invalidations missed Redis; cached reads stay off for the longest cache lifetime once Redis is back.');
+    return;
+  }
+  // A new object per failure: a replay only removes the entry it replayed.
+  pendingInvalidations.set(key, { segments });
+}
+
+const REPLAY_BATCH_SIZE = 50;
+const REPLAY_MIN_INTERVAL_MS = 1_000;
+let lastReplayAt = 0;
+
+/**
+ * Whether cached values may be read: no invalidation is waiting to be
+ * replayed and no read pause is running. Starts the replay when needed.
+ */
+function cachedReadsAllowed(client: NonNullable<ReturnType<typeof getRedisClient>>): boolean {
+  if (invalidationsDropped) {
+    invalidationsDropped = false;
+    readsPausedUntil = Date.now() + longestTtlSeconds * 1000;
+  }
+  if (pendingInvalidations.size === 0) return Date.now() >= readsPausedUntil;
+  const now = Date.now();
+  // A clock that moved backwards (NTP) never blocks the replay.
+  if (!replayInFlight && (now < lastReplayAt || now - lastReplayAt >= REPLAY_MIN_INTERVAL_MS)) {
+    lastReplayAt = now;
+    replayInFlight = (async () => {
+      const entries = [...pendingInvalidations];
+      for (let index = 0; index < entries.length; index += REPLAY_BATCH_SIZE) {
+        await Promise.all(entries.slice(index, index + REPLAY_BATCH_SIZE).map(async ([key, entry]) => {
+          await withRedisDeadline('cache invalidation replay', client.incr(key));
+          if (pendingInvalidations.get(key) === entry) pendingInvalidations.delete(key);
+        }));
+      }
+    })().catch(() => undefined).finally(() => { replayInFlight = null; });
+  }
+  return false;
+}
+
+/** Number of invalidations waiting for Redis (diagnostics and tests). */
+export function pendingCacheInvalidationCount(): number {
+  return pendingInvalidations.size;
+}
+
 export async function getCacheJson<T>(key: string): Promise<CacheHit<T>> {
   const client = getRedisClient();
-  if (!client) return { hit: false };
+  if (!client || !cachedReadsAllowed(client)) return { hit: false };
 
+  let raw: string | null;
   try {
-    const raw = await client.get(key);
-    if (!raw) return { hit: false };
+    raw = await withRedisDeadline('cache read', client.get(key));
+  } catch {
+    // A failed or slow read opened the Redis breaker; the database answers.
+    return { hit: false };
+  }
+  if (!raw) return { hit: false };
+  try {
     const parsed = JSON.parse(raw) as { value: T };
     return { hit: true, value: parsed.value };
-  } catch (err) {
-    disableRedisForProcess(err instanceof Error ? `cache read failed: ${err.message}` : 'cache read failed');
+  } catch {
     return { hit: false };
   }
 }
@@ -72,8 +138,10 @@ export async function setCacheJson<T>(key: string, value: T, ttlSeconds: number)
   const client = getRedisClient();
   if (!client) return;
 
+  const ttl = ttlWithJitter(ttlSeconds);
+  longestTtlSeconds = Math.max(longestTtlSeconds, ttl);
   try {
-    await client.set(key, JSON.stringify({ value }), { EX: ttlWithJitter(ttlSeconds) });
+    await withRedisDeadline('cache write', client.set(key, JSON.stringify({ value }), { EX: ttl }));
   } catch {
     // Redis is an optimization layer; DB remains the source of truth.
   }
@@ -109,22 +177,26 @@ export async function getCacheVersion(...segments: readonly unknown[]): Promise<
   if (!client) return '0';
 
   try {
-    const version = await client.get(cacheVersionKey(...segments));
+    const version = await withRedisDeadline('cache version read', client.get(cacheVersionKey(...segments)));
     return version || '0';
-  } catch (err) {
-    disableRedisForProcess(err instanceof Error ? `cache version read failed: ${err.message}` : 'cache version read failed');
+  } catch {
+    // The breaker is now open, so no cached value is read with this version.
     return '0';
   }
 }
 
 export async function bumpCacheVersion(...segments: readonly unknown[]): Promise<void> {
   const client = getRedisClient();
-  if (!client) return;
+  if (!client) {
+    rememberPendingInvalidation(segments);
+    return;
+  }
 
   try {
-    await client.incr(cacheVersionKey(...segments));
-  } catch (err) {
-    disableRedisForProcess(err instanceof Error ? `cache invalidation failed: ${err.message}` : 'cache invalidation failed');
+    await withRedisDeadline('cache invalidation', client.incr(cacheVersionKey(...segments)));
+  } catch {
+    // Replayed once Redis answers again (a replayed bump is only an extra miss).
+    rememberPendingInvalidation(segments);
   }
 }
 

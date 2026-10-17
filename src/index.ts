@@ -20,7 +20,11 @@ import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js
 import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/lesson-author-session-deletion.worker.js';
 import { startEmailOutboxRabbitConsumer } from './modules/assignments/email-outbox.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
-import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
+import {
+  assertAuthRevocationRedisReady,
+  cleanupExpiredAuthRevocations,
+  resyncAccessRevocationMirror,
+} from './modules/auth/auth-revocation.service.js';
 import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
 import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
@@ -173,6 +177,12 @@ async function bootstrap() {
   }
   if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION) {
     await assertAuthRevocationRedisReady();
+  }
+  // Authentication answers from Redis only once the revocations that can
+  // still refuse a token are copied there; until then it reads the database.
+  if (getRedisClient()) {
+    const ready = await resyncAccessRevocationMirror();
+    console.log(`[Auth] Access revocations in Redis: ${ready ? 'ready' : 'not ready yet, the database answers'}`);
   }
   await startDurableBlueprintWorker();
   await startLessonAuthorWorkspaceWorker();
