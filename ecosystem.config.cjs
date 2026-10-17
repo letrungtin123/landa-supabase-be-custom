@@ -22,6 +22,10 @@ module.exports = {
       listen_timeout: 60000,
       env: {
         NODE_ENV: "production",
+        // libuv threads for bcrypt, dns.lookup, fs and zlib (default 4): a
+        // sign-in burst otherwise queues storage DNS lookups behind password
+        // checks. Read once when the pool first starts, so it is set here.
+        UV_THREADPOOL_SIZE: "16",
         EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
         LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
@@ -35,6 +39,7 @@ module.exports = {
       },
       env_production: {
         NODE_ENV: "production",
+        UV_THREADPOOL_SIZE: "16",
         EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",
         LESSON_AUTHOR_WORKSPACE_READ_ENABLED: "true",
         LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: "true",
