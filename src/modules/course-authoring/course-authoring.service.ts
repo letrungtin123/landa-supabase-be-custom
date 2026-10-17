@@ -4,7 +4,7 @@
 // Structure: course → chapter → sequential → vertical → components
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
+import { afterCommit, getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { createHash } from 'node:crypto';
 import {
   invalidateBlockReadCaches,
@@ -1927,7 +1927,15 @@ async function deleteCourseAssetsByStoragePaths(courseId: string, storagePaths: 
   );
 
   const deletedPaths = Array.from(new Set(result.rows.map((row) => row.storage_path).filter(Boolean)));
-  await Promise.allSettled(deletedPaths.map((path) => deleteFile(path)));
+  // Publish and discard run this inside their audited transaction. The objects
+  // are removed once it committed: each delete's quota fence waits for the
+  // tenant quota row this transaction already locked (a statement_timeout
+  // later the file stayed), and a rollback must keep the files its rows use.
+  if (deletedPaths.length > 0) {
+    await afterCommit(async () => {
+      await Promise.allSettled(deletedPaths.map((path) => deleteFile(path)));
+    });
+  }
   return deletedPaths;
 }
 
