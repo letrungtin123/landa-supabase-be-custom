@@ -5,6 +5,21 @@ module.exports = {
       cwd: __dirname,
       script: "./dist/index.js",
       interpreter: "node",
+      // Graceful restarts (src/config/graceful-shutdown.ts). PM2 on Windows
+      // cannot deliver SIGINT/SIGTERM to the app, so it sends a "shutdown"
+      // message instead. The API drains requests for up to 10 s and exits
+      // within 13.5 s, before PM2 force-kills it at kill_timeout.
+      shutdown_with_message: true,
+      kill_timeout: 15000,
+      // Restart backoff: 1 s, then x1.5 per restart up to 15 s.
+      exp_backoff_restart_delay: 1000,
+      // An exit within 30 s of a start counts as an unstable restart. PM2
+      // stops restarting an app after max_restarts of them; it is kept high so
+      // the API comes back by itself after a long RabbitMQ or database outage.
+      min_uptime: 30000,
+      max_restarts: 10000,
+      // Only used with wait_ready or cluster mode (the API runs in fork mode).
+      listen_timeout: 60000,
       env: {
         NODE_ENV: "production",
         EMAIL_OUTBOX_INLINE_WORKER_ENABLED: "false",

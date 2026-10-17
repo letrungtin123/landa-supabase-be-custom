@@ -7,6 +7,7 @@ import {
   requeuePendingCourseProgressRecalculationJobs,
   runCourseProgressRecalculationJob,
 } from './progress-recalculation-job.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 interface CourseProgressRecalculationMessage {
   [key: string]: unknown;
@@ -60,11 +61,11 @@ export async function startCourseProgressRecalculationWorker(): Promise<void> {
   await requeuePendingCourseProgressRecalculationJobs();
 
   if (env.COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS > 0) {
-    setInterval(() => {
+    stopOnShutdown(setInterval(() => {
       requeuePendingCourseProgressRecalculationJobs().catch((error) => {
         console.error('[course-progress-recalculation] Poller failed', error);
       });
-    }, env.COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS).unref();
+    }, env.COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS).unref());
   }
 }
 

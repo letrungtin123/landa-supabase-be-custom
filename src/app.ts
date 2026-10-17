@@ -7,6 +7,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
+import { isShuttingDown } from './config/process-lifecycle.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
@@ -63,6 +64,14 @@ if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
 } else {
   console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
 }
+
+// ── Graceful shutdown ──
+// While the process drains, answers on kept-alive connections tell the client
+// (or the gateway) to open a new connection, which reaches the next process.
+app.use(function closeConnectionWhileShuttingDown(_req, res, next) {
+  if (isShuttingDown()) res.setHeader('Connection', 'close');
+  next();
+});
 
 // ── Security Headers ──
 app.use(helmet({

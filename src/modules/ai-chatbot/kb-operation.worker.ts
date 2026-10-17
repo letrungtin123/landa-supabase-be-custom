@@ -36,6 +36,7 @@ import {
 import { AppError } from '../../middleware/error-handler.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
+import { stopOnShutdown } from '../../config/process-lifecycle.js';
 
 let drainInFlight = false;
 
@@ -366,8 +367,8 @@ export async function startKbOperationWorker(): Promise<void> {
     return;
   }
   await drainDueKbOperations();
-  setInterval(() => {
+  stopOnShutdown(setInterval(() => {
     void drainDueKbOperations();
-  }, env.KB_OPERATION_WORKER_POLL_INTERVAL_MS).unref();
+  }, env.KB_OPERATION_WORKER_POLL_INTERVAL_MS).unref());
   console.log('[KbOperationWorker] Durable KB operation recovery started');
 }
