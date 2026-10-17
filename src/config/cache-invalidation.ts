@@ -101,3 +101,13 @@ export async function invalidateUserBadgeCaches(userIds: readonly string[]): Pro
   if (userIds.length === 0) return;
   await afterCommit(() => bumpCacheVersions(userIds.map((userId) => cacheVersions.userBadges(userId))));
 }
+
+/** After notifications of the tenant were created or deleted (all recipients' unread counts). */
+export async function invalidateTenantNotificationCaches(tenantId: string): Promise<void> {
+  await afterCommit(() => bumpCacheVersions([cacheVersions.tenantNotifications(tenantId)]));
+}
+
+/** After a user marked notifications as read. */
+export async function invalidateUserNotificationCaches(userId: string): Promise<void> {
+  await afterCommit(() => bumpCacheVersions([cacheVersions.userNotifications(userId)]));
+}

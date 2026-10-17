@@ -18,6 +18,8 @@ export const CACHE_TTL = {
   // Last badge overview of a user: every change it depends on bumps a
   // version; the TTL only bounds changes made outside the API (manual SQL).
   badgeOverview: 300,
+  // Unread notification count of a user (header badge polling).
+  notificationUnread: 30,
   news: 120,
   emailTemplates: 300,
   aiConfig: 300,
@@ -79,6 +81,10 @@ export const cacheVersions = {
     ['user', userId, 'course', courseId, 'progress'] as const,
   userBadges: (userId: string) =>
     ['user', userId, 'badges'] as const,
+  userNotifications: (userId: string) =>
+    ['user', userId, 'notifications'] as const,
+  tenantNotifications: (tenantId: string) =>
+    ['tenant', tenantId, 'notifications'] as const,
   bot: (botId: string) =>
     ['bot', botId] as const,
   modules: () =>

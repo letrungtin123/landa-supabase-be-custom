@@ -1,7 +1,11 @@
 import type { PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { getClient, query } from '../../config/database.js';
-import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
+import {
+  invalidateTenantNotificationCaches,
+  invalidateUserBadgeCaches,
+  invalidateUserNotificationCaches,
+} from '../../config/cache-invalidation.js';
 import {
   buildFileName,
   buildStoragePath,
@@ -542,6 +546,9 @@ export async function createAssignment(
 
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(assignment, course.display_name)));
     await client.query('COMMIT');
+
+    // Learners' unread counts include the new assignment notification.
+    if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
 
     await scheduleCourseProgressRecalculation({
       tenantId,
@@ -1492,6 +1499,8 @@ export async function feedbackSubmission(
     client.release();
   }
 
+  // The learner's unread count includes the feedback notification.
+  await invalidateUserNotificationCaches(ctx.learner_id);
   wakeEmailOutboxWorker('assignment-feedback');
 
   return listCourseSubmissions(ctx.course_id, tenantId, { page: '1', page_size: '1', assignment_id: ctx.assignment_id });

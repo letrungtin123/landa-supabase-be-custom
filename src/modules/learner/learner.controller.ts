@@ -386,13 +386,11 @@ export async function listNotifications(req: Request, res: Response, next: NextF
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
+    // { data, total, unread_count }: the unread count comes from the same query.
     const result = await learnerService.getMyNotifications(req.user.id, tenantId, {
       page: req.query.page ? parseInt(req.query.page as string) : undefined,
       page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
     });
-
-    // Fill unread count
-    result.unread_count = await learnerService.getUnreadCount(req.user.id, tenantId);
 
     sendSuccess(res, result);
   } catch (err) {

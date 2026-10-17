@@ -4,9 +4,13 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
-import { cacheJson, getCacheVersion } from '../../config/cache.js';
+import { cacheJson, getCacheVersion, setCacheJson } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
-import { invalidateUserBadgeCaches, invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
+import {
+  invalidateUserBadgeCaches,
+  invalidateUserCourseProgressCache,
+  invalidateUserNotificationCaches,
+} from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
@@ -1511,11 +1515,15 @@ export async function getMyNotifications(
   const { page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
 
+  // Total and unread come from the same query (window aggregates over all
+  // of the user's notifications of the tenant).
+  const unreadKey = await unreadNotificationCacheKey(userId, tenantId);
   const result = await query<any>(
     `SELECT n.id, n.title, n.message, n.course_id, n.type, n.metadata, n.created_at,
             nr.is_read, nr.read_at,
             u.full_name AS sent_by_name,
-            COUNT(*) OVER() AS full_count
+            COUNT(*) OVER() AS full_count,
+            COUNT(*) FILTER (WHERE nr.is_read = false) OVER() AS unread_full_count
      FROM notification_recipients nr
      JOIN notifications n ON n.id = nr.notification_id
      LEFT JOIN users u ON u.id = n.sent_by
@@ -1526,26 +1534,54 @@ export async function getMyNotifications(
   );
 
   const total = parseInt(result.rows[0]?.full_count ?? '0');
+  let unreadCount: number;
+  if (result.rows.length > 0) {
+    unreadCount = parseInt(result.rows[0].unread_full_count);
+    // Fresh value for the header badge (GET /notifications/unread-count).
+    await setCacheJson(unreadKey, unreadCount, CACHE_TTL.notificationUnread);
+  } else {
+    // A page past the end has no row to carry the counts.
+    unreadCount = await getUnreadCount(userId, tenantId);
+  }
 
   return {
     data: result.rows.map((r: any) => {
-      const { full_count, ...rest } = r;
+      const { full_count, unread_full_count, ...rest } = r;
       return rest;
     }),
     total,
-    unread_count: 0, // filled below
+    unread_count: unreadCount,
   };
 }
 
-export async function getUnreadCount(userId: string, tenantId: string) {
-  const result = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM notification_recipients nr
-     JOIN notifications n ON n.id = nr.notification_id
-     WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-    [userId, tenantId],
+/**
+ * Key of a user's cached unread count: bumped when the user reads
+ * notifications and when notifications of the tenant are created or deleted;
+ * the short TTL bounds anything else.
+ */
+async function unreadNotificationCacheKey(userId: string, tenantId: string): Promise<string> {
+  const [tenantVersion, userVersion] = await Promise.all([
+    getCacheVersion(...cacheVersions.tenantNotifications(tenantId)),
+    getCacheVersion(...cacheVersions.userNotifications(userId)),
+  ]);
+  return cacheKeys.learnerResource(tenantId, userId, 'notifications-unread', [tenantVersion, userVersion]);
+}
+
+export async function getUnreadCount(userId: string, tenantId: string): Promise<number> {
+  return cacheJson(
+    await unreadNotificationCacheKey(userId, tenantId),
+    CACHE_TTL.notificationUnread,
+    async () => {
+      const result = await query<{ count: string }>(
+        `SELECT COUNT(*) AS count
+         FROM notification_recipients nr
+         JOIN notifications n ON n.id = nr.notification_id
+         WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
+        [userId, tenantId],
+      );
+      return parseInt(result.rows[0].count);
+    },
   );
-  return parseInt(result.rows[0].count);
 }
 
 export async function markNotificationRead(userId: string, notificationId: string) {
@@ -1555,6 +1591,7 @@ export async function markNotificationRead(userId: string, notificationId: strin
      WHERE user_id = $1 AND notification_id = $2`,
     [userId, notificationId],
   );
+  await invalidateUserNotificationCaches(userId);
 }
 
 export async function markAllNotificationsRead(userId: string, tenantId: string) {
@@ -1565,6 +1602,7 @@ export async function markAllNotificationsRead(userId: string, tenantId: string)
      WHERE nr.notification_id = n.id AND nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
     [userId, tenantId],
   );
+  await invalidateUserNotificationCaches(userId);
 }
 
 // ══════════════════════════════════════════════════
