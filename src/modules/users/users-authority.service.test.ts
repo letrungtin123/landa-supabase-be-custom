@@ -154,6 +154,24 @@ test('updateUser applies an allowed change only while the target keeps the check
   await rejectsWith(updateUser(LEARNER, { is_active: false }, actorOf(db, SUPERUSER), TENANT_A), 'USER_AUTHORITY_TARGET_CHANGED', 409);
 });
 
+test('a deactivation locks the user row before its UPDATE; other edits do not', async (t) => {
+  const db = fakeDb();
+  await installFakeDb(t, db);
+  const { updateUser } = await import('./users.service.js');
+  const isLock = (sql: string) => /^\s*SELECT id FROM users WHERE id = \$1 FOR UPDATE/.test(sql);
+  const isUpdate = (sql: string) => /^\s*UPDATE users SET/.test(sql);
+
+  await updateUser(LEARNER, { full_name: 'Learner', is_active: true }, actorOf(db, STAFF), TENANT_A);
+  assert.equal(db.calls.some((call) => isLock(call.sql)), false);
+
+  db.calls.length = 0;
+  await updateUser(LEARNER, { is_active: false }, actorOf(db, STAFF), TENANT_A);
+  const lock = db.calls.findIndex((call) => isLock(call.sql));
+  const update = db.calls.findIndex((call) => isUpdate(call.sql));
+  assert.ok(lock >= 0 && lock < update, 'FOR UPDATE runs before the deactivating UPDATE');
+  assert.deepEqual(db.calls[lock]!.params, [LEARNER]);
+});
+
 test('the last active superadmin cannot be deactivated or demoted; the check runs under the superadmin-set lock', async (t) => {
   const db = fakeDb({ activeSuperadmins: 1 });
   await installFakeDb(t, db);

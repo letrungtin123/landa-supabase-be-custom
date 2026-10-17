@@ -430,6 +430,13 @@ async function updateUserInTransaction(
 
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
+  // The user deletion fence trigger locks the row FOR KEY SHARE, which a plain
+  // UPDATE does not wait for. A deactivation takes FOR UPDATE first, so a write
+  // racing it (refresh token, progress) waits and is then rejected as inactive.
+  if (input.is_active === false) {
+    await query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [userId]);
+  }
+
   params.push(userId, tenantScopeId, target.role, target.is_active);
   let result;
   try {
