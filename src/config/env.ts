@@ -222,6 +222,9 @@ export const env = {
   // Supabase Storage
   SUPABASE_URL: required('SUPABASE_URL'),
   SUPABASE_SERVICE_KEY: required('SUPABASE_SERVICE_KEY'),
+  // Storage proxy (/api/storage): how long it waits for Storage to start
+  // answering. A long video body is never cut by it.
+  STORAGE_PROXY_HEADERS_TIMEOUT_MS: optionalBoundedInt('STORAGE_PROXY_HEADERS_TIMEOUT_MS', 15_000, 1_000, 120_000),
 
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
