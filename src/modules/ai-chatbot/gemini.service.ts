@@ -6,6 +6,7 @@
 import { createHmac } from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import type { AiUsage } from './ai-engine.types.js';
+import { BilledAiCallError } from './ai-metered-call.service.js';
 import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
 import { getClient, query } from '../../config/database.js';
 import { env } from '../../config/env.js';
@@ -135,6 +136,7 @@ export async function getGeminiClient(tenantId: string): Promise<GoogleGenAI> {
 export async function transcribeAudioFile(
   localFilePath: string,
   aiClient: GoogleGenAI,
+  options: { maxOutputTokens?: number } = {},
 ): Promise<{ text: string; usage: AiUsage | null }> {
   const filesApi = (aiClient as any).files;
   const modelsApi = (aiClient as any).models;
@@ -176,12 +178,17 @@ export async function transcribeAudioFile(
         audioTranscriptionConfig: {
           languageCodes: [],
         },
+        // A cap on the transcript keeps a long or looping audio from billing without bound.
+        ...(options.maxOutputTokens ? { maxOutputTokens: options.maxOutputTokens } : {}),
       },
     });
     const text = extractGeminiAudioTranscriptionText(response);
     if (!text) {
       console.warn('[Gemini] Transcription response did not contain usable text', summarizeGeminiTranscriptionResponse(response));
-      throw new Error('Gemini không trả về transcript hợp lệ.');
+      const failure = new Error('Gemini không trả về transcript hợp lệ.');
+      const billed = aiUsageFromGeminiMetadata(response.usageMetadata);
+      // The audio was processed and billed: let the AI meter settle it.
+      throw billed ? new BilledAiCallError(billed, failure) : failure;
     }
     return { text, usage: aiUsageFromGeminiMetadata(response.usageMetadata) };
   } finally {

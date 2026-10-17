@@ -80,3 +80,16 @@ test('long calls (audio) add the unseen input and are never swept while running'
   assert.equal(reserve.maximumTokens, 1 + 3_200 + 1_824);
   assert.equal(reserve.budget.metadata.durable_generation, true);
 });
+
+test('a call that failed after billing settles the provider usage, then rethrows the original error', async () => {
+  const { BilledAiCallError } = await import('./ai-metered-call.service.js');
+  const { deps, calls } = harness();
+  const billed = { inputTokens: 120_000, outputTokens: 0, embeddingTokens: 0, totalTokens: 120_000 };
+  const original = new Error('empty transcript');
+  await assert.rejects(withMeteredAiCall(call, async () => { throw new BilledAiCallError(billed, original); }, deps),
+    (error: unknown) => error === original);
+  assert.deepEqual(calls.map(c => c.kind), ['reserve', 'finalize']);
+  const finalize = calls[1]!.input;
+  assert.deepEqual(finalize.usage, billed);
+  assert.equal(finalize.metadata.failed_after_billing, true);
+});

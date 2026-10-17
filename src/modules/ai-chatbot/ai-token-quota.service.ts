@@ -2,11 +2,21 @@ import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { AiChatTarget, AiEngine, AiOperation, AiProvider, AiUsage } from './ai-engine.types.js';
-import { calculateAiUsageCost } from './ai-pricing.service.js';
+import {
+  ensureCreditMonth,
+  forgetEnsuredCreditMonth,
+  markCreditThreshold,
+  releaseCreditUsd,
+  reserveCreditUsd,
+  settleCreditUsd,
+} from '../ai-credits/ai-credit.repository.js';
+import { calculateAiUsageCost, estimateMaxAiCallCostUsd } from './ai-pricing.service.js';
 import { aiLedgerFeature } from './ai-usage.logic.js';
 import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from './ai-settings.service.js';
 
 export const AI_TOKEN_LIMIT_REACHED_CODE = 'AI_TOKEN_LIMIT_REACHED';
+/** The tenant's AI points of the month are spent (new work is blocked; running AI ID runs finish). */
+export const AI_CREDIT_LIMIT_REACHED_CODE = 'AI_CREDIT_LIMIT_REACHED';
 
 interface ReservationBudget {
   inputTokens?: number;
@@ -30,6 +40,11 @@ interface ReservationInput {
   minimumTokens?: number;
   maximumTokens?: number;
   budget?: ReservationBudget;
+  /**
+   * A task of an AI ID run that was admitted with enough points: it is
+   * recorded against the budget but never refused, so the run can finish.
+   */
+  allowOverdraft?: boolean;
 }
 
 interface FinalizeInput {
@@ -52,6 +67,7 @@ interface ReservationRow {
   provider: AiProvider;
   model: string;
   operation: AiOperation;
+  reserved_usd: string;
 }
 
 export interface AiTokenReservationGrant {
@@ -109,6 +125,14 @@ function tokenLimitError(): AppError {
   );
 }
 
+function creditLimitError(): AppError {
+  return new AppError(
+    'Đã dùng hết điểm AI của tháng này. Liên hệ quản trị viên để mua thêm điểm.',
+    429,
+    AI_CREDIT_LIMIT_REACHED_CODE,
+  );
+}
+
 function reservationBounds(input: ReservationInput): { minimumTokens: number; maximumTokens: number } {
   const fallback = input.estimatedTokens ?? input.maximumTokens ?? input.minimumTokens;
   const minimumTokens = toSafePositiveInteger(input.minimumTokens ?? fallback);
@@ -139,10 +163,11 @@ export async function expireTenantAiTokenReservations(batchSize = 500): Promise<
        SET status = 'expired'
        FROM expired
        WHERE reservation.id = expired.id
-       RETURNING reservation.tenant_id, reservation.period_start, reservation.estimated_tokens
+       RETURNING reservation.tenant_id, reservation.period_start, reservation.estimated_tokens, reservation.reserved_usd
      ),
      summed AS (
-       SELECT tenant_id, period_start, SUM(estimated_tokens)::bigint AS estimated_tokens
+       SELECT tenant_id, period_start, SUM(estimated_tokens)::bigint AS estimated_tokens,
+              SUM(reserved_usd) AS reserved_usd
        FROM updated_reservations
        GROUP BY tenant_id, period_start
      ),
@@ -154,6 +179,16 @@ export async function expireTenantAiTokenReservations(batchSize = 500): Promise<
        WHERE usage.tenant_id = summed.tenant_id
          AND usage.period_start = summed.period_start
        RETURNING usage.tenant_id
+     ),
+     updated_credit AS (
+       UPDATE ai_credit_monthly credit
+       SET reserved_usd = GREATEST(0, credit.reserved_usd - summed.reserved_usd),
+           revision = credit.revision + 1
+       FROM summed
+       WHERE credit.tenant_id = summed.tenant_id
+         AND credit.period_start = summed.period_start
+         AND summed.reserved_usd > 0
+       RETURNING credit.tenant_id
      )
      SELECT COUNT(*)::bigint::text AS expired_count
      FROM updated_reservations`,
@@ -162,17 +197,46 @@ export async function expireTenantAiTokenReservations(batchSize = 500): Promise<
   return Number(result.rows[0]?.expired_count ?? 0);
 }
 
+const RESERVATION_SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * Expired reservations are swept in the background instead of on every
+ * reservation (that scan used to run in the hot path of every AI call).
+ */
+export function startAiTokenReservationSweeper(intervalMs = RESERVATION_SWEEP_INTERVAL_MS): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    expireTenantAiTokenReservations().catch((error) => {
+      console.warn('[AI Token Quota] Reservation sweep failed:', error instanceof Error ? error.message : String(error));
+    });
+  }, intervalMs);
+  timer.unref();
+  return timer;
+}
+
 /**
  * Atomically grants up to maximumTokens but never below minimumTokens. This is
  * what enables a concise answer when a tenant has a small usable balance left.
  */
 export async function reserveTenantAiTokens(input: ReservationInput): Promise<AiTokenReservationGrant> {
   const { minimumTokens, maximumTokens } = reservationBounds(input);
-  await expireTenantAiTokenReservations().catch((error) => {
-    console.warn('[AI Token Quota] Failed to expire stale reservations before reserve:', error instanceof Error ? error.message : String(error));
-  });
   const settings = await getTenantAiRuntimeSettings(input.tenantId);
   const periodStart = currentAiUsagePeriodStart(settings.tokenTimezone);
+  const budget = input.budget ?? {};
+  const fixedBudgetTokens = toSafeNonNegativeInteger(budget.inputTokens)
+    + toSafeNonNegativeInteger(budget.embeddingTokens);
+  const allowOverdraft = input.allowOverdraft === true;
+  // The most a grant of `tokens` can cost: input and embedding as budgeted,
+  // the rest as output (without a split, every token is priced as output).
+  const maxCostUsd = (tokens: number) => estimateMaxAiCallCostUsd({
+    provider: input.provider,
+    model: input.model,
+    embeddingModel: settings.embeddingModel,
+    inputTokens: toSafeNonNegativeInteger(budget.inputTokens),
+    outputTokens: budget.outputTokens === undefined
+      ? Math.max(0, tokens - fixedBudgetTokens)
+      : Math.min(toSafeNonNegativeInteger(budget.outputTokens), Math.max(0, tokens - fixedBudgetTokens)),
+    embeddingTokens: toSafeNonNegativeInteger(budget.embeddingTokens),
+  });
   return withDatabaseTransaction(async () => {
     await query(
       `INSERT INTO ai_token_monthly_usage (tenant_id, period_start)
@@ -180,6 +244,7 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
        ON CONFLICT (tenant_id, period_start) DO NOTHING`,
       [input.tenantId, periodStart],
     );
+    // Lock order: monthly token row (M), then the credit row (C).
     const usage = await query<{
       total_tokens: string;
       reserved_tokens: string;
@@ -189,28 +254,44 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
        FROM ai_token_monthly_usage usage
        JOIN tenant_ai_settings settings ON settings.tenant_id = usage.tenant_id
        WHERE usage.tenant_id = $1 AND usage.period_start = $2::date
-       FOR UPDATE OF usage, settings`,
+       FOR UPDATE OF usage`,
       [input.tenantId, periodStart],
     );
     const row = usage.rows[0];
     if (!row) throw new AppError('Không tìm thấy thống kê token AI', 404, 'AI_TOKEN_USAGE_NOT_FOUND');
 
     let grantedTokens = maximumTokens;
-    let remainingTokens: string | null = null;
+    let availableTokens: bigint | null = null;
     if (row.monthly_token_limit !== null) {
       const limit = BigInt(row.monthly_token_limit);
       const consumed = BigInt(row.total_tokens) + BigInt(row.reserved_tokens);
-      const available = limit > consumed ? limit - consumed : 0n;
-      if (available < BigInt(minimumTokens)) throw tokenLimitError();
+      availableTokens = limit > consumed ? limit - consumed : 0n;
+      if (availableTokens < BigInt(minimumTokens)) throw tokenLimitError();
       const maximum = BigInt(maximumTokens);
-      const granted = available < maximum ? available : maximum;
-      grantedTokens = Number(granted);
-      remainingTokens = String(available - granted);
+      grantedTokens = Number(availableTokens < maximum ? availableTokens : maximum);
     }
 
-    const budget = input.budget ?? {};
-    const fixedBudgetTokens = toSafeNonNegativeInteger(budget.inputTokens)
-      + toSafeNonNegativeInteger(budget.embeddingTokens);
+    // AI points: hold the most this grant can cost; when the full grant does
+    // not fit, try the minimum (a shorter answer) before refusing.
+    await ensureCreditMonth(input.tenantId, periodStart);
+    const hold = async (tokens: number): Promise<number | null> => {
+      const cost = await maxCostUsd(tokens);
+      let state = await reserveCreditUsd(input.tenantId, periodStart, cost, allowOverdraft);
+      if (state === 'missing') {
+        forgetEnsuredCreditMonth(input.tenantId, periodStart);
+        await ensureCreditMonth(input.tenantId, periodStart);
+        state = await reserveCreditUsd(input.tenantId, periodStart, cost, allowOverdraft);
+      }
+      return state === 'reserved' ? cost : null;
+    };
+    let reservedUsd = await hold(grantedTokens);
+    if (reservedUsd === null && grantedTokens > minimumTokens) {
+      reservedUsd = await hold(minimumTokens);
+      if (reservedUsd !== null) grantedTokens = minimumTokens;
+    }
+    if (reservedUsd === null) throw creditLimitError();
+    const remainingTokens = availableTokens === null ? null : String(availableTokens - BigInt(grantedTokens));
+
     const requestedOutputBudget = toSafeNonNegativeInteger(budget.outputTokens);
     const grantedOutputBudget = Math.max(0, Math.min(
       requestedOutputBudget,
@@ -224,11 +305,11 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
          tenant_id, user_id, conversation_id, target, engine, provider, model,
          operation, period_start, estimated_tokens,
          budget_input_tokens, budget_output_tokens, budget_embedding_tokens,
-         max_output_tokens, budget_metadata, expires_at
+         max_output_tokens, budget_metadata, expires_at, reserved_usd, allow_overdraft
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10::bigint,
                $11::bigint, $12::bigint, $13::bigint, $14::int, $15::jsonb,
-               now() + ($16::int * interval '1 second'))
+               now() + ($16::int * interval '1 second'), $17::numeric, $18::boolean)
        RETURNING id::text AS id`,
       [
         input.tenantId,
@@ -247,6 +328,8 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
         grantedMaxOutputTokens,
         JSON.stringify(budget.metadata ?? {}),
         env.AI_TOKEN_RESERVATION_SECONDS,
+        reservedUsd,
+        allowOverdraft,
       ],
     );
     await query(
@@ -272,7 +355,7 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
   await withDatabaseTransaction(async () => {
     const reservation = await query<ReservationRow>(
       `SELECT id::text, period_start::text, estimated_tokens::text, user_id::text,
-              conversation_id::text, target, engine, provider, model, operation
+              conversation_id::text, target, engine, provider, model, operation, reserved_usd::text
        FROM ai_token_reservations
        WHERE id = $1 AND tenant_id = $2 AND status = 'reserved'
        FOR UPDATE`,
@@ -353,6 +436,12 @@ export async function finalizeTenantAiTokens(input: FinalizeInput): Promise<void
         cachedInputTokens,
       ],
     );
+    const settlement = await settleCreditUsd(input.tenantId, row.period_start, Number(row.reserved_usd), pricing.amountUsd);
+    if (settlement && settlement.budgetUsd !== null && settlement.budgetUsd > 0) {
+      const share = settlement.usedUsd / settlement.budgetUsd;
+      if (share >= 1 && !settlement.warned100) await markCreditThreshold(input.tenantId, row.period_start, 100);
+      else if (share >= 0.8 && !settlement.warned80) await markCreditThreshold(input.tenantId, row.period_start, 80);
+    }
     // The acting user is copied into the row (actor_*): usage charts keep the
     // name after the user is deleted (user_id is then set to NULL).
     await query(
@@ -424,8 +513,8 @@ export async function releaseTenantAiTokenReservation(
 ): Promise<void> {
   if (!reservationId) return;
   await withDatabaseTransaction(async () => {
-    const reservation = await query<{ estimated_tokens: string; period_start: string }>(
-      `SELECT estimated_tokens::text, period_start::text
+    const reservation = await query<{ estimated_tokens: string; period_start: string; reserved_usd: string }>(
+      `SELECT estimated_tokens::text, period_start::text, reserved_usd::text
        FROM ai_token_reservations
        WHERE id = $1 AND tenant_id = $2 AND status = 'reserved'
        FOR UPDATE`,
@@ -446,5 +535,6 @@ export async function releaseTenantAiTokenReservation(
        WHERE tenant_id = $1 AND period_start = $2::date`,
       [tenantId, row.period_start, row.estimated_tokens],
     );
+    await releaseCreditUsd(tenantId, row.period_start, Number(row.reserved_usd));
   });
 }

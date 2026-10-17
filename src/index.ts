@@ -23,6 +23,7 @@ import { startCourseProgressRecalculationWorker } from './modules/learner/progre
 import { assertAuthRevocationRedisReady, cleanupExpiredAuthRevocations } from './modules/auth/auth-revocation.service.js';
 import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
+import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
 const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
@@ -176,6 +177,8 @@ async function bootstrap() {
   await startDurableBlueprintWorker();
   await startLessonAuthorWorkspaceWorker();
   await startChapterCheckpointMaintenance();
+  // Expired AI token/point reservations are returned in the background (never in the AI call path).
+  startAiTokenReservationSweeper();
 
   // 2. Ensure temp dir for Gemini worker
   try {

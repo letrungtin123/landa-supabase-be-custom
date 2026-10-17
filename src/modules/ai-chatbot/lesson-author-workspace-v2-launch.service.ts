@@ -41,6 +41,11 @@ export interface WorkspaceV2LaunchDependencies {
    * that can keep a document as it is. Absent means no (fail closed).
    */
   idmPipelineFor?(tenantId: string): boolean;
+  /**
+   * AI credits: refuses a new run when the tenant's remaining AI points do not
+   * cover its estimated cost (a replay of an admitted run is never refused).
+   */
+  assertAiCredit?(tenantId: string): Promise<void>;
   id?: () => string;
   report?(event: Record<string, unknown>): void;
 }
@@ -103,6 +108,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       // QLT-6: a new workspace that would keep its document needs the IDM pipeline: refused (a 400 with its own
       // plain message) before anything is prepared or written. A replay of an admitted workspace still replays.
       if (!replay) assertLaunchModeAvailable(input.brief, deps.idmPipelineFor?.(tenantId) === true);
+      if (!replay) await deps.assertAiCredit?.(tenantId);
       const candidate = await deps.prepareDurableBlueprint(input.conversationId, user.id, tenantId, content, {
         target: 'lesson_author', courseId: input.courseId, mode: 'course_blueprint', locale: input.locale,
         sourceDocuments: input.sourceDocumentIds.map(document_id => ({ document_id })), launchBrief: input.brief,

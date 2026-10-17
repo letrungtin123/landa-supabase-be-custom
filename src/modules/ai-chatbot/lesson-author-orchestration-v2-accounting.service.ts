@@ -122,6 +122,9 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       operation: 'lesson_author',
       minimumTokens: limits.total,
       maximumTokens: limits.total,
+      // The run was admitted with enough AI points: its tasks may finish even
+      // when the month's points run out meanwhile (owner decision, credits §8).
+      allowOverdraft: true,
       budget: {
         inputTokens: limits.input,
         outputTokens: limits.outputCeiling,

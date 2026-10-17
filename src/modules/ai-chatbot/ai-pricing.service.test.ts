@@ -4,6 +4,7 @@ import {
   calculateAiUsageCost,
   clearAiRateCardCache,
   costOfAiUsage,
+  estimateMaxAiCallCostUsd,
   selectRateCard,
   type AiPricingRateCardRow,
 } from './ai-pricing.service.js';
@@ -66,12 +67,28 @@ test('pricing reads the cards once per minute and records the card it used', asy
   clearAiRateCardCache();
 });
 
-test('a model without a card is recorded as unpriced, never silently free', async () => {
+test('a model without a card is priced with the proxy card (never free), unpriced only without any card', async () => {
   clearAiRateCardCache();
-  const result = await calculateAiUsageCost({ provider: 'google_ai_studio', model: 'gemini-3.5-transcribe',
-    usage: { inputTokens: 500_000, outputTokens: 5_000, embeddingTokens: 0, totalTokens: 505_000 } }, async () => []);
-  assert.equal(result.status, 'unpriced');
-  assert.equal(result.amountUsd, 0);
+  const usage = { inputTokens: 500_000, outputTokens: 5_000, embeddingTokens: 0, totalTokens: 505_000 };
+  const proxied = await calculateAiUsageCost({ provider: 'google_ai_studio', model: 'gemini-3.5-transcribe', usage,
+    at: new Date('2026-10-17T00:00:00Z') }, async (_provider, model) => model === 'gemini-3.8-flash' ? [FLASH_2026] : []);
+  assert.equal(proxied.status, 'estimated');
+  assert.equal(proxied.amountUsd, 0.39375);
+  assert.equal((proxied.pricingSnapshot as any).generation.proxy_card, true);
+  clearAiRateCardCache();
+  const none = await calculateAiUsageCost({ provider: 'google_ai_studio', model: 'gemini-3.5-transcribe', usage }, async () => []);
+  assert.equal(none.status, 'unpriced');
+  assert.equal(none.amountUsd, 0);
+  clearAiRateCardCache();
+});
+
+test('a reservation holds the most a call can cost, without the cache discount', async () => {
+  clearAiRateCardCache();
+  const load = async (_provider: string, model: string) => model === 'gemini-3.8-flash' ? [FLASH_2026] : model === 'gemini-embedding-001' ? [EMBEDDING] : [];
+  const cost = await estimateMaxAiCallCostUsd({ provider: 'google_ai_studio', model: 'gemini-3.8-flash', embeddingModel: 'gemini-embedding-001',
+    inputTokens: 100_000, outputTokens: 20_000, embeddingTokens: 1_000_000, at: new Date('2026-10-17T00:00:00Z') }, load);
+  // 0.075 + 0.075 + 0.15
+  assert.equal(cost, 0.3);
   clearAiRateCardCache();
 });
 

@@ -55,7 +55,8 @@ async function assertLease(job: LessonAuthorTranscriptionJob): Promise<void> {
 
 /** Gemini counts audio at about 32 tokens per second; a transcript is far shorter than its audio. */
 const AUDIO_INPUT_TOKENS_PER_SECOND = 32;
-const TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND = 8;
+// Fast Vietnamese speech is about 4-6 tokens a second; 12 leaves room without letting a loop run away.
+const TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND = 12;
 
 async function probeVideo(filePath: string): Promise<number> {
   const { stdout } = await execFile(env.FFPROBE_PATH, [
@@ -115,14 +116,15 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
     await assertLease(job);
 
     const audioPath = audioTempPath;
+    const maxTranscriptTokens = Math.ceil(durationSeconds * TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND) + 1_024;
     const transcribed = await withMeteredAiCall({
       tenantId: job.tenant_id, userId: job.requested_by, conversationId: job.conversation_id,
       target: 'lesson_author', operation: 'lesson_author', model: env.GEMINI_TRANSCRIPTION_MODEL,
       feature: 'video_transcription', promptParts: [], longRunning: true,
       extraInputTokens: Math.ceil(durationSeconds * AUDIO_INPUT_TOKENS_PER_SECOND),
-      maxOutputTokens: Math.ceil(durationSeconds * TRANSCRIPT_OUTPUT_TOKENS_PER_SECOND) + 1_024,
+      maxOutputTokens: maxTranscriptTokens,
     }, async () => {
-      const result = await transcribeAudioFile(audioPath, await getGeminiClient(job.tenant_id));
+      const result = await transcribeAudioFile(audioPath, await getGeminiClient(job.tenant_id), { maxOutputTokens: maxTranscriptTokens });
       return { value: result.text, usage: result.usage, outputText: result.text };
     });
     const transcript = normalizeTranscriptText(transcribed, env.LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS);

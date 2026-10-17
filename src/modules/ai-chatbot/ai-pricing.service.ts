@@ -143,6 +143,50 @@ export function clearAiRateCardCache(): void {
 }
 
 /**
+ * A model without a card of its own (a new or special model, e.g. the audio
+ * transcription model) is priced with the card of a known model and marked so:
+ * it is never counted as free, so it cannot spend past a tenant's budget.
+ */
+export const AI_PRICING_PROXY_GENERATION_MODEL = 'gemini-3.8-flash';
+export const AI_PRICING_PROXY_EMBEDDING_MODEL = 'gemini-embedding-001';
+
+async function cardFor(
+  provider: AiProvider,
+  model: string,
+  proxyModel: string,
+  at: Date,
+  load: RateCardLoader,
+): Promise<{ card: AiPricingRateCardRow | null; proxied: boolean }> {
+  const own = model ? selectRateCard(await cachedRateCards(provider, model, load, Date.now()), at) : null;
+  if (own || !proxyModel || proxyModel === model) return { card: own, proxied: false };
+  const proxy = selectRateCard(await cachedRateCards(provider, proxyModel, load, Date.now()), at);
+  return { card: proxy, proxied: Boolean(proxy) };
+}
+
+/**
+ * The most a call can cost (no cache discount): what a reservation holds
+ * against the tenant's budget before the call is made.
+ */
+export async function estimateMaxAiCallCostUsd(input: {
+  provider: AiProvider;
+  model: string;
+  embeddingModel?: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  embeddingTokens: number;
+  at?: Date;
+}, load: RateCardLoader = loadActiveRateCards): Promise<number> {
+  const at = input.at ?? new Date();
+  const generation = input.inputTokens > 0 || input.outputTokens > 0
+    ? await cardFor(input.provider, input.model.trim(), AI_PRICING_PROXY_GENERATION_MODEL, at, load) : { card: null, proxied: false };
+  const embedding = input.embeddingTokens > 0
+    ? await cardFor(input.provider, input.embeddingModel?.trim() || input.model.trim(), AI_PRICING_PROXY_EMBEDDING_MODEL, at, load)
+    : { card: null, proxied: false };
+  return costOfAiUsage({ inputTokens: Math.max(0, input.inputTokens), outputTokens: Math.max(0, input.outputTokens),
+    embeddingTokens: Math.max(0, input.embeddingTokens), totalTokens: 0 }, generation.card, embedding.card).amountUsd;
+}
+
+/**
  * Prices one call with the card in force when it was made and returns the
  * exact inputs used. The caller stores this snapshot beside the usage so
  * historical reports never change when a rate card is edited later.
@@ -159,13 +203,12 @@ export async function calculateAiUsageCost(input: {
   const generationModel = input.model.trim();
   const embeddingModel = input.embeddingModel?.trim() || generationModel;
   const needsEmbeddingRate = input.usage.embeddingTokens > 0;
-  const cards = async (model: string, needed: boolean) => needed && model
-    ? selectRateCard(await cachedRateCards(input.provider, model, load, Date.now()), at)
-    : null;
-  const [generationCard, embeddingCard] = await Promise.all([
-    cards(generationModel, needsGenerationRate),
-    cards(embeddingModel, needsEmbeddingRate),
+  const none = { card: null, proxied: false };
+  const [generation, embedding] = await Promise.all([
+    needsGenerationRate ? cardFor(input.provider, generationModel, AI_PRICING_PROXY_GENERATION_MODEL, at, load) : none,
+    needsEmbeddingRate ? cardFor(input.provider, embeddingModel, AI_PRICING_PROXY_EMBEDDING_MODEL, at, load) : none,
   ]);
+  const generationCard = generation.card, embeddingCard = embedding.card;
   const allRequiredCardsFound = (!needsGenerationRate || Boolean(generationCard))
     && (!needsEmbeddingRate || Boolean(embeddingCard));
   const cost = costOfAiUsage(input.usage, generationCard, embeddingCard);
@@ -177,8 +220,10 @@ export async function calculateAiUsageCost(input: {
       currency: 'USD',
       calculated_at: new Date().toISOString(),
       priced_at: at.toISOString(),
-      generation: { requested_model: generationModel, rate_card: toSnapshot(generationCard) },
-      embedding: { requested_model: embeddingModel, rate_card: toSnapshot(embeddingCard) },
+      generation: { requested_model: generationModel, rate_card: toSnapshot(generationCard),
+        ...(generation.proxied ? { proxy_card: true } : {}) },
+      embedding: { requested_model: embeddingModel, rate_card: toSnapshot(embeddingCard),
+        ...(embedding.proxied ? { proxy_card: true } : {}) },
     },
   };
 }

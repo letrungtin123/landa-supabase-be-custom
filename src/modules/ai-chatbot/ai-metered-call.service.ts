@@ -34,6 +34,18 @@ export interface MeteredAiCall {
   longRunning?: boolean;
 }
 
+/**
+ * Thrown by a call that reached the provider (and was billed) but whose
+ * answer is unusable: the wrapper settles the provider usage, then rethrows
+ * `cause`, so failed-but-billed calls still count against the budget.
+ */
+export class BilledAiCallError extends Error {
+  constructor(readonly usage: AiUsage, readonly cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'BilledAiCallError';
+  }
+}
+
 export interface MeteredAiResult<T> {
   value: T;
   usage: AiUsage | null;
@@ -82,6 +94,13 @@ export async function withMeteredAiCall<T>(
   try {
     result = await run();
   } catch (error) {
+    if (error instanceof BilledAiCallError) {
+      await deps.finalize({
+        reservationId: grant.id, tenantId: call.tenantId, usage: normalizeAiUsage(error.usage),
+        source: { service: 'backend_direct', usage_source: 'provider' }, metadata: { feature: call.feature, failed_after_billing: true },
+      }).catch(() => deps.release(grant.id, call.tenantId).catch(() => undefined));
+      throw error.cause;
+    }
     await deps.release(grant.id, call.tenantId).catch(() => undefined);
     throw error;
   }

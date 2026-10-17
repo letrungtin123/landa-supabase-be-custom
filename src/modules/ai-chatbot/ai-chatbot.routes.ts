@@ -2,6 +2,7 @@
 // AI Chatbot Routes — KB + Bot + Document + Chat management
 // ═══════════════════════════════════════════════════════════════
 
+import { assertAiCreditForAiIdRun } from '../ai-credits/ai-credit.service.js';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
 import { authenticate } from '../../middleware/authenticate.js';
@@ -302,6 +303,7 @@ const workspaceV2Launch = createWorkspaceV2LaunchService({
   prepareDurableBlueprint, withLessonAuthorConversationLock, admit: orchestrationV2Admit,
   // QLT-6: only a run admitted to the IDM pipeline can keep its document as it is.
   idmPipelineFor: tenantId => selectOrchestrationV2AdmissionPipeline(tenantId, orchestrationV2IdmPolicy) === 'idm-1',
+  assertAiCredit: assertAiCreditForAiIdRun,
   report: event => console.info('[LessonAuthorOrchestrationV2Admission]', JSON.stringify(event)),
 });
 const orchestrationV2LaunchEnabled = () => env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED
