@@ -115,9 +115,11 @@ app.get('/api/health', async function healthCheck(_req, res) {
 });
 
 // ── API Routes ──
-// The general limit applies to every auth endpoint too (me, profile,
+// The general limit applies to the other auth endpoints too (me, profile,
 // change-password, one-time links); auth.routes.ts adds the stricter
-// per-endpoint limits. The '/api' mount below skips '/auth/*'.
+// per-endpoint limits. Sign-in, refresh and the SSO code exchange are not
+// counted here (they have their own budgets). The '/api' mount below skips
+// '/auth/*'.
 app.use('/api/auth', apiLimiter);
 app.use('/api/auth', authRoutes);
 

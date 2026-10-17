@@ -1,11 +1,14 @@
 // ═══════════════════════════════════════════════════════════════
 // Auth rate limits — sign-in, session refresh and account actions
 //
-// - Sign-in: the historical per-IP limit plus a per-account limit on failed
-//   attempts (keyed by the typed identifier, so it never reveals whether the
-//   account exists).
-// - Refresh: its own budget per refresh token, so many users behind one
-//   office IP never share the sign-in bucket.
+// - Sign-in: failed attempts per typed account identifier (so it never
+//   reveals whether the account exists) plus a much larger budget of refused
+//   attempts per client IP. Successful sign-ins never count, so thousands of
+//   staff behind one office NAT can sign in.
+// - Refresh: its own budget per refresh token, plus refused refreshes per IP
+//   (a flood of invented tokens), so valid refreshes behind one IP pass.
+// - SSO code exchange: refused exchanges per IP, like sign-in.
+// - These three never count against the general per-IP API limit.
 // - Password change, one-time sign-in links and profile updates: strict
 //   per-user (or per-IP when anonymous) budgets.
 // Counters are shared through Redis when it is available (see
@@ -90,6 +93,15 @@ export function refreshTokenRateLimitKey(req: Request): string {
   return ipKey(req);
 }
 
+/**
+ * For the per-IP budgets only refusals (4xx) count. A server-side failure
+ * (5xx, e.g. a database blip) is not the client's fault and must not lock a
+ * whole office out once the server recovers.
+ */
+export function isNotClientRefusal(_req: Request, res: Response): boolean {
+  return res.statusCode < 400 || res.statusCode >= 500;
+}
+
 function limiter(options: {
   prefix: string;
   windowMs: number;
@@ -97,6 +109,7 @@ function limiter(options: {
   code: RateLimitErrorCode;
   keyGenerator?: (req: Request) => string;
   skipSuccessfulRequests?: boolean;
+  requestWasSuccessful?: (req: Request, res: Response) => boolean;
   skip?: (req: Request) => boolean;
   sharedStore?: boolean;
 }): RateLimitRequestHandler {
@@ -108,17 +121,24 @@ function limiter(options: {
     ...(options.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
     ...(options.skip ? { skip: options.skip } : {}),
     skipSuccessfulRequests: options.skipSuccessfulRequests ?? false,
+    ...(options.requestWasSuccessful ? { requestWasSuccessful: options.requestWasSuccessful } : {}),
     ...(options.sharedStore === false ? {} : { store: new SharedRateLimitStore({ prefix: options.prefix }) }),
     handler: (req, res) => sendRateLimited(req, res, options.code),
   });
 }
 
-/** Historical sign-in limit per client IP (all attempts). */
+/**
+ * Refused sign-ins per client IP. A request counts while it is in flight and
+ * is taken back when it ends without a refusal, so the cap also bounds a
+ * burst of parallel guesses from one address.
+ */
 export const loginIpLimiter = limiter({
   prefix: 'login-ip',
   windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
-  limit: env.AUTH_LOGIN_IP_MAX_ATTEMPTS,
+  limit: env.AUTH_LOGIN_IP_MAX_FAILURES,
   code: 'LOGIN_RATE_LIMITED',
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: isNotClientRefusal,
 });
 
 /** Failed sign-ins per typed account identifier; successful sign-ins do not count. */
@@ -140,6 +160,28 @@ export const refreshTokenLimiter = limiter({
   keyGenerator: refreshTokenRateLimitKey,
 });
 
+/** Refused session refreshes per client IP (invented or stale tokens). */
+export const refreshIpLimiter = limiter({
+  prefix: 'refresh-ip',
+  windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_REFRESH_IP_MAX_FAILURES,
+  code: 'REFRESH_RATE_LIMITED',
+  keyGenerator: ipKey,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: isNotClientRefusal,
+});
+
+/** Refused SSO code exchanges per client IP; shares the sign-in cap. */
+export const ssoExchangeIpLimiter = limiter({
+  prefix: 'sso-exchange-ip',
+  windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+  limit: env.AUTH_LOGIN_IP_MAX_FAILURES,
+  code: 'LOGIN_RATE_LIMITED',
+  keyGenerator: ipKey,
+  skipSuccessfulRequests: true,
+  requestWasSuccessful: isNotClientRefusal,
+});
+
 /** Password change attempts per signed-in user. */
 export const passwordChangeLimiter = limiter({
   prefix: 'password-change',
@@ -158,10 +200,24 @@ export const accountActionLimiter = limiter({
   keyGenerator: authenticatedUserOrIpRateLimitKey,
 });
 
+// Sign-in, refresh and SSO code exchange carry no bearer token, so the general
+// limiter would key them by IP: one office NAT would then share 200 requests a
+// minute for every sign-in and refresh. They have their own budgets above.
+const OWN_BUDGET_POST_PATHS = new Set(['/api/auth/login', '/api/auth/refresh']);
+const SSO_EXCHANGE_PATH = /^\/api\/sso\/exchange\/[^/]+$/;
+
+/** Whether a request is one of the sign-in calls with their own budgets (matched like Express routes: case-insensitive, optional trailing slash). */
+export function hasOwnSignInBudget(req: Pick<Request, 'method' | 'baseUrl' | 'path'>): boolean {
+  if (req.method !== 'POST') return false;
+  const fullPath = `${req.baseUrl}${req.path}`.toLowerCase().replace(/\/+$/, '');
+  return OWN_BUDGET_POST_PATHS.has(fullPath) || SSO_EXCHANGE_PATH.test(fullPath);
+}
+
 /**
  * General API limit (per verified user, else per client IP). It is mounted
  * on `/api/auth` before the auth routes and again on `/api`; the second mount
- * skips `/auth/*` so an auth request is counted once.
+ * skips `/auth/*` so an auth request is counted once. Sign-in calls with
+ * their own budgets are not counted here.
  */
 export const apiLimiter = limiter({
   prefix: 'api',
@@ -169,7 +225,8 @@ export const apiLimiter = limiter({
   limit: API_RATE_LIMIT_MAX,
   code: 'API_RATE_LIMITED',
   keyGenerator: authenticatedUserOrIpRateLimitKey,
-  skip: (req) => req.baseUrl === '/api' && (req.path === '/auth' || req.path.startsWith('/auth/')),
+  skip: (req) => (req.baseUrl === '/api' && (req.path === '/auth' || req.path.startsWith('/auth/')))
+    || hasOwnSignInBudget(req),
   // High-volume limiter: keep today's per-process counters (no Redis round trip per API call).
   sharedStore: false,
 });
