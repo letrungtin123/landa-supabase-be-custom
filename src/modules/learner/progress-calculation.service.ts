@@ -64,11 +64,22 @@ export async function getEnrollmentContentCompletion(
   };
 }
 
+/** What one enrollment's recalculation wrote (callers may ignore it). */
+export interface EnrollmentProgressResult {
+  /** Same value as stored in course_progress.progress. */
+  progress: number;
+  is_completed: boolean;
+  /** False when the enrollment has no course_progress row (nothing was written). */
+  updated: boolean;
+  /** True when this write switched course_progress.is_completed on or off. */
+  completion_changed: boolean;
+}
+
 export async function recalculateEnrollmentProgress(
   enrollmentId: string,
   courseId: string,
   client?: Queryable,
-): Promise<void> {
+): Promise<EnrollmentProgressResult> {
   const result = await runQuery<{ total: string; completed: string }>(
     client,
     `${activeLeafBlocksCte()},
@@ -103,17 +114,34 @@ export async function recalculateEnrollmentProgress(
   const progress = total > 0 ? Math.round((completed / total) * 10000) / 100 : 0;
   const isCompleted = total > 0 && completed >= total;
 
-  await runQuery(
+  // `previous` is read from the statement's snapshot, so it is the value
+  // before this UPDATE (the written columns are unchanged).
+  const updated = await runQuery<{ was_completed: boolean | null }>(
     client,
-    `UPDATE course_progress
+    `WITH previous AS (
+       SELECT enrollment_id, is_completed AS was_completed
+       FROM course_progress
+       WHERE enrollment_id = $3
+     )
+     UPDATE course_progress
      SET progress = $1,
          is_completed = $2,
          completed_at = CASE WHEN $2 THEN COALESCE(completed_at, now()) ELSE NULL END,
          last_activity_at = now(),
          updated_at = now()
-     WHERE enrollment_id = $3`,
+     FROM previous
+     WHERE course_progress.enrollment_id = previous.enrollment_id
+     RETURNING previous.was_completed`,
     [progress, isCompleted, enrollmentId],
   );
+
+  const row = updated.rows[0];
+  return {
+    progress,
+    is_completed: isCompleted,
+    updated: Boolean(row),
+    completion_changed: Boolean(row) && (row.was_completed === true) !== isCompleted,
+  };
 }
 
 export async function recalculateCourseProgressForActiveEnrollments(

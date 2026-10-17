@@ -6,6 +6,8 @@ import type { Request, Response, NextFunction } from 'express';
 import * as learnerService from './learner.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
+import { requestUiLocaleOf } from '../../utils/client-error.js';
+import { COMPLETE_BLOCKS_LIMIT_ERROR, MAX_COMPLETE_BLOCK_IDS } from './learner-completion.logic.js';
 
 function demoProgressState() {
   return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
@@ -223,6 +225,11 @@ export async function completeBlocks(req: Request, res: Response, next: NextFunc
     const { course_id, block_ids } = req.body;
     if (!course_id || !Array.isArray(block_ids)) {
       sendError(res, 'Thiếu course_id hoặc block_ids', 400);
+      return;
+    }
+    if (block_ids.length > MAX_COMPLETE_BLOCK_IDS) {
+      const [status, vi, en] = COMPLETE_BLOCKS_LIMIT_ERROR;
+      sendError(res, requestUiLocaleOf(req) === 'en' ? en : vi, status);
       return;
     }
 

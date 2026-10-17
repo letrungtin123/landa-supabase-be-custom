@@ -14,6 +14,7 @@ import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.
 import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
 import { mediaQuizModeValue, safeJsonParse, scenarioChatString, toLearnerBlockRow } from './learner-block-row.logic.js';
 import { LEARNER_BLOCK_SERIALIZATION_VERSION, problemExplanationHtml, resolveSortableSubmission } from './learner-answer-key.logic.js';
+import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   evaluateUserBadges,
   getEffectiveBadgeDefinitions,
@@ -1292,16 +1293,18 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
 
 /**
  * Đánh dấu blocks hoàn thành (batch).
- * Tự động tính lại course progress sau khi mark.
+ * Only blocks the enrollment has not completed yet are written; progress is
+ * recalculated (and the progress cache version bumped) only when a row was
+ * actually inserted. `marked` keeps its meaning (see learner-completion.logic.ts).
  */
 export async function markBlocksComplete(
   userId: string,
   courseId: string,
   blockIds: string[],
-) {
+): Promise<MarkBlocksCompleteResult> {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi tiến độ');
 
-  if (blockIds.length === 0) return { marked: 0 };
+  if (blockIds.length === 0) return { marked: 0, newly_completed: 0 };
 
   // Lấy enrollment
   const enrollment = await query<{ id: string }>(
@@ -1322,7 +1325,8 @@ export async function markBlocksComplete(
 
   const enrollmentId = enrollment.rows[0].id;
 
-  const activeBlocks = await query<{ id: string }>(
+  // Same block filter as before; `completed` tells which ones are already done.
+  const activeBlocks = await query<ActiveBlockCompletionRow>(
     `WITH RECURSIVE ancestors AS (
        SELECT id AS root_id, id, parent_id, deleted_at
        FROM course_blocks
@@ -1332,7 +1336,13 @@ export async function markBlocksComplete(
        FROM course_blocks parent
        JOIN ancestors a ON parent.id = a.parent_id
      )
-     SELECT b.id
+     SELECT b.id,
+            EXISTS (
+              SELECT 1
+              FROM block_completions bc
+              WHERE bc.enrollment_id = $3::uuid
+                AND bc.block_id = b.id
+            ) AS completed
      FROM course_blocks b
      WHERE b.course_id = $1
        AND b.id = ANY($2::uuid[])
@@ -1345,36 +1355,37 @@ export async function markBlocksComplete(
          WHERE a.root_id = b.id
            AND a.deleted_at IS NOT NULL
        )`,
-    [courseId, blockIds],
+    [courseId, blockIds, enrollmentId],
   );
-  const activeBlockIds = activeBlocks.rows.map((row) => row.id);
+  const { marked, missing } = planBlockCompletion(activeBlocks.rows);
 
-  if (activeBlockIds.length === 0) {
-    await recalculateProgress(enrollmentId, courseId);
-    await invalidateUserCourseProgressCache(userId, courseId);
-    return { marked: 0 };
-  }
+  // Nothing new (all already completed, or no valid leaf): no write, no
+  // recalculation, no cache bump.
+  if (missing.length === 0) return { marked, newly_completed: 0 };
 
-  // Batch insert completions (ON CONFLICT skip)
-  const values = activeBlockIds.map((_, i) => `($1, $${i + 2})`).join(', ');
-  await query(
-    `INSERT INTO block_completions (enrollment_id, block_id) VALUES ${values} ON CONFLICT DO NOTHING`,
-    [enrollmentId, ...activeBlockIds],
+  const inserted = await query<{ block_id: string }>(
+    `INSERT INTO block_completions (enrollment_id, block_id)
+     SELECT $1::uuid, block_id
+     FROM unnest($2::uuid[]) AS requested(block_id)
+     ON CONFLICT DO NOTHING
+     RETURNING block_id`,
+    [enrollmentId, missing],
   );
+  const newlyCompleted = inserted.rowCount ?? inserted.rows.length;
+  // A concurrent request inserted them first and recalculates for itself.
+  if (newlyCompleted === 0) return { marked, newly_completed: 0 };
 
   // Tính lại progress: completed_leaves / total_leaves
-  await recalculateProgress(enrollmentId, courseId);
+  const progress = await recalculateEnrollmentProgress(enrollmentId, courseId);
   await invalidateUserCourseProgressCache(userId, courseId);
 
-  return { marked: activeBlockIds.length };
-}
-
-/**
- * Tính lại progress % dựa trên block completions.
- * Chỉ tính leaf blocks (video, html, problem, la_*).
- */
-async function recalculateProgress(enrollmentId: string, courseId: string) {
-  await recalculateEnrollmentProgress(enrollmentId, courseId);
+  return {
+    marked,
+    newly_completed: newlyCompleted,
+    ...(progress.updated
+      ? { progress: progress.progress, is_completed: progress.is_completed, completion_changed: progress.completion_changed }
+      : {}),
+  };
 }
 
 // ── Progress ──
