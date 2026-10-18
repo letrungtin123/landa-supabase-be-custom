@@ -7,6 +7,9 @@
 import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { TENANT_DATA_QUOTA_COUNTED_STATES } from './tenant-data-quota-ledger.logic.js';
+import { createTenantDataQuotaLedgerRepository } from './tenant-data-quota-ledger.repository.js';
+import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';
 import {
   TENANT_DATA_LIMIT_REACHED_CODE,
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
@@ -127,8 +130,18 @@ async function lockQuota(client: Awaited<ReturnType<typeof getClient>>, tenantId
     [tenantId],
   );
 
-  if (!result.rows[0]) throw new AppError('Doanh nghiệp không tồn tại', 404);
-  return result.rows[0];
+  const quota = result.rows[0];
+  if (!quota) throw new AppError('Doanh nghiệp không tồn tại', 404);
+
+  // Database writes append lock-free deltas (SQL 20261018_1100) that the quota
+  // worker folds later: the limit check must count the unfolded ones too. The
+  // catalog check runs inside this transaction, so it works on both schemas.
+  const ledger = createTenantDataQuotaLedgerRepository(client);
+  if ((TENANT_DATA_QUOTA_COUNTED_STATES as readonly string[]).includes(quota.state) && await ledger.isReady()) {
+    const pendingBytes = await ledger.pendingBytes(tenantId);
+    quota.database_used_bytes = (asBigInt(quota.database_used_bytes) + pendingBytes).toString();
+  }
+  return quota;
 }
 
 export function totalTenantDataQuotaBytes(
@@ -529,16 +542,18 @@ export async function recordStorageDelete(
 }
 
 export async function getTenantDataQuota(tenantId: string): Promise<TenantDataQuota | null> {
-  const result = await query<{
+  // Database usage includes the deltas the quota worker has not folded yet.
+  const result = await readWithPendingDatabaseBytes<{
     data_limit_bytes: string | null;
-    database_used_bytes: string;
-    storage_used_bytes: string;
-    storage_reserved_bytes: string;
-    state: QuotaState;
+    database_used_bytes: string | null;
+    storage_used_bytes: string | null;
+    storage_reserved_bytes: string | null;
+    state: QuotaState | null;
     last_verified_at: Date | null;
   }>(
-    `SELECT t.data_limit_bytes, usage.database_used_bytes, usage.storage_used_bytes,
-            usage.storage_reserved_bytes, usage.state, usage.last_verified_at
+    (databaseBytes) => `SELECT t.data_limit_bytes,
+            CASE WHEN usage.tenant_id IS NOT NULL THEN ${databaseBytes('usage', 't.id')}::text END AS database_used_bytes,
+            usage.storage_used_bytes, usage.storage_reserved_bytes, usage.state, usage.last_verified_at
      FROM tenants t
      LEFT JOIN tenant_data_quota_usage usage ON usage.tenant_id = t.id
      WHERE t.id = $1::uuid`,
