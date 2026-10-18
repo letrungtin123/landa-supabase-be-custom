@@ -2,7 +2,7 @@ import { lookup } from 'node:dns/promises';
 import https from 'node:https';
 import { BlockList } from 'node:net';
 import path from 'node:path';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 const MAX_REMOTE_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_REMOTE_IMAGE_REDIRECTS = 3;

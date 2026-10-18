@@ -22,7 +22,7 @@ import {
   resolveTenantStoragePath,
 } from '../../config/storage.js';
 import { LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
-import { swallowAndLog } from '../../utils/best-effort.js';
+import { bestEffort, swallowAndLog } from '../../utils/best-effort.js';
 
 function formatUploadSizeMb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
@@ -201,8 +201,8 @@ export async function deleteDocumentController(req: Request, res: Response, next
         deleted.title,
       ),
     );
-    // Cleanup storage
-    await deleteTenantFileByUrl(doc.file_url, tenantId).catch(() => false);
+    // Cleanup storage: the document row is gone; a failure leaves an orphan file, recorded.
+    await bestEffort('library.document_storage_cleanup', () => deleteTenantFileByUrl(doc.file_url, tenantId));
     sendSuccess(res, null, 'Xóa thành công');
   } catch (err) { next(err); }
 }
@@ -230,7 +230,7 @@ export async function bulkDocumentActionController(req: Request, res: Response, 
       );
       const deletePromises = result.rows
         .filter(r => r.file_url)
-        .map(r => deleteTenantFileByUrl(r.file_url, tenantId).catch(() => false));
+        .map(r => bestEffort('library.document_storage_cleanup', () => deleteTenantFileByUrl(r.file_url, tenantId)));
       await Promise.all(deletePromises);
       sendSuccess(res, { deleted: result.deleted });
       return;

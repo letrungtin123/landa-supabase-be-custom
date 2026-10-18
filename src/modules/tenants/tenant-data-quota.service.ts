@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { TENANT_DATA_QUOTA_COUNTED_STATES } from './tenant-data-quota-ledger.logic.js';
 import { createTenantDataQuotaLedgerRepository } from './tenant-data-quota-ledger.repository.js';
 import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';

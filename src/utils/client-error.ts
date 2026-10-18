@@ -2,14 +2,15 @@
 // Client-safe errors — what a controller may tell the browser
 //
 // Only errors the code raised on purpose (AppError and its subclasses) pass
-// their message, status and code through. The tenant quota triggers keep
+// their message, status and code through (one without a code gets the code
+// of its status, utils/errors.ts). The tenant quota triggers keep
 // their fixed answer. Everything else (database, storage, AI provider,
 // network, programming errors) becomes one fixed plain message in the
 // request language; the detail is written to the server log only.
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response } from 'express';
-import { AppError } from '../middleware/error-handler.js';
+import { AppError, errorBody, resolveErrorCode } from './errors.js';
 import {
   TENANT_DATA_LIMIT_REACHED_CODE,
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
@@ -31,7 +32,7 @@ export const UNEXPECTED_ERROR_CODE = 'REQUEST_FAILED';
 export interface ClientErrorBody {
   status: number;
   message: string;
-  code?: string;
+  code: string;
   /** false when the message is the fixed fallback (the real cause is only logged). */
   known: boolean;
 }
@@ -42,7 +43,7 @@ export function requestUiLocaleOf(req: Pick<Request, 'get'> | undefined): 'vi' |
 
 export function describeClientError(err: unknown, locale: 'vi' | 'en'): ClientErrorBody {
   if (err instanceof AppError) {
-    return { status: err.statusCode, message: err.message, ...(err.code ? { code: err.code } : {}), known: true };
+    return { status: err.statusCode, message: err.message, code: resolveErrorCode(err.statusCode, err.code), known: true };
   }
   const sqlState = (err as { code?: unknown } | null)?.code;
   if (sqlState === TENANT_DATA_LIMIT_REACHED_SQLSTATE) {
@@ -66,15 +67,11 @@ function logUnexpected(context: string, err: unknown): void {
   console.error(`[${context}] request failed:`, err instanceof Error ? (err.stack || err.message) : err);
 }
 
-/** Sends `{ success: false, message, code? }` for any caught error. */
+/** Sends `{ success: false, message, code }` for any caught error. */
 export function sendClientError(req: Request, res: Response, err: unknown, context: string): void {
   const described = describeClientError(err, requestUiLocaleOf(req));
   if (!described.known) logUnexpected(context, err);
-  res.status(described.status).json({
-    success: false,
-    message: described.message,
-    ...(described.code ? { code: described.code } : {}),
-  });
+  res.status(described.status).json(errorBody(described.status, described.message, described.code));
 }
 
 /** Strict ISO-8601 timestamp (as produced by Date#toISOString or with an offset). */

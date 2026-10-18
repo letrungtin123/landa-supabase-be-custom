@@ -4,7 +4,7 @@
 
 import { query } from '../../config/database.js';
 import { extractStoragePath } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 interface HelpDocMutationResult {
   id: string;

@@ -10,7 +10,7 @@ import {
   invalidateTenantNotificationCaches,
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import {
   appendAuditLogViewerScopeFilter,

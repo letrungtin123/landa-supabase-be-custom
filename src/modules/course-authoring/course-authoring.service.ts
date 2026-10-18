@@ -11,7 +11,7 @@ import {
   invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import {
   assertCourseComponentTypeAllowed,
   assertTenantCanAddCourseComponent,

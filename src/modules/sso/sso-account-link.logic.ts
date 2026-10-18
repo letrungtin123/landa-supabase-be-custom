@@ -13,7 +13,7 @@
 //      email is refused. Without the key nothing changes.
 // ═══════════════════════════════════════════════════════════════
 
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 /** [HTTP status, Vietnamese, English] — the response picks by X-UI-Locale. */
 export const SSO_LOGIN_ERRORS = {

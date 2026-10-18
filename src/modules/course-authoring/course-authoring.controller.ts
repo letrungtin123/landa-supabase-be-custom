@@ -21,7 +21,7 @@ import {
   fixMulterFilename,
 } from '../../config/storage.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import {
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
   TENANT_DATA_LIMIT_REACHED_SQLSTATE,

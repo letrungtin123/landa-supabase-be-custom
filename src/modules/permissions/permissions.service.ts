@@ -4,7 +4,7 @@
 
 import type { PoolClient } from 'pg';
 import { query, withDatabaseTransaction } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type {
   CreatePermGroupInput,

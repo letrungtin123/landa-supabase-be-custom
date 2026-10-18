@@ -8,7 +8,7 @@ import { query } from '../../config/database.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { DashboardContentData, UpsertDashboardContentInput } from './dashboard-content.validator.js';
 
 // ── Types ──

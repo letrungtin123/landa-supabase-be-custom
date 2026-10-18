@@ -5,7 +5,7 @@
 
 import { query } from '../../config/database.js';
 import { invalidateUserBadgeCaches, invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 import {
   assertUserNotActiveDemoIframeAccount,

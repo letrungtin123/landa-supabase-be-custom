@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import {
   COURSE_COMPONENT_TYPES,
   isCourseComponentType,

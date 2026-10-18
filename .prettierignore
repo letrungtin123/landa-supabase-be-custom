@@ -25,3 +25,12 @@
 !/src/config/
 /src/config/*
 !/src/config/pm2-ecosystem.test.ts
+!/src/middleware/
+/src/middleware/*
+!/src/middleware/error-handler.test.ts
+!/src/middleware/request-body-errors.test.ts
+!/src/utils/
+/src/utils/*
+!/src/utils/errors.ts
+!/src/utils/errors.test.ts
+!/src/utils/response.test.ts

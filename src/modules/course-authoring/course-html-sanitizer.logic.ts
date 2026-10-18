@@ -1,5 +1,5 @@
 import sanitizeHtml from 'sanitize-html';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 const COURSE_HTML_MAX_LENGTH = 250_000;
 const COURSE_HTML_MAX_ROWS = 100;

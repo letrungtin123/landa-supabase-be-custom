@@ -90,7 +90,7 @@ test('a date range or chart window the checks refuse is a 400 with a plain messa
   for (const [handler, query, message] of cases) {
     const res = await respond(handler, fakeRequest(query));
     assert.equal(res.statusCode, 400, JSON.stringify(query));
-    assert.deepEqual(res.body, { success: false, message }, JSON.stringify(query));
+    assert.deepEqual(res.body, { success: false, message, code: 'BAD_REQUEST' }, JSON.stringify(query));
   }
 });
 
@@ -133,7 +133,7 @@ test('the learner list needs a status (the dashboard always sends one); a missin
   for (const query of missing) {
     const res = await respond(ctrl.getLearners, fakeRequest(query));
     assert.equal(res.statusCode, 400);
-    assert.deepEqual(res.body, { success: false, message: 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.' });
+    assert.deepEqual(res.body, { success: false, message: 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.', code: 'BAD_REQUEST' });
   }
   assert.equal(statements.length, 0, 'nothing was read');
 

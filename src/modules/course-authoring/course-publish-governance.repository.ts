@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { AuthUser } from '../../types/express.js';
 import {
   buildCoursePublishCandidateIdentity,

@@ -5,6 +5,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { authorize, checkPermission, hasPermission } from '../../middleware/authorize.js';
 import { requireTenantModule } from '../../middleware/require-tenant-module.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
+import { sendError } from '../../utils/response.js';
 import * as controller from './news.controller.js';
 
 const router = Router();
@@ -14,23 +15,23 @@ const learnerFeatureGate = requireTenantModule('news');
 const managerFeatureGate = requireTenantModule('news', { superadminBypass: true });
 
 function managers(req: Request, res: Response, next: NextFunction): void {
-  if (!req.user) { res.status(401).json({ success: false, message: 'Chưa xác thực' }); return; }
+  if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
   if (!['staff', 'superuser', 'superadmin'].includes(req.user.role)) {
-    res.status(403).json({ success: false, message: 'Không có quyền quản lý Bảng tin' });
+    sendError(res, 'Không có quyền quản lý Bảng tin', 403);
     return;
   }
   next();
 }
 
 async function checkNewsAssetWritePermission(req: Request, res: Response, next: NextFunction): Promise<void> {
-  if (!req.user) { res.status(401).json({ success: false, message: 'Chưa xác thực' }); return; }
+  if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
   try {
     const subject = { id: req.user.id, tenantId: req.user.tenantId, role: req.user.role };
     if (await hasPermission(subject, 'news', 'can_add') || await hasPermission(subject, 'news', 'can_edit')) {
       next();
       return;
     }
-    res.status(403).json({ success: false, message: 'Không có quyền tải ảnh Bảng tin' });
+    sendError(res, 'Không có quyền tải ảnh Bảng tin', 403);
   } catch (error) { next(error); }
 }
 

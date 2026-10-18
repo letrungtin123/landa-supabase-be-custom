@@ -15,6 +15,7 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { createClient } from '@supabase/supabase-js';
 import { env } from '../../config/env.js';
+import { sendError } from '../../utils/response.js';
 
 const BUCKET = 'landa-storage';
 
@@ -81,6 +82,12 @@ function normalizeIfRangeHeader(value: string | string[] | undefined): string | 
   const ifRange = value?.trim();
   if (!ifRange || ifRange.length > MAX_IF_RANGE_HEADER_LENGTH) return null;
   return ifRange;
+}
+
+/** Storage answered an error: its 404 stays a 404, anything else is a 502. */
+function sendUpstreamRefusal(res: Response, upstreamStatus: number): void {
+  if (upstreamStatus === 404) sendError(res, 'File not found', 404);
+  else sendError(res, 'Upstream error', 502);
 }
 
 function rejectInvalidRange(res: Response, contentRange = 'bytes */*'): void {
@@ -169,7 +176,7 @@ export function createStorageProxyRouter(options: StorageProxyOptions): Router {
         storagePath.includes('//') ||
         /[<>"|?*]/.test(storagePath)
       ) {
-        res.status(400).json({ success: false, message: 'Invalid path' });
+        sendError(res, 'Invalid path', 400);
         return;
       }
 
@@ -205,10 +212,7 @@ export function createStorageProxyRouter(options: StorageProxyOptions): Router {
 
         if (!upstreamRes.ok && upstreamRes.status !== 206) {
           discardBody(upstreamRes);
-          res.status(upstreamRes.status === 404 ? 404 : 502).json({
-            success: false,
-            message: upstreamRes.status === 404 ? 'File not found' : 'Upstream error',
-          });
+          sendUpstreamRefusal(res, upstreamRes.status);
           return;
         }
 
@@ -249,10 +253,7 @@ export function createStorageProxyRouter(options: StorageProxyOptions): Router {
 
       if (!upstreamRes.ok) {
         discardBody(upstreamRes);
-        res.status(upstreamRes.status === 404 ? 404 : 502).json({
-          success: false,
-          message: upstreamRes.status === 404 ? 'File not found' : 'Upstream error',
-        });
+        sendUpstreamRefusal(res, upstreamRes.status);
         return;
       }
 
@@ -307,13 +308,13 @@ export function createStorageProxyRouter(options: StorageProxyOptions): Router {
         || (err instanceof Error && err.cause instanceof UpstreamHeadersTimeoutError)
         || (err as { name?: string })?.name === 'UpstreamHeadersTimeoutError') {
         console.warn('[Storage Proxy] Storage did not answer in time');
-        if (!res.headersSent) res.status(502).json({ success: false, message: 'Upstream error' });
+        if (!res.headersSent) sendError(res, 'Upstream error', 502);
         return;
       }
       if (res.destroyed || res.writableEnded) return; // the client left before Storage answered
       console.error('[Storage Proxy] Error:', err);
       if (!res.headersSent) {
-        res.status(500).json({ success: false, message: 'Internal error' });
+        sendError(res, 'Internal error', 500);
       }
     }
   });

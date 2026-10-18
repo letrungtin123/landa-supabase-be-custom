@@ -102,7 +102,7 @@ test('small files are streamed with their headers; missing files stay 404', asyn
 
     const missing = await fetch(`${api.url}/tenant-a/missing.png`);
     assert.equal(missing.status, 404);
-    assert.deepEqual(await missing.json(), { success: false, message: 'File not found' });
+    assert.deepEqual(await missing.json(), { success: false, message: 'File not found', code: 'NOT_FOUND' });
 
     const head = await fetch(`${api.url}/tenant-a/avatars/avatar.png`, { method: 'HEAD' });
     assert.equal(head.status, 200);
@@ -150,7 +150,7 @@ test('Storage that never starts answering gets a 502 after the headers timeout',
     const startedAt = performance.now();
     const response = await fetch(`${api.url}/tenant-a/hang.png`);
     assert.equal(response.status, 502);
-    assert.deepEqual(await response.json(), { success: false, message: 'Upstream error' });
+    assert.deepEqual(await response.json(), { success: false, message: 'Upstream error', code: 'BAD_GATEWAY' });
     assert.ok(performance.now() - startedAt < 2_000);
   } finally {
     await api.close();

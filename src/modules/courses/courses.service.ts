@@ -8,7 +8,7 @@ import {
   invalidateCourseReadCaches,
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { assertCourseBelongsToTenant } from './course-access.service.js';
 import { classifyCourseMentorLogoOwnership } from './course-mentor-logo-ownership.logic.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';

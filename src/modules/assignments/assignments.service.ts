@@ -16,7 +16,7 @@ import {
   uploadFile,
   type StorageObjectStream,
 } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { isLearnerRole } from '../../types/index.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';

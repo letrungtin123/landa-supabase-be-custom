@@ -15,7 +15,7 @@ import {
   invalidateCourseReadCaches,
 } from '../../config/cache-invalidation.js';
 import { buildStoragePath, downloadFileBuffer, getPublicUrl, uploadFile, deleteFiles, extractStoragePath } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { COURSE_AUTHOR_NOTES_KEY, withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import {

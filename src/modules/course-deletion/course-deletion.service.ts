@@ -10,7 +10,7 @@ import {
 } from '../../config/cache-invalidation.js';
 import { extractStoragePath } from '../../config/storage.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import {
   deleteStorageManifest,
   registerStorageManifestPaths,

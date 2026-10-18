@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Request, Response } from 'express';
-import { AppError } from '../middleware/error-handler.js';
+import { AppError } from './errors.js';
 import {
   TENANT_DATA_LIMIT_REACHED_CODE,
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
@@ -27,6 +27,17 @@ test('AppError keeps its message, status and code', () => {
   const { req, res, out } = capture();
   sendClientError(req, res, new AppError('Bot không tồn tại', 404, 'BOT_NOT_FOUND'), 'Test');
   assert.deepEqual(out, { status: 404, body: { success: false, message: 'Bot không tồn tại', code: 'BOT_NOT_FOUND' } });
+});
+
+test('AppError without a code gets the code of its status, message and status unchanged', () => {
+  for (const [status, code] of [[400, 'BAD_REQUEST'], [403, 'FORBIDDEN'], [404, 'NOT_FOUND'], [409, 'CONFLICT'], [503, 'SERVICE_UNAVAILABLE']] as const) {
+    const { req, res, out } = capture();
+    sendClientError(req, res, new AppError('Khóa học không tồn tại', status), 'Test');
+    assert.deepEqual(out, { status, body: { success: false, message: 'Khóa học không tồn tại', code } });
+  }
+  const { req, res, out } = capture();
+  sendClientError(req, res, new AppError('Dữ liệu không hợp lệ', 400, ''), 'Test');
+  assert.deepEqual(out.body, { success: false, message: 'Dữ liệu không hợp lệ', code: 'BAD_REQUEST' });
 });
 
 test('database, storage and provider errors become one plain message in the request language', (t) => {

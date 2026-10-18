@@ -3,7 +3,7 @@ import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/a
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
 import { generateOTT } from '../auth/auth.service.js';
 import type { ReplaceDemoLoginAccountsInput, UpdateDemoLoginConfigInput } from './demo-login.validator.js';

@@ -7,7 +7,7 @@ import { getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
 
 const MAX_ACTIVE = 6;
