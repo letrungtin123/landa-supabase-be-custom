@@ -152,16 +152,6 @@ const EXPECTED_CASES: Case[] = [
       message: TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
     }),
   },
-  {
-    name: 'JSON body over the route limit',
-    error: () => errorOf('request entity too large', { type: 'entity.too.large', status: 413 }),
-    status: 413,
-    legacy: () => ({
-      success: false,
-      code: 'PAYLOAD_TOO_LARGE',
-      message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.',
-    }),
-  },
 ];
 
 /** Unexpected errors outside production: the raw message and the stack. */
@@ -178,13 +168,6 @@ const UNEXPECTED_CASES: Case[] = [
     error: () => errorOf('duplicate key value violates unique constraint', { code: '23505' }),
     status: 500,
     legacy: error => ({ success: false, message: 'duplicate key value violates unique constraint', stack: stackOf(error) }),
-    added: 'INTERNAL_ERROR',
-  },
-  {
-    name: 'malformed JSON body (body-parser 400, answered 500 as before)',
-    error: () => errorOf('Unexpected token } in JSON', { type: 'entity.parse.failed', status: 400 }),
-    status: 500,
-    legacy: error => ({ success: false, message: 'Unexpected token } in JSON', stack: stackOf(error) }),
     added: 'INTERNAL_ERROR',
   },
   {
@@ -205,7 +188,7 @@ const UNEXPECTED_CASES: Case[] = [
 
 const PRODUCTION_MESSAGE = 'Lỗi hệ thống, vui lòng thử lại sau';
 
-function respond(error: unknown): { status?: number; body?: Body } {
+function respond(error: unknown, request: Record<string, unknown> = {}): { status?: number; body?: Body } {
   const out: { status?: number; body?: Body } = {};
   const res = {
     status(code: number) {
@@ -218,7 +201,7 @@ function respond(error: unknown): { status?: number; body?: Body } {
       return this;
     },
   } as unknown as Response;
-  const req = { get: () => undefined } as unknown as Request;
+  const req = { get: () => undefined, ...request } as unknown as Request;
   errorHandler(error as Error, req, res, (() => undefined) as NextFunction);
   return out;
 }
@@ -286,3 +269,116 @@ for (const item of UNEXPECTED_CASES) {
     assert.equal(logged.length, 1);
   });
 }
+
+// Request bodies the JSON parser refuses. Deliberately changed (security
+// review of wave 1): a malformed body, an unsupported encoding or charset and
+// a cut-off body used to be an unexpected 500 whose log line (and, outside
+// production, whose answer) carried the parse message, which quotes the body.
+// Now each is a 4xx with its own code and a fixed message, logged by type,
+// status, method and path only. Too large was already a 413 and keeps its body.
+const SECRET = 'FAKE-SECRET-91b2';
+
+const REQUEST_BODY_CASES: Array<{
+  type: string;
+  status: number;
+  body: Body;
+  before: { status: number; body: 'unexpected 500' | Body };
+}> = [
+  {
+    type: 'entity.parse.failed',
+    status: 400,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên không đúng định dạng. Vui lòng kiểm tra lại và thử lại.',
+      code: 'INVALID_JSON',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+  {
+    type: 'entity.too.large',
+    status: 413,
+    body: { success: false, code: 'PAYLOAD_TOO_LARGE', message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.' },
+    before: {
+      status: 413,
+      body: { success: false, code: 'PAYLOAD_TOO_LARGE', message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.' },
+    },
+  },
+  {
+    type: 'encoding.unsupported',
+    status: 415,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên có định dạng chưa được hỗ trợ. Vui lòng thử lại.',
+      code: 'UNSUPPORTED_ENCODING',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+  {
+    type: 'charset.unsupported',
+    status: 415,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên có định dạng chưa được hỗ trợ. Vui lòng thử lại.',
+      code: 'UNSUPPORTED_ENCODING',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+  {
+    type: 'request.aborted',
+    status: 400,
+    body: {
+      success: false,
+      message: 'Yêu cầu bị gián đoạn trước khi gửi xong. Vui lòng thử lại.',
+      code: 'REQUEST_ABORTED',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+];
+
+for (const item of REQUEST_BODY_CASES) {
+  test(`error handler: request body refused (${item.type})`, t => {
+    const errors = quietConsole(t);
+    const warnings: unknown[][] = [];
+    t.mock.method(console, 'warn', (...args: unknown[]) => {
+      warnings.push(args);
+    });
+    const req = { method: 'POST', originalUrl: `/api/auth/login?token=${SECRET}`, get: () => undefined };
+    for (const run of [(fn: () => unknown) => fn(), inProduction]) {
+      // What body-parser throws: the message and `body` quote the request body.
+      const error = errorOf(`Unexpected token 'F', ..."password":${SECRET}"... is not valid JSON`, {
+        type: item.type,
+        status: item.status,
+        statusCode: item.status,
+        expose: true,
+        body: `{"password":${SECRET}}`,
+      });
+      const out = run(() => respond(error, req)) as ReturnType<typeof respond>;
+      assert.equal(out.status, item.status);
+      assert.deepEqual(out.body, item.body);
+      if (item.before.body !== 'unexpected 500') assert.deepEqual(out.body, item.before.body);
+    }
+    assert.equal(errors.length, 0, 'not logged as an unexpected error');
+    assert.equal(warnings.length, 2);
+    for (const [line] of warnings) {
+      assert.equal(typeof line, 'string');
+      assert.doesNotMatch(String(line), /FAKE-SECRET|password|Unexpected|valid JSON/);
+      assert.deepEqual(JSON.parse(String(line).replace(/^\[RequestBody\] /, '')), {
+        event: 'request_body_refused',
+        type: item.type,
+        status: item.status,
+        method: 'POST',
+        path: '/api/auth/login',
+      });
+    }
+  });
+}
+
+test('error handler: an error type the body parser does not set is still an unexpected 500', t => {
+  const logged = quietConsole(t);
+  for (const type of ['constructor', 'toString', 'stream.encoding.set', 'entity.verify.failed']) {
+    const out = inProduction(() => respond(errorOf('x', { type })));
+    assert.equal(out.status, 500, type);
+    assert.deepEqual(out.body, { success: false, message: PRODUCTION_MESSAGE, code: 'INTERNAL_ERROR' });
+  }
+  assert.equal(logged.length, 4);
+});
