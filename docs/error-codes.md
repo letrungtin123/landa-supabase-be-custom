@@ -214,7 +214,7 @@ some of these codes with status 400 for invalid input.
 | `COURSE_PUBLISH_ASSIGNMENT_FORBIDDEN` | 403 (400) | Not allowed to assign reviewers (400: invalid assignment id). |
 | `COURSE_PUBLISH_ASSIGNMENT_TRANSITION_INVALID` | 409 | The reviewer assignment cannot move to that state. |
 
-### Other modules of this list
+### Other modules
 
 assignments, audit-logs, badges, branding (and dashboard content), course-categories,
 course-deletion, courses, deletion, demo-login,
