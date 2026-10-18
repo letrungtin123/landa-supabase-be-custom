@@ -1,5 +1,6 @@
 ﻿import type { Request, Response, NextFunction } from 'express';
-import { unlink } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
+import { removeTempUploadFiles } from '../../utils/temp-upload-files.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import type { AuditChange } from '../audit-logs/audit-event.contract.js';
@@ -24,19 +25,9 @@ function files(req: Request): Express.Multer.File[] {
   return (req.files as Express.Multer.File[] | undefined) || [];
 }
 
-const TEMP_UPLOAD_UNLINK_RETRY_MS = 1_000;
-
 /** Removes the temp files of a disk upload; one retry for a file Windows still holds open. */
 export async function removeTempUploads(uploaded: Express.Multer.File[]): Promise<void> {
-  await Promise.all(uploaded.filter((item) => item.path).map(async (item) => {
-    try {
-      await unlink(item.path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      await new Promise((resolve) => setTimeout(resolve, TEMP_UPLOAD_UNLINK_RETRY_MS));
-      await unlink(item.path).catch(() => console.warn('[Assignments] Could not remove a temp upload file'));
-    }
-  }));
+  await removeTempUploadFiles(uploaded, 'Assignments');
 }
 
 function file(req: Request): Express.Multer.File | undefined {
@@ -242,13 +233,35 @@ export async function submitAssignment(req: Request, res: Response, next: NextFu
   }
 }
 
+/**
+ * Streams the file from Storage to the client (same headers as before).
+ * The Storage request is aborted when the client goes away; a body cut
+ * midway ends the connection instead of pretending the file is complete.
+ */
 export async function downloadFile(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const clientGone = new AbortController();
+  const onClose = () => clientGone.abort(new Error('assignment_download_client_closed'));
+  res.once('close', onClose);
   try {
-    const file = await service.getAssignmentFileForDownload(req.params.fileId, req.user!);
+    const file = await service.getAssignmentFileForDownload(req.params.fileId, req.user!, { signal: clientGone.signal });
     const encoded = encodeURIComponent(file.originalName);
     res.setHeader('Content-Type', file.contentType);
-    res.setHeader('Content-Length', file.buffer.length);
+    if (file.contentLength !== null) res.setHeader('Content-Length', file.contentLength);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encoded}`);
-    res.send(file.buffer);
-  } catch (err) { next(err); }
+    if (req.method === 'HEAD') {
+      file.body.destroy();
+      res.end();
+      return;
+    }
+    try {
+      await pipeline(file.body, res);
+    } catch {
+      // The client left or Storage failed mid-body; pipeline destroyed both streams.
+    }
+  } catch (err) {
+    if (res.headersSent || res.destroyed) return;
+    next(err);
+  } finally {
+    res.off('close', onClose);
+  }
 }

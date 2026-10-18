@@ -10,10 +10,11 @@ import {
   buildFileName,
   buildStoragePath,
   deleteFile,
-  downloadFileBuffer,
   fixMulterFilename,
+  openStorageObjectStream,
   uploadCourseAssetFileFromPath,
   uploadFile,
+  type StorageObjectStream,
 } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
@@ -1572,7 +1573,44 @@ export async function listSubmissionFeedbackHistory(submissionId: string, tenant
   }));
 }
 
-export async function getAssignmentFileForDownload(fileId: string, user: AuthUser) {
+export interface AssignmentFileDownload {
+  body: StorageObjectStream['body'];
+  contentLength: number | null;
+  contentType: string;
+  originalName: string;
+}
+
+export interface AssignmentFileDownloadOptions {
+  /** Aborts the Storage request (the controller ties it to the client connection). */
+  signal?: AbortSignal;
+  openObject?: typeof openStorageObjectStream;
+}
+
+async function openAssignmentFile(
+  storagePath: string,
+  mimeType: string | null,
+  originalName: string,
+  options: AssignmentFileDownloadOptions,
+): Promise<AssignmentFileDownload> {
+  const opened = await (options.openObject ?? openStorageObjectStream)(storagePath, { signal: options.signal });
+  return {
+    body: opened.body,
+    contentLength: opened.contentLength,
+    contentType: mimeType || opened.contentType || 'application/octet-stream',
+    originalName,
+  };
+}
+
+/**
+ * An assignment attachment or submission/feedback file, after the access
+ * check, as a stream from Storage: a download is never held whole in the
+ * heap (many learners download at a deadline).
+ */
+export async function getAssignmentFileForDownload(
+  fileId: string,
+  user: AuthUser,
+  options: AssignmentFileDownloadOptions = {},
+): Promise<AssignmentFileDownload> {
   const attachment = await query<{
     assignment_id: string;
     tenant_id: string;
@@ -1617,12 +1655,7 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
       throw new AppError('Khong co quyen tai file nay', 403);
     }
 
-    const downloaded = await downloadFileBuffer(file.storage_path);
-    return {
-      buffer: downloaded.buffer,
-      contentType: file.mime_type || downloaded.contentType || 'application/octet-stream',
-      originalName: file.original_name || 'file',
-    };
+    return openAssignmentFile(file.storage_path, file.mime_type, file.original_name || 'file', options);
   }
 
   const result = await query<{
@@ -1657,10 +1690,5 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
     throw new AppError('Khong co quyen tai file nay', 403);
   }
 
-  const downloaded = await downloadFileBuffer(file.storage_path);
-  return {
-    buffer: downloaded.buffer,
-    contentType: file.mime_type || downloaded.contentType || 'application/octet-stream',
-    originalName: file.original_name,
-  };
+  return openAssignmentFile(file.storage_path, file.mime_type, file.original_name, options);
 }

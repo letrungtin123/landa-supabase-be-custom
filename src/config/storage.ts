@@ -120,12 +120,27 @@ export async function uploadFile(
   }
 }
 
+/** The `message` of a Storage API error body, else its text (bounded). */
+async function storageErrorDetail(response: globalThis.Response): Promise<string> {
+  const text = (await response.text().catch(() => '')).slice(0, 2_000);
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown };
+    if (typeof parsed?.message === 'string' && parsed.message) return parsed.message.slice(0, 300);
+  } catch { /* not JSON */ }
+  return text.slice(0, 300) || response.statusText;
+}
+
 /**
- * Upload a local temp file to Supabase Storage.
+ * Upload a local temp file to Supabase Storage, streamed from disk: a
+ * library document of up to 300 MB is never read whole into the heap.
  *
  * Supabase JS can keep Node file streams open on Windows in this runtime,
- * leaving multer temp files locked and the request unresolved. Read the temp
- * file into a Buffer and reuse the stable upload path used by memory uploads.
+ * leaving multer temp files locked and the request unresolved, so the SDK
+ * is not used here: the same request it sends for a Buffer (POST
+ * /object/<bucket>/<path>, x-upsert, cache-control max-age=3600, the file's
+ * content type) is sent with fetch, and the file handle is closed in every
+ * outcome so the caller can delete the temp file. Quota reservation and
+ * error handling are those of uploadFile(). An empty file uses uploadFile().
  */
 export async function uploadFileFromPath(
   storagePath: string,
@@ -133,8 +148,44 @@ export async function uploadFileFromPath(
   contentType: string,
   upsert = false,
 ): Promise<string> {
-  const buffer = await fs.readFile(filePath);
-  return uploadFile(storagePath, buffer, contentType, upsert);
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile()) throw new Error('Tệp tải lên tạm không hợp lệ.');
+  if (stat.size === 0) return uploadFile(storagePath, Buffer.alloc(0), contentType, upsert);
+
+  await ensureBucket();
+  const reservation = await reserveStorageUpload(storagePath, stat.size);
+  const fileStream = createReadStream(filePath);
+  try {
+    const response = await fetch(storageObjectUrl(STORAGE_BUCKET, storagePath), {
+      method: 'POST',
+      headers: {
+        ...privateStorageHeaders(contentType, stat.size),
+        'x-upsert': String(upsert),
+        'cache-control': 'max-age=3600',
+      },
+      body: Readable.toWeb(fileStream) as unknown as BodyInit,
+      // Node requires this for a streamed request body.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    if (!response.ok) {
+      throw new StorageProviderRejectedError(`[Storage] Upload failed (${storagePath}): ${await storageErrorDetail(response)}`);
+    }
+    await response.arrayBuffer().catch(() => undefined);
+
+    await commitStorageUpload(reservation, stat.size);
+    return storagePath;
+  } catch (error) {
+    if (error instanceof StorageProviderRejectedError) {
+      await releaseStorageUploadReservation(reservation)
+        .catch(() => flagStorageUploadForReconciliation(reservation));
+    } else {
+      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    fileStream.destroy();
+  }
 }
 
 function storageObjectUrl(bucket: string, storagePath: string): string {
@@ -357,6 +408,57 @@ export async function downloadFileBuffer(storagePath: string): Promise<{ buffer:
   return {
     buffer: Buffer.from(await data.arrayBuffer()),
     contentType: data.type || null,
+  };
+}
+
+export interface StorageObjectStream {
+  body: Readable;
+  contentType: string | null;
+  /** From the Storage answer; null when it sent none. */
+  contentLength: number | null;
+}
+
+/**
+ * Opens a file of the application bucket as a stream: the authenticated
+ * download downloadFileBuffer() makes, without holding the file in the
+ * heap. `signal` aborts the request, body included (callers tie it to the
+ * client connection). Storage must start answering within `headersTimeoutMs`
+ * (STORAGE_PROXY_HEADERS_TIMEOUT_MS); the body itself has no deadline. The
+ * body is asked for uncompressed so Content-Length is the file size.
+ */
+export async function openStorageObjectStream(
+  storagePath: string,
+  options: { signal?: AbortSignal; headersTimeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<StorageObjectStream> {
+  await ensureBucket();
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) forwardAbort();
+  else options.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const timer = setTimeout(
+    () => controller.abort(new Error('[Storage] Download did not start in time')),
+    options.headersTimeoutMs ?? env.STORAGE_PROXY_HEADERS_TIMEOUT_MS,
+  );
+  let response: globalThis.Response;
+  try {
+    response = await fetchImpl(storageObjectUrl(STORAGE_BUCKET, storagePath), {
+      headers: { ...privateStorageHeaders(), 'Accept-Encoding': 'identity' },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok || !response.body) {
+    const detail = await storageErrorDetail(response);
+    throw new Error(`[Storage] Download failed (${storagePath}): ${detail || 'No data'}`);
+  }
+  const rawLength = response.headers.get('content-length');
+  const contentLength = rawLength !== null && /^\d+$/.test(rawLength.trim()) ? Number(rawLength) : null;
+  return {
+    body: Readable.fromWeb(response.body as unknown as import('stream/web').ReadableStream),
+    contentType: response.headers.get('content-type') || null,
+    contentLength,
   };
 }
 
