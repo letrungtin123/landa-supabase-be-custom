@@ -2,7 +2,7 @@
 process.env.NODE_ENV = 'production';
 process.env.PGOPTIONS = '-c default_transaction_read_only=on';
 const {pool} = await import('../dist/config/database.js');
-const {decryptAiProviderKey} = await import('../dist/modules/ai-chatbot/ai-secret.service.js');
+const {decryptAiProviderKey} = await import('../dist/modules/ai-chatbot/ai-platform/ai-secret.service.js');
 const {spawn} = await import('node:child_process');
 const {randomUUID} = await import('node:crypto');
 try {
