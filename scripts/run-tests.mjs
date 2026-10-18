@@ -11,6 +11,9 @@
 //   so no suite reaches a real database, Redis, RabbitMQ, Storage or AI
 //   service. NODE_ENV is "test" unless set; "production" is refused (env.ts
 //   would load .env.production).
+// - No suite uses --test-force-exit: a test file must end on its own. Importing
+//   a module starts no timer or connection (src/config/import-side-effects.test.ts);
+//   a test that starts one stops it.
 //
 // Usage: npm test                     every suite
 //        npm test -- test:news ...    only these suites
@@ -76,6 +79,9 @@ async function readSuites() {
   const suites = new Map();
   for (const [name, command] of Object.entries(scripts)) {
     if (!name.startsWith('test:') || DATABASE_SUITES.has(name)) continue;
+    if (command.includes('--test-force-exit')) {
+      fail(`${name} uses --test-force-exit; the test files must end on their own (stop what the test started).`);
+    }
     const scripted = SCRIPTED_SUITES[name];
     const files = scripted
       ? (await scripted(root)).map(file => toPosix(path.relative(root, file)))
