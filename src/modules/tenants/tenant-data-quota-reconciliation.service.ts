@@ -329,6 +329,8 @@ async function finishReconciliation(
     await client.query('BEGIN');
     // The application pool stays at a short timeout for HTTP traffic. Only the
     // exact, fenced database baseline gets this longer transaction-local budget.
+    // With the delta ledger (SQL 20261018_1100) the finish function consumes
+    // exactly the unfolded deltas its per-relation snapshots already contain.
     await client.query(
       `SELECT set_config('statement_timeout', $1::text, true)`,
       [String(databaseSnapshotTimeoutMs)],
@@ -398,8 +400,10 @@ export async function reconcileTenantDataQuota(
     }
 
     // Yield between bounded batches and during graceful shutdown. The state
-    // remains reconciling (writes stay fail-closed), but another valid worker
-    // can resume immediately from the durable cursor.
+    // remains reconciling (content writes stay fail-closed; with SQL
+    // 20261018_1100 learner and sign-in writes continue and their deltas are
+    // folded on top of the baseline), but another valid worker can resume
+    // immediately from the durable cursor.
     await releaseClaim(tenantId, claimToken);
     ownsClaim = false;
     return 'yielded';

@@ -6,8 +6,14 @@
 // in landa-storage to compare the provider catalog with the local ledger.
 // ═══════════════════════════════════════════════════════════════
 
-import { pool, query } from '../config/database.js';
+import { getClient, pool, query } from '../config/database.js';
+import { env } from '../config/env.js';
 import { TENANT_STORAGE_BUCKETS } from '../config/storage.js';
+import {
+  createTenantDataQuotaLedgerRepository,
+  type TenantDataQuotaLedgerSummary,
+} from '../modules/tenants/tenant-data-quota-ledger.repository.js';
+import { effectiveDatabaseBytesSql } from '../modules/tenants/tenant-data-quota-ledger.logic.js';
 
 type Mode = 'fast' | 'full-parity';
 type HealthStatus = 'ready' | 'degraded' | 'blocked';
@@ -29,6 +35,14 @@ type SchemaRow = {
   storage_ledger_ready: boolean;
   worker_heartbeat_ready: boolean;
   reconciliation_queue_ready: boolean;
+  delta_ledger_ready: boolean;
+  trigger_appends_deltas: boolean;
+};
+
+type DatabaseParityRow = {
+  tenant_name: string;
+  counted_bytes: string;
+  actual_bytes: string;
 };
 
 type CoverageRow = {
@@ -119,12 +133,20 @@ type HealthReport = {
     latestHeartbeatAt: string | null;
     latestState: string | null;
   };
+  /** Lock-free database deltas (SQL 20261018_1100): usage = folded counter + unfolded deltas. */
+  deltaLedger: {
+    installed: boolean;
+    triggerAppendsDeltas: boolean;
+    summary: TenantDataQuotaLedgerSummary | null;
+  };
   fullParity?: {
     mismatchedTenants: FullParityRow[];
     platformObjects: string;
     platformBytes: string;
     unclassifiedObjects: string;
     unclassifiedBytes: string;
+    /** Enforced tenants whose counted database bytes differ from a recount at the same snapshot. */
+    databaseDifferences: DatabaseParityRow[];
   };
   blockers: string[];
   warnings: string[];
@@ -198,6 +220,10 @@ function printText(report: HealthReport): void {
   console.log(`[tenant-data-quota] Coverage: direct=${report.coverage.direct_relations}, protected=${report.coverage.fully_protected_relations}, missing-triggers=${report.coverage.missing_trigger_relations}, unclassified=${report.coverage.unclassified_relations}, inactive-specs=${report.coverage.inactive_ownership_specs}.`);
   console.log(`[tenant-data-quota] Reconciliation queue: ${report.reconciliation.queueReady ? `due=${report.reconciliation.dueTenants ?? '0'}, active-claims=${report.reconciliation.activeClaims}, oldest=${report.reconciliation.oldestDueAt ?? '—'}` : 'chưa có SQL queue/finalization fence'}.`);
   console.log(`[tenant-data-quota] Worker heartbeat: ${report.worker.schemaReady ? `${report.worker.latestState ?? 'chưa có'} @ ${report.worker.latestHeartbeatAt ?? '—'}` : 'chưa có SQL heartbeat'}.`);
+  const ledger = report.deltaLedger.summary;
+  console.log(`[tenant-data-quota] Delta ledger: ${report.deltaLedger.installed && ledger
+    ? `pending=${ledger.pendingDeltas} deltas, tenants=${ledger.pendingTenants}, bytes=${ledger.pendingBytes}, oldest=${ledger.oldestPendingAgeSeconds ?? '—'}s`
+    : 'chưa có SQL delta ledger (trigger cập nhật usage trực tiếp)'}.`);
   for (const message of report.blockers) console.error(`[tenant-data-quota] BỊ CHẶN: ${message}`);
   for (const message of report.warnings) console.warn(`[tenant-data-quota] CẢNH BÁO: ${message}`);
   for (const message of report.information) console.log(`[tenant-data-quota] THÔNG TIN: ${message}`);
@@ -272,6 +298,36 @@ async function loadFullParity(): Promise<{ mismatchedTenants: FullParityRow[]; c
   };
 }
 
+/**
+ * Counted database bytes (folded counter + unfolded deltas) against a recount,
+ * both read from ONE read-only snapshot so concurrent writes cannot skew them.
+ * Reads every tenant row: maintenance-window only, like the Storage parity.
+ */
+async function loadDatabaseParity(ledgerInstalled: boolean): Promise<DatabaseParityRow[]> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await client.query(`SELECT set_config('statement_timeout', $1::text, true)`,
+      [String(env.TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS)]);
+    const result = await client.query<DatabaseParityRow>(
+      `SELECT tenant.name AS tenant_name, counted.bytes::text AS counted_bytes, actual.bytes::text AS actual_bytes
+       FROM public.tenants tenant
+       JOIN public.tenant_data_quota_usage usage ON usage.tenant_id = tenant.id AND usage.state = 'enforced'
+       CROSS JOIN LATERAL (SELECT ${effectiveDatabaseBytesSql('usage', 'tenant.id', ledgerInstalled)} AS bytes) counted
+       CROSS JOIN LATERAL (SELECT public.tenant_data_quota_backfill_direct_database_bytes(tenant.id) AS bytes) actual
+       WHERE counted.bytes <> actual.bytes
+       ORDER BY tenant.name`,
+    );
+    await client.query('COMMIT');
+    return result.rows;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
   const availabilityResult = await query<SchemaRow>(
@@ -287,7 +343,15 @@ async function main(): Promise<void> {
             to_regclass('public.tenant_data_quota_reconciliation_queue') IS NOT NULL
               AND to_regprocedure('public.tenant_data_quota_prepare_reconciliation_finalization(uuid,uuid,integer)') IS NOT NULL
               AND to_regprocedure('public.tenant_data_quota_finish_reconciliation(uuid,uuid,integer)') IS NOT NULL
-              AS reconciliation_queue_ready`,
+              AS reconciliation_queue_ready,
+            to_regclass('public.tenant_data_quota_database_deltas') IS NOT NULL
+              AND to_regprocedure('public.tenant_data_quota_fold_database_deltas(integer)') IS NOT NULL
+              AND to_regprocedure('public.tenant_data_quota_pending_database_bytes(uuid)') IS NOT NULL
+              AS delta_ledger_ready,
+            COALESCE((SELECT position('tenant_data_quota_database_deltas' IN p.prosrc) > 0
+                      FROM pg_proc p
+                      WHERE p.oid = to_regprocedure('public.tenant_data_quota_apply_direct_delta()')), false)
+              AS trigger_appends_deltas`,
   );
   const availability = availabilityResult.rows[0];
   const blockers: string[] = [];
@@ -312,6 +376,7 @@ async function main(): Promise<void> {
         activeClaims: '0',
       },
       worker: { required: options.requireWorkerHeartbeat, schemaReady: false, activeWorkers: null, latestHeartbeatAt: null, latestState: null },
+      deltaLedger: { installed: false, triggerAppendsDeltas: false, summary: null },
       blockers: ['Thiếu bảng quota nền tảng. Không được tin số liệu hoặc bật enforcement mới.'],
       warnings,
       information,
@@ -460,16 +525,41 @@ async function main(): Promise<void> {
     if (heartbeat?.latest_error) information.push('Worker có lưu lỗi gần nhất; xem dữ liệu heartbeat để chẩn đoán, không hiển thị lỗi nhạy cảm trong UI.');
   }
 
+  // Database usage of a tenant is its folded counter plus its unfolded deltas.
+  const deltaLedger: HealthReport['deltaLedger'] = {
+    installed: availability.delta_ledger_ready,
+    triggerAppendsDeltas: availability.trigger_appends_deltas,
+    summary: null,
+  };
+  if (deltaLedger.installed !== deltaLedger.triggerAppendsDeltas) {
+    blockers.push('Bảng delta quota và trigger quota không cùng phiên bản SQL (20261018_1100 chạy dở hoặc rollback dở).');
+  }
+  if (deltaLedger.installed) {
+    deltaLedger.summary = await createTenantDataQuotaLedgerRepository({ query }).summary();
+    const oldestAge = deltaLedger.summary.oldestPendingAgeSeconds;
+    if (oldestAge !== null && oldestAge > options.maxWorkerHeartbeatAgeSeconds) {
+      warnings.push(`Delta quota cũ nhất chưa được cộng vào usage sau ${oldestAge} giây: worker quota không gộp kịp hoặc đang dừng.`);
+    }
+    information.push(`Usage database = bộ đếm đã gộp + ${deltaLedger.summary.pendingBytes} bytes delta chưa gộp (${deltaLedger.summary.pendingDeltas} dòng); giới hạn luôn tính cả phần chưa gộp.`);
+  }
+
   let fullParity: HealthReport['fullParity'];
   if (options.mode === 'full-parity') {
     const full = await loadFullParity();
+    const databaseDifferences = await loadDatabaseParity(deltaLedger.installed);
     fullParity = {
       mismatchedTenants: full.mismatchedTenants,
       platformObjects: full.classification.platform_objects,
       platformBytes: full.classification.platform_bytes,
       unclassifiedObjects: full.classification.unclassified_objects,
       unclassifiedBytes: full.classification.unclassified_bytes,
+      databaseDifferences,
     };
+    if (databaseDifferences.length > 0) {
+      // Information only: the trigger measures some new rows a few bytes smaller than
+      // a later recount (also before 20261018_1100); a reconciliation re-baselines them.
+      information.push(`Database bytes (đã gộp + chưa gộp) khác số đếm lại ở ${databaseDifferences.length} tenant enforced; xem fullParity.databaseDifferences.`);
+    }
     if (full.mismatchedTenants.length > 0) blockers.push('Ledger Storage không khớp storage.objects cho ít nhất một tenant.');
     if (asCount(full.classification.unclassified_objects) > 0) {
       blockers.push('Có object Storage không thuộc tenant hoặc prefix platform đã được phê duyệt; không thể xác nhận quota đầy đủ.');
@@ -502,6 +592,7 @@ async function main(): Promise<void> {
       activeClaims,
     },
     worker,
+    deltaLedger,
     ...(fullParity ? { fullParity } : {}),
     blockers,
     warnings,

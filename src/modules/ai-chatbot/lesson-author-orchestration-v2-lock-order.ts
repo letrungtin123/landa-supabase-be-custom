@@ -13,6 +13,8 @@ import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-ge
  *     tenant_data_quota_usage FOR UPDATE — tenant_data_quota_apply_direct_delta(),
  *     an AFTER STATEMENT trigger on every quota-registered table whose physical
  *     row size changed (course-scoped V2 tables and the AI token tables).
+ *     SQL 20261018_1100 removes Q: the trigger then only appends a delta row
+ *     without any tenant lock. Keep the order below until it runs everywhere.
  *
  * A single write statement therefore always acquires: own row -> C -> Q.
  * Every V2 transaction must keep that order for its whole lifetime:

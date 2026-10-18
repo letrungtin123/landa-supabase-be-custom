@@ -19,6 +19,7 @@ import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-h
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
 import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';
 import { getTenantDataQuota } from './tenant-data-quota.service.js';
+import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';
 import { removeAiSecretsFromTenantSettings } from '../ai-chatbot/ai-settings.service.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
@@ -68,10 +69,10 @@ export async function listTenants(queryParams: Record<string, unknown>) {
   }
 
   params.push(pageSize, offset);
-  const result = await query<any>(
-    `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
+  const result = await readWithPendingDatabaseBytes<any>(
+    (databaseBytes) => `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
             t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
-            COALESCE(quota.database_used_bytes, 0)::bigint::text AS database_used_bytes,
+            ${databaseBytes('quota', 't.id')}::bigint::text AS database_used_bytes,
             COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
             COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
             COALESCE(quota.state, 'initializing') AS data_quota_state,
@@ -116,10 +117,10 @@ export async function listTenants(queryParams: Record<string, unknown>) {
  * Chi tiết tenant theo ID.
  */
 export async function getTenantById(id: string) {
-  const result = await query(
-    `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
+  const result = await readWithPendingDatabaseBytes(
+    (databaseBytes) => `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
             t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
-            COALESCE(quota.database_used_bytes, 0)::bigint::text AS database_used_bytes,
+            ${databaseBytes('quota', 't.id')}::bigint::text AS database_used_bytes,
             COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
             COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
             COALESCE(quota.state, 'initializing') AS data_quota_state,

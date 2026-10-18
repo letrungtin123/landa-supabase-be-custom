@@ -418,6 +418,12 @@ export const env = {
   TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS', 600_000, 30_000, 600_000),
   TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
   TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
+  // Folding of the lock-free database deltas (SQL 20261018_1100) by the quota
+  // worker leader. Inactive until that SQL exists. Unfolded deltas are always
+  // counted by the limit check; the interval only bounds how long they wait.
+  TENANT_DATA_QUOTA_FOLD_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_INTERVAL_MS', 2_000, 500, 60_000),
+  TENANT_DATA_QUOTA_FOLD_BATCH_SIZE: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_BATCH_SIZE', 5_000, 100, 100_000),
+  TENANT_DATA_QUOTA_FOLD_MAX_BATCHES_PER_TICK: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_MAX_BATCHES_PER_TICK', 20, 1, 1_000),
 
   // Durable Knowledge Base operations. Every API replica may run this worker:
   // PostgreSQL SKIP LOCKED + lease tokens make claims safe across replicas.

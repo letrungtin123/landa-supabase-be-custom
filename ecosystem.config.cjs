@@ -130,7 +130,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TENANT_DATA_QUOTA_WORKER_ENABLED: "true",
-        // The session lock connection, one cycle and the heartbeat.
+        // The session lock connection, one cycle, and the heartbeat and the
+        // delta fold, which take turns (each runs short single queries).
         DB_POOL_MAX: "3"
       },
       env_production: {

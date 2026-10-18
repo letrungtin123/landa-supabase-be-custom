@@ -19,6 +19,11 @@ import {
   type TenantDataQuotaWorkerHeartbeatState,
   type TenantDataQuotaReconciliationOptions,
 } from '../modules/tenants/tenant-data-quota-reconciliation.service.js';
+import {
+  assertTenantDataQuotaFoldOptions,
+  type TenantDataQuotaFoldOptions,
+} from '../modules/tenants/tenant-data-quota-ledger.logic.js';
+import { foldTenantDataQuotaDeltas } from '../modules/tenants/tenant-data-quota-ledger.service.js';
 
 const WORKER_LOCK_NAME = 'landa:tenant-data-quota-worker:v1';
 const WORKER_NAME = 'landa-tenant-data-quota-worker';
@@ -41,6 +46,10 @@ let latestCycle: TenantDataQuotaCycleResult = {
 let heartbeatSchemaMissingLogged = false;
 let lastHeartbeatFailureLoggedAt = 0;
 let heartbeatWriteInFlight = false;
+let foldTimer: NodeJS.Timeout | null = null;
+let foldInFlight = false;
+let foldLedgerMissingLogged = false;
+let lastFoldFailureLoggedAt = 0;
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
@@ -130,6 +139,68 @@ function stopHeartbeatTimer(): void {
   heartbeatTimer = null;
 }
 
+function foldOptions(): TenantDataQuotaFoldOptions {
+  const options: TenantDataQuotaFoldOptions = {
+    intervalMs: env.TENANT_DATA_QUOTA_FOLD_INTERVAL_MS,
+    batchSize: env.TENANT_DATA_QUOTA_FOLD_BATCH_SIZE,
+    maxBatchesPerTick: env.TENANT_DATA_QUOTA_FOLD_MAX_BATCHES_PER_TICK,
+  };
+  assertTenantDataQuotaFoldOptions(options);
+  return options;
+}
+
+/**
+ * Folds the lock-free database deltas on its own timer: a long Storage scan or
+ * finalization in the reconciliation loop must not delay it. A fold never
+ * waits for a locked usage row, and an unfolded delta is still counted by
+ * every limit check, so a failed tick only delays the counter.
+ */
+async function foldPendingDeltas(options: TenantDataQuotaFoldOptions): Promise<void> {
+  if (foldInFlight || !lockClient || stopping || lockLost) return;
+  foldInFlight = true;
+  try {
+    const tick = await foldTenantDataQuotaDeltas(options, () => stopping || lockLost);
+    if (!tick.ledgerReady) {
+      if (!foldLedgerMissingLogged) {
+        console.warn('[TenantDataQuotaWorker] Delta ledger SQL is not applied; nothing to fold. The quota trigger still updates usage directly.');
+        foldLedgerMissingLogged = true;
+      }
+      return;
+    }
+    foldLedgerMissingLogged = false;
+    if (tick.batches >= options.maxBatchesPerTick) {
+      console.warn(JSON.stringify({
+        event: 'tenant_data_quota_fold_backlog',
+        folded_rows: tick.foldedRows,
+        folded_tenants: tick.foldedTenants,
+        batches: tick.batches,
+      }));
+    }
+  } catch (error) {
+    const now = Date.now();
+    if (now - lastFoldFailureLoggedAt >= 300_000) {
+      console.warn(`[TenantDataQuotaWorker] Could not fold quota deltas: ${heartbeatErrorMessage(error)}`);
+      lastFoldFailureLoggedAt = now;
+    }
+  } finally {
+    foldInFlight = false;
+  }
+}
+
+function startFoldTimer(options: TenantDataQuotaFoldOptions): void {
+  if (foldTimer) return;
+  foldTimer = setInterval(() => {
+    void foldPendingDeltas(options);
+  }, options.intervalMs);
+  foldTimer.unref();
+}
+
+function stopFoldTimer(): void {
+  if (!foldTimer) return;
+  clearInterval(foldTimer);
+  foldTimer = null;
+}
+
 async function tryAcquireWorkerLock(): Promise<boolean> {
   const client = await getClient();
   try {
@@ -173,8 +244,10 @@ async function releaseWorkerLock(): Promise<void> {
 async function runLeaderLoop(): Promise<void> {
   console.log(`[TenantDataQuotaWorker] Active leader. environment=${env.NODE_ENV} instance=${WORKER_INSTANCE_ID}`);
   const options = workerOptions();
+  const deltaFoldOptions = foldOptions();
   setHeartbeatState('starting');
   startHeartbeatTimer();
+  startFoldTimer(deltaFoldOptions);
 
   while (!stopping) {
     if (lockLost) throw new Error('Tenant data quota worker leader lock was lost.');
@@ -238,6 +311,7 @@ async function bootstrap(): Promise<void> {
       throw error;
     } finally {
       stopHeartbeatTimer();
+      stopFoldTimer();
       await releaseWorkerLock();
     }
   }
@@ -260,10 +334,12 @@ process.once('SIGTERM', () => {
 
 bootstrap().then(async () => {
   stopHeartbeatTimer();
+  stopFoldTimer();
   await pool.end();
 }).catch(async (error) => {
   console.error('[TenantDataQuotaWorker] Fatal error:', error);
   stopHeartbeatTimer();
+  stopFoldTimer();
   await releaseWorkerLock();
   await pool.end();
   process.exit(1);
