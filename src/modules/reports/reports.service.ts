@@ -2179,7 +2179,8 @@ export async function getReportLearners(
     params.push(search.trim());
     paramIdx++;
   }
-  const safeStatus = ['all', 'not_started', 'learning', 'completed'].includes(status || 'all') ? status! : 'all';
+  // A missing status never becomes the filter text 'undefined' (the controller refuses it).
+  const safeStatus = status && ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
   const statusFilter = safeStatus === 'all' ? '' : `WHERE learner_status.status = '${safeStatus}'`;
   params.push(safePageSize, (safePage - 1) * safePageSize);
 

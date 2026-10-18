@@ -5,6 +5,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { AppError } from '../../middleware/error-handler.js';
 import { query } from '../../config/database.js';
 import { isReportsSnapshotAbortedError } from '../../config/reports-database.js';
 import * as svc from './reports.service.js';
@@ -103,21 +104,21 @@ function parseReportDateRange(req: Request): svc.ReportDateRange | undefined {
   const dateTo = getQueryString(req.query.date_to);
   if (!dateFrom && !dateTo) return undefined;
   if (!dateFrom || !dateTo) {
-    throw { status: 400, message: 'date_from và date_to phải được gửi cùng nhau' };
+    throw new AppError('Vui lòng chọn cả ngày bắt đầu và ngày kết thúc.', 400);
   }
 
   const ymdPattern = /^\d{4}-\d{2}-\d{2}$/;
   if (!ymdPattern.test(dateFrom) || !ymdPattern.test(dateTo)) {
-    throw { status: 400, message: 'date_from/date_to phải có định dạng YYYY-MM-DD' };
+    throw new AppError('Ngày bắt đầu hoặc ngày kết thúc không hợp lệ.', 400);
   }
 
   const startDate = new Date(`${dateFrom}T00:00:00.000+07:00`);
   const endDate = new Date(`${dateTo}T23:59:59.999+07:00`);
   if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-    throw { status: 400, message: 'Khoảng ngày không hợp lệ' };
+    throw new AppError('Khoảng ngày không hợp lệ.', 400);
   }
   if (startDate.getTime() > endDate.getTime()) {
-    throw { status: 400, message: 'date_from không được lớn hơn date_to' };
+    throw new AppError('Ngày bắt đầu không được sau ngày kết thúc.', 400);
   }
 
   return { startDate, endDate, dateFrom, dateTo };
@@ -137,12 +138,12 @@ function parseChartWindowOptions(req: Request): svc.ReportChartWindowOptions {
   const mode = req.query.mode === 'window' ? 'window' : 'range';
   const rawDirection = typeof req.query.direction === 'string' ? req.query.direction : 'initial';
   if (rawDirection && !VALID_CHART_WINDOW_DIRECTIONS.has(rawDirection)) {
-    throw { status: 400, message: 'direction phải là initial, before hoặc after' };
+    throw new AppError('Hướng xem tiếp của biểu đồ không hợp lệ.', 400);
   }
 
   const anchorBucket = getQueryString(req.query.anchor_bucket);
   if (anchorBucket && !YMD_PATTERN.test(anchorBucket)) {
-    throw { status: 400, message: 'anchor_bucket phải có định dạng YYYY-MM-DD' };
+    throw new AppError('Mốc thời gian của biểu đồ không hợp lệ.', 400);
   }
 
   return {
@@ -163,19 +164,36 @@ function reportActor(req: Request) {
   return { userId: req.user!.id, tenantId: req.user!.tenantId!, role: req.user!.role };
 }
 
+/**
+ * The shared scope check (report-access.service.ts) throws `{ status, message,
+ * code }` objects, which report chat and the PDF export read as they are. On
+ * the Reports routes they become AppErrors, so the answer keeps their 4xx and
+ * message instead of the global handler's 500.
+ */
+export function asReportRequestError(error: unknown): unknown {
+  if (error instanceof Error || !error || typeof error !== 'object') return error;
+  const { status, message, code } = error as { status?: unknown; message?: unknown; code?: unknown };
+  if (typeof status !== 'number' || status < 400 || status >= 500 || typeof message !== 'string') return error;
+  return new AppError(message, status, typeof code === 'string' ? code : undefined);
+}
+
 async function enforceReportScope(req: Request): Promise<ReportScope> {
-  return enforceSharedReportScope(
-    {
-      userId: req.user!.id,
-      tenantId: req.user!.tenantId!,
-      role: req.user!.role,
-    },
-    {
-      groupId: readReportScopeId(req.query.group_id),
-      subgroupId: readReportScopeId(req.query.subgroup_id),
-      teamId: readReportScopeId(req.query.team_id),
-    },
-  );
+  try {
+    return await enforceSharedReportScope(
+      {
+        userId: req.user!.id,
+        tenantId: req.user!.tenantId!,
+        role: req.user!.role,
+      },
+      {
+        groupId: readReportScopeId(req.query.group_id),
+        subgroupId: readReportScopeId(req.query.subgroup_id),
+        teamId: readReportScopeId(req.query.team_id),
+      },
+    );
+  } catch (error) {
+    throw asReportRequestError(error);
+  }
 }
 
 /** GET /api/reports/summary */
@@ -359,7 +377,12 @@ export async function getLearners(req: Request, res: Response) {
   const month = req.query.month ? parseInt(req.query.month as string) : undefined;
   const year = req.query.year ? parseInt(req.query.year as string) : undefined;
   const dateRange = parseReportDateRange(req);
-  const status = req.query.status as 'all' | 'not_started' | 'learning' | 'completed' | undefined;
+  // The dashboard always sends one ('all' for no filter); a missing or empty
+  // status used to filter on the text 'undefined' and list nobody.
+  if (getQueryString(req.query.status) === undefined) {
+    return sendError(res, 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.', 400);
+  }
+  const status = req.query.status as 'all' | 'not_started' | 'learning' | 'completed';
 
   const scope = await enforceReportScope(req);
   if (scope.allowedGroupIds?.length === 0) {
