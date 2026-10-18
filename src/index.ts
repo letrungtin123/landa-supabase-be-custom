@@ -6,6 +6,7 @@ import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js'
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
 import { getClient, pool, query } from './config/database.js';
+import { endReportsPool } from './config/reports-database.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, cancelConsumers, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { processRolePlan, signalProcessReady } from './config/process-role.js';
@@ -351,7 +352,7 @@ bootstrap().catch(err => {
 });
 
 // Graceful shutdown (see config/graceful-shutdown.ts): stop intake, drain
-// in-flight requests (bounded), then close RabbitMQ, Redis and the pool.
+// in-flight requests (bounded), then close RabbitMQ, Redis and the pools.
 // The steps per role: config/process-startup.ts.
 const gracefulShutdown = createGracefulShutdown({
   getServer: () => httpServer,
@@ -372,6 +373,8 @@ const gracefulShutdown = createGracefulShutdown({
     pdfRenderer: { name: 'report PDF renderer', run: shutdownReportPdfRenderer },
     rabbitmq: { name: 'RabbitMQ', run: closeRabbitMQ },
     redis: { name: 'Redis', run: closeRedis },
+    // Created on first report read; a no-op in a process that never made it.
+    reportsPool: { name: 'reports database pool', run: endReportsPool },
     pool: { name: 'database pool', run: () => pool.end() },
   }),
   exit: (code) => process.exit(code),

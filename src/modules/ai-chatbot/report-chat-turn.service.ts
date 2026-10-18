@@ -8,7 +8,9 @@
 // rewrite it as "Yêu cầu không hợp lệ" nor mark the bot KB store broken.
 
 import type { UserRole } from '../../types/index.js';
+import { isReportsBusyError } from '../reports/report-admission.logic.js';
 import {
+  REPORT_CHAT_BUSY_CODE,
   REPORT_DATA_UNAVAILABLE_CODE,
   ReportChatError,
   isReportChatError,
@@ -329,6 +331,8 @@ export async function handleAdminReportTurn(
     return 'handled';
   } catch (error) {
     if (isReportChatError(error)) throw error;
+    // Report admission is full: a plain "busy, try again" instead of "data unavailable".
+    if (isReportsBusyError(error)) throw new ReportChatError(REPORT_CHAT_BUSY_CODE, input.locale);
     console.error(JSON.stringify({
       event: 'report_chat_turn_failed',
       correlation_id: input.correlationId ?? null,

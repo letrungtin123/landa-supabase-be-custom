@@ -86,6 +86,7 @@ function resources(order: string[]) {
     pdfRenderer: step(order, 'pdf-renderer'),
     rabbitmq: step(order, 'rabbitmq'),
     redis: step(order, 'redis'),
+    reportsPool: step(order, 'reports-pool'),
     pool: step(order, 'pool'),
   };
 }
@@ -94,13 +95,13 @@ test('shutdown steps per role', () => {
   const names = (steps: ShutdownStep[]) => steps.map((entry) => entry.name);
   const all = shutdownStepsFor(planProcessRole('all', 1), resources([]));
   assert.deepEqual(names(all.stopIntake), ['workers', 'consumers']);
-  assert.deepEqual(names(all.closeResources), ['listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'pool']);
+  assert.deepEqual(names(all.closeResources), ['listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'reports-pool', 'pool']);
   const api = shutdownStepsFor(planProcessRole('api', 4), resources([]));
   assert.deepEqual(names(api.stopIntake), ['workers'], 'an API process has no consumers');
-  assert.deepEqual(names(api.closeResources), ['listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'pool']);
+  assert.deepEqual(names(api.closeResources), ['listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'reports-pool', 'pool']);
   const background = shutdownStepsFor(planProcessRole('background', 4), resources([]));
   assert.deepEqual(names(background.stopIntake), ['workers', 'consumers']);
-  assert.deepEqual(names(background.closeResources), ['listen-connections', 'rabbitmq', 'redis', 'pool']);
+  assert.deepEqual(names(background.closeResources), ['listen-connections', 'rabbitmq', 'redis', 'reports-pool', 'pool']);
 });
 
 test('api shutdown (PM2 "shutdown" message): the request in flight finishes, then resources close, exit 0', async () => {
@@ -129,7 +130,7 @@ test('api shutdown (PM2 "shutdown" message): the request in flight finishes, the
   assert.equal(await answer, 'done');
   for (let attempt = 0; attempt < 100 && exits.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.deepEqual(exits, [0]);
-  assert.deepEqual(order, ['workers', 'listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'pool']);
+  assert.deepEqual(order, ['workers', 'listen-connections', 'pdf-renderer', 'rabbitmq', 'redis', 'reports-pool', 'pool']);
 });
 
 test('background shutdown: no server; timers stop, consumers are cancelled, resources close, exit 0', async () => {
@@ -152,5 +153,5 @@ test('background shutdown: no server; timers stop, consumers are cancelled, reso
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(pollerRuns, runsAtShutdown, 'pollers stopped');
   assert.deepEqual(exits, [0]);
-  assert.deepEqual(order, ['workers', 'consumers', 'listen-connections', 'rabbitmq', 'redis', 'pool']);
+  assert.deepEqual(order, ['workers', 'consumers', 'listen-connections', 'rabbitmq', 'redis', 'reports-pool', 'pool']);
 });

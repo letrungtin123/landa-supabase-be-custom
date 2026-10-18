@@ -1,7 +1,14 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'node:stream';
-import { query } from '../../config/database.js';
-import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
+import { env } from '../../config/env.js';
+import {
+  forEachReportsCursorBatch,
+  reportsQuery,
+  throwIfReportsAborted,
+  withReportsSnapshot,
+} from '../../config/reports-database.js';
+import { loadReportPeriodOverviews, type ReportPeriodRange } from './report-period-summaries.repository.js';
+import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
 type ExportScope = {
   groupId?: string;
@@ -25,6 +32,8 @@ export type ReportExcelExportOptions = {
   labels: ExportLabels;
   exporterName: string;
   locale: ReportExcelLocale;
+  /** Aborted when the client goes away: the export stops reading and writing. */
+  signal?: AbortSignal;
 };
 
 export type CourseLearnerExcelExportOptions = ReportExcelExportOptions & {
@@ -525,7 +534,7 @@ class SplitWorksheetWriter {
 async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: ReportExcelLocale): Promise<ScopeNames> {
   const all = getReportExcelCopy(locale).all;
   if (scope.teamId) {
-    const result = await query<ScopeNames>(
+    const result = await reportsQuery<ScopeNames>(
       `SELECT og.name AS "groupName", sg.name AS "subgroupName", t.name AS "teamName"
        FROM teams t
        JOIN sub_groups sg ON sg.id = t.sub_group_id
@@ -538,7 +547,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: R
   }
 
   if (scope.subgroupId) {
-    const result = await query<Pick<ScopeNames, 'groupName' | 'subgroupName'>>(
+    const result = await reportsQuery<Pick<ScopeNames, 'groupName' | 'subgroupName'>>(
       `SELECT og.name AS "groupName", sg.name AS "subgroupName"
        FROM sub_groups sg
        JOIN org_groups og ON og.id = sg.org_group_id
@@ -551,7 +560,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: R
   }
 
   if (scope.groupId) {
-    const result = await query<Pick<ScopeNames, 'groupName'>>(
+    const result = await reportsQuery<Pick<ScopeNames, 'groupName'>>(
       `SELECT name AS "groupName"
        FROM org_groups
        WHERE id = $1 AND tenant_id = $2
@@ -610,6 +619,19 @@ async function writeInfoSheet(
   worksheet.commit();
 }
 
+type ReportOverview = ReportSummary['overview'];
+
+/** Overview figures of each range in the export's scope (one statement for all of them). */
+function loadExportOverviews(options: ReportExcelExportOptions, ranges: ReportPeriodRange[]): Promise<ReportOverview[]> {
+  return loadReportPeriodOverviews({
+    tenantId: options.tenantId,
+    ranges,
+    groupId: options.scope.groupId,
+    subgroupId: options.scope.subgroupId,
+    teamId: options.scope.teamId,
+  });
+}
+
 async function writeMonthlyOverviewSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -633,15 +655,15 @@ async function writeMonthlyOverviewSheet(
     columns,
   );
 
-  const addOverviewRow = (label: string, summary: ReportSummary | null, index: number): void => {
-    const rate = summary ? roundPercent(summary.overview.completion_rate) : null;
+  const addOverviewRow = (label: string, overview: ReportOverview | null, index: number): void => {
+    const rate = overview ? roundPercent(overview.completion_rate) : null;
     const row = worksheet.addRow([
       label,
-      summary?.overview.total_learners ?? '',
-      summary?.overview.active_learners ?? '',
-      summary?.overview.total_enrollments ?? '',
-      summary?.overview.completed_enrollments ?? '',
-      summary?.overview.incomplete_enrollments ?? '',
+      overview?.total_learners ?? '',
+      overview?.active_learners ?? '',
+      overview?.total_enrollments ?? '',
+      overview?.completed_enrollments ?? '',
+      overview?.incomplete_enrollments ?? '',
       rate === null ? '' : rate / 100,
     ]);
     row.height = 22;
@@ -660,15 +682,13 @@ async function writeMonthlyOverviewSheet(
   };
 
   if (options.dateRange) {
-    const summary = await getReportSummary(
-      options.tenantId, undefined, undefined, options.scope.groupId, options.scope.subgroupId, options.scope.teamId, options.dateRange,
-    );
-    addOverviewRow(getExportPeriodLabel(options), summary, 0);
+    const [overview] = await loadExportOverviews(options, [options.dateRange]);
+    addOverviewRow(getExportPeriodLabel(options), overview, 0);
     addStyledRow(worksheet, [], columns.length, 'spacer');
-    addStyledRow(worksheet, [copy.totalPeriodEnrollments, summary.overview.total_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, [copy.completed, summary.overview.completed_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, [copy.incomplete, summary.overview.incomplete_enrollments], columns.length, 'summary');
-    addStyledRow(worksheet, [copy.averageCompletionRate, `${roundPercent(summary.overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.totalPeriodEnrollments, overview.total_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.completed, overview.completed_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.incomplete, overview.incomplete_enrollments], columns.length, 'summary');
+    addStyledRow(worksheet, [copy.averageCompletionRate, `${roundPercent(overview.completion_rate).toFixed(2)}%`], columns.length, 'summary');
     worksheet.commit();
     return;
   }
@@ -679,40 +699,28 @@ async function writeMonthlyOverviewSheet(
   let completedEnrollments = 0;
   let incompleteEnrollments = 0;
 
+  // The months up to maxMonth and the year so far (January to the end of
+  // maxMonth), all in one statement; months after maxMonth stay empty.
+  const monthRanges: ReportPeriodRange[] = [];
+  for (let month = 1; month <= maxMonth; month++) monthRanges.push(getMonthRange(options.year, month));
+  const annualRange: ReportPeriodRange | null = maxMonth === 0
+    ? null
+    : { startDate: new Date(options.year, 0, 1), endDate: getMonthRange(options.year, maxMonth).endDate };
+  const overviews = await loadExportOverviews(options, annualRange ? [...monthRanges, annualRange] : monthRanges);
+
   for (let month = 1; month <= 12; month++) {
-    const summary = month > maxMonth
-      ? null
-      : await getReportSummary(options.tenantId, month, options.year, options.scope.groupId, options.scope.subgroupId, options.scope.teamId);
-    if (summary) {
-      totalEnrollments += summary.overview.total_enrollments;
-      completedEnrollments += summary.overview.completed_enrollments;
-      incompleteEnrollments += summary.overview.incomplete_enrollments;
+    const overview = month > maxMonth ? null : overviews[month - 1];
+    if (overview) {
+      totalEnrollments += overview.total_enrollments;
+      completedEnrollments += overview.completed_enrollments;
+      incompleteEnrollments += overview.incomplete_enrollments;
     }
-    addOverviewRow(copy.months[month], summary, month - 1);
+    addOverviewRow(copy.months[month], overview, month - 1);
   }
 
-  const annualRange = maxMonth === 0 ? null : (() => {
-    const startDate = new Date(options.year, 0, 1);
-    const endDate = getMonthRange(options.year, maxMonth).endDate;
-    return {
-      startDate,
-      endDate,
-      dateFrom: `${options.year}-01-01`,
-      dateTo: `${options.year}-${String(maxMonth).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`,
-    };
-  })();
-  const annualSummary = annualRange
-    ? await getReportSummary(
-      options.tenantId,
-      undefined,
-      undefined,
-      options.scope.groupId,
-      options.scope.subgroupId,
-      options.scope.teamId,
-      annualRange,
-    )
-    : null;
-  const yearlyRate = annualSummary?.overview.completion_rate ?? 0;  addStyledRow(worksheet, [], columns.length, 'spacer');
+  const annualOverview = annualRange ? overviews[maxMonth] : null;
+  const yearlyRate = annualOverview?.completion_rate ?? 0;
+  addStyledRow(worksheet, [], columns.length, 'spacer');
   addStyledRow(worksheet, [copy.totalYearEnrollments, totalEnrollments], columns.length, 'summary');
   addStyledRow(worksheet, [copy.completedInYear, completedEnrollments], columns.length, 'summary');
   addStyledRow(worksheet, [copy.incompleteInYear, incompleteEnrollments], columns.length, 'summary');
@@ -726,7 +734,7 @@ async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promi
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4,
   });
-  const result = await query<HierarchyTrendRow>(
+  const result = await reportsQuery<HierarchyTrendRow>(
     `WITH ${buildActiveLearnerEventsCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3' })},
       ${cohort.sql},
       enrollment_metrics AS (
@@ -825,7 +833,7 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
   const params: unknown[] = [options.tenantId, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
   const cohort = buildReportEnrollmentCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4 });
-  const result = await query<TeamBreakdownRow>(
+  const result = await reportsQuery<TeamBreakdownRow>(
     `WITH ${cohort.sql},
       scoped_teams AS (
         SELECT t.id AS team_id, t.name AS team_name, sg.name AS subgroup_name, og.name AS group_name
@@ -912,7 +920,7 @@ async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promis
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
     groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
   });
-  const result = await query<CourseRankingExportRow>(
+  const result = await reportsQuery<CourseRankingExportRow>(
     `WITH ${cohort.sql}
      SELECT
        re.course_id,
@@ -968,10 +976,12 @@ async function writeCourseRankingSheet(
   worksheet.commit();
   return rows;
 }
-async function fetchLearnerSummaryBatch(
-  options: ReportExcelExportOptions,
-  lastUserId: string | null,
-): Promise<LearnerSummaryRow[]> {
+/**
+ * Every learner of the scope with their period figures, ordered by user id
+ * (the order of the former keyset batches). Read through one cursor, so the
+ * period cohort is built once for the whole sheet.
+ */
+function buildLearnerSummaryQuery(options: ReportExcelExportOptions): { text: string; params: unknown[] } {
   const { startDate, endDate } = getExportPeriodRange(options);
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
@@ -984,8 +994,6 @@ async function fetchLearnerSummaryBatch(
     teamId: options.scope.teamId,
     scopeParamStart: 4,
   });
-  const cursorParam = 4 + cohort.params.length;
-  const limitParam = cursorParam + 1;
   const membershipScope = options.scope.teamId
     ? 'AND t.id = $4'
     : options.scope.subgroupId
@@ -993,23 +1001,16 @@ async function fetchLearnerSummaryBatch(
       : options.scope.groupId
         ? 'AND og.id = $4'
         : '';
-  const result = await query<LearnerSummaryRow>(
-    `WITH ${cohort.sql},
+  return {
+    text: `WITH ${cohort.sql},
       ${roster.sql},
-      selected_users AS (
-        SELECT rl.user_id
-        FROM report_learners rl
-        WHERE ($${cursorParam}::uuid IS NULL OR rl.user_id > $${cursorParam}::uuid)
-        ORDER BY rl.user_id
-        LIMIT $${limitParam}
-      ),
       memberships AS (
         SELECT
           tm.user_id,
           string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
           string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
           string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-        FROM selected_users su
+        FROM report_learners su
         JOIN team_members tm ON tm.user_id = su.user_id
         JOIN teams t ON t.id = tm.team_id
         JOIN sub_groups sg ON sg.id = t.sub_group_id
@@ -1035,15 +1036,14 @@ async function fetchLearnerSummaryBatch(
           WHEN COALESCE(AVG(re.progress), 0) > 0 THEN 'learning'
           ELSE 'not_started'
         END AS status
-      FROM selected_users su
+      FROM report_learners su
       JOIN users u ON u.id = su.user_id
       LEFT JOIN report_enrollments re ON re.user_id = su.user_id
       LEFT JOIN memberships m ON m.user_id = su.user_id
       GROUP BY su.user_id, u.username, u.email, u.full_name, m.group_names, m.subgroup_names, m.team_names
       ORDER BY su.user_id`,
-    [options.tenantId, startDate, endDate, ...cohort.params, lastUserId, STREAM_BATCH_SIZE],
-  );
-  return result.rows;
+    params: [options.tenantId, startDate, endDate, ...cohort.params],
+  };
 }
 async function writeLearnerSummarySheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
@@ -1065,10 +1065,8 @@ async function writeLearnerSummarySheet(
     { header: copy.latestCompletion, key: 'lastCompletion', width: 20 },
   ];
   const writer = new SplitWorksheetWriter(workbook, copy.learnerList, copy.learnerListInScope, subtitle, columns);
-  let lastUserId: string | null = null;
-  for (;;) {
-    const rows = await fetchLearnerSummaryBatch(options, lastUserId);
-    if (rows.length === 0) break;
+  const learnerQuery = buildLearnerSummaryQuery(options);
+  await forEachReportsCursorBatch<LearnerSummaryRow>({ ...learnerQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
     for (const item of rows) {
       const rate = roundPercent(item.completion_rate);
       writer.addRow([
@@ -1080,24 +1078,21 @@ async function writeLearnerSummarySheet(
         row.getCell(11).numFmt = dateTimeNumberFormat(options.locale);
       });
     }
-    lastUserId = rows[rows.length - 1].user_id;
-    if (rows.length < STREAM_BATCH_SIZE) break;
-  }
+  });
   writer.finish();
 }
-async function fetchCourseLearnerBatch(
-  options: ReportExcelExportOptions,
-  lastEnrolledAt: Date | null,
-  lastEnrollmentId: string | null,
-): Promise<CourseLearnerRow[]> {
+/**
+ * Every enrollment of the period cohort, ordered by enrollment time then id,
+ * read through one cursor. (The former keyset carried enrolled_at back as a
+ * millisecond JS Date, so a batch could restart inside the microseconds of
+ * the previous batch's last row and repeat rows.)
+ */
+function buildCourseLearnerQuery(options: ReportExcelExportOptions): { text: string; params: unknown[] } {
   const { startDate, endDate } = getExportPeriodRange(options);
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
     groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
   });
-  const cursorDateParam = 4 + cohort.params.length;
-  const cursorIdParam = cursorDateParam + 1;
-  const limitParam = cursorIdParam + 1;
   const membershipScope = options.scope.teamId
     ? 'AND t.id = $4'
     : options.scope.subgroupId
@@ -1105,26 +1100,15 @@ async function fetchCourseLearnerBatch(
       : options.scope.groupId
         ? 'AND og.id = $4'
         : '';
-  const result = await query<CourseLearnerRow>(
-    `WITH ${cohort.sql},
-      selected_enrollments AS (
-        SELECT re.*
-        FROM report_enrollments re
-        WHERE (
-          $${cursorDateParam}::timestamptz IS NULL
-          OR re.enrolled_at > $${cursorDateParam}
-          OR (re.enrolled_at = $${cursorDateParam} AND re.enrollment_id > $${cursorIdParam}::uuid)
-        )
-        ORDER BY re.enrolled_at, re.enrollment_id
-        LIMIT $${limitParam}
-      ),
+  return {
+    text: `WITH ${cohort.sql},
       memberships AS (
         SELECT
           tm.user_id,
           string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
           string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
           string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-        FROM selected_enrollments se
+        FROM report_enrollments se
         JOIN team_members tm ON tm.user_id = se.user_id
         JOIN teams t ON t.id = tm.team_id
         JOIN sub_groups sg ON sg.id = t.sub_group_id
@@ -1148,13 +1132,12 @@ async function fetchCourseLearnerBatch(
         se.is_completed,
         se.progress,
         CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
-      FROM selected_enrollments se
+      FROM report_enrollments se
       JOIN users u ON u.id = se.user_id
       LEFT JOIN memberships m ON m.user_id = se.user_id
       ORDER BY se.enrolled_at, se.enrollment_id`,
-    [options.tenantId, startDate, endDate, ...cohort.params, lastEnrolledAt, lastEnrollmentId, STREAM_BATCH_SIZE],
-  );
-  return result.rows;
+    params: [options.tenantId, startDate, endDate, ...cohort.params],
+  };
 }
 
 function courseLearnerColumns(options: ReportExcelExportOptions): ColumnDef[] {
@@ -1201,34 +1184,21 @@ async function writeCourseLearnerDetailSheets(
   const copy = getReportExcelCopy(options.locale);
   const columns = courseLearnerColumns(options);
   const writer = new SplitWorksheetWriter(workbook, copy.courseLearnerDetail, copy.courseEnrollmentDetail, subtitle, columns);
-  let lastEnrolledAt: Date | null = null;
-  let lastEnrollmentId: string | null = null;
-  for (;;) {
-    const rows = await fetchCourseLearnerBatch(options, lastEnrolledAt, lastEnrollmentId);
-    if (rows.length === 0) break;
+  const enrollmentQuery = buildCourseLearnerQuery(options);
+  await forEachReportsCursorBatch<CourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
     for (const item of rows) addCourseLearnerRow(writer, item, options);
-    const lastRow = rows[rows.length - 1];
-    lastEnrolledAt = lastRow.enrolled_at;
-    lastEnrollmentId = lastRow.enrollment_id;
-    if (rows.length < STREAM_BATCH_SIZE) break;
-  }
+  });
   writer.finish();
 }
 
-async function fetchSingleCourseLearnerBatch(
-  options: CourseLearnerExcelExportOptions,
-  cursor: Pick<SortedCourseLearnerRow, 'sort_name' | 'username' | 'enrollment_id'> | null,
-): Promise<SortedCourseLearnerRow[]> {
+/** One course's enrollments of the period cohort, ordered by learner name, username, id; read through one cursor. */
+function buildSingleCourseLearnerQuery(options: CourseLearnerExcelExportOptions): { text: string; params: unknown[] } {
   const { startDate, endDate } = getExportPeriodRange(options);
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
     groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
   });
   const courseParam = 4 + cohort.params.length;
-  const cursorNameParam = courseParam + 1;
-  const cursorUsernameParam = cursorNameParam + 1;
-  const cursorIdParam = cursorUsernameParam + 1;
-  const limitParam = cursorIdParam + 1;
   const membershipScope = options.scope.teamId
     ? 'AND t.id = $4'
     : options.scope.subgroupId
@@ -1238,8 +1208,8 @@ async function fetchSingleCourseLearnerBatch(
         : '';
   const displayNameSql = "COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username)";
   const sortNameSql = `unaccent(LOWER(${displayNameSql}))`;
-  const result = await query<SortedCourseLearnerRow>(
-    `WITH ${cohort.sql},
+  return {
+    text: `WITH ${cohort.sql},
       selected_enrollments AS (
         SELECT
           re.*,
@@ -1250,16 +1220,6 @@ async function fetchSingleCourseLearnerBatch(
         FROM report_enrollments re
         JOIN users u ON u.id = re.user_id
         WHERE re.course_id = $${courseParam}
-          AND (
-            $${cursorNameParam}::text IS NULL
-            OR (
-              ${sortNameSql},
-              u.username,
-              re.enrollment_id
-            ) > ($${cursorNameParam}, $${cursorUsernameParam}, $${cursorIdParam}::uuid)
-          )
-        ORDER BY sort_name, u.username, re.enrollment_id
-        LIMIT $${limitParam}
       ),
       memberships AS (
         SELECT
@@ -1295,88 +1255,102 @@ async function fetchSingleCourseLearnerBatch(
       FROM selected_enrollments se
       LEFT JOIN memberships m ON m.user_id = se.user_id
       ORDER BY se.sort_name, se.username, se.enrollment_id`,
-    [
-      options.tenantId, startDate, endDate, ...cohort.params, options.courseId,
-      cursor?.sort_name ?? null, cursor?.username ?? null, cursor?.enrollment_id ?? null, STREAM_BATCH_SIZE,
-    ],
-  );
-  return result.rows;
+    params: [options.tenantId, startDate, endDate, ...cohort.params, options.courseId],
+  };
 }
 
-export async function streamCourseLearnerExcel(options: CourseLearnerExcelExportOptions): Promise<void> {
-  const copy = getReportExcelCopy(options.locale);
-  const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
-  const subtitle = [
-    `${copy.course}: ${options.courseName}`,
-    `${copy.dataPeriod}: ${getExportPeriodLabel(options)}`,
-    `${options.labels.group}: ${scopeNames.groupName}`,
-    `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
-    `${options.labels.team}: ${scopeNames.teamName}`,
-    `${copy.exportedBy}: ${options.exporterName}`,
-  ].join(' | ');
-  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-    stream: options.stream,
-    useStyles: true,
-    useSharedStrings: false,
-  });
-  workbook.creator = 'Landa';
-  workbook.lastModifiedBy = options.exporterName || 'Landa';
-  workbook.created = new Date();
-  workbook.modified = new Date();
+/** Snapshot of an export: its own raised statement timeout and the client's abort signal. */
+function exportSnapshotOptions(options: ReportExcelExportOptions): { statementTimeoutMs: number; signal?: AbortSignal } {
+  return { statementTimeoutMs: env.REPORTS_EXPORT_STATEMENT_TIMEOUT_MS, signal: options.signal };
+}
 
-  const writer = new SplitWorksheetWriter(
-    workbook,
-    copy.courseLearnerDetail,
-    copy.courseEnrollmentDetail,
-    subtitle,
-    courseLearnerColumns(options),
-  );
-  let cursor: Pick<SortedCourseLearnerRow, 'sort_name' | 'username' | 'enrollment_id'> | null = null;
-  for (;;) {
-    const rows = await fetchSingleCourseLearnerBatch(options, cursor);
-    if (rows.length === 0) break;
-    for (const item of rows) addCourseLearnerRow(writer, item, options);
-    const lastRow = rows[rows.length - 1];
-    cursor = { sort_name: lastRow.sort_name, username: lastRow.username, enrollment_id: lastRow.enrollment_id };
-    if (rows.length < STREAM_BATCH_SIZE) break;
-  }
-  writer.finish();
+/**
+ * Every read of the file runs in one READ ONLY REPEATABLE READ snapshot on
+ * the reports pool; its connection is released before the zip is finalized.
+ */
+export async function streamCourseLearnerExcel(options: CourseLearnerExcelExportOptions): Promise<void> {
+  const workbook = await withReportsSnapshot(exportSnapshotOptions(options), async () => {
+    const copy = getReportExcelCopy(options.locale);
+    const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
+    const subtitle = [
+      `${copy.course}: ${options.courseName}`,
+      `${copy.dataPeriod}: ${getExportPeriodLabel(options)}`,
+      `${options.labels.group}: ${scopeNames.groupName}`,
+      `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
+      `${options.labels.team}: ${scopeNames.teamName}`,
+      `${copy.exportedBy}: ${options.exporterName}`,
+    ].join(' | ');
+    const writer = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: options.stream,
+      useStyles: true,
+      useSharedStrings: false,
+    });
+    writer.creator = 'Landa';
+    writer.lastModifiedBy = options.exporterName || 'Landa';
+    writer.created = new Date();
+    writer.modified = new Date();
+
+    const sheet = new SplitWorksheetWriter(
+      writer,
+      copy.courseLearnerDetail,
+      copy.courseEnrollmentDetail,
+      subtitle,
+      courseLearnerColumns(options),
+    );
+    const enrollmentQuery = buildSingleCourseLearnerQuery(options);
+    await forEachReportsCursorBatch<SortedCourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
+      for (const item of rows) addCourseLearnerRow(sheet, item, options);
+    });
+    sheet.finish();
+    return writer;
+  });
+  throwIfReportsAborted(options.signal);
   await workbook.commit();
 }
 
 export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
-  const copy = getReportExcelCopy(options.locale);
-  const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
-  const selectedPeriodText = getExportPeriodLabel(options);
-  const yearlyPeriodText = getExportPeriodLabel(options);
-  const buildSubtitle = (periodText: string): string => [
-    `${copy.dataPeriod}: ${periodText}`,
-    `${options.labels.group}: ${scopeNames.groupName}`,
-    `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
-    `${options.labels.team}: ${scopeNames.teamName}`,
-    `${copy.exportedBy}: ${options.exporterName}`,
-  ].join(' | ');
-  const selectedPeriodSubtitle = buildSubtitle(selectedPeriodText);
-  const yearlySubtitle = buildSubtitle(yearlyPeriodText);
+  const workbook = await withReportsSnapshot(exportSnapshotOptions(options), async () => {
+    const copy = getReportExcelCopy(options.locale);
+    const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
+    const selectedPeriodText = getExportPeriodLabel(options);
+    const yearlyPeriodText = getExportPeriodLabel(options);
+    const buildSubtitle = (periodText: string): string => [
+      `${copy.dataPeriod}: ${periodText}`,
+      `${options.labels.group}: ${scopeNames.groupName}`,
+      `${options.labels.subgroup}: ${scopeNames.subgroupName}`,
+      `${options.labels.team}: ${scopeNames.teamName}`,
+      `${copy.exportedBy}: ${options.exporterName}`,
+    ].join(' | ');
+    const selectedPeriodSubtitle = buildSubtitle(selectedPeriodText);
+    const yearlySubtitle = buildSubtitle(yearlyPeriodText);
 
-  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-    stream: options.stream,
-    useStyles: true,
-    useSharedStrings: false,
+    const writer = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: options.stream,
+      useStyles: true,
+      useSharedStrings: false,
+    });
+
+    writer.creator = 'Landa';
+    writer.lastModifiedBy = options.exporterName || 'Landa';
+    writer.created = new Date();
+    writer.modified = new Date();
+
+    // The export stops between sheets once the client has gone away.
+    const sheets: Array<() => Promise<unknown>> = [
+      () => writeInfoSheet(writer, options, scopeNames, selectedPeriodSubtitle),
+      () => writeMonthlyOverviewSheet(writer, options, yearlySubtitle),
+      () => writeHierarchyTrendSheet(writer, options, yearlySubtitle),
+      () => writeTeamBreakdownSheet(writer, options, yearlySubtitle),
+      () => writeCourseRankingSheet(writer, options, selectedPeriodSubtitle),
+      () => writeLearnerSummarySheet(writer, options, selectedPeriodSubtitle),
+      () => writeCourseLearnerDetailSheets(writer, options, selectedPeriodSubtitle),
+    ];
+    for (const writeSheet of sheets) {
+      throwIfReportsAborted(options.signal);
+      await writeSheet();
+    }
+    return writer;
   });
-
-  workbook.creator = 'Landa';
-  workbook.lastModifiedBy = options.exporterName || 'Landa';
-  workbook.created = new Date();
-  workbook.modified = new Date();
-
-  await writeInfoSheet(workbook, options, scopeNames, selectedPeriodSubtitle);
-  await writeMonthlyOverviewSheet(workbook, options, yearlySubtitle);
-  await writeHierarchyTrendSheet(workbook, options, yearlySubtitle);
-  await writeTeamBreakdownSheet(workbook, options, yearlySubtitle);
-  await writeCourseRankingSheet(workbook, options, selectedPeriodSubtitle);
-  await writeLearnerSummarySheet(workbook, options, selectedPeriodSubtitle);
-  await writeCourseLearnerDetailSheets(workbook, options, selectedPeriodSubtitle);
-
+  throwIfReportsAborted(options.signal);
   await workbook.commit();
 }

@@ -67,6 +67,8 @@ export interface ShutdownResources {
   pdfRenderer: ShutdownStep;
   rabbitmq: ShutdownStep;
   redis: ShutdownStep;
+  /** Opened on the first report read (any role); ends before the main pool, whose connection cancels its statements. */
+  reportsPool: ShutdownStep;
   pool: ShutdownStep;
 }
 
@@ -78,6 +80,7 @@ export function shutdownStepsFor(plan: ProcessRolePlan, resources: ShutdownResou
       ...(plan.servesHttp ? [resources.pdfRenderer] : []),
       resources.rabbitmq,
       resources.redis,
+      resources.reportsPool,
       resources.pool,
     ],
   };

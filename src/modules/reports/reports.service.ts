@@ -6,10 +6,14 @@
 //   - No N+1 subqueries
 // ═══════════════════════════════════════════════════════════════
 
-import { cacheJson, cacheKey, stableHash } from '../../config/cache.js';
-import { query } from '../../config/database.js';
+import { cacheJson, cacheKey, getCacheVersion, stableHash } from '../../config/cache.js';
+import { cacheKeys, cacheVersions } from '../../config/cache-keys.js';
+import { reportsQuery } from '../../config/reports-database.js';
 import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
+import { runReportAggregate } from './report-admission.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
+import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
+import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
 
 // ── Types ──
 
@@ -300,6 +304,33 @@ function resolveChartWindow(
   };
 }
 
+/**
+ * What a date-range chart computes. Only enrollments outside a team scope are
+ * split into series; every other request is the plain series whatever its
+ * grouped / group_by_org / series_limit, so the report page and the report
+ * chat share one cache entry for the same numbers.
+ */
+type DateRangeChartShape =
+  | { kind: 'simple' }
+  | { kind: 'grouped'; dimension: GroupedEnrollmentDimension; parentId?: string; seriesLimit: number };
+
+function resolveDateRangeChartShape(options: {
+  metric: string;
+  groupId?: string;
+  subgroupId?: string;
+  teamId?: string;
+  groupByOrg: boolean;
+  grouped: boolean;
+  seriesLimit: number;
+}): DateRangeChartShape {
+  if (!options.teamId && options.metric === 'total_enrollments') {
+    if (options.groupByOrg) return { kind: 'grouped', dimension: 'group', parentId: options.groupId, seriesLimit: options.seriesLimit };
+    if (options.subgroupId && options.grouped) return { kind: 'grouped', dimension: 'team', parentId: options.subgroupId, seriesLimit: options.seriesLimit };
+    if (options.groupId && options.grouped) return { kind: 'grouped', dimension: 'subgroup', parentId: options.groupId, seriesLimit: options.seriesLimit };
+  }
+  return { kind: 'simple' };
+}
+
 function buildReportChartCacheKey(options: {
   tenantId: string;
   metric: string;
@@ -308,11 +339,9 @@ function buildReportChartCacheKey(options: {
   groupId?: string;
   subgroupId?: string;
   teamId?: string;
-  groupByOrg: boolean;
-  grouped: boolean;
-  seriesLimit: number;
+  shape: DateRangeChartShape;
 }): string {
-  return cacheKey('reports', 'chart', 'v9', options.tenantId, stableHash({
+  return cacheKey('reports', 'chart', 'v10', options.tenantId, stableHash({
     metric: options.metric,
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
@@ -320,9 +349,7 @@ function buildReportChartCacheKey(options: {
     groupId: options.groupId,
     subgroupId: options.subgroupId,
     teamId: options.teamId,
-    groupByOrg: options.groupByOrg,
-    grouped: options.grouped,
-    seriesLimit: options.seriesLimit,
+    shape: options.shape,
   }));
 }
 function buildReportSummaryCacheKey(options: {
@@ -378,9 +405,32 @@ function getRangeDayCount(range: ReportDateRange): number {
   return Math.max(1, Math.ceil((range.endDate.getTime() - range.startDate.getTime() + 1) / msPerDay));
 }
 
-function getSummaryCacheTtl(range: ReportDateRange): number {
+function getSummaryCacheTtl(range: Pick<ReportDateRange, 'dateTo'>): number {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
   return range.dateTo >= today ? 30 : 300;
+}
+
+/** Seconds a cached aggregate of a range lives: 30 while the range includes today, else 300. */
+export function getReportAggregateCacheTtl(range: Pick<ReportDateRange, 'dateTo'>): number {
+  return getSummaryCacheTtl(range);
+}
+
+/**
+ * Report list pages (learners, a course's learners, top courses, the yearly
+ * chart): 30 s while the period includes today, 60 s for a past period. Lists
+ * page and search, so they keep a shorter life than the summary figures.
+ */
+function getReportListCacheTtl(dateTo: string | null): number {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
+  return dateTo === null || dateTo >= today ? 30 : 60;
+}
+
+/**
+ * A report aggregate: from Redis when cached, else loaded in a slot of the
+ * tenant's report admission (runReportAggregate), so a cache hit never waits.
+ */
+function cachedReportAggregate<T>(tenantId: string, key: string, ttlSeconds: number, load: () => Promise<T>): Promise<T> {
+  return cacheJson(key, ttlSeconds, () => runReportAggregate(tenantId, load));
 }
 
 /** Effective chart granularity of a range (the rule of the Reports charts). */
@@ -750,7 +800,7 @@ export async function getReportSummary(
     usesDateRange: Boolean(dateRange),
   });
 
-  return cacheJson(summaryCacheKey, getSummaryCacheTtl(range), () => getReportSummaryForRange({
+  return cachedReportAggregate(tenantId, summaryCacheKey, getSummaryCacheTtl(range), () => getReportSummaryForRange({
     tenantId,
     range,
     targetMonth,
@@ -803,7 +853,7 @@ async function getReportSummaryForRange(options: {
     scopeParamStart: 4,
   });
 
-  const result = await query<{
+  const result = await reportsQuery<{
     total_learners: string;
     active_learners: string;
     total_enrollments: string;
@@ -911,6 +961,7 @@ export async function getReportChart(
       ? resolveChartWindow(dateRange, granularity, windowOptions)
       : null;
     const queryRange = resolvedWindow?.range ?? dateRange;
+    const shape = resolveDateRangeChartShape({ metric, groupId, subgroupId, teamId, groupByOrg, grouped, seriesLimit });
     const chartCacheKey = buildReportChartCacheKey({
       tenantId,
       metric,
@@ -919,21 +970,17 @@ export async function getReportChart(
       groupId,
       subgroupId,
       teamId,
-      groupByOrg,
-      grouped,
-      seriesLimit,
+      shape,
     });
-    const result = await cacheJson(chartCacheKey, 90, () => chartByDateRange(
+    const result = await cachedReportAggregate(tenantId, chartCacheKey, 90, () => chartByDateRange(
       tenantId,
       metric,
       queryRange,
       granularity,
+      shape,
       groupId,
       subgroupId,
       teamId,
-      groupByOrg,
-      grouped,
-      seriesLimit,
     ));
     return {
       year: dateRange.startDate.getFullYear(),
@@ -952,21 +999,26 @@ export async function getReportChart(
   const maxMonth = year > now.getFullYear() ? 0
     : year === now.getFullYear() ? now.getMonth() + 1
     : 12;
+  const yearChartCacheKey = cacheKey('reports', 'chart-year', 'v1', tenantId, stableHash({
+    year, metric, groupId, subgroupId, teamId, groupByOrg, grouped, maxMonth,
+  }));
 
-  if (teamId) {
+  return cachedReportAggregate(tenantId, yearChartCacheKey, getReportListCacheTtl(`${year}-12-31`), async () => {
+    if (teamId) {
+      return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
+    }
+    if (groupByOrg) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'group', groupId);
+    }
+    if (subgroupId && grouped) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'team', subgroupId);
+    }
+    if (groupId && grouped) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'subgroup', groupId);
+    }
+
     return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
-  }
-  if (groupByOrg) {
-    return chartGroupedByOrg(tenantId, year, metric, maxMonth, groupId);
-  }
-  if (subgroupId && grouped) {
-    return chartGroupedByTeam(tenantId, year, metric, maxMonth, subgroupId);
-  }
-  if (groupId && grouped) {
-    return chartGroupedBySubGroup(tenantId, year, metric, maxMonth, groupId);
-  }
-
-  return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
+  });
 }
 
 async function chartByDateRange(
@@ -974,17 +1026,13 @@ async function chartByDateRange(
   metric: string,
   range: ReportDateRange,
   granularity: EffectiveChartGranularity,
+  shape: DateRangeChartShape,
   groupId?: string,
   subgroupId?: string,
   teamId?: string,
-  groupByOrg = false,
-  grouped = true,
-  seriesLimit = DEFAULT_GROUP_SERIES_LIMIT,
 ): Promise<{ data: ReportChartPoint[]; is_grouped: boolean; series_overflow?: boolean }> {
-  if (!teamId && metric === 'total_enrollments') {
-    if (groupByOrg) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'group', groupId, seriesLimit);
-    if (subgroupId && grouped) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'team', subgroupId, seriesLimit);
-    if (groupId && grouped) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'subgroup', groupId, seriesLimit);
+  if (shape.kind === 'grouped') {
+    return chartGroupedEnrollmentsByRange(tenantId, range, granularity, shape.dimension, shape.parentId, shape.seriesLimit);
   }
 
   const data = await chartSimpleByRange(tenantId, metric, range, granularity, groupId, subgroupId, teamId);
@@ -1107,7 +1155,7 @@ async function chartSimpleByRange(
     params.splice(5, scope.params.length, ...cohort.params);
   }
 
-  const result = await query<{ bucket: string; bucket_label: string; value: string }>(sql, params);
+  const result = await reportsQuery<{ bucket: string; bucket_label: string; value: string }>(sql, params);
   return result.rows.map(row => ({
     month: row.bucket,
     month_label: row.bucket_label,
@@ -1186,7 +1234,7 @@ async function chartGroupedEnrollmentsByRange(
   params.push(limit);
   const limitParam = `$${params.length}`;
   const labelSql = getBucketLabelSql('sr.bucket_start');
-  const result = await query<{ bucket: string; bucket_label: string; series_name: string; value: string }>(
+  const result = await reportsQuery<{ bucket: string; bucket_label: string; series_name: string; value: string }>(
     `WITH ${getBucketCteSql()},
      entity_names AS (${entitySql}),
      aggregated AS (
@@ -1291,105 +1339,25 @@ async function chartSimple(
 }
 
 /**
- * Grouped by OrgGroup — 1 SQL query per OrgGroup (instead of N×12)
+ * Yearly chart split by org unit (company, branch or department under the
+ * parent): the unit list, then ONE grouped statement for every unit's
+ * months (report-org-chart.repository.ts) instead of one statement per unit.
  */
-async function chartGroupedByOrg(
+async function chartGroupedByOrgUnit(
   tenantId: string, year: number, metric: string, maxMonth: number,
-  groupId?: string,
+  dimension: OrgChartDimension, parentId?: string,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const gFilter = groupId ? 'AND og.id = $2' : '';
-  const gParams = groupId ? [tenantId, groupId] : [tenantId];
-  const orgs = await query<{ id: string; name: string }>(
-    `SELECT id, name FROM org_groups WHERE tenant_id = $1 ${gFilter} ORDER BY name`,
-    gParams,
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  // 1 batch query per org (not 12!)
-  const orgMonthData = new Map<string, Map<number, number>>();
-  for (const og of orgs.rows) {
-    const mv = await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, og.id, undefined);
-    orgMonthData.set(og.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const og of orgs.rows) {
-      point[og.name] = m > maxMonth ? 0 : (orgMonthData.get(og.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
-}
-
-/**
- * Grouped by SubGroup — 1 SQL query per SubGroup (not 12!)
- */
-async function chartGroupedBySubGroup(
-  tenantId: string, year: number, metric: string, maxMonth: number,
-  groupId: string,
-): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const sgs = await query<{ id: string; name: string }>(
-    `SELECT id, name FROM sub_groups WHERE org_group_id = $1 ORDER BY name`,
-    [groupId],
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  const sgMonthData = new Map<string, Map<number, number>>();
-  for (const sg of sgs.rows) {
-    const mv = await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, undefined, sg.id);
-    sgMonthData.set(sg.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const sg of sgs.rows) {
-      point[sg.name] = m > maxMonth ? 0 : (sgMonthData.get(sg.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
-}
-
-/**
- * Grouped by Team — 1 SQL query per Team (not 12!)
- */
-async function chartGroupedByTeam(
-  tenantId: string, year: number, metric: string, maxMonth: number,
-  subgroupId: string,
-): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const teams = await query<{ id: string; name: string }>(
-    `SELECT id, name FROM teams WHERE sub_group_id = $1 ORDER BY name`,
-    [subgroupId],
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  const teamMonthData = new Map<string, Map<number, number>>();
-  for (const tm of teams.rows) {
-    const mv = await batchMetricByMonthTeam(tenantId, metric, yearStart, yearEnd, year, tm.id);
-    teamMonthData.set(tm.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const tm of teams.rows) {
-      point[tm.name] = m > maxMonth ? 0 : (teamMonthData.get(tm.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
+  const entities = await loadOrgChartEntities(tenantId, dimension, parentId);
+  const values = await loadOrgChartMonthValues({
+    tenantId,
+    metric,
+    dimension,
+    entityIds: entities.map((entity) => entity.id),
+    year,
+    yearStart: new Date(year, 0, 1),
+    yearEnd: new Date(year, 11, 31, 23, 59, 59, 999),
+  });
+  return { year, metric, data: buildOrgUnitChartPoints(entities, values, maxMonth, MONTH_LABELS), is_grouped: true };
 }
 
 /**
@@ -1409,7 +1377,7 @@ async function batchMetricByMonth(
       const ugf = buildUserGroupFilter(groupId, subgroupId);
       let idx = 2;
       const conds = ugf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT gs.m,
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
@@ -1426,7 +1394,7 @@ async function batchMetricByMonth(
     }
     case 'active_learners': {
       const activeScope = buildLearnerScopeExists('u.id', groupId, subgroupId, undefined, 4);
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `WITH ${buildActiveLearnerEventsCte({
           tenantParam: '$1',
           rangeStartParam: '$2',
@@ -1462,7 +1430,7 @@ async function batchMetricByMonth(
         subgroupId,
         scopeParamStart: 4,
       });
-      const r = await query<{ m: number; completion_rate: string }>(
+      const r = await reportsQuery<{ m: number; completion_rate: string }>(
         `WITH ${cohort.sql},
           ${roster.sql},
           roster_size AS (
@@ -1491,7 +1459,7 @@ async function batchMetricByMonth(
       const egf = buildGroupFilter(groupId, subgroupId);
       let idx = 2;
       const conds = egf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COUNT(DISTINCT e.id) AS cnt
          FROM enrollments e ${egf.joins}
@@ -1521,7 +1489,7 @@ async function batchMetricByMonthTeam(
 
   switch (metric) {
     case 'total_learners': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT gs.m,
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
@@ -1537,7 +1505,7 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'active_learners': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `WITH ${buildActiveLearnerEventsCte({
           tenantParam: '$1',
           rangeStartParam: '$2',
@@ -1572,7 +1540,7 @@ async function batchMetricByMonthTeam(
         teamId,
         scopeParamStart: 4,
       });
-      const r = await query<{ m: number; completion_rate: string }>(
+      const r = await reportsQuery<{ m: number; completion_rate: string }>(
         `WITH ${cohort.sql},
           ${roster.sql},
           roster_size AS (
@@ -1598,7 +1566,7 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'total_enrollments': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COUNT(e.id) AS cnt
          FROM enrollments e
@@ -1645,7 +1613,7 @@ export async function getReportCoursePerformance(
     pageSize: safePageSize,
   }));
 
-  return cacheJson(portfolioCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, portfolioCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1656,7 +1624,7 @@ export async function getReportCoursePerformance(
       scopeParamStart: 4,
     });
     const limitParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql},
         aggregated AS (
           SELECT
@@ -1711,7 +1679,7 @@ export async function getReportCourseCount(
     teamId,
   }));
 
-  return cacheJson(countCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, countCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1721,7 +1689,7 @@ export async function getReportCourseCount(
       teamId,
       scopeParamStart: 4,
     });
-    const result = await query<{ course_count: string }>(
+    const result = await reportsQuery<{ course_count: string }>(
       `WITH ${cohort.sql}
        SELECT COUNT(DISTINCT re.course_id)::bigint AS course_count
        FROM report_enrollments re`,
@@ -1757,7 +1725,7 @@ export async function findReportCoursePerformanceByName(
     courseName: normalizedName.toLocaleLowerCase('vi-VN'),
   }));
 
-  return cacheJson(matchingCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, matchingCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1768,7 +1736,7 @@ export async function findReportCoursePerformanceByName(
       scopeParamStart: 4,
     });
     const courseNameParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql},
         aggregated AS (
           SELECT
@@ -1834,7 +1802,7 @@ export async function getReportCoursePerformanceById(
     courseId: id,
   }));
 
-  return cacheJson(byIdCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, byIdCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1845,7 +1813,7 @@ export async function getReportCoursePerformanceById(
       scopeParamStart: 4,
     });
     const courseIdParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql}
        SELECT
          re.course_id,
@@ -1882,7 +1850,7 @@ export async function getReportCompletionStatusDistribution(
     subgroupId,
     teamId,
   }));
-  return cacheJson(cacheKeyValue, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, cacheKeyValue, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1892,7 +1860,7 @@ export async function getReportCompletionStatusDistribution(
       teamId,
       scopeParamStart: 4,
     });
-    const result = await query<{
+    const result = await reportsQuery<{
       not_started: string;
       in_progress: string;
       completed: string;
@@ -1937,7 +1905,7 @@ export async function getReportCourseCompletionRanking(
     page: safePage,
     pageSize: safePageSize,
   }));
-  return cacheJson(rankingCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, rankingCacheKey, getSummaryCacheTtl(range), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -1948,7 +1916,7 @@ export async function getReportCourseCompletionRanking(
     scopeParamStart: 4,
   });
   const limitParam = 4 + cohort.params.length;
-  const result = await query<ReportCourseCompletionRanking & { full_count: string }>(
+  const result = await reportsQuery<ReportCourseCompletionRanking & { full_count: string }>(
     `WITH ${cohort.sql},
       aggregated AS (
         SELECT
@@ -2001,6 +1969,22 @@ export async function getReportCourseCompletionLearners(
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const range = getReportRange(month, year, dateRange);
+  // Cached per tenant, course, period, org scope, page, search and status. The
+  // key carries the tenant's course cache version: a course change shows at once.
+  const coursesVersion = await getCacheVersion(...cacheVersions.tenantCourses(tenantId));
+  const learnersCacheKey = cacheKeys.tenantResource(tenantId, 'report-course-learners', coursesVersion, {
+    courseId,
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    page: safePage,
+    pageSize: safePageSize,
+    search: search?.trim() ?? '',
+    status,
+  });
+  return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -2021,7 +2005,7 @@ export async function getReportCourseCompletionLearners(
   const safeStatus = ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
   if (safeStatus !== 'all') filters.push(`CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END = '${safeStatus}'`);
   params.push(safePageSize, (safePage - 1) * safePageSize);
-  const result = await query<ReportCourseCompletionLearner & { full_count: string }>(
+  const result = await reportsQuery<ReportCourseCompletionLearner & { full_count: string }>(
     `WITH ${cohort.sql}
      SELECT
        re.user_id,
@@ -2058,6 +2042,7 @@ export async function getReportCourseCompletionLearners(
       status: row.status,
     })),
   };
+  });
 }
 export async function getReportTopCourses(
   tenantId: string,
@@ -2070,6 +2055,23 @@ export async function getReportTopCourses(
   teamId?: string,
   dateRange?: ReportDateRange,
 ): Promise<{ count: number; total_pages: number; current_page: number; results: ReportTopCourse[] }> {
+  // Cached per tenant, period, org scope and page; the key carries the tenant's
+  // course cache version (course names).
+  const periodEnd = dateRange?.dateTo
+    ?? (month && year ? getReportRange(month, year).dateTo : year ? `${year}-12-31` : null);
+  const coursesVersion = await getCacheVersion(...cacheVersions.tenantCourses(tenantId));
+  const topCoursesCacheKey = cacheKeys.tenantResource(tenantId, 'report-top-courses', coursesVersion, {
+    page,
+    pageSize,
+    month,
+    year,
+    dateFrom: dateRange?.dateFrom,
+    dateTo: dateRange?.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+  });
+  return cachedReportAggregate(tenantId, topCoursesCacheKey, getReportListCacheTtl(periodEnd), async () => {
   const offset = (page - 1) * pageSize;
   const conditions: string[] = ['e.tenant_id = $1', 'e.is_active = true'];
   const params: any[] = [tenantId];
@@ -2093,7 +2095,7 @@ export async function getReportTopCourses(
 
   // Single query: count + data using window function
   params.push(pageSize, offset);
-  const result = await query<ReportTopCourse & { full_count: string }>(
+  const result = await reportsQuery<ReportTopCourse & { full_count: string }>(
     `SELECT e.course_id, c.display_name AS name,
             COUNT(DISTINCT e.id) AS enrollments,
             COUNT(*) OVER() AS full_count
@@ -2116,6 +2118,7 @@ export async function getReportTopCourses(
     current_page: page,
     results: result.rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
   };
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2138,6 +2141,19 @@ export async function getReportLearners(
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const range = getReportRange(month, year, dateRange);
+  // Cached per tenant, period, org scope, page, search and status.
+  const learnersCacheKey = cacheKey('reports', 'learners', 'v1', tenantId, stableHash({
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    page: safePage,
+    pageSize: safePageSize,
+    search: search?.trim() ?? '',
+    status: status ?? null,
+  }));
+  return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -2167,7 +2183,7 @@ export async function getReportLearners(
   const statusFilter = safeStatus === 'all' ? '' : `WHERE learner_status.status = '${safeStatus}'`;
   params.push(safePageSize, (safePage - 1) * safePageSize);
 
-  const result = await query<ReportLearner & { full_count: string }>(
+  const result = await reportsQuery<ReportLearner & { full_count: string }>(
     `WITH ${cohort.sql},
       ${roster.sql},
       learner_status AS (
@@ -2213,6 +2229,7 @@ export async function getReportLearners(
       status: row.status,
     })),
   };
+  });
 }
 // ═══════════════════════════════════════════════════════════════
 // Learner Detail
@@ -2315,7 +2332,7 @@ async function getEnrollmentScopedLearnerDetailRows(options: {
   const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   params.push(safePageSize, offset);
 
-  const result = await query<LearnerDetailResult & { full_count: string }>(
+  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
     `WITH ${sourceCte},
       course_rows AS (
         SELECT
@@ -2380,7 +2397,7 @@ export async function getLearnerDetail(
   const userScope = dataScope
     ? buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, 3)
     : { sql: '', params: [] as string[] };
-  const userResult = await query<{ id: string }>(
+  const userResult = await reportsQuery<{ id: string }>(
     `SELECT u.id
      FROM users u
      WHERE u.username = $1
@@ -2397,7 +2414,7 @@ export async function getLearnerDetail(
   const userId = userResult.rows[0].id;
 
   // Groups
-  const groupsResult = await query<{ group_name: string; subgroup_name: string }>(
+  const groupsResult = await reportsQuery<{ group_name: string; subgroup_name: string }>(
     `SELECT DISTINCT og.name AS group_name, sg.name AS subgroup_name
      FROM team_members tm
      JOIN teams t ON t.id = tm.team_id
@@ -2460,7 +2477,7 @@ export async function getLearnerDetail(
   }
 
   params.push(safePageSize, offset);
-  const result = await query<LearnerDetailResult & { full_count: string }>(
+  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
     `WITH
       ${buildVisibleCourseUsersCte({
         tenantParam: '$1',
@@ -2560,7 +2577,7 @@ export async function getUserBadges(
   username: string,
   tenantId: string,
 ): Promise<{ username: string; badges: UserBadgeRow[] }> {
-  const result = await query<UserBadgeRow>(
+  const result = await reportsQuery<UserBadgeRow>(
     `SELECT ub.badge_id, ub.earned_at, NULLIF(BTRIM(tbs.name_override), '') AS name_override
      FROM user_badges ub
      JOIN users u ON u.id = ub.user_id
@@ -2602,7 +2619,7 @@ export async function getUserStudyTime(
   tenantId: string,
   options: UserStudyTimeOptions = {},
 ): Promise<UserStudyTimeResponse> {
-  const userResult = await query<{ id: string }>(
+  const userResult = await reportsQuery<{ id: string }>(
     `SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1`,
     [username, tenantId],
   );
@@ -2624,7 +2641,7 @@ export async function getUserStudyTime(
 
 export async function refreshReportSummary(): Promise<void> {
   try {
-    await query('SELECT refresh_report_summary()', []);
+    await reportsQuery('SELECT refresh_report_summary()', []);
   } catch {
     // Function may not exist yet
   }

@@ -2,11 +2,24 @@
 // Reports Controller — HTTP handlers for analytics
 // ═══════════════════════════════════════════════════════════════
 
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
+import { isReportsSnapshotAbortedError } from '../../config/reports-database.js';
 import * as svc from './reports.service.js';
+import {
+  REPORTS_BUSY_CODE,
+  REPORTS_BUSY_ERROR,
+  REPORTS_BUSY_RETRY_AFTER_SECONDS,
+  REPORT_EXPORT_BUSY_CODE,
+  REPORT_EXPORT_BUSY_ERROR,
+  REPORT_EXPORT_BUSY_RETRY_AFTER_SECONDS,
+  REPORT_EXPORT_IN_PROGRESS_CODE,
+  REPORT_EXPORT_IN_PROGRESS_ERROR,
+  isReportsBusyError,
+} from './report-admission.logic.js';
+import { tryAcquireReportExportSlot } from './report-admission.service.js';
 import {
   buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
@@ -32,6 +45,48 @@ async function getExportLabels(req: Request, tenantId: string, locale: ReportExc
     { group: req.query.group_label, subgroup: req.query.subgroup_label, team: req.query.team_label },
     locale,
   );
+}
+
+/** The dashboard sends its UI language on every request. */
+function requestUiLocale(req: Request): ReportExcelLocale {
+  return req.get('X-UI-Locale')?.trim().toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+/**
+ * Router error handler: a report aggregate that found no free slot in time
+ * (report-admission.logic.ts) answers 429 REPORTS_BUSY instead of a 500.
+ */
+export function handleReportsBusyError(err: unknown, req: Request, res: Response, next: NextFunction): void {
+  if (!isReportsBusyError(err) || res.headersSent) {
+    next(err);
+    return;
+  }
+  const [status, vi, en] = REPORTS_BUSY_ERROR;
+  res.setHeader('Retry-After', String(REPORTS_BUSY_RETRY_AFTER_SECONDS));
+  res.status(status).json({ success: false, code: REPORTS_BUSY_CODE, message: requestUiLocale(req) === 'en' ? en : vi });
+}
+
+/** An export slot of the caller (release it when done), or null once a 429 has been sent. */
+function acquireExportSlotOrRefuse(req: Request, res: Response, locale: ReportExcelLocale): (() => void) | null {
+  const slot = tryAcquireReportExportSlot({ tenantId: req.user!.tenantId!, userId: req.user!.id });
+  if ('release' in slot) return slot.release;
+  const [status, vi, en] = slot.refused === 'user' ? REPORT_EXPORT_IN_PROGRESS_ERROR : REPORT_EXPORT_BUSY_ERROR;
+  res.setHeader('Retry-After', String(REPORT_EXPORT_BUSY_RETRY_AFTER_SECONDS));
+  res.status(status).json({
+    success: false,
+    code: slot.refused === 'user' ? REPORT_EXPORT_IN_PROGRESS_CODE : REPORT_EXPORT_BUSY_CODE,
+    message: locale === 'en' ? en : vi,
+  });
+  return null;
+}
+
+/** Aborts when the response closes before the whole file was sent (tab closed, download cancelled). */
+function abortWhenClientLeaves(res: Response): AbortSignal {
+  const controller = new AbortController();
+  res.once('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  return controller.signal;
 }
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
@@ -250,6 +305,10 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
     return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
   }
 
+  const releaseExportSlot = acquireExportSlotOrRefuse(req, res, locale);
+  if (!releaseExportSlot) return;
+  const clientGone = abortWhenClientLeaves(res);
+
   const courseName = course.rows[0].display_name;
   const fileName = buildCourseLearnerExcelFileName(locale, courseName, dateRange, month, year);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -273,14 +332,21 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
       labels: await getExportLabels(req, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
+      signal: clientGone,
     });
   } catch (err) {
+    if (isReportsSnapshotAbortedError(err)) {
+      console.info(JSON.stringify({ event: 'report_export_aborted', export: 'course_learners', tenant_id: tenantId }));
+      return;
+    }
     console.error('[CourseLearnersExport] Error:', err);
     if (!res.headersSent) {
       sendError(res, 'Có lỗi xảy ra khi xuất danh sách học viên khóa học', 500);
       return;
     }
     res.destroy(err instanceof Error ? err : undefined);
+  } finally {
+    releaseExportSlot();
   }
 }
 
@@ -324,6 +390,10 @@ export async function exportExcel(req: Request, res: Response) {
     return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
   }
 
+  const releaseExportSlot = acquireExportSlotOrRefuse(req, res, locale);
+  if (!releaseExportSlot) return;
+  const clientGone = abortWhenClientLeaves(res);
+
   const fileName = buildReportExcelFileName(locale, dateRange, month, year);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
@@ -344,14 +414,21 @@ export async function exportExcel(req: Request, res: Response) {
       labels: await getExportLabels(req, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
+      signal: clientGone,
     });
   } catch (err) {
+    if (isReportsSnapshotAbortedError(err)) {
+      console.info(JSON.stringify({ event: 'report_export_aborted', export: 'report', tenant_id: tenantId }));
+      return;
+    }
     console.error('[ReportsExport] Error:', err);
     if (!res.headersSent) {
       sendError(res, 'Có lỗi xảy ra khi xuất file báo cáo', 500);
       return;
     }
     res.destroy(err instanceof Error ? err : undefined);
+  } finally {
+    releaseExportSlot();
   }
 }
 

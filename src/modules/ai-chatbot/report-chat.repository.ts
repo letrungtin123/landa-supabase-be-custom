@@ -4,8 +4,11 @@
 // users.tenant_id, the unit breakdown through the tenant_id of every table it
 // reads, conversations through the caller's already-verified conversation
 // (loaded with user_id + tenant_id by the chat service).
+// Report aggregates (unit breakdown, nearest data dates) run on the reports
+// pool; the chat's own rows and catalogs stay on the main pool.
 
 import { query } from '../../config/database.js';
+import { reportsQuery } from '../../config/reports-database.js';
 import { buildLearnerScopeExists, type ReportDateRange } from '../reports/reports.service.js';
 import type { ReportScope } from '../reports/report-access.service.js';
 import type { NormalizedReportChatFilter } from './report-chat.service.js';
@@ -20,7 +23,7 @@ import {
 /** Per-unit breakdown of a report scope: one grouped statement, at most limit + 2 rows. */
 export async function loadReportUnitBreakdownRows(input: ReportUnitBreakdownQueryInput): Promise<ReportUnitBreakdownQueryRow[]> {
   const { sql, params } = buildReportUnitBreakdownQuery(input);
-  const result = await query<ReportUnitBreakdownQueryRow>(sql, params);
+  const result = await reportsQuery<ReportUnitBreakdownQueryRow>(sql, params);
   return result.rows;
 }
 
@@ -172,7 +175,7 @@ export async function findNearestReportEnrollmentDates(input: {
     ORDER BY e.enrolled_at ${order}
     LIMIT 1
   )`;
-  const result = await query<{ before_date: string | null; after_date: string | null }>(
+  const result = await reportsQuery<{ before_date: string | null; after_date: string | null }>(
     `SELECT ${nearest('e.enrolled_at < $2', 'DESC')} AS before_date,
             ${nearest('e.enrolled_at > $3 AND e.enrolled_at <= now()', 'ASC')} AS after_date`,
     [input.tenantId, input.range.startDate.toISOString(), input.range.endDate.toISOString(), ...scope.params],

@@ -4,6 +4,7 @@
 // Search permission failure (which used to mark the bot KB store broken).
 
 import { AppError } from '../../middleware/error-handler.js';
+import { REPORTS_BUSY_CODE, REPORTS_BUSY_ERROR } from '../reports/report-admission.logic.js';
 import { isGeminiPermissionDeniedError } from './gemini.service.js';
 
 export const REPORT_FILTERS_INVALID_CODE = 'REPORT_FILTERS_INVALID';
@@ -14,6 +15,8 @@ export const REPORT_FILTER_RANGE_TOO_LONG_CODE = 'REPORT_FILTER_RANGE_TOO_LONG';
 export const REPORT_FILTER_UNIT_INVALID_CODE = 'REPORT_FILTER_UNIT_INVALID';
 export const REPORT_PERMISSION_CHECK_FAILED_CODE = 'REPORT_PERMISSION_CHECK_FAILED';
 export const REPORT_DATA_UNAVAILABLE_CODE = 'REPORT_DATA_UNAVAILABLE';
+/** Too many report aggregates at once (report admission); the same code as the Reports page. */
+export const REPORT_CHAT_BUSY_CODE = REPORTS_BUSY_CODE;
 
 export type ReportChatErrorCode =
   | typeof REPORT_FILTERS_INVALID_CODE
@@ -23,7 +26,8 @@ export type ReportChatErrorCode =
   | typeof REPORT_FILTER_RANGE_TOO_LONG_CODE
   | typeof REPORT_FILTER_UNIT_INVALID_CODE
   | typeof REPORT_PERMISSION_CHECK_FAILED_CODE
-  | typeof REPORT_DATA_UNAVAILABLE_CODE;
+  | typeof REPORT_DATA_UNAVAILABLE_CODE
+  | typeof REPORT_CHAT_BUSY_CODE;
 
 export const REPORT_CHAT_ERRORS: Record<ReportChatErrorCode, readonly [status: number, vi: string, en: string]> = {
   REPORT_FILTERS_INVALID: [400, 'Bộ lọc báo cáo không hợp lệ.', 'The report filters are invalid.'],
@@ -34,6 +38,7 @@ export const REPORT_CHAT_ERRORS: Record<ReportChatErrorCode, readonly [status: n
   REPORT_FILTER_UNIT_INVALID: [400, 'Đơn vị trong bộ lọc báo cáo không hợp lệ.', 'A unit in the report filters is invalid.'],
   REPORT_PERMISSION_CHECK_FAILED: [500, 'Chưa thể kiểm tra quyền xem báo cáo. Vui lòng thử lại.', 'Your report access could not be checked. Please try again.'],
   REPORT_DATA_UNAVAILABLE: [503, 'Chưa thể tải số liệu báo cáo lúc này. Vui lòng thử lại sau.', 'Report data is not available right now. Please try again later.'],
+  REPORTS_BUSY: REPORTS_BUSY_ERROR,
 };
 
 export class ReportChatError extends AppError {

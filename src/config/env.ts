@@ -216,6 +216,25 @@ export const env = {
   // would turn ordinary lock waits into errors. Code that needs one sets
   // SET LOCAL lock_timeout itself.
   DB_LOCK_TIMEOUT_MS: optionalBoundedInt('DB_LOCK_TIMEOUT_MS', 0, 0, 600_000),
+  // Admin reports, report chat and Excel exports use their own small pool of
+  // this size (per process), so their aggregates never take the main pool.
+  REPORTS_DB_POOL_MAX: optionalBoundedInt('REPORTS_DB_POOL_MAX', 4, 1, 50),
+  // Report aggregates (a report page read that misses the cache, one report
+  // chat turn) running at once on this process, per tenant and in total. Past
+  // a limit a request waits up to REPORTS_ADMISSION_WAIT_MS for a slot, then
+  // gets 429 REPORTS_BUSY (0 = refuse at once).
+  REPORTS_TENANT_CONCURRENCY: optionalBoundedInt('REPORTS_TENANT_CONCURRENCY', 2, 1, 64),
+  REPORTS_GLOBAL_CONCURRENCY: optionalBoundedInt('REPORTS_GLOBAL_CONCURRENCY', 8, 1, 512),
+  REPORTS_ADMISSION_WAIT_MS: optionalBoundedInt('REPORTS_ADMISSION_WAIT_MS', 2_000, 0, 30_000),
+  // Excel exports in progress at once on this process, per user, per tenant
+  // and in total; one more is refused at once with 429. Each export holds one
+  // reports-pool connection for its whole read-only snapshot.
+  REPORTS_EXPORT_USER_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_USER_CONCURRENCY', 1, 1, 8),
+  REPORTS_EXPORT_TENANT_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_TENANT_CONCURRENCY', 2, 1, 32),
+  REPORTS_EXPORT_GLOBAL_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_GLOBAL_CONCURRENCY', 2, 1, 64),
+  // statement_timeout inside an export's snapshot transaction only; every
+  // other report statement keeps the pool's 30 s.
+  REPORTS_EXPORT_STATEMENT_TIMEOUT_MS: optionalBoundedInt('REPORTS_EXPORT_STATEMENT_TIMEOUT_MS', 120_000, 30_000, 900_000),
 
   // JWT
   JWT_SECRET: required('JWT_SECRET'),
