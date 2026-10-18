@@ -20,6 +20,7 @@ import {
 import { createReportSnapshot, generateReportNarrative, type ReportChatFilterInput, type ReportChatSnapshot } from './report-chat.service.js';
 import type { ReportSummary } from '../reports/reports.service.js';
 import { ReportsBusyError } from '../reports/report-admission.logic.js';
+import { ReportRequestError } from '../reports/report-request-error.js';
 import { COURSE_IDS, REPORT_COURSE_CATALOG, REPORT_REFERENCE_DATE, REPORT_TODAY, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
 
 test.after(async () => {
@@ -187,7 +188,7 @@ test('a resolved question builds one snapshot with the resolved unit and period'
 test('a learner_plus 403 while reading data becomes a localized clarification, not an error', async () => {
   const h = harness({
     allowedGroupIds: [UNIT_IDS.nesso],
-    buildSnapshot: async () => { throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này', code: 'REPORT_SCOPE_FORBIDDEN' }; },
+    buildSnapshot: async () => { throw new ReportRequestError('Bạn không có quyền xem báo cáo của nhóm này', 403, 'REPORT_SCOPE_FORBIDDEN'); },
   });
   // The catalog no longer lists the requested team (renamed/moved): the read is what fails.
   const outcome = await run(h, turnInput('Báo cáo', {
@@ -218,7 +219,7 @@ test('a 403 for a known unit outside the groups (membership changed meanwhile) n
   const h = harness({
     // Allowed when the filter is checked, removed from the group before the data read.
     allowedGroupIds: () => (calls++ === 0 ? [UNIT_IDS.holdings, UNIT_IDS.nesso] : [UNIT_IDS.nesso]),
-    buildSnapshot: async () => { throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này', code: 'REPORT_SCOPE_FORBIDDEN' }; },
+    buildSnapshot: async () => { throw new ReportRequestError('Bạn không có quyền xem báo cáo của nhóm này', 403, 'REPORT_SCOPE_FORBIDDEN'); },
   });
   await run(h, turnInput('Báo cáo', {
     role: 'learner_plus', locale: 'en', reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31', group_id: UNIT_IDS.holdings, subgroup_id: UNIT_IDS.southSales, team_id: UNIT_IDS.marketing },
@@ -257,14 +258,14 @@ test('learner_plus with one group gets that group explicitly', async () => {
 test('a scope that must be chosen while reading data (REPORT_SCOPE_REQUIRED) becomes scope_required', async () => {
   const h = harness({
     allowedGroupIds: [UNIT_IDS.holdings, UNIT_IDS.nesso],
-    buildSnapshot: async () => { throw { status: 400, message: 'Vui lòng chọn đơn vị cần xem báo cáo', code: 'REPORT_SCOPE_REQUIRED' }; },
+    buildSnapshot: async () => { throw new ReportRequestError('Vui lòng chọn đơn vị cần xem báo cáo', 400, 'REPORT_SCOPE_REQUIRED'); },
   });
   await run(h, turnInput('Báo cáo', { reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31' } }));
   assert.deepEqual((h.saved[0].metadata.report_clarification as { reasons: string[] }).reasons, ['scope_required']);
 });
 
 test('an invalid range raised while reading data becomes a clarification instead of "Yêu cầu không hợp lệ"', async () => {
-  const h = harness({ buildSnapshot: async () => { throw { status: 400, message: 'Khoảng ngày không hợp lệ', code: 'REPORT_RANGE_INVALID' }; } });
+  const h = harness({ buildSnapshot: async () => { throw new ReportRequestError('Khoảng ngày không hợp lệ', 400, 'REPORT_RANGE_INVALID'); } });
   await run(h, turnInput('Báo cáo', { reportFilters: { date_from: '2026-07-01', date_to: '2026-07-31' } }));
   assert.deepEqual((h.saved[0].metadata.report_clarification as { reasons: string[] }).reasons, ['date_invalid']);
 });

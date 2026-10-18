@@ -8,6 +8,7 @@ import {
   type ReportScopeOptions,
 } from '../reports/report-access.service.js';
 import { runReportAggregate } from '../reports/report-admission.service.js';
+import { ReportRequestError } from '../reports/report-request-error.js';
 import * as reportsService from '../reports/reports.service.js';
 import {
   MAX_REPORT_RANGE_DAYS,
@@ -392,8 +393,8 @@ export function resolveReportYearCorrection(input: {
   };
 }
 
-function rangeError(message: string): { status: number; message: string; code: string } {
-  return { status: 400, message, code: REPORT_RANGE_INVALID_CODE };
+function rangeError(message: string): ReportRequestError {
+  return new ReportRequestError(message, 400, REPORT_RANGE_INVALID_CODE);
 }
 
 function dateRangeFromYmd(dateFrom: string, dateTo: string): reportsService.ReportDateRange {
@@ -904,12 +905,12 @@ export async function loadStoredReportSnapshot(input: {
   );
   const metadata = result.rows[0]?.metadata;
   if (!isRecord(metadata) || metadata.kind !== 'report_analysis' || !isStoredReportChatSnapshot(metadata.report_snapshot)) {
-    throw { status: 404, message: 'Không tìm thấy bản chụp báo cáo hợp lệ' };
+    throw new ReportRequestError('Không tìm thấy bản chụp báo cáo hợp lệ', 404);
   }
   const snapshot = metadata.report_snapshot;
   const storedHash = typeof metadata.report_snapshot_hash === 'string' ? metadata.report_snapshot_hash : '';
   if (!storedHash || storedHash !== getReportSnapshotHash(snapshot)) {
-    throw { status: 409, message: 'Bản chụp báo cáo không còn toàn vẹn' };
+    throw new ReportRequestError('Bản chụp báo cáo không còn toàn vẹn', 409);
   }
   return {
     snapshot,

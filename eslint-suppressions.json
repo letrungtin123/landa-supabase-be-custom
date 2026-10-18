@@ -531,16 +531,6 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/report-chat-turn.service.test.ts": {
-    "@typescript-eslint/only-throw-error": {
-      "count": 4
-    }
-  },
-  "src/modules/ai-chatbot/report-chat.service.ts": {
-    "@typescript-eslint/only-throw-error": {
-      "count": 6
-    }
-  },
   "src/modules/ai-chatbot/report-date.logic.ts": {
     "@typescript-eslint/only-throw-error": {
       "count": 1
@@ -888,11 +878,6 @@
   "src/modules/prompt-templates/prompt-templates.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 9
-    }
-  },
-  "src/modules/reports/report-access.service.ts": {
-    "@typescript-eslint/only-throw-error": {
-      "count": 8
     }
   },
   "src/modules/reports/reports-request-errors.test.ts": {

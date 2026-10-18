@@ -166,10 +166,11 @@ function reportActor(req: Request) {
 }
 
 /**
- * The shared scope check (report-access.service.ts) throws `{ status, message,
- * code }` objects, which report chat and the PDF export read as they are. On
- * the Reports routes they become AppErrors, so the answer keeps their 4xx and
- * message instead of the global handler's 500.
+ * The shared scope check (report-access.service.ts) throws ReportRequestErrors
+ * (AppErrors), which pass through unchanged. A plain 4xx `{ status, message,
+ * code }` object, the form those errors used to have, still becomes an
+ * AppError, so the answer keeps its 4xx and message instead of the global
+ * handler's 500.
  */
 export function asReportRequestError(error: unknown): unknown {
   if (error instanceof Error || !error || typeof error !== 'object') return error;

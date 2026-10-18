@@ -58,7 +58,7 @@ export function reportChatErrorBody(code: ReportChatErrorCode, locale: 'vi' | 'e
   return { status, body: { success: false, message: locale === 'en' ? en : vi, code } };
 }
 
-/** Codes attached to the plain `{ status, message, code }` objects thrown by the report scope/date helpers. */
+/** Codes of the ReportRequestErrors thrown by the report scope/date helpers (read by shape, so a plain `{ code }` object works too). */
 export type ReportDomainErrorCode =
   | 'REPORT_SCOPE_FORBIDDEN'
   | 'REPORT_SCOPE_REQUIRED'

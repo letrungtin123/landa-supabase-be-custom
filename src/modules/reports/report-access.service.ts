@@ -1,5 +1,6 @@
 import { query } from '../../config/database.js';
 import type { UserRole } from '../../types/index.js';
+import { ReportRequestError } from './report-request-error.js';
 
 export interface ReportScopeActor {
   userId: string;
@@ -30,13 +31,13 @@ export interface ReportScopeOptions {
   requireExplicitLearnerPlusScope?: boolean;
 }
 
-/** Codes on the thrown `{ status, message, code }` objects; the Reports page reads status/message only. */
+/** Codes of the ReportRequestErrors thrown here; the Reports page reads status/message only. */
 export const REPORT_SCOPE_FORBIDDEN_CODE = 'REPORT_SCOPE_FORBIDDEN';
 export const REPORT_SCOPE_REQUIRED_CODE = 'REPORT_SCOPE_REQUIRED';
 export const REPORT_SCOPE_INVALID_CODE = 'REPORT_SCOPE_INVALID';
 
-function scopeInvalid(message: string): { status: number; message: string; code: string } {
-  return { status: 400, message, code: REPORT_SCOPE_INVALID_CODE };
+function scopeInvalid(message: string): ReportRequestError {
+  return new ReportRequestError(message, 400, REPORT_SCOPE_INVALID_CODE);
 }
 
 /**
@@ -59,11 +60,11 @@ export function resolveLearnerPlusReportScope(
   }
   const requestedAny = Boolean(hierarchy.groupId || requested.groupId || requested.subgroupId || requested.teamId);
   if (!requestedAny && options.requireExplicitLearnerPlusScope && allowedGroupIds.length > 1) {
-    throw { status: 400, message: 'Vui lòng chọn đơn vị cần xem báo cáo', code: REPORT_SCOPE_REQUIRED_CODE };
+    throw new ReportRequestError('Vui lòng chọn đơn vị cần xem báo cáo', 400, REPORT_SCOPE_REQUIRED_CODE);
   }
   const effectiveGroupId = hierarchy.groupId || requested.groupId || allowedGroupIds[0];
   if (!allowedGroupIds.includes(effectiveGroupId)) {
-    throw { status: 403, message: 'Bạn không có quyền xem báo cáo của nhóm này', code: REPORT_SCOPE_FORBIDDEN_CODE };
+    throw new ReportRequestError('Bạn không có quyền xem báo cáo của nhóm này', 403, REPORT_SCOPE_FORBIDDEN_CODE);
   }
   return {
     groupId: effectiveGroupId,

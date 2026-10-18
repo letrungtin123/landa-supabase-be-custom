@@ -20,6 +20,7 @@ import type { TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 import { enforceReportScope, hasNoAccessibleReportScope } from '../reports/report-access.service.js';
+import { ReportRequestError } from '../reports/report-request-error.js';
 import { getReportSnapshotHash, loadStoredReportSnapshot } from './report-chat.service.js';
 import { loadReportPdfTenantBranding, loadReportPdfTenantLabels, supabaseReportPdfArtifactStore, type ReportPdfArtifactStore } from './report-pdf-artifact.service.js';
 import { reportTenantLabelsKey, type ReportTenantLabels } from './report-labels.logic.js';
@@ -150,7 +151,9 @@ export function getReportPdfExportError(error: unknown): ReportPdfExportError {
   if (code === 'REPORT_PDF_RENDERER_UNAVAILABLE') return new ReportPdfExportError('Report PDF renderer unavailable', 503, code);
   if (code === 'REPORT_PDF_RENDER_TIMEOUT') return new ReportPdfExportError('Report PDF rendering timed out', 504, code);
   if (code === 'REPORT_PDF_RENDER_BUSY') return new ReportPdfExportError('Report PDF renderer busy', 429, code);
-  if (error instanceof AppError && error.statusCode < 500) {
+  // A ReportRequestError (scope, stored snapshot) is mapped by its status below,
+  // as when it was a plain object: 409 is an altered snapshot, not a bad request.
+  if (error instanceof AppError && !(error instanceof ReportRequestError) && error.statusCode < 500) {
     const mapped = error.statusCode === 403 ? 'REPORT_PDF_SCOPE_DENIED' : error.statusCode === 404 ? 'REPORT_PDF_NOT_FOUND' : 'REPORT_PDF_INVALID_REQUEST';
     return new ReportPdfExportError(error.message, error.statusCode, mapped);
   }
