@@ -72,6 +72,67 @@ async function getDisplayLabelsForTenant(tenantId: string | null | undefined) {
   return { roleLabels, groupLabels };
 }
 
+/**
+ * Starts a read-only sign-in lookup now; the caller awaits it where its
+ * check stands. A rejection is surfaced only by that await (or never, when
+ * an earlier check refused the sign-in), never as an unhandled rejection.
+ */
+function startLoginLookup<T>(needed: boolean, lookup: () => Promise<T>): Promise<T> | null {
+  if (!needed) return null;
+  const pending = lookup();
+  pending.catch(() => undefined);
+  return pending;
+}
+
+/**
+ * last_login_at is shown with minute precision at most; writing it at most
+ * once a minute per user keeps repeated sign-ins of one account (tabs,
+ * devices, SSO round trips) from rewriting the users row (many indexes,
+ * never a HOT update) each time.
+ */
+async function touchLastLogin(userId: string): Promise<void> {
+  await query(
+    `UPDATE users SET last_login_at = now()
+     WHERE id = $1 AND (last_login_at IS NULL OR last_login_at < now() - interval '1 minute')`,
+    [userId],
+  );
+}
+
+/**
+ * Permissions, managed tenants, tenant modules, labels and member groups of
+ * a session. Independent reads run at once; modules and labels wait only
+ * for the managed tenants that pick their tenant. Same values as reading
+ * them one after the other.
+ */
+async function resolveSessionContext(
+  userId: string,
+  role: string,
+  tenantId: string | null,
+  selectedTenantId?: string | null,
+) {
+  const [permissions, tenantContext, memberGroups] = await Promise.all([
+    resolvePermissions(userId, role, tenantId),
+    (async () => {
+      // Superuser/superadmin: lấy danh sách tenants được quản lý
+      const managedTenants = (role === 'superuser' || role === 'superadmin')
+        ? await resolveManagedTenants(userId, tenantId, role)
+        : [];
+      // Superadmin has no tenant in the JWT. Its UI context defaults to the
+      // first managed tenant, so module entitlements must use that same
+      // tenant instead of returning every globally-active module.
+      const tenantContextId = resolveRoleLabelTenantId(role, tenantId, managedTenants, selectedTenantId);
+      const [tenantModules, { roleLabels, groupLabels }] = await Promise.all([
+        resolveTenantModules(tenantContextId),
+        getDisplayLabelsForTenant(tenantContextId),
+      ]);
+      return { managedTenants, tenantModules, roleLabels, groupLabels };
+    })(),
+    // learner_plus: lấy danh sách org groups mà user thuộc về
+    role === 'learner_plus' ? resolveMemberGroups(userId) : Promise.resolve([] as { id: string; name: string }[]),
+  ]);
+  return { permissions, ...tenantContext, memberGroups };
+}
+
 const LOGIN_USER_SELECT = `
   SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
          u.role, u.is_active, u.tenant_id,
@@ -129,11 +190,30 @@ export async function login(username: string, password: string, clientApp?: 'adm
     throw new AuthLoginError('INVALID_CREDENTIALS');
   }
 
+  // The read-only lookups the checks below need start together, once the
+  // password is proven; each one is still awaited where its check stands,
+  // so the refusals (and their order) are exactly as before.
+  const originTenantLookup = startLoginLookup(Boolean(origin) && user.role !== 'superadmin',
+    () => resolveTenantByOrigin(origin!));
+  const adminGroupCountLookup = startLoginLookup(clientApp === 'admin' && user.role === 'learner_plus',
+    () => query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
+      [user.id],
+    ));
+  const managedTenantCountLookup = startLoginLookup(user.role === 'superuser',
+    () => query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM user_tenants ut
+       JOIN tenants t ON t.id = ut.tenant_id
+       WHERE ut.user_id = $1 AND t.is_active = true`,
+      [user.id],
+    ));
+  const demoAccountLookup = startLoginLookup(user.role === 'learner', () => isActiveDemoIframeAccount(user.id));
+
   // ── Kiểm tra user có thuộc tenant của domain đang login không ──
   // Chỉ superadmin mới được login ở bất kỳ domain nào.
   // Các role khác phải login đúng domain của tenant mình.
-  if (origin && user.role !== 'superadmin') {
-    const tenantFromDomain = await resolveTenantByOrigin(origin);
+  if (originTenantLookup) {
+    const tenantFromDomain = await originTenantLookup;
     if (tenantFromDomain && tenantFromDomain.id !== user.tenant_id) {
       throw new AuthLoginError('INVALID_CREDENTIALS');
     }
@@ -149,11 +229,8 @@ export async function login(username: string, password: string, clientApp?: 'adm
   }
 
   // learner_plus login admin: phải có ít nhất 1 permission group
-  if (clientApp === 'admin' && user.role === 'learner_plus') {
-    const pgCheck = await query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
-      [user.id],
-    );
+  if (adminGroupCountLookup) {
+    const pgCheck = await adminGroupCountLookup;
     if (parseInt(pgCheck.rows[0].count) === 0) {
       throw new AuthLoginError('NO_ADMIN_ACCESS');
     }
@@ -171,12 +248,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
 
   // superuser: check user_tenants có ít nhất 1 tenant active
   if (user.role === 'superuser') {
-    const managedCheck = await query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM user_tenants ut
-       JOIN tenants t ON t.id = ut.tenant_id
-       WHERE ut.user_id = $1 AND t.is_active = true`,
-      [user.id],
-    );
+    const managedCheck = await managedTenantCountLookup!;
     const hasManagedTenants = parseInt(managedCheck.rows[0].count) > 0;
     const hasPrimaryTenant = !!user.tenant_id && !!user.tenant_active;
 
@@ -194,7 +266,7 @@ export async function login(username: string, password: string, clientApp?: 'adm
   }
 
   // Tạo token pair
-  if (user.role === 'learner' && await isActiveDemoIframeAccount(user.id)) {
+  if (demoAccountLookup && await demoAccountLookup) {
     throw new AuthLoginError('DEMO_ACCOUNT_LOCKED');
   }
 
@@ -218,29 +290,13 @@ export async function login(username: string, password: string, clientApp?: 'adm
     [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE, sessionId],
   );
 
-  // Cập nhật last_login_at
-  await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
-
-  // Lấy permissions
-  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-
-  // Superuser/superadmin: lấy danh sách tenants được quản lý
-  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
-    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
-    : [];
-  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
-  // Superadmin has no tenant in the JWT. Its UI context defaults to the first
-  // managed tenant, so module entitlements must use that same tenant instead
-  // of returning every globally-active module.
-  const tenantModules = await resolveTenantModules(tenantContextId);
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    tenantContextId,
-  );
-
-  // learner_plus: lấy danh sách org groups mà user thuộc về
-  const memberGroups = user.role === 'learner_plus'
-    ? await resolveMemberGroups(user.id)
-    : [];
+  // last_login_at (at most once a minute) and the session context, together.
+  const [, {
+    permissions, managedTenants, tenantModules, roleLabels, groupLabels, memberGroups,
+  }] = await Promise.all([
+    touchLastLogin(user.id),
+    resolveSessionContext(user.id, user.role, user.tenant_id),
+  ]);
 
   return {
     access_token: accessToken,
@@ -269,6 +325,10 @@ export async function login(username: string, password: string, clientApp?: 'adm
 
 /**
  * Refresh token — rotate: cấp token mới, revoke token cũ.
+ *
+ * The transaction holds the token row lock only for the rotation itself
+ * (checks, reuse detection with its grace period, revoke + insert); the
+ * permissions, modules and labels of the answer are read after COMMIT.
  */
 export async function refresh(refreshToken: string, selectedTenantId?: string) {
   const outcome = await withDatabaseTransaction(async () => {
@@ -401,55 +461,49 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode, sessionId],
   );
 
-  // Lấy permissions + tenant context mới
-  const permissions = await resolvePermissions(row.user_id, row.role, row.tenant_id);
-  const managedTenants = (row.role === 'superuser' || row.role === 'superadmin')
-    ? await resolveManagedTenants(row.user_id, row.tenant_id, row.role)
-    : [];
-  const tenantContextId = resolveRoleLabelTenantId(
-    row.role,
-    row.tenant_id,
-    managedTenants,
-    selectedTenantId,
-  );
-  const tenantModules = await resolveTenantModules(tenantContextId);
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(tenantContextId);
-  const memberGroups = row.role === 'learner_plus'
-    ? await resolveMemberGroups(row.user_id)
-    : [];
-
   return {
     ok: true as const,
-    response: {
-      access_token: newAccessToken,
-      refresh_token: newRefreshToken,
-      expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
-      session_mode: sessionMode,
-      user: {
-        id: row.user_id,
-        username: row.username,
-        email: row.email,
-        full_name: row.full_name,
-        phone: row.phone,
-        avatar_url: row.avatar_url,
-        role: row.role,
-        tenant_id: row.tenant_id,
-        tenant_name: row.tenant_name,
-      },
-      permissions,
-      tenant_modules: tenantModules,
-      managed_tenants: managedTenants,
-      role_labels: roleLabels,
-      group_labels: groupLabels,
-      member_groups: memberGroups,
-    },
+    row,
+    sessionMode,
+    newAccessToken,
+    newRefreshToken,
   };
   });
 
   if (!outcome.ok) {
     throw outcome.error;
   }
-  return outcome.response;
+
+  // The rotation is committed: the token row lock (and the quota lock of the
+  // refresh_tokens insert) is released before the session context is read.
+  const { row, sessionMode, newAccessToken, newRefreshToken } = outcome;
+  const {
+    permissions, managedTenants, tenantModules, roleLabels, groupLabels, memberGroups,
+  } = await resolveSessionContext(row.user_id, row.role, row.tenant_id, selectedTenantId);
+
+  return {
+    access_token: newAccessToken,
+    refresh_token: newRefreshToken,
+    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
+    session_mode: sessionMode,
+    user: {
+      id: row.user_id,
+      username: row.username,
+      email: row.email,
+      full_name: row.full_name,
+      phone: row.phone,
+      avatar_url: row.avatar_url,
+      role: row.role,
+      tenant_id: row.tenant_id,
+      tenant_name: row.tenant_name,
+    },
+    permissions,
+    tenant_modules: tenantModules,
+    managed_tenants: managedTenants,
+    role_labels: roleLabels,
+    group_labels: groupLabels,
+    member_groups: memberGroups,
+  };
 }
 
 /**
@@ -513,22 +567,12 @@ export async function issueSessionForUserId(
      VALUES ($1, $2, $3, $4, $5)`,
     [user.id, refreshHash, refreshExpiresAt, sessionMode, sessionId],
   );
-  if (options?.updateLastLogin !== false) {
-    await query('UPDATE users SET last_login_at = now() WHERE id = $1', [user.id]);
-  }
-
-  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
-    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
-    : [];
-  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
-  const tenantModules = await resolveTenantModules(tenantContextId);
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    tenantContextId,
-  );
-  const memberGroups = user.role === 'learner_plus'
-    ? await resolveMemberGroups(user.id)
-    : [];
+  const [, {
+    permissions, managedTenants, tenantModules, roleLabels, groupLabels, memberGroups,
+  }] = await Promise.all([
+    options?.updateLastLogin !== false ? touchLastLogin(user.id) : Promise.resolve(),
+    resolveSessionContext(user.id, user.role, user.tenant_id),
+  ]);
 
   return {
     access_token: accessToken,
