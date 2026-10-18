@@ -5,7 +5,8 @@
 // events and averages, only grouped by period instead of run per period.
 
 import { reportsQuery } from '../../config/reports-database.js';
-import { buildLearnerScopeExists, buildReportLearnerRosterCte, type ReportSummary } from './reports.service.js';
+import { buildLearnerScopeExists, buildReportLearnerRosterCte } from './report-sql.js';
+import type { ReportSummary } from './reports.service.js';
 
 export interface ReportPeriodRange {
   startDate: Date;

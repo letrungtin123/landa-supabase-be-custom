@@ -9,7 +9,8 @@ import {
 } from '../../config/reports-database.js';
 import { spoolReportExport, trackWorkbookBacklog, waitForWorkbookRoom } from './report-export-flow.js';
 import { loadReportPeriodOverviews, type ReportPeriodRange } from './report-period-summaries.repository.js';
-import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, type ReportDateRange, type ReportSummary } from './reports.service.js';
+import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte } from './report-sql.js';
+import type { ReportDateRange, ReportSummary } from './reports.service.js';
 
 type ExportScope = {
   groupId?: string;
