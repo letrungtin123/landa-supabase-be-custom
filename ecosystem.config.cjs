@@ -7,12 +7,18 @@
 // Redis when there is more than one.
 //
 // Database connections: every process has its own pool (DB_POOL_MAX, it
-// includes the process's LISTEN connections). Keep the sum of all pools
-// (this file + ecosystem.lesson-author-orchestration-v2.config.cjs + the AI
-// service) well below max_connections minus what Supabase itself holds.
-//   API          LANDA_API_INSTANCES x LANDA_API_DB_POOL_MAX (2 x 10 = 20)
-//   background   10   email outbox 3   tenant quota 3
+// includes the process's LISTEN connections); a process that reads reports
+// also opens the reports pool (REPORTS_DB_POOL_MAX, default 4, on the first
+// report read). Keep the sum of all pools (this file +
+// ecosystem.lesson-author-orchestration-v2.config.cjs + the AI service) well
+// below max_connections minus what Supabase itself holds.
+//   API          LANDA_API_INSTANCES x (LANDA_API_DB_POOL_MAX + REPORTS_DB_POOL_MAX)
+//                (2 x (10 + 4) = 28)
+//   background   10 (reads no reports)   email outbox 3   tenant quota 4
 //   outline transfer 3   news cleanup 2
+//   = 50 here; + orchestration V2 8 (dispatcher 3, worker 5) + AI service 8
+//   (AI_RAG_DB_POOL_MAX default) = 66. Local: max_connections 100, of which
+//   Supabase itself holds about 25-30.
 function positiveInt(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
@@ -130,14 +136,14 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         TENANT_DATA_QUOTA_WORKER_ENABLED: "true",
-        // The session lock connection, one cycle, and the heartbeat and the
-        // delta fold, which take turns (each runs short single queries).
-        DB_POOL_MAX: "3"
+        // The session lock connection, one cycle, the heartbeat and the delta
+        // fold (each on its own connection).
+        DB_POOL_MAX: "4"
       },
       env_production: {
         NODE_ENV: "production",
         TENANT_DATA_QUOTA_WORKER_ENABLED: "true",
-        DB_POOL_MAX: "3"
+        DB_POOL_MAX: "4"
       }
     },
     {
