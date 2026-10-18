@@ -1,20 +1,16 @@
 // ═══════════════════════════════════════════════════════════════
 // Response Utils — Format JSON response chuẩn
 // Tất cả API đều trả về { success, data?, message?, error? }
+// Errors: { success: false, message, code, error? } (utils/errors.ts).
 // ═══════════════════════════════════════════════════════════════
 
 import type { Response } from 'express';
+import { errorBody } from './errors.js';
 
 interface SuccessBody<T = unknown> {
   success: true;
   data: T;
   message?: string;
-}
-
-interface ErrorBody {
-  success: false;
-  message: string;
-  error?: string;
 }
 
 /**
@@ -30,11 +26,11 @@ export function sendSuccess<T>(res: Response, data: T, message?: string, statusC
 }
 
 /**
- * Trả response lỗi.
+ * Trả response lỗi: `{ success: false, message, code }`. `error` (a code
+ * such as MODULE_DISABLED) is the code; it is also kept in the `error` field
+ * where it always was. Without it, the code comes from the status.
  */
 export function sendError(res: Response, message: string, statusCode = 400, error?: string): void {
-  const body: ErrorBody = { success: false, message };
-  if (error) body.error = error;
-  res.status(statusCode).json(body);
+  res.status(statusCode).json(errorBody(statusCode, message, error, error ? { error } : {}));
 }
 

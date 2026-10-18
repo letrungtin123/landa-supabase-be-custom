@@ -133,7 +133,7 @@ test('the learner list needs a status (the dashboard always sends one); a missin
   for (const query of missing) {
     const res = await respond(ctrl.getLearners, fakeRequest(query));
     assert.equal(res.statusCode, 400);
-    assert.deepEqual(res.body, { success: false, message: 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.' });
+    assert.deepEqual(res.body, { success: false, message: 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.', code: 'BAD_REQUEST' });
   }
   assert.equal(statements.length, 0, 'nothing was read');
 

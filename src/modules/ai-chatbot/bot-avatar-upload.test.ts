@@ -58,7 +58,7 @@ test('an avatar over 5 MB gets the handler message without being read further', 
   try {
     for (const bytes of [BOT_AVATAR_MAX_BYTES + 1, 6 * 1024 * 1024, 60 * 1024 * 1024]) {
       assert.deepEqual(await server.post(BOT_ID, bytes, 'image/jpeg'), {
-        status: 400, body: { success: false, message: BOT_AVATAR_SIZE_MESSAGE },
+        status: 400, body: { success: false, message: BOT_AVATAR_SIZE_MESSAGE, code: 'BAD_REQUEST' },
       }, `${bytes} bytes`);
     }
     assert.deepEqual(server.seen, [], 'nothing over the limit is handed to the handler');
@@ -71,10 +71,10 @@ test('the handler order is kept for a large file: unknown bot id, then type, the
   const server = await serve();
   try {
     assert.deepEqual(await server.post('not-a-uuid', 6 * 1024 * 1024, 'image/png'), {
-      status: 404, body: { success: false, message: BOT_NOT_FOUND_MESSAGE },
+      status: 404, body: { success: false, message: BOT_NOT_FOUND_MESSAGE, code: 'NOT_FOUND' },
     });
     assert.deepEqual(await server.post(BOT_ID, 6 * 1024 * 1024, 'application/pdf'), {
-      status: 400, body: { success: false, message: BOT_AVATAR_TYPE_MESSAGE },
+      status: 400, body: { success: false, message: BOT_AVATAR_TYPE_MESSAGE, code: 'BAD_REQUEST' },
     });
     // A small file of the wrong type is still refused by the handler itself.
     assert.deepEqual(await server.post(BOT_ID, 10, 'application/pdf'), {
