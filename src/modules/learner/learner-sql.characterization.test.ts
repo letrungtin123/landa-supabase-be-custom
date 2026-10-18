@@ -86,7 +86,8 @@ function installDb(t: TestContext, answer?: Answer): Statement[] {
   };
   const handle = async (config: string | { text: string; values?: unknown[] }, values: unknown[] = []) => {
     const text = typeof config === 'string' ? config : config.text;
-    statements.push({ text, params: typeof config === 'string' ? values : (config.values ?? []) });
+    // A copy, as sent: the service may push onto the same array for its next statement.
+    statements.push({ text, params: [...(typeof config === 'string' ? values : (config.values ?? []))] });
     return reply(text);
   };
   t.mock.method(pg.default.Pool.prototype, 'query', handle);
