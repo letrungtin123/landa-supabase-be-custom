@@ -21,6 +21,7 @@ import { gradeBlockAnswer } from './learner-grading.logic.js';
 import { createLearnerCoursesRepository } from './learner-courses.repository.js';
 import { createLearnerLibraryRepository } from './learner-library.repository.js';
 import { createLearnerProgressRepository } from './learner-progress.repository.js';
+import { createLearnerNotificationsRepository } from './learner-notifications.repository.js';
 import { planBlockCompletion, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   buildLearnerCourseStructure,
@@ -37,6 +38,7 @@ import { isUuid } from '../../utils/uuid.js';
 const coursesRepository = createLearnerCoursesRepository({ query });
 const libraryRepository = createLearnerLibraryRepository({ query });
 const progressRepository = createLearnerProgressRepository({ query });
+const notificationsRepository = createLearnerNotificationsRepository({ query });
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -697,25 +699,12 @@ export async function getMyNotifications(
   // Total and unread come from the same query (window aggregates over all
   // of the user's notifications of the tenant).
   const unreadKey = await unreadNotificationCacheKey(userId, tenantId);
-  const result = await query<any>(
-    `SELECT n.id, n.title, n.message, n.course_id, n.type, n.metadata, n.created_at,
-            nr.is_read, nr.read_at,
-            u.full_name AS sent_by_name,
-            COUNT(*) OVER() AS full_count,
-            COUNT(*) FILTER (WHERE nr.is_read = false) OVER() AS unread_full_count
-     FROM notification_recipients nr
-     JOIN notifications n ON n.id = nr.notification_id
-     LEFT JOIN users u ON u.id = n.sent_by
-     WHERE nr.user_id = $1 AND n.tenant_id = $2
-     ORDER BY n.created_at DESC
-     LIMIT $3 OFFSET $4`,
-    [userId, tenantId, page_size, offset],
-  );
+  const rows = await notificationsRepository.selectNotifications(userId, tenantId, page_size, offset);
 
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const total = parseInt(rows[0]?.full_count ?? '0');
   let unreadCount: number;
-  if (result.rows.length > 0) {
-    unreadCount = parseInt(result.rows[0].unread_full_count);
+  if (rows.length > 0) {
+    unreadCount = parseInt(rows[0].unread_full_count);
     // Fresh value for the header badge (GET /notifications/unread-count).
     await setCacheJson(unreadKey, unreadCount, CACHE_TTL.notificationUnread);
   } else {
@@ -724,8 +713,8 @@ export async function getMyNotifications(
   }
 
   return {
-    data: result.rows.map((r: any) => {
-      const { full_count, unread_full_count, ...rest } = r;
+    data: rows.map(r => {
+      const { full_count: _fullCount, unread_full_count: _unreadFullCount, ...rest } = r;
       return rest;
     }),
     total,
@@ -750,37 +739,19 @@ export async function getUnreadCount(userId: string, tenantId: string): Promise<
   return cacheJson(
     await unreadNotificationCacheKey(userId, tenantId),
     CACHE_TTL.notificationUnread,
-    async () => {
-      const result = await query<{ count: string }>(
-        `SELECT COUNT(*) AS count
-         FROM notification_recipients nr
-         JOIN notifications n ON n.id = nr.notification_id
-         WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-        [userId, tenantId],
-      );
-      return parseInt(result.rows[0].count);
-    },
+    () => notificationsRepository.countUnread(userId, tenantId),
   );
 }
 
 export async function markNotificationRead(userId: string, notificationId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
-  await query(
-    `UPDATE notification_recipients SET is_read = true, read_at = now()
-     WHERE user_id = $1 AND notification_id = $2`,
-    [userId, notificationId],
-  );
+  await notificationsRepository.markRead(userId, notificationId);
   await invalidateUserNotificationCaches(userId);
 }
 
 export async function markAllNotificationsRead(userId: string, tenantId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
-  await query(
-    `UPDATE notification_recipients nr SET is_read = true, read_at = now()
-     FROM notifications n
-     WHERE nr.notification_id = n.id AND nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-    [userId, tenantId],
-  );
+  await notificationsRepository.markAllRead(userId, tenantId);
   await invalidateUserNotificationCaches(userId);
 }
 
@@ -802,15 +773,8 @@ export async function getCourseModalConfig(courseId: string) {
 }
 
 async function getCourseModalConfigFromDb(courseId: string) {
-  const result = await query<any>(
-    `SELECT welcome_enabled, welcome_title, welcome_description,
-            confirm_enabled, confirm_title, confirm_description, confirm_checkbox_text,
-            completion_enabled, completion_title, completion_description,
-            completion_social_type, completion_social_link
-     FROM course_modal_configs WHERE course_id = $1`,
-    [courseId],
-  );
-  if (result.rowCount === 0) {
+  const config = await notificationsRepository.selectCourseModalConfig(courseId);
+  if (!config) {
     return {
       welcome_enabled: true,
       welcome_title: '',
@@ -826,7 +790,7 @@ async function getCourseModalConfigFromDb(courseId: string) {
       completion_social_link: null,
     };
   }
-  return result.rows[0];
+  return config;
 }
 
 /**
@@ -835,21 +799,12 @@ async function getCourseModalConfigFromDb(courseId: string) {
  */
 export async function getCourseModalState(userId: string, courseId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
-  const result = await query<any>(
-    `INSERT INTO course_modal_states (user_id, course_id)
-     VALUES ($1, $2)
-     ON CONFLICT (user_id, course_id) DO NOTHING
-     RETURNING *`,
-    [userId, courseId],
-  );
-  if (result.rowCount && result.rowCount > 0) {
-    return result.rows[0];
+  const created = await notificationsRepository.createCourseModalState(userId, courseId);
+  if (created) {
+    return created;
   }
-  const existing = await query<any>(
-    `SELECT * FROM course_modal_states WHERE user_id = $1 AND course_id = $2`,
-    [userId, courseId],
-  );
-  return existing.rows[0] || { course_id: courseId, welcome_shown: false, confirm_shown: false, complete_shown: false };
+  const existing = await notificationsRepository.selectCourseModalState(userId, courseId);
+  return existing || { course_id: courseId, welcome_shown: false, confirm_shown: false, complete_shown: false };
 }
 
 /**
@@ -862,30 +817,8 @@ export async function updateCourseModalState(
 ) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
 
-  const sets: string[] = [];
-  const params: unknown[] = [userId, courseId];
-  let idx = 3;
-
-  if (updates.welcome_shown !== undefined) { sets.push(`welcome_shown = $${idx++}`); params.push(updates.welcome_shown); }
-  if (updates.confirm_shown !== undefined) { sets.push(`confirm_shown = $${idx++}`); params.push(updates.confirm_shown); }
-  if (updates.complete_shown !== undefined) { sets.push(`complete_shown = $${idx++}`); params.push(updates.complete_shown); }
-
-  if (sets.length === 0) return getCourseModalState(userId, courseId);
-
-  sets.push('updated_at = NOW()');
-
-  // Upsert: nếu chưa có row thì tạo mới
-  await query(
-    `INSERT INTO course_modal_states (user_id, course_id)
-     VALUES ($1, $2)
-     ON CONFLICT (user_id, course_id) DO NOTHING`,
-    [userId, courseId],
-  );
-
-  await query(
-    `UPDATE course_modal_states SET ${sets.join(', ')} WHERE user_id = $1 AND course_id = $2`,
-    params,
-  );
+  // No flag given: nothing is written, the state is read as is.
+  await notificationsRepository.updateCourseModalState(userId, courseId, updates);
 
   return getCourseModalState(userId, courseId);
 }
@@ -908,25 +841,14 @@ export async function getSectionModalConfigs(courseId: string) {
 }
 
 async function getSectionModalConfigsFromDb(courseId: string) {
-  const result = await query<any>(
-    `SELECT section_id, title, description
-     FROM section_modal_configs
-     WHERE course_id = $1 AND enabled = true`,
-    [courseId],
-  );
-  return result.rows;
+  return notificationsRepository.selectSectionModalConfigs(courseId);
 }
 
 /**
  * Lấy danh sách section đã xem popup per-user per-course.
  */
 export async function getSectionModalShown(userId: string, courseId: string) {
-  const result = await query<any>(
-    `SELECT section_id FROM section_modal_shown
-     WHERE user_id = $1 AND course_id = $2`,
-    [userId, courseId],
-  );
-  return { shown_sections: result.rows.map((r: any) => r.section_id) };
+  return { shown_sections: await notificationsRepository.selectShownSectionIds(userId, courseId) };
 }
 
 /**
@@ -934,11 +856,6 @@ export async function getSectionModalShown(userId: string, courseId: string) {
  */
 export async function markSectionModalShown(userId: string, courseId: string, sectionId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
-  await query(
-    `INSERT INTO section_modal_shown (user_id, course_id, section_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (user_id, course_id, section_id) DO NOTHING`,
-    [userId, courseId, sectionId],
-  );
+  await notificationsRepository.markSectionShown(userId, courseId, sectionId);
   return { success: true };
 }
