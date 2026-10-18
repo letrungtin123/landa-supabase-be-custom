@@ -7,6 +7,7 @@ import { respondToGenerationAdmission } from './lesson-author-generation-admissi
 import { createGenerationStatusHandler } from './lesson-author-generation-status.controller.js';
 import { runGenerationJob } from './lesson-author-generation-runner.logic.js';
 import { GenerationJobError, generationJobStatusView, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 
@@ -72,7 +73,7 @@ test('diagnostic sink failure cannot trigger fallback or replace the original ad
 
 test('production admission propagates one correlation and records preparation/transaction boundaries', () => {
   const service = readFileSync(new URL('./lesson-author-durable-blueprint.service.ts', import.meta.url), 'utf8');
-  const chat = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const chat = readChatServiceSource();
   const controller = readFileSync(new URL('./chat.controller.ts', import.meta.url), 'utf8');
   assert.match(controller, /respondToGenerationAdmission\(res, admission =>/);
   assert.match(controller, /\}, admission\), \{ conversationId \}\)/);

@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { resolveLessonAuthorAction } from './lesson-author-action.logic.js';
 import { classifyLessonAuthorIntent } from './lesson-author-intent.logic.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const create = { lesson_author_action: 'GENERATE_COURSE_BLUEPRINT', source_documents: [{ document_id: id }] };
@@ -55,7 +56,7 @@ test('draft/resume reject malformed or mixed target contracts', () => {
 });
 test('HTTP wiring resolves action before admission/SSE and existing message owners persist it exactly once', () => {
   const controller = readFileSync(new URL('./chat.controller.ts', import.meta.url), 'utf8');
-  const service = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const service = readChatServiceSource();
   assert.ok(controller.indexOf('resolveLessonAuthorAction(req.body') < controller.indexOf('tryEnqueueDurableBlueprint(conversationId'));
   assert.equal(controller.match(/lessonAuthorAction: buttonAction\?\.action/g)?.length, 2);
   assert.equal(service.match(/lesson_author_action: options.lessonAuthorAction }/g)?.length, 3);

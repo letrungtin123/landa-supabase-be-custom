@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { readChatServiceSource } from '../ai-chatbot/chat-service-source.fixture.js';
 
 // Source-level boundary contract for AI ID author notes (QC 364564, N6). The
 // behavior of each helper is covered in course-author-notes.logic.test.ts;
@@ -15,7 +16,7 @@ const routes = read('./course-authoring.routes.ts');
 const service = read('./course-authoring.service.ts');
 const transfer = read('./course-outline-transfer.service.ts');
 const courses = read('../courses/courses.service.ts');
-const chat = read('../ai-chatbot/chat.service.ts');
+const chat = readChatServiceSource().replace(/\r\n/g, '\n');
 
 test('learner tree and block detail serialize every row through the stripping boundary', async () => {
   assert.match(learnerRow, /export function toLearnerBlockRow\(input: any\) \{\n  const row = input && typeof input === 'object' \? withoutAuthorOnlyBlockMetadata\(input\) : input;/);

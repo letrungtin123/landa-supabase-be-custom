@@ -12,6 +12,7 @@ import type { ChapterDraftRow, ChapterAttemptRow, ChapterUnitRow } from './lesso
 import { assertLessonAuthorProposalComponentsValid } from './lesson-author-component-registry.logic.js';
 import { assertLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
 import { COURSE_COMPONENT_TYPES } from '../tenants/tenant-course-components.constants.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node acceptance', { skip: aiRagPythonSkip }, async t => {
   const pg = await import('pg');
@@ -123,7 +124,7 @@ test('offline Node→Python unit contract→timeout→explicit resume→Python w
 
 test('wiring retains legacy paths, four-step UI, safe metadata and explicit rollout gate',()=>{
   const read=(path:string)=>readFileSync(new URL(path,import.meta.url),'utf8');
-  const chat=read('./chat.service.ts');const api=read('./chat.controller.ts');const runtime=read('./lesson-author-chapter-runtime.service.ts');
+  const chat=readChatServiceSource();const api=read('./chat.controller.ts');const runtime=read('./lesson-author-chapter-runtime.service.ts');
   assert.ok(chat.indexOf('await executeChapterCheckpoint(ctx,userId,trimmed,options,blueprintDraftContext')<chat.indexOf('const aiReservation = await reserveTenantAiTokens'));
   assert.match(chat,/outcome==='ready' && finishedProposal && finishedJob/);
   assert.match(chat,/if \(replyCommitted && reply\) onChunk\(reply\)/);
