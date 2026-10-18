@@ -293,7 +293,7 @@ async function updateCourseProgressRecalculationCursor(
   processed: number,
   lastEnrollmentId: string,
 ): Promise<void> {
-  await query(
+  await query<Record<string, unknown>>(
     `
       UPDATE course_progress_recalculation_jobs
       SET
@@ -307,7 +307,7 @@ async function updateCourseProgressRecalculationCursor(
 }
 
 async function pauseCourseProgressRecalculationJob(jobId: string): Promise<void> {
-  await query(
+  await query<Record<string, unknown>>(
     `
       UPDATE course_progress_recalculation_jobs
       SET status = 'queued', updated_at = now()
@@ -343,7 +343,7 @@ export async function markCourseProgressRecalculationJobRetryable(
   jobId: string,
   error: unknown,
 ): Promise<void> {
-  await query(
+  await query<Record<string, unknown>>(
     `
       UPDATE course_progress_recalculation_jobs
       SET
@@ -361,7 +361,7 @@ export async function markCourseProgressRecalculationJobFailed(
   jobId: string,
   error: unknown,
 ): Promise<void> {
-  await query(
+  await query<Record<string, unknown>>(
     `
       UPDATE course_progress_recalculation_jobs
       SET
@@ -415,7 +415,7 @@ export async function runCourseProgressRecalculationJob(jobId: string): Promise<
 
 export async function requeuePendingCourseProgressRecalculationJobs(limit = 100): Promise<void> {
   try {
-    await query(
+    await query<Record<string, unknown>>(
       `
         UPDATE course_progress_recalculation_jobs
         SET status = 'queued', updated_at = now()

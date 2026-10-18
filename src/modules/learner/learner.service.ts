@@ -15,10 +15,14 @@ import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
-import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
-import { mediaQuizModeValue, safeJsonParse, scenarioChatString, toLearnerBlockRow } from './learner-block-row.logic.js';
-import { LEARNER_BLOCK_SERIALIZATION_VERSION, problemExplanationHtml, resolveSortableSubmission } from './learner-answer-key.logic.js';
-import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
+import { toLearnerBlockRow } from './learner-block-row.logic.js';
+import { LEARNER_BLOCK_SERIALIZATION_VERSION } from './learner-answer-key.logic.js';
+import { gradeBlockAnswer } from './learner-grading.logic.js';
+import { createLearnerCoursesRepository } from './learner-courses.repository.js';
+import { createLearnerLibraryRepository } from './learner-library.repository.js';
+import { createLearnerProgressRepository } from './learner-progress.repository.js';
+import { createLearnerNotificationsRepository } from './learner-notifications.repository.js';
+import { planBlockCompletion, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   buildLearnerCourseStructure,
   overlayLearnerBlockCompletions,
@@ -31,6 +35,11 @@ import {
 } from '../badges/badge-evaluation.service.js';
 import { isUuid } from '../../utils/uuid.js';
 
+const coursesRepository = createLearnerCoursesRepository({ query });
+const libraryRepository = createLearnerLibraryRepository({ query });
+const progressRepository = createLearnerProgressRepository({ query });
+const notificationsRepository = createLearnerNotificationsRepository({ query });
+
 async function assertLearnerCourseAccess(
   courseId: string,
   userId: string,
@@ -40,21 +49,12 @@ async function assertLearnerCourseAccess(
 ): Promise<void> {
   if (!tenantId) throw new AppError('Thiếu tenant', 400);
 
-  const params: unknown[] = [courseId, tenantId];
-  const conditions = ['c.id = $1', 'c.tenant_id = $2', 'c.deleted_at IS NULL'];
-  if (isLearnerRole(role)) {
-    params.push(userId);
-    conditions.push(learnerCourseAccessCondition('c', `$${params.length}`));
-  }
-
-  const result = await query<{ id: string }>(
-    `SELECT c.id
-     FROM courses c
-     WHERE ${conditions.join(' AND ')}
-     LIMIT 1`,
-    params,
-  );
-  if (result.rowCount === 0) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
+  const accessible = await coursesRepository.courseAccessible({
+    courseId,
+    tenantId,
+    learnerUserId: isLearnerRole(role) ? userId : undefined,
+  });
+  if (!accessible) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
 }
 
 /**
@@ -79,13 +79,7 @@ export async function assertCourseSection(courseId: string, sectionId: unknown):
   if (!isUuid(sectionId)) {
     throw new AppError('Không tìm thấy phần học này', 404);
   }
-  const result = await query(
-    `SELECT 1 FROM course_blocks
-     WHERE id = $1::uuid AND course_id = $2 AND deleted_at IS NULL
-     LIMIT 1`,
-    [sectionId, courseId],
-  );
-  if (result.rowCount === 0) throw new AppError('Không tìm thấy phần học này', 404);
+  if (!(await coursesRepository.sectionOfCourse(sectionId, courseId))) throw new AppError('Không tìm thấy phần học này', 404);
   return sectionId;
 }
 
@@ -122,90 +116,33 @@ async function getMyVisibleCoursesFromDb(
 ) {
   const { search, category_id, page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
-  const sqlParams: unknown[] = [tenantId];
-  let where = 'WHERE c.tenant_id = $1 AND c.deleted_at IS NULL';
+  const learnerUserId = isLearnerRole(role) ? userId : undefined;
 
-  // learner: chỉ thấy courses assign qua team → category → course
-  // Path: team_members → team_course_categories → course_category_courses
-  // Fallback: team_courses (direct assignment, backward compat)
-  if (isLearnerRole(role)) {
-    sqlParams.push(userId);
-    where += ` AND ${learnerCourseAccessCondition('c', `$${sqlParams.length}`)}`;
-  }
+  const rows = await coursesRepository.selectVisibleCourses({
+    tenantId, learnerUserId, categoryId: category_id, search, limit: page_size, offset,
+  });
 
-  // Filter theo category_id
-  if (category_id) {
-    sqlParams.push(category_id);
-    where += ` AND c.id IN (SELECT course_id FROM course_category_courses WHERE category_id = $${sqlParams.length})`;
-  }
-
-  if (search) {
-    sqlParams.push(`%${search}%`);
-    where += ` AND (unaccent(c.display_name) ILIKE unaccent($${sqlParams.length}) OR unaccent(c.org) ILIKE unaccent($${sqlParams.length}))`;
-  }
-
-  sqlParams.push(page_size, offset);
-  const result = await query<any>(
-    `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
-            COUNT(*) OVER() AS full_count
-     FROM courses c
-     ${where}
-     ORDER BY c.created_at DESC
-     LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
-    sqlParams,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
-  const courseIds = result.rows.map((r: any) => r.id);
+  const total = parseInt(rows[0]?.full_count ?? '0');
+  const courseIds = rows.map(r => r.id);
 
   // Fetch categories for returned courses
-  let categoriesByCourse: Record<string, { id: string; name: string }[]> = {};
+  const categoriesByCourse: Record<string, { id: string; name: string }[]> = {};
   if (courseIds.length > 0) {
-    const catResult = await query<any>(
-      `SELECT ccc.course_id, cc.id, cc.name
-       FROM course_category_courses ccc
-       JOIN course_categories cc ON cc.id = ccc.category_id
-       WHERE ccc.course_id = ANY($1)
-       ORDER BY cc.name`,
-      [courseIds],
-    );
-    for (const row of catResult.rows) {
+    for (const row of await coursesRepository.selectCategoriesOfCourses(courseIds)) {
       if (!categoriesByCourse[row.course_id]) categoriesByCourse[row.course_id] = [];
       categoriesByCourse[row.course_id].push({ id: row.id, name: row.name });
     }
   }
 
   // Fetch categories visible to this user for the FE filter dropdown.
-  const allCatsResult = await query<any>(
-    isLearnerRole(role)
-      ? `SELECT DISTINCT cc.id, cc.name
-         FROM course_categories cc
-         WHERE cc.tenant_id = $1
-           AND (
-             COALESCE(cc.is_public, false) = true
-             OR EXISTS (
-               SELECT 1
-               FROM team_course_categories tcc
-               JOIN team_members tm ON tm.team_id = tcc.team_id
-               WHERE tcc.category_id = cc.id
-                 AND tm.user_id = $2
-             )
-           )
-         ORDER BY cc.name`
-      : `SELECT DISTINCT cc.id, cc.name
-         FROM course_categories cc
-         WHERE cc.tenant_id = $1
-         ORDER BY cc.name`,
-    isLearnerRole(role) ? [tenantId, userId] : [tenantId],
-  );
+  const categories = await coursesRepository.selectFilterCategories(tenantId, learnerUserId);
 
   return {
-    data: result.rows.map((r: any) => {
-      const { full_count, ...rest } = r;
+    data: rows.map(r => {
+      const { full_count: _fullCount, ...rest } = r;
       return { ...rest, categories: categoriesByCourse[r.id] || [] };
     }),
-    categories: allCatsResult.rows,
+    categories,
     total,
     page,
     page_size,
@@ -241,27 +178,9 @@ async function getCourseDetailFromDb(
   tenantId: string,
   role: string,
 ) {
-  const result = await query<any>(
-    `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
-            mentor.id AS mentor_id,
-            mentor.full_name AS mentor_full_name,
-            mentor.email AS mentor_email,
-            mentor.phone AS mentor_phone,
-            mentor.avatar_url AS mentor_avatar,
-            mentor.bio AS mentor_bio,
-            mentor.role AS mentor_role,
-            cms.description AS mentor_section_description,
-            cms.logo_light_path AS mentor_section_logo_light,
-            cms.logo_dark_path AS mentor_section_logo_dark
-     FROM courses c
-     LEFT JOIN users mentor ON mentor.id = c.mentor_id
-     LEFT JOIN course_mentor_sections cms ON cms.course_id = c.id AND cms.tenant_id = c.tenant_id
-     WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
+  const row = await coursesRepository.selectCourseDetail(courseId, tenantId);
 
-  if (result.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
+  if (!row) throw new AppError('Khóa học không tồn tại', 404);
 
   if (isLearnerRole(role)) {
     await assertLearnerCourseAccess(courseId, userId, tenantId, role);
@@ -279,7 +198,7 @@ async function getCourseDetailFromDb(
     mentor_section_logo_light,
     mentor_section_logo_dark,
     ...coursePayload
-  } = result.rows[0];
+  } = row;
 
   const mentorSection = mentor_section_description || mentor_section_logo_light || mentor_section_logo_dark
     ? {
@@ -364,49 +283,11 @@ async function getCourseBlocksLearnerStateFromDb(
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
   if (isDemoIframe) return { completed_block_ids: [] };
 
-  // The learner's active enrollment (at most one per user and course).
-  const result = await query<{ block_id: string }>(
-    `WITH enrollment AS (
-       SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1
-     )
-     SELECT bc.block_id
-     FROM enrollment e
-     JOIN block_completions bc ON bc.enrollment_id = e.id`,
-    [courseId, userId],
-  );
-  return { completed_block_ids: result.rows.map((row) => row.block_id) };
+  return { completed_block_ids: await coursesRepository.selectCompletedBlockIds(courseId, userId) };
 }
 
 async function getCourseBlocksStructureFromDb(courseId: string): Promise<LearnerCourseStructure> {
-  // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
-  // Staff/admin muốn xem draft → dùng CMS route, KHÔNG dùng learner route.
-  // Learner route must read the immutable published snapshot only.  Falling
-  // back to metadata would leak a saved-but-unpublished diagram draft.
-  const result = await query<Record<string, unknown>>(
-    `WITH RECURSIVE active_tree AS (
-       SELECT b.id, b.parent_id, b.block_type, b.display_name,
-              b.published_data, b.published_metadata,
-              b.sort_order, b.is_published
-       FROM course_blocks b
-       WHERE b.course_id = $1
-         AND b.parent_id IS NULL
-         AND b.deleted_at IS NULL AND b.is_published = true
-       UNION ALL
-       SELECT child.id, child.parent_id, child.block_type, child.display_name,
-              child.published_data, child.published_metadata,
-              child.sort_order, child.is_published
-       FROM course_blocks child
-       JOIN active_tree parent ON parent.id = child.parent_id
-       WHERE child.deleted_at IS NULL AND child.is_published = true
-     )
-     SELECT b.id, b.parent_id, b.block_type, b.display_name,
-            b.published_data AS data, b.published_metadata AS metadata,
-            b.sort_order, b.is_published
-     FROM active_tree b
-     ORDER BY b.sort_order`,
-    [courseId],
-  );
-  return buildLearnerCourseStructure(result.rows);
+  return buildLearnerCourseStructure(await coursesRepository.selectPublishedBlockTree(courseId));
 }
 
 /**
@@ -439,34 +320,9 @@ export async function getBlockDetail(
 }
 
 async function getBlockDetailFromDb(blockId: string) {
-  // Learner route must never fall back to a block's draft columns.
-  const dataCol = 'b.published_data';
-  const metaCol = 'b.published_metadata';
-
-  const result = await query<any>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = $1
-       UNION ALL
-       SELECT parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id, b.course_id, b.parent_id, b.block_type, b.display_name,
-            ${dataCol} AS data, ${metaCol} AS metadata,
-            b.sort_order, b.is_published
-     FROM course_blocks b
-     JOIN courses c ON c.id = b.course_id
-     WHERE b.id = $1
-       AND b.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
-    [blockId],
-  );
-
-  if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
-  return toLearnerBlockRow(result.rows[0]);
+  const row = await coursesRepository.selectBlockDetail(blockId);
+  if (!row) throw new AppError('Block không tồn tại', 404);
+  return toLearnerBlockRow(row);
 }
 
 /**
@@ -478,478 +334,13 @@ export async function submitBlockAnswer(
   userId: string,
   role: string,
   tenantId: string | null | undefined,
-  body: any,
+  body: unknown,
 ) {
-  // Lấy block data — luôn dùng snapshot published, kể cả khi snapshot null.
-  // Không fallback sang draft vì learner không được thấy hay dùng nội dung chưa publish.
-  const blockResult = await query<any>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = $1
-       UNION ALL
-       SELECT parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id, b.block_type,
-            b.published_data AS data,
-            b.published_metadata AS metadata,
-            b.course_id
-     FROM course_blocks b
-     JOIN courses c ON c.id = b.course_id
-     WHERE b.id = $1
-       AND b.is_published = true
-       AND b.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
-    [blockId],
-  );
-
-  if (blockResult.rowCount === 0) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
-  const block = blockResult.rows[0];
+  const block = await coursesRepository.selectSubmittableBlock(blockId);
+  if (!block) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
   await assertLearnerCourseAccess(block.course_id, userId, tenantId, role);
 
-  switch (block.block_type) {
-    case 'problem':
-      return gradeProblem(block, body.answers || {});
-
-    case 'la_media_quiz':
-      return gradeMediaQuiz(block, body);
-
-    case 'la_image_choice_quiz':
-      return gradeImageChoiceQuiz(block, body);
-
-    case 'la_scenario_chat':
-      return gradeScenarioChat(block, body);
-
-    case 'la_crossword':
-      return gradeCrossword(block, body.answers || {});
-
-    case 'la_sortable':
-      return gradeSortable(block, Array.isArray(body.answer) ? body.answer : []);
-
-    default:
-      return {
-        status: 'ok',
-        message: 'Block type không hỗ trợ submit',
-        feedback: submitFeedback('unsupported_block_type'),
-        score: 0,
-      };
-  }
-}
-
-/** Grade problem block — parse OLX XML, support all 5 problem types */
-type SubmitFeedbackCode =
-  | 'correct'
-  | 'incorrect'
-  | 'partial_answers'
-  | 'partial_words'
-  | 'partial_positions'
-  | 'content_unavailable'
-  | 'question_not_found'
-  | 'round_not_found'
-  | 'answer_not_found'
-  | 'missing_correct_answer'
-  | 'unsupported_problem_type'
-  | 'unsupported_block_type';
-
-function submitFeedback(
-  code: SubmitFeedbackCode,
-  params?: Record<string, number>,
-) {
-  return params && Object.keys(params).length > 0 ? { code, params } : { code };
-}
-
-function normalizeMediaQuizAnswer(raw: unknown): string[] {
-  const values = Array.isArray(raw) ? raw : [raw];
-  return Array.from(new Set(
-    values
-      .map(value => typeof value === 'string' ? value.trim() : String(value ?? '').trim())
-      .filter(Boolean),
-  ));
-}
-
-function gradeMediaQuiz(block: any, body: any) {
-  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
-  if (!data || typeof data !== 'object' || !Array.isArray(data.questions)) {
-    return { status: 'error', message: 'Câu hỏi kèm media chưa có dữ liệu câu hỏi', feedback: submitFeedback('content_unavailable'), score: 0 };
-  }
-
-  const questionId = typeof body?.question_id === 'string' ? body.question_id : '';
-  const questionIndex = data.questions.findIndex((question: any) => question?.id === questionId);
-  if (questionIndex < 0) {
-    return { status: 'error', message: 'Không tìm thấy câu hỏi', feedback: submitFeedback('question_not_found'), score: 0 };
-  }
-
-  const question = data.questions[questionIndex];
-  const mode = mediaQuizModeValue(question?.mode, mediaQuizModeValue(data.mode, 'single_select'));
-  const choices = Array.isArray(question?.choices) ? question.choices : [];
-  const correctSet = new Set<string>(
-    choices
-      .filter((choice: any) => choice?.correct === true)
-      .map((choice: any) => String(choice.id)),
-  );
-  if (correctSet.size === 0) {
-    return { status: 'error', message: 'Câu hỏi chưa có đáp án đúng', feedback: submitFeedback('missing_correct_answer'), score: 0, question_id: questionId };
-  }
-
-  const answerSource = body?.answer ?? body?.answers?.[questionId] ?? body?.answers;
-  const submitted = normalizeMediaQuizAnswer(answerSource);
-  const submittedSet = new Set<string>(mode === 'single_select' ? submitted.slice(0, 1) : submitted);
-  const isCorrect = submittedSet.size === correctSet.size
-    && [...correctSet].every(answer => submittedSet.has(answer));
-  const isLastQuestion = questionIndex >= data.questions.length - 1;
-  const nextQuestion = data.questions[questionIndex + 1];
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác! Media tiếp theo đã được mở.' : 'Chưa đúng, hãy thử lại.',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    question_id: questionId,
-    completed: isCorrect && isLastQuestion,
-    next_question_id: isCorrect && nextQuestion?.id ? nextQuestion.id : null,
-    explanation_html: isCorrect && typeof question?.explanation_html === 'string' ? question.explanation_html : undefined,
-    correctness: { [questionId]: isCorrect ? 'correct' : 'incorrect' },
-  };
-}
-
-function gradeImageChoiceQuiz(block: any, body: any) {
-  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
-  if (!data || typeof data !== 'object' || !Array.isArray(data.choices)) {
-    return { status: 'error', message: 'Câu hỏi đáp án hình ảnh chưa có dữ liệu', feedback: submitFeedback('content_unavailable'), score: 0 };
-  }
-
-  const answerFromMap = body?.answers && typeof body.answers === 'object'
-    ? Object.values(body.answers)[0]
-    : undefined;
-  const choiceId = typeof body?.choice_id === 'string'
-    ? body.choice_id.trim()
-    : typeof body?.answer === 'string'
-      ? body.answer.trim()
-      : typeof answerFromMap === 'string'
-        ? answerFromMap.trim()
-        : '';
-
-  const choices = data.choices.slice(0, 4);
-  const choice = choices.find((item: any) => item?.id === choiceId);
-  if (!choice) {
-    return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), score: 0 };
-  }
-
-  const isCorrect = choice.correct === true;
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    choice_id: choiceId,
-    completed: isCorrect,
-    explanation_html: isCorrect && typeof data.explanation_html === 'string' ? data.explanation_html : undefined,
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-  };
-}
-
-function gradeScenarioChat(block: any, body: any) {
-  const data = typeof block.data === 'string' ? safeJsonParse(block.data) : block.data;
-  if (!data || typeof data !== 'object' || !Array.isArray(data.rounds)) {
-    return { status: 'error', message: 'Giao tiếp tình huống chưa có dữ liệu', feedback: submitFeedback('content_unavailable'), score: 0 };
-  }
-
-  const roundId = typeof body?.round_id === 'string' ? body.round_id : '';
-  const choiceId = typeof body?.choice_id === 'string' ? body.choice_id : '';
-  const roundIndex = data.rounds.findIndex((round: any) => round?.id === roundId);
-  if (roundIndex < 0) {
-    return { status: 'error', message: 'Không tìm thấy lượt hội thoại', feedback: submitFeedback('round_not_found'), score: 0 };
-  }
-
-  const round = data.rounds[roundIndex];
-  const choices = Array.isArray(round?.choices) ? round.choices : [];
-  const choice = choices.find((item: any) => item?.id === choiceId);
-  if (!choice) {
-    return { status: 'error', message: 'Không tìm thấy câu trả lời', feedback: submitFeedback('answer_not_found'), score: 0, round_id: roundId };
-  }
-
-  const isCorrect = choice.correct === true;
-  const nextRound = isCorrect ? data.rounds[roundIndex + 1] : null;
-  const completed = isCorrect && roundIndex >= data.rounds.length - 1;
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, hãy thử lại.',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    round_id: roundId,
-    choice_id: choiceId,
-    completed,
-    next_round_id: isCorrect && nextRound?.id ? nextRound.id : null,
-    response_message: scenarioChatString(choice.response_message),
-    response_description: scenarioChatString(choice.response_description),
-    character_status: scenarioChatString(choice.character_status),
-    explanation: scenarioChatString(choice.explanation),
-    correctness: { [roundId]: isCorrect ? 'correct' : 'incorrect' },
-  };
-}
-
-/** Correct answers and the explanation are disclosed only after a correct answer. */
-function withAnswerDisclosure<T extends { status?: string; correct_answers?: unknown }>(result: T, data: string): T & { explanation_html?: string } {
-  if (result.status !== 'correct') {
-    const { correct_answers: _hidden, ...rest } = result;
-    return rest as T;
-  }
-  const explanation = problemExplanationHtml(data);
-  return explanation ? { ...result, explanation_html: explanation } : result;
-}
-
-function gradeProblem(block: any, userAnswers: Record<string, string | string[]>) {
-  const data = typeof block.data === 'string' ? block.data : '';
-  return withAnswerDisclosure(gradeProblemOlx(data, userAnswers), data);
-}
-
-function gradeProblemOlx(data: string, userAnswers: Record<string, string | string[]>) {
-  if (!data) return { status: 'error', message: 'Không có dữ liệu câu hỏi', feedback: submitFeedback('content_unavailable'), correctness: {} };
-
-
-
-  // ── 1. multiplechoiceresponse (single-select radio) ──
-  if (data.includes('<multiplechoiceresponse') || (data.includes('<choicegroup') && !data.includes('<checkboxgroup'))) {
-    return gradeMultipleChoice(data, userAnswers);
-  }
-
-  // ── 2. choiceresponse (multi-select checkbox) ──
-  if (data.includes('<choiceresponse') || data.includes('<checkboxgroup')) {
-    return gradeCheckbox(data, userAnswers);
-  }
-
-  // ── 3. optionresponse (dropdown) ──
-  if (data.includes('<optionresponse')) {
-    return gradeDropdown(data, userAnswers);
-  }
-
-  // ── 4. stringresponse (text input) ──
-  if (data.includes('<stringresponse')) {
-    return gradeStringInput(data, userAnswers);
-  }
-
-  // ── 5. numericalresponse (number input) ──
-  if (data.includes('<numericalresponse')) {
-    return gradeNumericalInput(data, userAnswers);
-  }
-
-  return { status: 'error', message: 'Loại câu hỏi chưa được hỗ trợ', feedback: submitFeedback('unsupported_problem_type'), correctness: {} };
-}
-
-/** 1. Single-select (radio) */
-function gradeMultipleChoice(data: string, userAnswers: Record<string, string | string[]>) {
-  const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
-  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), correctness: {} };
-
-  const correctIndices: string[] = [];
-  const choiceTexts: Record<string, string> = {};
-  choiceMatches.forEach((m, i) => {
-    const id = `choice_${i}`;
-    choiceTexts[id] = m[2];
-    if (m[1] === 'true') correctIndices.push(id);
-  });
-
-  const userAnswer = Object.values(userAnswers)[0];
-  const userStr = Array.isArray(userAnswer) ? userAnswer[0] : String(userAnswer || '');
-
-  const isCorrect = correctIndices.includes(userStr) ||
-    choiceMatches.some(m => m[1] === 'true' && m[2] === userStr);
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-    correct_answers: correctIndices.map(id => choiceTexts[id]),
-  };
-}
-
-/** 2. Multi-select (checkbox) */
-function gradeCheckbox(data: string, userAnswers: Record<string, string | string[]>) {
-  const choiceMatches = [...data.matchAll(/<choice\s+correct="(true|false)"[^>]*>(.*?)<\/choice>/gi)];
-  if (choiceMatches.length === 0) return { status: 'error', message: 'Không tìm thấy đáp án', feedback: submitFeedback('answer_not_found'), correctness: {} };
-
-  const correctSet = new Set<string>();
-  const choiceTexts: Record<string, string> = {};
-  choiceMatches.forEach((m, i) => {
-    const id = `choice_${i}`;
-    choiceTexts[id] = m[2];
-    if (m[1] === 'true') correctSet.add(id);
-  });
-
-  // FE sends { "olx_multi_0": ["choice_0", "choice_1", ...] }
-  const userVal = Object.values(userAnswers)[0];
-  const userSelected = new Set(Array.isArray(userVal) ? userVal : [String(userVal || '')]);
-
-  // Check exact match
-  const isCorrect = correctSet.size === userSelected.size &&
-    [...correctSet].every(id => userSelected.has(id));
-
-  const correctCount = [...correctSet].filter(id => userSelected.has(id)).length;
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : `Đúng ${correctCount}/${correctSet.size} đáp án. Thử lại nhé!`,
-    feedback: submitFeedback(isCorrect ? 'correct' : 'partial_answers', isCorrect ? undefined : { correct: correctCount, total: correctSet.size }),
-    score: Math.round((correctCount / correctSet.size) * 100),
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-    correct_answers: [...correctSet].map(id => choiceTexts[id]),
-  };
-}
-
-/** 3. Dropdown (optionresponse) */
-function gradeDropdown(data: string, userAnswers: Record<string, string | string[]>) {
-  const correctMatch = data.match(/<optioninput[^>]*\scorrect="([^"]+)"/i);
-  let correctAnswer = correctMatch ? correctMatch[1] : '';
-
-  if (!correctAnswer) {
-    const optionMatches = [...data.matchAll(/<option\s+[^>]*correct="(true|false)"[^>]*>([\s\S]*?)<\/option>/gi)];
-    const correctOption = optionMatches.find(m => m[1].toLowerCase() === 'true');
-    correctAnswer = correctOption ? correctOption[2].replace(/<[^>]+>/g, '').trim() : '';
-  }
-
-  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
-
-  const userVal = Object.values(userAnswers)[0];
-  const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
-
-  // FE sends option text directly (id = text for dropdown)
-  const isCorrect = userStr === correctAnswer;
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-    correct_answers: [correctAnswer],
-  };
-}
-
-/** 4. String input (stringresponse) */
-function gradeStringInput(data: string, userAnswers: Record<string, string | string[]>) {
-  // Parse correct answer and type from <stringresponse answer="..." type="ci|cs">
-  const answerMatch = data.match(/<stringresponse\s+answer="([^"]+)"[^>]*/i);
-  const correctAnswer = answerMatch ? answerMatch[1] : '';
-  const isCaseInsensitive = data.includes('type="ci"');
-
-  if (!correctAnswer) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
-
-  const userVal = Object.values(userAnswers)[0];
-  const userStr = Array.isArray(userVal) ? userVal[0] : String(userVal || '');
-
-  const isCorrect = isCaseInsensitive
-    ? userStr.toLowerCase().trim() === correctAnswer.toLowerCase().trim()
-    : userStr.trim() === correctAnswer.trim();
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-    correct_answers: [correctAnswer],
-  };
-}
-
-/** 5. Numerical input (numericalresponse) */
-function gradeNumericalInput(data: string, userAnswers: Record<string, string | string[]>) {
-  // Parse correct answer from <numericalresponse answer="...">
-  const answerMatch = data.match(/<numericalresponse\s+answer="([^"]+)"/i);
-  const correctAnswer = answerMatch ? parseFloat(answerMatch[1]) : NaN;
-
-  // Parse tolerance from <responseparam type="tolerance" default="..."/>
-  const tolMatch = data.match(/<responseparam\s+type="tolerance"\s+default="([^"]+)"/i);
-  const tolerance = tolMatch ? parseFloat(tolMatch[1]) : 0;
-
-  if (isNaN(correctAnswer)) return { status: 'error', message: 'Không tìm thấy đáp án đúng', feedback: submitFeedback('missing_correct_answer'), correctness: {} };
-
-  const userVal = Object.values(userAnswers)[0];
-  const userNum = parseFloat(Array.isArray(userVal) ? userVal[0] : String(userVal || ''));
-
-  const isCorrect = !isNaN(userNum) && Math.abs(userNum - correctAnswer) <= tolerance;
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect ? 'Chính xác!' : 'Chưa đúng, thử lại nhé!',
-    feedback: submitFeedback(isCorrect ? 'correct' : 'incorrect'),
-    score: isCorrect ? 100 : 0,
-    correctness: { answer: isCorrect ? 'correct' : 'incorrect' },
-    correct_answers: [String(correctAnswer)],
-  };
-}
-
-/** Grade crossword block — so sánh từng word answer */
-function gradeCrossword(block: any, userAnswers: Record<string, string>) {
-  const meta = block.metadata || {};
-  const cd = meta.crossword_data || {};
-  const words: any[] = cd.words || [];
-
-  if (words.length === 0) {
-    return { status: 'error', message: 'Không có dữ liệu ô chữ', feedback: submitFeedback('content_unavailable'), score: 0 };
-  }
-
-  let correct = 0;
-  const results: Record<string, boolean> = {};
-
-  for (const word of words) {
-    const userAnswer = (userAnswers[String(word.id)] || '').toUpperCase().trim();
-    const correctAnswer = (word.answer || '').toUpperCase().trim();
-    const isCorrect = userAnswer === correctAnswer;
-    results[String(word.id)] = isCorrect;
-    if (isCorrect) correct++;
-  }
-
-  const score = Math.round((correct / words.length) * 100);
-
-  return {
-    status: correct === words.length ? 'correct' : 'incorrect',
-    message: correct === words.length
-      ? 'Hoàn thành ô chữ!'
-      : `Đúng ${correct}/${words.length} từ`,
-    feedback: submitFeedback(correct === words.length ? 'correct' : 'partial_words', correct === words.length ? undefined : { correct, total: words.length }),
-    score,
-    results,
-  };
-}
-
-/** Grade sortable block — check thứ tự */
-function gradeSortable(block: any, submittedOrder: unknown[]) {
-  const meta = block.metadata || {};
-  const sd = meta.sortable_data || {};
-  const items: any[] = sd.items || [];
-
-  if (items.length === 0) {
-    return { status: 'error', message: 'Không có dữ liệu sắp xếp', feedback: submitFeedback('content_unavailable'), score: 0 };
-  }
-
-  // Correct order = thứ tự id trong items array (1,2,3,4,5). Learners receive
-  // opaque ids in a shuffled order (learner-answer-key.logic.ts).
-  const correctOrder = items.map((item: any) => item.id);
-  const userOrder = resolveSortableSubmission(String(block.id), correctOrder, submittedOrder);
-  const isCorrect = JSON.stringify(userOrder) === JSON.stringify(correctOrder);
-
-  // Count how many are in correct position
-  let correctPositions = 0;
-  for (let i = 0; i < Math.min(userOrder.length, correctOrder.length); i++) {
-    if (userOrder[i] === correctOrder[i]) correctPositions++;
-  }
-
-  const score = Math.round((correctPositions / correctOrder.length) * 100);
-
-  return {
-    status: isCorrect ? 'correct' : 'incorrect',
-    message: isCorrect
-      ? 'Sắp xếp đúng thứ tự!'
-      : `Đúng ${correctPositions}/${correctOrder.length} vị trí`,
-    feedback: submitFeedback(isCorrect ? 'correct' : 'partial_positions', isCorrect ? undefined : { correct: correctPositions, total: correctOrder.length }),
-    score,
-  };
+  return gradeBlockAnswer(block, body);
 }
 
 // ── Course Files (tài liệu tham khảo) ──
@@ -984,27 +375,10 @@ export async function getCourseFiles(courseId: string, userId: string, role = 'l
 }
 
 async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
-  const lockedFilter = learnerView ? 'AND is_locked = false' : '';
-  const result = await query<any>(
-    `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
-     FROM course_assets
-     WHERE course_id = $1
-       -- The asset must belong to the course's own tenant (rows injected from
-       -- another tenant before the upload check existed stay hidden).
-       AND EXISTS (
-         SELECT 1 FROM courses c
-         WHERE c.id = course_assets.course_id
-           AND c.tenant_id = course_assets.tenant_id
-           AND c.deleted_at IS NULL
-       )
-       AND is_reference = true
-       ${lockedFilter}
-     ORDER BY created_at DESC`,
-    [courseId],
-  );
+  const result = await coursesRepository.selectCourseFiles(courseId, learnerView);
 
   return {
-    files: result.rows.map((r: any) => {
+    files: result.rows.map(r => {
       const ext = r.display_name?.split('.').pop()?.toLowerCase() || '';
       return {
         id: r.id,
@@ -1012,7 +386,7 @@ async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
         url: r.url,
         extension: ext,
         content_type: r.content_type,
-        size: parseInt(r.file_size) || 0,
+        size: parseInt(r.file_size as string) || 0,
         date_added: r.created_at,
       };
     }),
@@ -1048,50 +422,13 @@ async function getMyLibraryCategoriesFromDb(
   tenantId: string,
   role: string,
 ) {
-  const learner = isLearnerRole(role);
-  const sql = learner
-    ? `SELECT dc.id::text AS id,
-              dc.name,
-              dc.slug,
-              dc.sort_order,
-              COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true)::int AS count
-       FROM document_categories dc
-       LEFT JOIN documents d
-         ON d.category_id = dc.id
-        AND d.tenant_id = $1::uuid
-       WHERE dc.tenant_id = $1::uuid
-         AND (
-           COALESCE(dc.is_public, false) = true
-           OR EXISTS (
-             SELECT 1
-             FROM team_doc_categories tdc
-             JOIN team_members tm ON tm.team_id = tdc.team_id
-             WHERE tdc.category_id = dc.id
-               AND tm.user_id = $2::uuid
-           )
-         )
-       GROUP BY dc.id
-       ORDER BY dc.sort_order, dc.name`
-    : `SELECT dc.id::text AS id,
-              dc.name,
-              dc.slug,
-              dc.sort_order,
-              COUNT(d.id)::int AS count
-       FROM document_categories dc
-       LEFT JOIN documents d
-         ON d.category_id = dc.id
-        AND d.tenant_id = $1::uuid
-       WHERE dc.tenant_id = $1::uuid
-       GROUP BY dc.id
-       ORDER BY dc.sort_order, dc.name`;
-
-  const result = await query<any>(sql, learner ? [tenantId, userId] : [tenantId]);
+  const result = await libraryRepository.selectCategories(tenantId, isLearnerRole(role) ? userId : undefined);
   return {
-    categories: result.rows.map((r: any) => ({
+    categories: result.rows.map(r => ({
       id: r.id,
       name: r.name,
       slug: r.slug || '',
-      count: parseInt(r.count) || 0,
+      count: parseInt(String(r.count)) || 0,
     })),
     total: result.rowCount || 0,
   };
@@ -1140,84 +477,20 @@ async function getMyLibraryDocumentsFromDb(
 ) {
   const { page = 1, page_size = 20, category, extension, search, ordering } = params;
   const offset = (page - 1) * page_size;
-  const sqlParams: unknown[] = [tenantId];
-  const conditions: string[] = ['d.tenant_id = $1::uuid'];
+  const filter = { tenantId, learnerUserId: isLearnerRole(role) ? userId : undefined, category, extension, search };
 
-  if (isLearnerRole(role)) {
-    sqlParams.push(userId);
-    conditions.push(`d.is_visible = true AND d.category_id IS NOT NULL AND (
-      COALESCE(dc.is_public, false) = true
-      OR EXISTS (
-        SELECT 1
-        FROM team_doc_categories tdc
-        JOIN team_members tm ON tm.team_id = tdc.team_id
-        WHERE tm.user_id = $${sqlParams.length}::uuid
-          AND tdc.category_id = d.category_id
-      )
-    )`);
-  }
-
-  if (category) {
-    sqlParams.push(category);
-    conditions.push(`(dc.slug = $${sqlParams.length} OR dc.id::text = $${sqlParams.length})`);
-  }
-  if (extension) {
-    sqlParams.push(extension);
-    conditions.push(`d.extension = $${sqlParams.length}`);
-  }
-  if (search) {
-    sqlParams.push(`%${search}%`);
-    conditions.push(`unaccent(d.title) ILIKE unaccent($${sqlParams.length})`);
-  }
-
-  const where = conditions.join(' AND ');
-  let orderBy = 'd.created_at DESC';
-  if (ordering === 'title') orderBy = 'd.title ASC';
-  else if (ordering === '-title') orderBy = 'd.title DESC';
-  else if (ordering === 'created_at') orderBy = 'd.created_at ASC';
-  else if (ordering === 'file_size') orderBy = 'd.file_size DESC';
-
-  const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM documents d
-     LEFT JOIN document_categories dc ON dc.id = d.category_id
-     WHERE ${where}`,
-    sqlParams,
-  );
-  const total = parseInt(countResult.rows[0]?.count || '0', 10);
-
-  sqlParams.push(page_size, offset);
-  const result = await query<any>(
-    `SELECT d.id,
-            d.title,
-            d.extension,
-            d.file_size,
-            d.file_url,
-            d.category_id,
-            d.created_at,
-            d.is_visible,
-            COALESCE(dc.is_public, false) AS is_public,
-            dc.name AS category_name,
-            dc.slug AS category_slug,
-            u.full_name AS uploaded_by_name
-     FROM documents d
-     LEFT JOIN document_categories dc ON dc.id = d.category_id
-     LEFT JOIN users u ON u.id = d.uploaded_by
-     WHERE ${where}
-     ORDER BY ${orderBy}
-     LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
-    sqlParams,
-  );
+  const total = await libraryRepository.countDocuments(filter);
+  const rows = await libraryRepository.selectDocuments(filter, { ordering, limit: page_size, offset });
 
   return {
     count: total,
     next: page * page_size < total ? `page=${page + 1}` : null,
     previous: page > 1 ? `page=${page - 1}` : null,
-    results: result.rows.map((r: any) => ({
+    results: rows.map(r => ({
       id: r.id,
       title: r.title,
       extension: r.extension || '',
-      file_size: parseInt(r.file_size) || 0,
+      file_size: parseInt(r.file_size as string) || 0,
       category_id: r.category_id || null,
       category_name: r.category_name || '',
       category_slug: r.category_slug || '',
@@ -1235,21 +508,7 @@ async function getMyLibraryDocumentsFromDb(
  * JOIN course_progress để lấy progress % và completion status.
  */
 export async function getMyEnrollments(userId: string, tenantId: string) {
-  const result = await query<any>(
-    `SELECT e.id, e.course_id, e.enrolled_at, e.is_active,
-            c.display_name, c.image_url, c.org,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at, cp.last_activity_at
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true AND c.deleted_at IS NULL
-     ORDER BY e.enrolled_at DESC`,
-    [userId, tenantId],
-  );
-
-  return result.rows;
+  return progressRepository.selectEnrollments(userId, tenantId);
 }
 
 /**
@@ -1262,34 +521,22 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
 
   // Kiểm tra đã enroll chưa
-  const existing = await query<any>(
-    'SELECT id, is_active FROM enrollments WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3',
-    [userId, courseId, tenantId],
-  );
+  const existing = await progressRepository.findEnrollment(userId, courseId, tenantId);
 
-  if (existing.rowCount! > 0) {
-    if (existing.rows[0].is_active) {
-      return { enrollment_id: existing.rows[0].id, already_enrolled: true };
+  if (existing) {
+    if (existing.is_active) {
+      return { enrollment_id: existing.id, already_enrolled: true };
     }
     // Re-activate
-    await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
-    await recalculateEnrollmentProgress(existing.rows[0].id, courseId);
+    await progressRepository.reactivateEnrollment(existing.id);
+    await recalculateEnrollmentProgress(existing.id, courseId);
     await invalidateUserCourseProgressCache(userId, courseId);
     await invalidateUserBadgeCaches([userId]);
-    return { enrollment_id: existing.rows[0].id, already_enrolled: false };
+    return { enrollment_id: existing.id, already_enrolled: false };
   }
 
   // Tạo enrollment + course_progress
-  const result = await query<{ id: string }>(
-    `INSERT INTO enrollments (user_id, course_id, tenant_id) VALUES ($1, $2, $3) RETURNING id`,
-    [userId, courseId, tenantId],
-  );
-  const enrollmentId = result.rows[0].id;
-
-  await query(
-    'INSERT INTO course_progress (enrollment_id) VALUES ($1)',
-    [enrollmentId],
-  );
+  const enrollmentId = await progressRepository.createEnrollment(userId, courseId, tenantId);
   await invalidateUserCourseProgressCache(userId, courseId);
 
   return { enrollment_id: enrollmentId, already_enrolled: false };
@@ -1304,13 +551,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
  * version stay as they are (no cached answer contains last_activity_at).
  */
 async function touchEnrollmentLastActivity(enrollmentId: string): Promise<void> {
-  await query(
-    `UPDATE course_progress
-     SET last_activity_at = now()
-     WHERE enrollment_id = $1::uuid
-       AND (last_activity_at IS NULL OR last_activity_at < now() - interval '5 minutes')`,
-    [enrollmentId],
-  );
+  await progressRepository.touchLastActivity(enrollmentId);
 }
 
 /**
@@ -1329,57 +570,15 @@ export async function markBlocksComplete(
   if (blockIds.length === 0) return { marked: 0, newly_completed: 0 };
 
   // Lấy enrollment
-  const enrollment = await query<{ id: string }>(
-    `SELECT e.id
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     WHERE e.user_id = $1
-       AND e.course_id = $2
-       AND e.is_active = true
-       AND c.deleted_at IS NULL
-     LIMIT 1`,
-    [userId, courseId],
-  );
+  const enrollmentId = await progressRepository.findActiveEnrollmentId(userId, courseId);
 
-  if (enrollment.rowCount === 0) {
+  if (enrollmentId === undefined) {
     throw new AppError('Chưa ghi danh khóa học này', 400);
   }
 
-  const enrollmentId = enrollment.rows[0].id;
-
   // Same block filter as before; `completed` tells which ones are already done.
-  const activeBlocks = await query<ActiveBlockCompletionRow>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id AS root_id, id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = ANY($2::uuid[])
-       UNION ALL
-       SELECT a.root_id, parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id,
-            EXISTS (
-              SELECT 1
-              FROM block_completions bc
-              WHERE bc.enrollment_id = $3::uuid
-                AND bc.block_id = b.id
-            ) AS completed
-     FROM course_blocks b
-     WHERE b.course_id = $1
-       AND b.id = ANY($2::uuid[])
-       AND b.is_published = true
-       AND b.deleted_at IS NULL
-       AND b.block_type NOT IN ('course','chapter','sequential','vertical')
-       AND NOT EXISTS (
-         SELECT 1
-         FROM ancestors a
-         WHERE a.root_id = b.id
-           AND a.deleted_at IS NOT NULL
-       )`,
-    [courseId, blockIds, enrollmentId],
-  );
-  const { marked, missing } = planBlockCompletion(activeBlocks.rows);
+  const activeBlocks = await progressRepository.selectActiveBlocks(courseId, blockIds, enrollmentId);
+  const { marked, missing } = planBlockCompletion(activeBlocks);
 
   // Nothing new (all already completed, or no valid leaf): no completion
   // write, no recalculation, no cache bump; only "last activity" moves.
@@ -1388,15 +587,7 @@ export async function markBlocksComplete(
     return { marked, newly_completed: 0 };
   }
 
-  const inserted = await query<{ block_id: string }>(
-    `INSERT INTO block_completions (enrollment_id, block_id)
-     SELECT $1::uuid, block_id
-     FROM unnest($2::uuid[]) AS requested(block_id)
-     ON CONFLICT DO NOTHING
-     RETURNING block_id`,
-    [enrollmentId, missing],
-  );
-  const newlyCompleted = inserted.rowCount ?? inserted.rows.length;
+  const newlyCompleted = await progressRepository.insertBlockCompletions(enrollmentId, missing);
   // A concurrent request inserted them first and recalculates for itself.
   if (newlyCompleted === 0) return { marked, newly_completed: 0 };
 
@@ -1421,22 +612,12 @@ export async function markBlocksComplete(
  * Lấy progress chi tiết cho 1 khóa học.
  */
 export async function getMyProgress(userId: string, courseId: string) {
-  const result = await query<any>(
-    `SELECT cp.progress, cp.is_completed, cp.completed_at, cp.last_activity_at
-     FROM course_progress cp
-     JOIN enrollments e ON e.id = cp.enrollment_id
-     JOIN courses c ON c.id = e.course_id
-     WHERE e.user_id = $1 AND e.course_id = $2 AND e.is_active = true
-       AND c.deleted_at IS NULL
-     LIMIT 1`,
-    [userId, courseId],
-  );
+  const row = await progressRepository.selectProgress(userId, courseId);
 
-  if (result.rowCount === 0) {
+  if (!row) {
     return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
   }
 
-  const row = result.rows[0];
   return {
     ...row,
     progress: parseFloat(row.progress) || 0, // pg numeric → JS number
@@ -1454,24 +635,7 @@ export async function getBatchProgress(
 ) {
   if (courseIds.length === 0) return { progress: {} };
 
-  const result = await query<{
-    course_id: string;
-    progress: string;
-    is_completed: boolean;
-    completed_at: string | null;
-  }>(
-    `SELECT e.course_id,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at
-     FROM enrollments e
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1
-       AND e.tenant_id = $2
-       AND e.course_id = ANY($3)
-       AND e.is_active = true`,
-    [userId, tenantId, courseIds],
-  );
+  const rows = await progressRepository.selectBatchProgress(userId, tenantId, courseIds);
 
   const progress: Record<string, {
     progress: number;
@@ -1479,7 +643,7 @@ export async function getBatchProgress(
     completed_at: string | null;
   }> = {};
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     progress[row.course_id] = {
       progress: parseFloat(row.progress) || 0,
       is_completed: row.is_completed,
@@ -1513,10 +677,7 @@ export async function saveBadge(userId: string, tenantId: string, _badgeId: stri
 
 export async function updateBadgeShown(userId: string, badgeId: string, isShown: boolean) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật huy hiệu');
-  await query(
-    'UPDATE user_badges SET is_shown = $1 WHERE user_id = $2 AND badge_id = $3',
-    [isShown, userId, badgeId],
-  );
+  await progressRepository.setBadgeShown(userId, badgeId, isShown);
   // The kept overview lists this badge as a pending popup.
   await invalidateUserBadgeCaches([userId]);
 }
@@ -1538,25 +699,12 @@ export async function getMyNotifications(
   // Total and unread come from the same query (window aggregates over all
   // of the user's notifications of the tenant).
   const unreadKey = await unreadNotificationCacheKey(userId, tenantId);
-  const result = await query<any>(
-    `SELECT n.id, n.title, n.message, n.course_id, n.type, n.metadata, n.created_at,
-            nr.is_read, nr.read_at,
-            u.full_name AS sent_by_name,
-            COUNT(*) OVER() AS full_count,
-            COUNT(*) FILTER (WHERE nr.is_read = false) OVER() AS unread_full_count
-     FROM notification_recipients nr
-     JOIN notifications n ON n.id = nr.notification_id
-     LEFT JOIN users u ON u.id = n.sent_by
-     WHERE nr.user_id = $1 AND n.tenant_id = $2
-     ORDER BY n.created_at DESC
-     LIMIT $3 OFFSET $4`,
-    [userId, tenantId, page_size, offset],
-  );
+  const rows = await notificationsRepository.selectNotifications(userId, tenantId, page_size, offset);
 
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const total = parseInt(rows[0]?.full_count ?? '0');
   let unreadCount: number;
-  if (result.rows.length > 0) {
-    unreadCount = parseInt(result.rows[0].unread_full_count);
+  if (rows.length > 0) {
+    unreadCount = parseInt(rows[0].unread_full_count);
     // Fresh value for the header badge (GET /notifications/unread-count).
     await setCacheJson(unreadKey, unreadCount, CACHE_TTL.notificationUnread);
   } else {
@@ -1565,8 +713,8 @@ export async function getMyNotifications(
   }
 
   return {
-    data: result.rows.map((r: any) => {
-      const { full_count, unread_full_count, ...rest } = r;
+    data: rows.map(r => {
+      const { full_count: _fullCount, unread_full_count: _unreadFullCount, ...rest } = r;
       return rest;
     }),
     total,
@@ -1591,37 +739,19 @@ export async function getUnreadCount(userId: string, tenantId: string): Promise<
   return cacheJson(
     await unreadNotificationCacheKey(userId, tenantId),
     CACHE_TTL.notificationUnread,
-    async () => {
-      const result = await query<{ count: string }>(
-        `SELECT COUNT(*) AS count
-         FROM notification_recipients nr
-         JOIN notifications n ON n.id = nr.notification_id
-         WHERE nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-        [userId, tenantId],
-      );
-      return parseInt(result.rows[0].count);
-    },
+    () => notificationsRepository.countUnread(userId, tenantId),
   );
 }
 
 export async function markNotificationRead(userId: string, notificationId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
-  await query(
-    `UPDATE notification_recipients SET is_read = true, read_at = now()
-     WHERE user_id = $1 AND notification_id = $2`,
-    [userId, notificationId],
-  );
+  await notificationsRepository.markRead(userId, notificationId);
   await invalidateUserNotificationCaches(userId);
 }
 
 export async function markAllNotificationsRead(userId: string, tenantId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật thông báo');
-  await query(
-    `UPDATE notification_recipients nr SET is_read = true, read_at = now()
-     FROM notifications n
-     WHERE nr.notification_id = n.id AND nr.user_id = $1 AND n.tenant_id = $2 AND nr.is_read = false`,
-    [userId, tenantId],
-  );
+  await notificationsRepository.markAllRead(userId, tenantId);
   await invalidateUserNotificationCaches(userId);
 }
 
@@ -1643,15 +773,8 @@ export async function getCourseModalConfig(courseId: string) {
 }
 
 async function getCourseModalConfigFromDb(courseId: string) {
-  const result = await query<any>(
-    `SELECT welcome_enabled, welcome_title, welcome_description,
-            confirm_enabled, confirm_title, confirm_description, confirm_checkbox_text,
-            completion_enabled, completion_title, completion_description,
-            completion_social_type, completion_social_link
-     FROM course_modal_configs WHERE course_id = $1`,
-    [courseId],
-  );
-  if (result.rowCount === 0) {
+  const config = await notificationsRepository.selectCourseModalConfig(courseId);
+  if (!config) {
     return {
       welcome_enabled: true,
       welcome_title: '',
@@ -1667,7 +790,7 @@ async function getCourseModalConfigFromDb(courseId: string) {
       completion_social_link: null,
     };
   }
-  return result.rows[0];
+  return config;
 }
 
 /**
@@ -1676,21 +799,12 @@ async function getCourseModalConfigFromDb(courseId: string) {
  */
 export async function getCourseModalState(userId: string, courseId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
-  const result = await query<any>(
-    `INSERT INTO course_modal_states (user_id, course_id)
-     VALUES ($1, $2)
-     ON CONFLICT (user_id, course_id) DO NOTHING
-     RETURNING *`,
-    [userId, courseId],
-  );
-  if (result.rowCount && result.rowCount > 0) {
-    return result.rows[0];
+  const created = await notificationsRepository.createCourseModalState(userId, courseId);
+  if (created) {
+    return created;
   }
-  const existing = await query<any>(
-    `SELECT * FROM course_modal_states WHERE user_id = $1 AND course_id = $2`,
-    [userId, courseId],
-  );
-  return existing.rows[0] || { course_id: courseId, welcome_shown: false, confirm_shown: false, complete_shown: false };
+  const existing = await notificationsRepository.selectCourseModalState(userId, courseId);
+  return existing || { course_id: courseId, welcome_shown: false, confirm_shown: false, complete_shown: false };
 }
 
 /**
@@ -1703,30 +817,8 @@ export async function updateCourseModalState(
 ) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
 
-  const sets: string[] = [];
-  const params: unknown[] = [userId, courseId];
-  let idx = 3;
-
-  if (updates.welcome_shown !== undefined) { sets.push(`welcome_shown = $${idx++}`); params.push(updates.welcome_shown); }
-  if (updates.confirm_shown !== undefined) { sets.push(`confirm_shown = $${idx++}`); params.push(updates.confirm_shown); }
-  if (updates.complete_shown !== undefined) { sets.push(`complete_shown = $${idx++}`); params.push(updates.complete_shown); }
-
-  if (sets.length === 0) return getCourseModalState(userId, courseId);
-
-  sets.push('updated_at = NOW()');
-
-  // Upsert: nếu chưa có row thì tạo mới
-  await query(
-    `INSERT INTO course_modal_states (user_id, course_id)
-     VALUES ($1, $2)
-     ON CONFLICT (user_id, course_id) DO NOTHING`,
-    [userId, courseId],
-  );
-
-  await query(
-    `UPDATE course_modal_states SET ${sets.join(', ')} WHERE user_id = $1 AND course_id = $2`,
-    params,
-  );
+  // No flag given: nothing is written, the state is read as is.
+  await notificationsRepository.updateCourseModalState(userId, courseId, updates);
 
   return getCourseModalState(userId, courseId);
 }
@@ -1749,25 +841,14 @@ export async function getSectionModalConfigs(courseId: string) {
 }
 
 async function getSectionModalConfigsFromDb(courseId: string) {
-  const result = await query<any>(
-    `SELECT section_id, title, description
-     FROM section_modal_configs
-     WHERE course_id = $1 AND enabled = true`,
-    [courseId],
-  );
-  return result.rows;
+  return notificationsRepository.selectSectionModalConfigs(courseId);
 }
 
 /**
  * Lấy danh sách section đã xem popup per-user per-course.
  */
 export async function getSectionModalShown(userId: string, courseId: string) {
-  const result = await query<any>(
-    `SELECT section_id FROM section_modal_shown
-     WHERE user_id = $1 AND course_id = $2`,
-    [userId, courseId],
-  );
-  return { shown_sections: result.rows.map((r: any) => r.section_id) };
+  return { shown_sections: await notificationsRepository.selectShownSectionIds(userId, courseId) };
 }
 
 /**
@@ -1775,11 +856,6 @@ export async function getSectionModalShown(userId: string, courseId: string) {
  */
 export async function markSectionModalShown(userId: string, courseId: string, sectionId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể ghi modal state');
-  await query(
-    `INSERT INTO section_modal_shown (user_id, course_id, section_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (user_id, course_id, section_id) DO NOTHING`,
-    [userId, courseId, sectionId],
-  );
+  await notificationsRepository.markSectionShown(userId, courseId, sectionId);
   return { success: true };
 }

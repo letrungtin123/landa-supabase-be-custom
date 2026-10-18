@@ -9,7 +9,17 @@ import {
 } from '../../config/reports-database.js';
 import { spoolReportExport, trackWorkbookBacklog, waitForWorkbookRoom } from './report-export-flow.js';
 import { loadReportPeriodOverviews, type ReportPeriodRange } from './report-period-summaries.repository.js';
-import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, type ReportDateRange, type ReportSummary } from './reports.service.js';
+import {
+  createReportsExportRepository,
+  type CourseLearnerRow,
+  type HierarchyTrendRow,
+  type ReportExportInput,
+  type ScopeNames,
+} from './reports-export.repository.js';
+import type { ReportDateRange, ReportSummary } from './reports.service.js';
+
+// Every read joins the export's snapshot (withReportsSnapshot) through reportsQuery.
+const repository = createReportsExportRepository({ query: reportsQuery, forEachCursorBatch: forEachReportsCursorBatch });
 
 type ExportScope = {
   groupId?: string;
@@ -49,81 +59,6 @@ type ColumnDef = {
   key: string;
   width: number;
 };
-
-type ScopeNames = {
-  groupName: string;
-  subgroupName: string;
-  teamName: string;
-};
-
-type CourseRankingExportRow = {
-  course_id: string;
-  name: string;
-  total_enrollments: string;
-  completed_enrollments: string;
-  incomplete_enrollments: string;
-  completion_rate: string;
-};
-
-type TeamBreakdownRow = {
-  group_name: string;
-  subgroup_name: string;
-  team_name: string;
-  member_count: string;
-  total_enrollments: string;
-  completed_enrollments: string;
-  incomplete_enrollments: string;
-  completion_rate: string | null;
-};
-
-type HierarchyTrendRow = {
-  period_month: string;
-  period_year: string;
-  group_name: string;
-  subgroup_name: string;
-  team_name: string;
-  total_enrollments: string;
-  completed_enrollments: string;
-  incomplete_enrollments: string;
-  active_learners: string;
-  completion_rate: string | null;
-};
-
-type LearnerSummaryRow = {
-  user_id: string;
-  username: string;
-  email: string;
-  full_name: string | null;
-  group_names: string | null;
-  subgroup_names: string | null;
-  team_names: string | null;
-  enrolled_courses: string;
-  completed_courses: string;
-  incomplete_courses: string;
-  completion_rate: string | null;
-  last_completion_at: Date | null;
-  status: 'not_started' | 'learning' | 'completed';
-};
-
-type CourseLearnerRow = {
-  enrollment_id: string;
-  user_id: string;
-  username: string;
-  email: string;
-  full_name: string | null;
-  group_names: string | null;
-  subgroup_names: string | null;
-  team_names: string | null;
-  course_id: string;
-  course_name: string;
-  enrolled_at: Date | null;
-  completed_at: Date | null;
-  is_completed: boolean;
-  progress: string;
-  status: 'not_started' | 'learning' | 'completed';
-};
-
-type SortedCourseLearnerRow = CourseLearnerRow & { sort_name: string };
 
 type ReportExcelCopy = {
   all: string;
@@ -369,25 +304,6 @@ function statusColor(status: string): string {
   return COLORS.slate;
 }
 
-function appendScopeFilter(
-  params: unknown[],
-  scope: ExportScope,
-  aliases: { group: string; subgroup: string; team: string } = { group: 'og', subgroup: 'sg', team: 't' },
-): string {
-  if (scope.teamId) {
-    params.push(scope.teamId);
-    return `AND ${aliases.team}.id = $${params.length}`;
-  }
-  if (scope.subgroupId) {
-    params.push(scope.subgroupId);
-    return `AND ${aliases.subgroup}.id = $${params.length}`;
-  }
-  if (scope.groupId) {
-    params.push(scope.groupId);
-    return `AND ${aliases.group}.id = $${params.length}`;
-  }
-  return '';
-}
 function safeSheetName(baseName: string, index?: number): string {
   const suffix = index && index > 1 ? ` ${index}` : '';
   return `${baseName}${suffix}`.replace(/[\\/*?:[\]]/g, ' ').slice(0, 31);
@@ -535,40 +451,17 @@ class SplitWorksheetWriter {
 async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: ReportExcelLocale): Promise<ScopeNames> {
   const all = getReportExcelCopy(locale).all;
   if (scope.teamId) {
-    const result = await reportsQuery<ScopeNames>(
-      `SELECT og.name AS "groupName", sg.name AS "subgroupName", t.name AS "teamName"
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE t.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [scope.teamId, tenantId],
-    );
-    return result.rows[0] || { groupName: all, subgroupName: all, teamName: all };
+    return (await repository.findTeamNames(scope.teamId, tenantId)) || { groupName: all, subgroupName: all, teamName: all };
   }
 
   if (scope.subgroupId) {
-    const result = await reportsQuery<Pick<ScopeNames, 'groupName' | 'subgroupName'>>(
-      `SELECT og.name AS "groupName", sg.name AS "subgroupName"
-       FROM sub_groups sg
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE sg.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [scope.subgroupId, tenantId],
-    );
-    const row = result.rows[0];
+    const row = await repository.findSubgroupNames(scope.subgroupId, tenantId);
     return { groupName: row?.groupName || all, subgroupName: row?.subgroupName || all, teamName: all };
   }
 
   if (scope.groupId) {
-    const result = await reportsQuery<Pick<ScopeNames, 'groupName'>>(
-      `SELECT name AS "groupName"
-       FROM org_groups
-       WHERE id = $1 AND tenant_id = $2
-       LIMIT 1`,
-      [scope.groupId, tenantId],
-    );
-    return { groupName: result.rows[0]?.groupName || all, subgroupName: all, teamName: all };
+    const row = await repository.findGroupName(scope.groupId, tenantId);
+    return { groupName: row?.groupName || all, subgroupName: all, teamName: all };
   }
 
   return { groupName: all, subgroupName: all, teamName: all };
@@ -728,70 +621,6 @@ async function writeMonthlyOverviewSheet(
   addStyledRow(worksheet, [copy.averageCompletionRateInYear, `${yearlyRate.toFixed(2)}%`], columns.length, 'summary');
   worksheet.commit();
 }
-async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promise<HierarchyTrendRow[]> {
-  const { startDate, endDate } = getExportPeriodRange(options);
-  const params: unknown[] = [options.tenantId, startDate, endDate];
-  const scopeFilter = appendScopeFilter(params, options.scope);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4,
-  });
-  const result = await reportsQuery<HierarchyTrendRow>(
-    `WITH ${buildActiveLearnerEventsCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3' })},
-      ${cohort.sql},
-      enrollment_metrics AS (
-        SELECT
-          date_trunc('month', re.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS period_start,
-          og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id,
-          og.name AS group_name, sg.name AS subgroup_name, t.name AS team_name,
-          COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
-          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-        FROM report_enrollments re
-        JOIN team_members tm ON tm.user_id = re.user_id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1 ${scopeFilter}
-        GROUP BY period_start, og.id, sg.id, t.id, og.name, sg.name, t.name
-      ),
-      activity_metrics AS (
-        SELECT
-          date_trunc('month', ae.activity_date::timestamp) AS period_start,
-          og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id,
-          og.name AS group_name, sg.name AS subgroup_name, t.name AS team_name,
-          COUNT(DISTINCT ae.user_id)::bigint AS active_learners
-        FROM active_learner_events ae
-        JOIN users u ON u.id = ae.user_id
-        JOIN team_members tm ON tm.user_id = ae.user_id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE u.tenant_id = $1
-          AND u.is_active = true
-          AND u.role IN ('learner', 'learner_plus')
-          AND og.tenant_id = $1 ${scopeFilter}
-        GROUP BY period_start, og.id, sg.id, t.id, og.name, sg.name, t.name
-      )
-      SELECT
-        EXTRACT(MONTH FROM COALESCE(em.period_start, am.period_start))::int AS period_month,
-        EXTRACT(YEAR FROM COALESCE(em.period_start, am.period_start))::int AS period_year,
-        COALESCE(em.group_name, am.group_name) AS group_name,
-        COALESCE(em.subgroup_name, am.subgroup_name) AS subgroup_name,
-        COALESCE(em.team_name, am.team_name) AS team_name,
-        COALESCE(em.total_enrollments, 0)::bigint AS total_enrollments,
-        COALESCE(em.completed_enrollments, 0)::bigint AS completed_enrollments,
-        COALESCE(em.incomplete_enrollments, 0)::bigint AS incomplete_enrollments,
-        COALESCE(am.active_learners, 0)::bigint AS active_learners,
-        em.completion_rate
-      FROM enrollment_metrics em
-      FULL OUTER JOIN activity_metrics am
-        ON am.period_start = em.period_start AND am.group_id = em.group_id AND am.subgroup_id = em.subgroup_id AND am.team_id = em.team_id
-      ORDER BY COALESCE(em.period_start, am.period_start), COALESCE(em.group_name, am.group_name), COALESCE(em.subgroup_name, am.subgroup_name), COALESCE(em.team_name, am.team_name)`,
-    params,
-  );
-  return result.rows;
-}
 async function writeHierarchyTrendSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -810,7 +639,7 @@ async function writeHierarchyTrendSheet(
     { header: copy.averageProgress, key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(workbook, `${copy.trendBy} ${options.labels.team}`, `${copy.trendBy} ${lowerLabel(options.labels.team, options.locale)} - ${getExportPeriodLabel(options)}`, subtitle, columns);
-  const rows = await fetchHierarchyTrendRows(options);
+  const rows = await repository.selectHierarchyTrend(exportInput(options));
   rows.forEach((item, index) => {
     const row = worksheet.addRow([
       formatHierarchyPeriodLabel(item, options.locale), item.group_name, item.subgroup_name, item.team_name,
@@ -829,54 +658,6 @@ async function writeHierarchyTrendSheet(
   });
   worksheet.commit();
 }
-async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promise<TeamBreakdownRow[]> {
-  const { startDate, endDate } = getExportPeriodRange(options);
-  const params: unknown[] = [options.tenantId, startDate, endDate];
-  const scopeFilter = appendScopeFilter(params, options.scope);
-  const cohort = buildReportEnrollmentCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4 });
-  const result = await reportsQuery<TeamBreakdownRow>(
-    `WITH ${cohort.sql},
-      scoped_teams AS (
-        SELECT t.id AS team_id, t.name AS team_name, sg.name AS subgroup_name, og.name AS group_name
-        FROM teams t
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1 ${scopeFilter}
-      ),
-      members AS (
-        SELECT st.team_id, COUNT(DISTINCT u.id)::bigint AS member_count
-        FROM scoped_teams st
-        LEFT JOIN team_members tm ON tm.team_id = st.team_id
-        LEFT JOIN users u ON u.id = tm.user_id AND u.tenant_id = $1 AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
-        GROUP BY st.team_id
-      ),
-      enrollment_metrics AS (
-        SELECT
-          st.team_id,
-          COUNT(DISTINCT re.enrollment_id)::bigint AS total_enrollments,
-          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-          COUNT(DISTINCT re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-        FROM scoped_teams st
-        LEFT JOIN team_members tm ON tm.team_id = st.team_id
-        LEFT JOIN report_enrollments re ON re.user_id = tm.user_id
-        GROUP BY st.team_id
-      )
-      SELECT
-        st.group_name, st.subgroup_name, st.team_name,
-        COALESCE(m.member_count, 0)::bigint AS member_count,
-        COALESCE(em.total_enrollments, 0)::bigint AS total_enrollments,
-        COALESCE(em.completed_enrollments, 0)::bigint AS completed_enrollments,
-        COALESCE(em.incomplete_enrollments, 0)::bigint AS incomplete_enrollments,
-        COALESCE(em.completion_rate, 0) AS completion_rate
-      FROM scoped_teams st
-      LEFT JOIN members m ON m.team_id = st.team_id
-      LEFT JOIN enrollment_metrics em ON em.team_id = st.team_id
-      ORDER BY st.group_name, st.subgroup_name, st.team_name`,
-    params,
-  );
-  return result.rows;
-}
 async function writeTeamBreakdownSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
@@ -894,7 +675,7 @@ async function writeTeamBreakdownSheet(
     { header: copy.averageProgress, key: 'completionRate', width: 18 },
   ];
   const worksheet = addWorksheetChrome(workbook, `${copy.teamBreakdown} ${options.labels.team}`, `${copy.teamBreakdown} ${lowerLabel(options.labels.team, options.locale)}`, subtitle, columns);
-  const rows = await fetchTeamBreakdownRows(options);
+  const rows = await repository.selectTeamBreakdown(exportInput(options));
   rows.forEach((item, index) => {
     const rate = roundPercent(item.completion_rate);
     const row = worksheet.addRow([
@@ -915,33 +696,11 @@ async function writeTeamBreakdownSheet(
   });
   worksheet.commit();
 }
-async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promise<CourseRankingExportRow[]> {
-  const { startDate, endDate } = getExportPeriodRange(options);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
-    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
-  });
-  const result = await reportsQuery<CourseRankingExportRow>(
-    `WITH ${cohort.sql}
-     SELECT
-       re.course_id,
-       MAX(re.course_name) AS name,
-       COUNT(*)::bigint AS total_enrollments,
-       COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-       COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-       COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-     FROM report_enrollments re
-     GROUP BY re.course_id
-     ORDER BY completion_rate DESC NULLS LAST, completed_enrollments DESC, total_enrollments DESC, name ASC`,
-    [options.tenantId, startDate, endDate, ...cohort.params],
-  );
-  return result.rows;
-}
 async function writeCourseRankingSheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
   options: ReportExcelExportOptions,
   subtitle: string,
-): Promise<CourseRankingExportRow[]> {
+): Promise<void> {
   const copy = getReportExcelCopy(options.locale);
   const columns: ColumnDef[] = [
     { header: copy.rank, key: 'rank', width: 10 },
@@ -955,7 +714,7 @@ async function writeCourseRankingSheet(
   const worksheet = addWorksheetChrome(
     workbook, copy.courseRanking, copy.courseCompletionRanking, subtitle, columns,
   );
-  const rows = await fetchCourseRankingRows(options);
+  const rows = await repository.selectCourseRanking(exportInput(options));
   rows.forEach((item, index) => {
     const rate = roundPercent(item.completion_rate);
     const row = worksheet.addRow([
@@ -975,76 +734,6 @@ async function writeCourseRankingSheet(
     row.commit();
   });
   worksheet.commit();
-  return rows;
-}
-/**
- * Every learner of the scope with their period figures, ordered by user id
- * (the order of the former keyset batches). Read through one cursor, so the
- * period cohort is built once for the whole sheet.
- */
-function buildLearnerSummaryQuery(options: ReportExcelExportOptions): { text: string; params: unknown[] } {
-  const { startDate, endDate } = getExportPeriodRange(options);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
-    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
-  });
-  const roster = buildReportLearnerRosterCte({
-    tenantParam: '$1',
-    groupId: options.scope.groupId,
-    subgroupId: options.scope.subgroupId,
-    teamId: options.scope.teamId,
-    scopeParamStart: 4,
-  });
-  const membershipScope = options.scope.teamId
-    ? 'AND t.id = $4'
-    : options.scope.subgroupId
-      ? 'AND sg.id = $4'
-      : options.scope.groupId
-        ? 'AND og.id = $4'
-        : '';
-  return {
-    text: `WITH ${cohort.sql},
-      ${roster.sql},
-      memberships AS (
-        SELECT
-          tm.user_id,
-          string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
-          string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
-          string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-        FROM report_learners su
-        JOIN team_members tm ON tm.user_id = su.user_id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1 ${membershipScope}
-        GROUP BY tm.user_id
-      )
-      SELECT
-        su.user_id,
-        u.username,
-        u.email,
-        u.full_name,
-        m.group_names,
-        m.subgroup_names,
-        m.team_names,
-        COUNT(re.enrollment_id)::bigint AS enrolled_courses,
-        COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_courses,
-        COUNT(re.enrollment_id) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_courses,
-        COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate,
-        MAX(re.completed_at) FILTER (WHERE re.is_completed) AS last_completion_at,
-        CASE
-          WHEN COALESCE(AVG(re.progress), 0) >= 100 THEN 'completed'
-          WHEN COALESCE(AVG(re.progress), 0) > 0 THEN 'learning'
-          ELSE 'not_started'
-        END AS status
-      FROM report_learners su
-      JOIN users u ON u.id = su.user_id
-      LEFT JOIN report_enrollments re ON re.user_id = su.user_id
-      LEFT JOIN memberships m ON m.user_id = su.user_id
-      GROUP BY su.user_id, u.username, u.email, u.full_name, m.group_names, m.subgroup_names, m.team_names
-      ORDER BY su.user_id`,
-    params: [options.tenantId, startDate, endDate, ...cohort.params],
-  };
 }
 async function writeLearnerSummarySheet(
   workbook: ExcelJS.stream.xlsx.WorkbookWriter,
@@ -1066,8 +755,7 @@ async function writeLearnerSummarySheet(
     { header: copy.latestCompletion, key: 'lastCompletion', width: 20 },
   ];
   const writer = new SplitWorksheetWriter(workbook, copy.learnerList, copy.learnerListInScope, subtitle, columns);
-  const learnerQuery = buildLearnerSummaryQuery(options);
-  await forEachReportsCursorBatch<LearnerSummaryRow>({ ...learnerQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+  await repository.streamLearnerSummary(exportInput(options), { batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
     await waitForWorkbookRoom(workbook, options.signal);
     for (const item of rows) {
       const rate = roundPercent(item.completion_rate);
@@ -1083,65 +771,6 @@ async function writeLearnerSummarySheet(
   });
   writer.finish();
 }
-/**
- * Every enrollment of the period cohort, ordered by enrollment time then id,
- * read through one cursor. (The former keyset carried enrolled_at back as a
- * millisecond JS Date, so a batch could restart inside the microseconds of
- * the previous batch's last row and repeat rows.)
- */
-function buildCourseLearnerQuery(options: ReportExcelExportOptions): { text: string; params: unknown[] } {
-  const { startDate, endDate } = getExportPeriodRange(options);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
-    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
-  });
-  const membershipScope = options.scope.teamId
-    ? 'AND t.id = $4'
-    : options.scope.subgroupId
-      ? 'AND sg.id = $4'
-      : options.scope.groupId
-        ? 'AND og.id = $4'
-        : '';
-  return {
-    text: `WITH ${cohort.sql},
-      memberships AS (
-        SELECT
-          tm.user_id,
-          string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
-          string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
-          string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-        FROM report_enrollments se
-        JOIN team_members tm ON tm.user_id = se.user_id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1 ${membershipScope}
-        GROUP BY tm.user_id
-      )
-      SELECT
-        se.enrollment_id,
-        se.user_id,
-        u.username,
-        u.email,
-        u.full_name,
-        m.group_names,
-        m.subgroup_names,
-        m.team_names,
-        se.course_id,
-        se.course_name,
-        se.enrolled_at,
-        se.completed_at,
-        se.is_completed,
-        se.progress,
-        CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
-      FROM report_enrollments se
-      JOIN users u ON u.id = se.user_id
-      LEFT JOIN memberships m ON m.user_id = se.user_id
-      ORDER BY se.enrolled_at, se.enrollment_id`,
-    params: [options.tenantId, startDate, endDate, ...cohort.params],
-  };
-}
-
 function courseLearnerColumns(options: ReportExcelExportOptions): ColumnDef[] {
   const copy = getReportExcelCopy(options.locale);
   return [
@@ -1186,80 +815,17 @@ async function writeCourseLearnerDetailSheets(
   const copy = getReportExcelCopy(options.locale);
   const columns = courseLearnerColumns(options);
   const writer = new SplitWorksheetWriter(workbook, copy.courseLearnerDetail, copy.courseEnrollmentDetail, subtitle, columns);
-  const enrollmentQuery = buildCourseLearnerQuery(options);
-  await forEachReportsCursorBatch<CourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+  await repository.streamCourseLearners(exportInput(options), { batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
     await waitForWorkbookRoom(workbook, options.signal);
     for (const item of rows) addCourseLearnerRow(writer, item, options);
   });
   writer.finish();
 }
 
-/** One course's enrollments of the period cohort, ordered by learner name, username, id; read through one cursor. */
-function buildSingleCourseLearnerQuery(options: CourseLearnerExcelExportOptions): { text: string; params: unknown[] } {
+/** What the repository reads for an export: tenant, period bounds and scope. */
+function exportInput(options: ReportExcelExportOptions): ReportExportInput {
   const { startDate, endDate } = getExportPeriodRange(options);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
-    groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
-  });
-  const courseParam = 4 + cohort.params.length;
-  const membershipScope = options.scope.teamId
-    ? 'AND t.id = $4'
-    : options.scope.subgroupId
-      ? 'AND sg.id = $4'
-      : options.scope.groupId
-        ? 'AND og.id = $4'
-        : '';
-  const displayNameSql = "COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username)";
-  const sortNameSql = `unaccent(LOWER(${displayNameSql}))`;
-  return {
-    text: `WITH ${cohort.sql},
-      selected_enrollments AS (
-        SELECT
-          re.*,
-          u.username,
-          u.email,
-          u.full_name,
-          ${sortNameSql} AS sort_name
-        FROM report_enrollments re
-        JOIN users u ON u.id = re.user_id
-        WHERE re.course_id = $${courseParam}
-      ),
-      memberships AS (
-        SELECT
-          tm.user_id,
-          string_agg(DISTINCT og.name, ', ' ORDER BY og.name) AS group_names,
-          string_agg(DISTINCT sg.name, ', ' ORDER BY sg.name) AS subgroup_names,
-          string_agg(DISTINCT t.name, ', ' ORDER BY t.name) AS team_names
-        FROM selected_enrollments se
-        JOIN team_members tm ON tm.user_id = se.user_id
-        JOIN teams t ON t.id = tm.team_id
-        JOIN sub_groups sg ON sg.id = t.sub_group_id
-        JOIN org_groups og ON og.id = sg.org_group_id
-        WHERE og.tenant_id = $1 ${membershipScope}
-        GROUP BY tm.user_id
-      )
-      SELECT
-        se.enrollment_id,
-        se.user_id,
-        se.username,
-        se.email,
-        se.full_name,
-        se.sort_name,
-        m.group_names,
-        m.subgroup_names,
-        m.team_names,
-        se.course_id,
-        se.course_name,
-        se.enrolled_at,
-        se.completed_at,
-        se.is_completed,
-        se.progress,
-        CASE WHEN se.is_completed THEN 'completed' WHEN se.has_started THEN 'learning' ELSE 'not_started' END AS status
-      FROM selected_enrollments se
-      LEFT JOIN memberships m ON m.user_id = se.user_id
-      ORDER BY se.sort_name, se.username, se.enrollment_id`,
-    params: [options.tenantId, startDate, endDate, ...cohort.params, options.courseId],
-  };
+  return { tenantId: options.tenantId, startDate, endDate, scope: options.scope };
 }
 
 /** Snapshot of an export: its own raised statement timeout and the client's abort signal. */
@@ -1320,8 +886,8 @@ async function writeCourseLearnerWorkbook(options: CourseLearnerExcelExportOptio
       subtitle,
       courseLearnerColumns(options),
     );
-    const enrollmentQuery = buildSingleCourseLearnerQuery(options);
-    await forEachReportsCursorBatch<SortedCourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+    const courseInput = { ...exportInput(options), courseId: options.courseId };
+    await repository.streamSingleCourseLearners(courseInput, { batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
       await waitForWorkbookRoom(writer, options.signal);
       for (const item of rows) addCourseLearnerRow(sheet, item, options);
     });

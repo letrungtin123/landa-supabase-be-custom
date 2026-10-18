@@ -821,27 +821,9 @@
       "count": 1
     }
   },
-  "src/modules/learner/learner.controller.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/learner/learner.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 31
-    }
-  },
-  "src/modules/learner/learner.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 44
-    },
-    "prefer-const": {
-      "count": 1
-    }
-  },
-  "src/modules/learner/progress-calculation.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
     }
   },
   "src/modules/library/library.controller.ts": {
@@ -908,11 +890,6 @@
   "src/modules/reports/reports.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 32
-    }
-  },
-  "src/modules/reports/reports.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 11
     }
   },
   "src/modules/sso/sso.routes.ts": {

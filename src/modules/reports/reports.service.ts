@@ -14,6 +14,21 @@ import { runReportAggregate } from './report-admission.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
 import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
 import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
+import { createReportChartRepository, type GroupedEnrollmentDimension } from './report-chart.repository.js';
+import { createReportCoursesRepository, type CoursePerformanceRow } from './report-courses.repository.js';
+import {
+  createReportLearnersRepository,
+  type LearnerCourseRow,
+  type LearnerCoursesSource,
+  type UserBadgeRow,
+} from './report-learners.repository.js';
+// The shared SQL fragments live in report-sql.ts; these names stay importable from here.
+export {
+  buildActiveLearnerEventsCte,
+  buildLearnerScopeExists,
+  buildReportEnrollmentCte,
+  buildReportLearnerRosterCte,
+} from './report-sql.js';
 
 // ── Types ──
 
@@ -148,6 +163,10 @@ export interface LearnerDetailResponse {
 }
 
 // ── Helpers ──
+
+const chartRepository = createReportChartRepository({ query: reportsQuery });
+const coursesRepository = createReportCoursesRepository({ query: reportsQuery });
+const learnersRepository = createReportLearnersRepository({ query: reportsQuery });
 
 const MONTH_LABELS = [
   '', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
@@ -444,328 +463,6 @@ function resolveChartGranularity(range: ReportDateRange, requested: ReportChartG
   return resolveAutoReportBucket(days);
 }
 
-function getGranularityStep(granularity: EffectiveChartGranularity): string {
-  if (granularity === 'day') return '1 day';
-  if (granularity === 'week') return '1 week';
-  return '1 month';
-}
-
-function getBucketLabelSql(alias = 'b.bucket_start'): string {
-  return `CASE
-    WHEN $4 = 'day' THEN to_char(${alias}, 'DD/MM/YYYY')
-    WHEN $4 = 'week' THEN 'Tuần ' || to_char(${alias}, 'IW/YYYY')
-    ELSE 'Tháng ' || EXTRACT(MONTH FROM ${alias})::int || '/' || EXTRACT(YEAR FROM ${alias})::int
-  END`;
-}
-
-function getBucketCteSql(): string {
-  return `bounds AS (
-      SELECT
-        date_trunc($4, $2::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-        date_trunc($4, $3::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_end
-    ),
-    buckets AS (
-      SELECT generate_series(bucket_start, bucket_end, $5::interval) AS bucket_start
-      FROM bounds
-    )`;
-}
-
-function buildGroupFilter(groupId?: string, subgroupId?: string, teamId?: string): { joins: string; conditions: string[]; params: any[] } {
-  const joins: string[] = [];
-  const conditions: string[] = [];
-  const params: any[] = [];
-
-  if (teamId) {
-    joins.push('JOIN team_members tm ON tm.user_id = e.user_id');
-    conditions.push(`tm.team_id = $PARAM`);
-    params.push(teamId);
-  } else if (subgroupId) {
-    joins.push('JOIN team_members tm ON tm.user_id = e.user_id');
-    joins.push('JOIN teams t ON t.id = tm.team_id');
-    conditions.push(`t.sub_group_id = $PARAM`);
-    params.push(subgroupId);
-  } else if (groupId) {
-    joins.push('JOIN team_members tm ON tm.user_id = e.user_id');
-    joins.push('JOIN teams t ON t.id = tm.team_id');
-    joins.push('JOIN sub_groups sg ON sg.id = t.sub_group_id');
-    conditions.push(`sg.org_group_id = $PARAM`);
-    params.push(groupId);
-  }
-
-  return { joins: joins.join(' '), conditions, params };
-}
-
-function buildUserGroupFilter(groupId?: string, subgroupId?: string, teamId?: string): { joins: string; conditions: string[]; params: any[] } {
-  const joins: string[] = [];
-  const conditions: string[] = [];
-  const params: any[] = [];
-
-  if (teamId) {
-    joins.push('JOIN team_members tm ON tm.user_id = u.id');
-    conditions.push(`tm.team_id = $PARAM`);
-    params.push(teamId);
-  } else if (subgroupId) {
-    joins.push('JOIN team_members tm ON tm.user_id = u.id');
-    joins.push('JOIN teams t ON t.id = tm.team_id');
-    conditions.push(`t.sub_group_id = $PARAM`);
-    params.push(subgroupId);
-  } else if (groupId) {
-    joins.push('JOIN team_members tm ON tm.user_id = u.id');
-    joins.push('JOIN teams t ON t.id = tm.team_id');
-    joins.push('JOIN sub_groups sg ON sg.id = t.sub_group_id');
-    conditions.push(`sg.org_group_id = $PARAM`);
-    params.push(groupId);
-  }
-
-  return { joins: joins.join(' '), conditions, params };
-}
-
-export function buildLearnerScopeExists(
-  userIdSql: string,
-  groupId: string | undefined,
-  subgroupId: string | undefined,
-  teamId: string | undefined,
-  startParamIndex: number,
-): { sql: string; params: string[] } {
-  if (teamId) {
-    return {
-      sql: `AND EXISTS (
-        SELECT 1 FROM team_members tm_scope
-        WHERE tm_scope.user_id = ${userIdSql}
-          AND tm_scope.team_id = $${startParamIndex}
-      )`,
-      params: [teamId],
-    };
-  }
-
-  if (subgroupId) {
-    return {
-      sql: `AND EXISTS (
-        SELECT 1
-        FROM team_members tm_scope
-        JOIN teams t_scope ON t_scope.id = tm_scope.team_id
-        WHERE tm_scope.user_id = ${userIdSql}
-          AND t_scope.sub_group_id = $${startParamIndex}
-      )`,
-      params: [subgroupId],
-    };
-  }
-
-  if (groupId) {
-    return {
-      sql: `AND EXISTS (
-        SELECT 1
-        FROM team_members tm_scope
-        JOIN teams t_scope ON t_scope.id = tm_scope.team_id
-        JOIN sub_groups sg_scope ON sg_scope.id = t_scope.sub_group_id
-        WHERE tm_scope.user_id = ${userIdSql}
-          AND sg_scope.org_group_id = $${startParamIndex}
-      )`,
-      params: [groupId],
-    };
-  }
-
-  return { sql: '', params: [] };
-}
-
-/**
- * Returns completed-learning events in the selected range.
- * Keep this CTE shared by UI charts and Excel so the metric cannot silently drift.
- */
-export function buildActiveLearnerEventsCte(options: {
-  tenantParam: string;
-  rangeStartParam: string;
-  rangeEndParam: string;
-  cteName?: string;
-}): string {
-  const { tenantParam, rangeStartParam, rangeEndParam, cteName = 'active_learner_events' } = options;
-
-  return `${cteName} AS (
-    SELECT e.user_id, (bc.completed_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS activity_date
-    FROM block_completions bc
-    JOIN enrollments e ON e.id = bc.enrollment_id
-    WHERE e.tenant_id = ${tenantParam}
-      AND bc.completed_at >= ${rangeStartParam}
-      AND bc.completed_at <= ${rangeEndParam}
-  )`;
-}
-/**
- * Returns the immutable report cohort: active learner enrollments created in the selected period.
- * Every course-completion metric must use this CTE so cards, lists, rankings, charts, and Excel reconcile.
- */
-export function buildReportEnrollmentCte(options: {
-  tenantParam: string;
-  rangeStartParam: string;
-  rangeEndParam: string;
-  groupId?: string;
-  subgroupId?: string;
-  teamId?: string;
-  scopeParamStart: number;
-  cteName?: string;
-}): { sql: string; params: string[] } {
-  const {
-    tenantParam,
-    rangeStartParam,
-    rangeEndParam,
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart,
-    cteName = 'report_enrollments',
-  } = options;
-  const scope = buildLearnerScopeExists('e.user_id', groupId, subgroupId, teamId, scopeParamStart);
-
-  return {
-    params: scope.params,
-    sql: `${cteName} AS (
-      SELECT
-        e.id AS enrollment_id,
-        e.user_id,
-        e.course_id,
-        e.enrolled_at,
-        COALESCE(c.display_name, 'Khóa học không còn hiển thị') AS course_name,
-        CASE
-          WHEN cp.completed_at IS NOT NULL AND cp.completed_at <= ${rangeEndParam} THEN 100
-          ELSE LEAST(GREATEST(COALESCE(cp.progress, 0), 0), 99.99)
-        END AS progress,
-        CASE
-          WHEN cp.completed_at IS NOT NULL AND cp.completed_at <= ${rangeEndParam} THEN cp.completed_at
-          ELSE NULL
-        END AS completed_at,
-        CASE
-          WHEN cp.completed_at IS NOT NULL AND cp.completed_at <= ${rangeEndParam} THEN true
-          ELSE false
-        END AS is_completed,
-        CASE
-          WHEN COALESCE(cp.progress, 0) > 0 OR cp.completed_at IS NOT NULL THEN true
-          ELSE false
-        END AS has_started
-      FROM enrollments e
-      JOIN users u ON u.id = e.user_id
-        AND u.tenant_id = ${tenantParam}
-        AND u.is_active = true
-        AND u.role IN ('learner', 'learner_plus')
-      LEFT JOIN courses c ON c.id = e.course_id
-      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-      WHERE e.tenant_id = ${tenantParam}
-        AND e.is_active = true
-        AND e.enrolled_at >= ${rangeStartParam}
-        AND e.enrolled_at <= ${rangeEndParam}
-        ${scope.sql}
-    )`,
-  };
-}
-export function buildReportLearnerRosterCte(options: {
-  tenantParam: string;
-  groupId?: string;
-  subgroupId?: string;
-  teamId?: string;
-  scopeParamStart: number;
-  cteName?: string;
-}): { sql: string; params: string[] } {
-  const {
-    tenantParam,
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart,
-    cteName = 'report_learners',
-  } = options;
-  const scope = buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, scopeParamStart);
-
-  return {
-    params: scope.params,
-    sql: `${cteName} AS (
-      SELECT
-        u.id AS user_id,
-        u.username,
-        u.email,
-        u.full_name,
-        u.avatar_url
-      FROM users u
-      WHERE u.tenant_id = ${tenantParam}
-        AND u.is_active = true
-        AND u.role IN ('learner', 'learner_plus')
-        ${scope.sql}
-    )`,
-  };
-}
-function buildVisibleCourseUsersCte(options: {
-  tenantParam: string;
-  snapshotParam: string;
-  extraFilterSql?: string;
-}): string {
-  const { tenantParam, snapshotParam, extraFilterSql = '' } = options;
-  const learnerWhere = `
-    u.tenant_id = ${tenantParam}
-    AND u.is_active = true
-    AND u.role IN ('learner', 'learner_plus')
-    AND u.created_at <= ${snapshotParam}
-  `;
-  const courseWhere = `
-    c.tenant_id = ${tenantParam}
-    AND c.deleted_at IS NULL
-    AND c.visible_to_staff_only = false
-    AND c.created_at <= ${snapshotParam}
-    ${extraFilterSql}
-  `;
-  const assignedWhere = `
-    ${learnerWhere}
-    AND og.tenant_id = ${tenantParam}
-    AND ${courseWhere}
-  `;
-  const publicWhere = `
-    ${learnerWhere}
-    AND ${courseWhere}
-    AND EXISTS (
-      SELECT 1
-      FROM course_category_courses ccc_public
-      JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-      WHERE ccc_public.course_id = c.id
-        AND cc_public.tenant_id = c.tenant_id
-        AND COALESCE(cc_public.is_public, false) = true
-    )
-  `;
-
-  return `
-    visible_course_users AS (
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      JOIN team_members tm ON tm.user_id = u.id
-      JOIN teams t ON t.id = tm.team_id
-      JOIN sub_groups sg ON sg.id = t.sub_group_id
-      JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN team_courses tc ON tc.team_id = t.id
-      JOIN courses c ON c.id = tc.course_id
-      WHERE ${assignedWhere}
-
-      UNION
-
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      JOIN team_members tm ON tm.user_id = u.id
-      JOIN teams t ON t.id = tm.team_id
-      JOIN sub_groups sg ON sg.id = t.sub_group_id
-      JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN team_course_categories tcc ON tcc.team_id = t.id
-      JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-      JOIN courses c ON c.id = ccc.course_id
-      WHERE ${assignedWhere}
-
-      UNION
-
-      SELECT u.id AS user_id, c.id AS course_id, c.display_name AS name
-      FROM users u
-      LEFT JOIN team_members tm ON tm.user_id = u.id
-      LEFT JOIN teams t ON t.id = tm.team_id
-      LEFT JOIN sub_groups sg ON sg.id = t.sub_group_id
-      LEFT JOIN org_groups og ON og.id = sg.org_group_id
-      JOIN courses c ON c.tenant_id = ${tenantParam}
-      WHERE ${publicWhere}
-    )
-  `;
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Report Summary — 4 queries total (optimized)
 // ═══════════════════════════════════════════════════════════════
@@ -828,78 +525,7 @@ async function getReportSummaryForRange(options: {
     teamId,
     usesDateRange,
   } = options;
-  const learnerScope = buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, 4);
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const roster = buildReportLearnerRosterCte({
-    tenantParam: '$1',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-
-  const result = await reportsQuery<{
-    total_learners: string;
-    active_learners: string;
-    total_enrollments: string;
-    completed_enrollments: string;
-    incomplete_enrollments: string;
-    completion_rate: string;
-  }>(
-    `WITH ${buildActiveLearnerEventsCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-    })},
-    ${cohort.sql},
-    ${roster.sql},
-    learner_completion AS (
-      SELECT
-        rl.user_id,
-        COUNT(re.enrollment_id)::bigint AS total_enrollments,
-        COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-        COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-      FROM report_learners rl
-      LEFT JOIN report_enrollments re ON re.user_id = rl.user_id
-      GROUP BY rl.user_id
-    )
-    SELECT
-      (
-        SELECT COUNT(*)
-        FROM users u
-        WHERE u.tenant_id = $1
-          AND u.is_active = true
-          AND u.role IN ('learner', 'learner_plus')
-          AND u.created_at >= $2
-          AND u.created_at <= $3
-          ${learnerScope.sql}
-      )::bigint AS total_learners,
-      (
-        SELECT COUNT(DISTINCT ae.user_id)
-        FROM active_learner_events ae
-        JOIN users u ON u.id = ae.user_id
-        WHERE u.tenant_id = $1
-          AND u.is_active = true
-          AND u.role IN ('learner', 'learner_plus')
-          ${learnerScope.sql}
-      )::bigint AS active_learners,
-      COALESCE(SUM(lc.total_enrollments), 0)::bigint AS total_enrollments,
-      COALESCE(SUM(lc.completed_enrollments), 0)::bigint AS completed_enrollments,
-      COALESCE(SUM(lc.total_enrollments - lc.completed_enrollments), 0)::bigint AS incomplete_enrollments,
-      COALESCE(ROUND(AVG(lc.completion_rate), 2), 0) AS completion_rate
-    FROM learner_completion lc`,
-    [tenantId, range.startDate, range.endDate, ...cohort.params],
-  );
-
-  const row = result.rows[0];
+  const row = await chartRepository.selectSummary({ tenantId, range, groupId, subgroupId, teamId });
   return {
     meta: {
       month: targetMonth,
@@ -1040,116 +666,8 @@ async function chartSimpleByRange(
   subgroupId?: string,
   teamId?: string,
 ): Promise<ReportChartPoint[]> {
-  const step = getGranularityStep(granularity);
-  const labelSql = getBucketLabelSql();
-  const scopeAlias = metric === 'total_learners' || metric === 'active_learners' ? 'u.id' : 'e.user_id';
-  const scope = buildLearnerScopeExists(scopeAlias, groupId, subgroupId, teamId, 6);
-  const params: any[] = [tenantId, range.startDate, range.endDate, granularity, step, ...scope.params];
-
-  let sql: string;
-  if (metric === 'total_learners') {
-    sql = `WITH ${getBucketCteSql()},
-      created_by_bucket AS (
-        SELECT
-          date_trunc($4, u.created_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-          COUNT(*)::bigint AS value
-        FROM users u
-        WHERE u.tenant_id = $1
-          AND u.is_active = true
-          AND u.role IN ('learner', 'learner_plus')
-          AND u.created_at >= $2
-          AND u.created_at <= $3
-          ${scope.sql}
-        GROUP BY bucket_start
-      )
-      SELECT
-        to_char(b.bucket_start, 'YYYY-MM-DD') AS bucket,
-        ${labelSql} AS bucket_label,
-        COALESCE(cbb.value, 0)::bigint AS value
-      FROM buckets b
-      LEFT JOIN created_by_bucket cbb ON cbb.bucket_start = b.bucket_start
-      ORDER BY b.bucket_start`;
-  } else if (metric === 'active_learners') {
-    sql = `WITH ${getBucketCteSql()},
-      ${buildActiveLearnerEventsCte({
-        tenantParam: '$1',
-        rangeStartParam: '$2',
-        rangeEndParam: '$3',
-      })},
-      active_by_bucket AS (
-        SELECT
-          date_trunc($4, ae.activity_date::timestamp) AS bucket_start,
-          COUNT(DISTINCT ae.user_id)::bigint AS value
-        FROM active_learner_events ae
-        JOIN users u ON u.id = ae.user_id
-        WHERE u.tenant_id = $1
-          AND u.is_active = true
-          AND u.role IN ('learner', 'learner_plus')
-          ${scope.sql}
-        GROUP BY bucket_start
-      )
-      SELECT
-        to_char(b.bucket_start, 'YYYY-MM-DD') AS bucket,
-        ${labelSql} AS bucket_label,
-        COALESCE(abb.value, 0)::bigint AS value
-      FROM buckets b
-      LEFT JOIN active_by_bucket abb ON abb.bucket_start = b.bucket_start
-      ORDER BY b.bucket_start`;
-  } else {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 6,
-    });
-    const roster = buildReportLearnerRosterCte({
-      tenantParam: '$1',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 6,
-    });
-
-    sql = `WITH ${getBucketCteSql()},
-      ${cohort.sql},
-      ${roster.sql},
-      roster_size AS (
-        SELECT COUNT(*)::numeric AS learner_count
-        FROM report_learners
-      ),
-      learner_bucket_completion AS (
-        SELECT
-          date_trunc($4, re.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-          re.user_id,
-          COUNT(*)::bigint AS total_enrollments,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-        FROM report_enrollments re
-        GROUP BY bucket_start, re.user_id
-      ),
-      aggregated AS (
-        SELECT
-          bucket_start,
-          ${metric === 'completion_rate'
-            ? "COALESCE(ROUND(SUM(completion_rate) / NULLIF((SELECT learner_count FROM roster_size), 0), 2), 0) AS value"
-            : 'SUM(total_enrollments)::bigint AS value'}
-        FROM learner_bucket_completion
-        GROUP BY bucket_start
-      )
-      SELECT
-        to_char(b.bucket_start, 'YYYY-MM-DD') AS bucket,
-        ${labelSql} AS bucket_label,
-        COALESCE(a.value, 0) AS value
-      FROM buckets b
-      LEFT JOIN aggregated a ON a.bucket_start = b.bucket_start
-      ORDER BY b.bucket_start`;
-    params.splice(5, scope.params.length, ...cohort.params);
-  }
-
-  const result = await reportsQuery<{ bucket: string; bucket_label: string; value: string }>(sql, params);
-  return result.rows.map(row => ({
+  const rows = await chartRepository.selectRangeBuckets({ tenantId, metric, range, granularity, groupId, subgroupId, teamId });
+  return rows.map(row => ({
     month: row.bucket,
     month_label: row.bucket_label,
     bucket: row.bucket,
@@ -1159,8 +677,6 @@ async function chartSimpleByRange(
       : parseInt(row.value ?? '0', 10),
   }));
 }
-type GroupedEnrollmentDimension = 'group' | 'subgroup' | 'team';
-
 async function chartGroupedEnrollmentsByRange(
   tenantId: string,
   range: ReportDateRange,
@@ -1169,128 +685,18 @@ async function chartGroupedEnrollmentsByRange(
   parentId?: string,
   seriesLimit = DEFAULT_GROUP_SERIES_LIMIT,
 ): Promise<{ data: ReportChartPoint[]; is_grouped: boolean; series_overflow?: boolean }> {
-  const step = getGranularityStep(granularity);
-  const limit = clampSeriesLimit(seriesLimit);
-  const params: any[] = [tenantId, range.startDate, range.endDate, granularity, step];
-  let entitySql = '';
-  let dimensionIdSql = '';
-  let dimensionWhereSql = '';
-  let unassignedCteSql = '';
-  let unassignedUnionSql = '';
-
-  if (dimension === 'group') {
-    entitySql = `SELECT og.id, COALESCE(og.name, 'Không tên') AS name FROM org_groups og WHERE og.tenant_id = $1`;
-    dimensionIdSql = 'og.id';
-    if (parentId) {
-      params.push(parentId);
-      entitySql += ` AND og.id = $${params.length}`;
-      dimensionWhereSql = `AND og.id = $${params.length}`;
-    } else {
-      unassignedCteSql = `,
-      unassigned_series AS (
-        SELECT
-          date_trunc($4, e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-          'Chưa phân nhóm'::text AS series_name,
-          COUNT(DISTINCT e.id)::bigint AS value
-        FROM enrollments e
-        WHERE e.tenant_id = $1
-          AND e.is_active = true
-          AND e.enrolled_at >= $2
-          AND e.enrolled_at <= $3
-          AND NOT EXISTS (
-            SELECT 1
-            FROM team_members tm_unassigned
-            JOIN teams t_unassigned ON t_unassigned.id = tm_unassigned.team_id
-            JOIN sub_groups sg_unassigned ON sg_unassigned.id = t_unassigned.sub_group_id
-            JOIN org_groups og_unassigned ON og_unassigned.id = sg_unassigned.org_group_id
-            WHERE tm_unassigned.user_id = e.user_id
-              AND og_unassigned.tenant_id = e.tenant_id
-          )
-        GROUP BY bucket_start
-      )`;
-      unassignedUnionSql = `
-        UNION ALL
-        SELECT bucket_start, series_name, value FROM unassigned_series`;
-    }
-  } else if (dimension === 'subgroup') {
-    params.push(parentId);
-    entitySql = `SELECT sg.id, COALESCE(sg.name, 'Không tên') AS name FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id WHERE og.tenant_id = $1 AND sg.org_group_id = $${params.length}`;
-    dimensionIdSql = 'sg.id';
-    dimensionWhereSql = `AND sg.org_group_id = $${params.length}`;
-  } else {
-    params.push(parentId);
-    entitySql = `SELECT t.id, COALESCE(t.name, 'Không tên') AS name FROM teams t JOIN sub_groups sg ON sg.id = t.sub_group_id JOIN org_groups og ON og.id = sg.org_group_id WHERE og.tenant_id = $1 AND t.sub_group_id = $${params.length}`;
-    dimensionIdSql = 't.id';
-    dimensionWhereSql = `AND t.sub_group_id = $${params.length}`;
-  }
-
-  params.push(limit);
-  const limitParam = `$${params.length}`;
-  const labelSql = getBucketLabelSql('sr.bucket_start');
-  const result = await reportsQuery<{ bucket: string; bucket_label: string; series_name: string; value: string }>(
-    `WITH ${getBucketCteSql()},
-     entity_names AS (${entitySql}),
-     aggregated AS (
-       SELECT
-         date_trunc($4, e.enrolled_at AT TIME ZONE 'Asia/Ho_Chi_Minh') AS bucket_start,
-         ${dimensionIdSql} AS entity_id,
-         COUNT(DISTINCT e.id)::bigint AS value
-       FROM enrollments e
-       JOIN team_members tm ON tm.user_id = e.user_id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE e.tenant_id = $1
-         AND e.is_active = true
-         AND e.enrolled_at >= $2
-         AND e.enrolled_at <= $3
-         AND og.tenant_id = $1
-         ${dimensionWhereSql}
-       GROUP BY bucket_start, ${dimensionIdSql}
-     ),
-     entity_totals AS (
-       SELECT entity_id, SUM(value)::bigint AS total_value
-       FROM aggregated
-       GROUP BY entity_id
-     ),
-     ranked_entities AS (
-       SELECT en.id, en.name
-       FROM entity_names en
-       JOIN entity_totals et ON et.entity_id = en.id
-       ORDER BY et.total_value DESC, en.name ASC
-       LIMIT ${limitParam}
-     ),
-     top_series AS (
-       SELECT b.bucket_start, re.name AS series_name, COALESCE(a.value, 0)::bigint AS value
-       FROM buckets b
-       CROSS JOIN ranked_entities re
-       LEFT JOIN aggregated a ON a.bucket_start = b.bucket_start AND a.entity_id = re.id
-     ),
-     other_series AS (
-       SELECT a.bucket_start, 'Khác'::text AS series_name, SUM(a.value)::bigint AS value
-       FROM aggregated a
-       WHERE NOT EXISTS (SELECT 1 FROM ranked_entities re WHERE re.id = a.entity_id)
-       GROUP BY a.bucket_start
-       HAVING SUM(a.value) > 0
-     )${unassignedCteSql},
-     series_rows AS (
-       SELECT bucket_start, series_name, value FROM top_series
-       UNION ALL
-       SELECT bucket_start, series_name, value FROM other_series${unassignedUnionSql}
-     )
-     SELECT
-       to_char(sr.bucket_start, 'YYYY-MM-DD') AS bucket,
-       ${labelSql} AS bucket_label,
-       sr.series_name,
-       sr.value::bigint AS value
-     FROM series_rows sr
-     ORDER BY sr.bucket_start, sr.series_name`,
-    params,
-  );
+  const rows = await chartRepository.selectGroupedEnrollmentBuckets({
+    tenantId,
+    range,
+    granularity,
+    dimension,
+    parentId,
+    seriesLimit: clampSeriesLimit(seriesLimit),
+  });
 
   const points = new Map<string, ReportChartPoint>();
   let seriesOverflow = false;
-  for (const row of result.rows) {
+  for (const row of rows) {
     if (row.series_name === 'Khác') seriesOverflow = true;
     const point = points.get(row.bucket) || {
       month: row.bucket,
@@ -1363,106 +769,28 @@ async function batchMetricByMonth(
   groupId?: string, subgroupId?: string,
 ): Promise<Map<number, number>> {
   const result = new Map<number, number>();
+  const input = { tenantId, yearStart, yearEnd, year, groupId, subgroupId };
 
   switch (metric) {
     case 'total_learners': {
       // Cumulative: count users created before end of each month
-      const ugf = buildUserGroupFilter(groupId, subgroupId);
-      let idx = 2;
-      const conds = ugf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `SELECT gs.m,
-                COUNT(DISTINCT u.id) AS cnt
-         FROM generate_series(1, 12) AS gs(m)
-         LEFT JOIN users u ON u.tenant_id = $1
-           AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
-           AND u.created_at <= (make_date($${idx}, gs.m::INT, 1) + INTERVAL '1 month' - INTERVAL '1 second')
-           ${ugf.joins ? ugf.joins.replace(/\bu\b/g, 'u') : ''}
-           ${conds.length ? 'AND ' + conds.join(' AND ') : ''}
-         GROUP BY gs.m ORDER BY gs.m`,
-        [tenantId, ...ugf.params, year],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt));
+      const rows = await chartRepository.selectYearLearnersByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt));
       break;
     }
     case 'active_learners': {
-      const activeScope = buildLearnerScopeExists('u.id', groupId, subgroupId, undefined, 4);
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `WITH ${buildActiveLearnerEventsCte({
-          tenantParam: '$1',
-          rangeStartParam: '$2',
-          rangeEndParam: '$3',
-        })}
-         SELECT EXTRACT(MONTH FROM ae.activity_date)::INT AS m,
-                COUNT(DISTINCT ae.user_id) AS cnt
-         FROM active_learner_events ae
-         JOIN users u ON u.id = ae.user_id
-         WHERE u.tenant_id = $1
-           AND u.is_active = true
-           AND u.role IN ('learner', 'learner_plus')
-           AND u.created_at <= $3
-           ${activeScope.sql}
-         GROUP BY EXTRACT(MONTH FROM ae.activity_date)`,
-        [tenantId, yearStart, yearEnd, ...activeScope.params],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt, 10));
+      const rows = await chartRepository.selectYearActiveLearnersByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt, 10));
       break;
     }
     case 'completion_rate': {
-      const cohort = buildReportEnrollmentCte({
-        tenantParam: '$1',
-        rangeStartParam: '$2',
-        rangeEndParam: '$3',
-        groupId,
-        subgroupId,
-        scopeParamStart: 4,
-      });
-      const roster = buildReportLearnerRosterCte({
-        tenantParam: '$1',
-        groupId,
-        subgroupId,
-        scopeParamStart: 4,
-      });
-      const r = await reportsQuery<{ m: number; completion_rate: string }>(
-        `WITH ${cohort.sql},
-          ${roster.sql},
-          roster_size AS (
-            SELECT COUNT(*)::numeric AS learner_count
-            FROM report_learners
-          ),
-          learner_month AS (
-            SELECT
-              EXTRACT(MONTH FROM re.enrolled_at)::INT AS m,
-              re.user_id,
-              COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-            FROM report_enrollments re
-            GROUP BY EXTRACT(MONTH FROM re.enrolled_at), re.user_id
-          )
-         SELECT
-           m,
-           COALESCE(ROUND(SUM(completion_rate) / NULLIF((SELECT learner_count FROM roster_size), 0), 2), 0) AS completion_rate
-         FROM learner_month
-         GROUP BY m`,
-        [tenantId, yearStart, yearEnd, ...cohort.params],
-      );
-      for (const row of r.rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
+      const rows = await chartRepository.selectYearCompletionRateByMonth(input);
+      for (const row of rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
       break;
     }
     case 'total_enrollments': {
-      const egf = buildGroupFilter(groupId, subgroupId);
-      let idx = 2;
-      const conds = egf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
-                COUNT(DISTINCT e.id) AS cnt
-         FROM enrollments e ${egf.joins}
-         WHERE e.tenant_id = $1 AND e.is_active = true
-           AND e.enrolled_at >= $${idx} AND e.enrolled_at <= $${idx + 1}
-           ${conds.length ? 'AND ' + conds.join(' AND ') : ''}
-         GROUP BY EXTRACT(MONTH FROM e.enrolled_at)`,
-        [tenantId, ...egf.params, yearStart, yearEnd],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt));
+      const rows = await chartRepository.selectYearEnrollmentsByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt));
       break;
     }
   }
@@ -1479,97 +807,27 @@ async function batchMetricByMonthTeam(
   teamId: string,
 ): Promise<Map<number, number>> {
   const result = new Map<number, number>();
+  const input = { tenantId, yearStart, yearEnd, year, teamId };
 
   switch (metric) {
     case 'total_learners': {
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `SELECT gs.m,
-                COUNT(DISTINCT u.id) AS cnt
-         FROM generate_series(1, 12) AS gs(m)
-         LEFT JOIN users u ON u.tenant_id = $1
-           AND u.is_active = true AND u.role IN ('learner', 'learner_plus')
-           AND u.created_at <= (make_date($2, gs.m::INT, 1) + INTERVAL '1 month' - INTERVAL '1 second')
-         LEFT JOIN team_members tm ON tm.user_id = u.id AND tm.team_id = $3
-         WHERE (u.id IS NULL OR tm.user_id IS NOT NULL)
-         GROUP BY gs.m ORDER BY gs.m`,
-        [tenantId, year, teamId],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt));
+      const rows = await chartRepository.selectTeamYearLearnersByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt));
       break;
     }
     case 'active_learners': {
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `WITH ${buildActiveLearnerEventsCte({
-          tenantParam: '$1',
-          rangeStartParam: '$2',
-          rangeEndParam: '$3',
-        })}
-         SELECT EXTRACT(MONTH FROM ae.activity_date)::INT AS m,
-                COUNT(DISTINCT ae.user_id) AS cnt
-         FROM active_learner_events ae
-         JOIN users u ON u.id = ae.user_id
-         JOIN team_members tm ON tm.user_id = ae.user_id
-         WHERE u.tenant_id = $1
-           AND u.is_active = true
-           AND u.role IN ('learner', 'learner_plus')
-           AND u.created_at <= $3
-           AND tm.team_id = $4
-         GROUP BY EXTRACT(MONTH FROM ae.activity_date)`,
-        [tenantId, yearStart, yearEnd, teamId],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt, 10));
+      const rows = await chartRepository.selectTeamYearActiveLearnersByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt, 10));
       break;
     }
     case 'completion_rate': {
-      const cohort = buildReportEnrollmentCte({
-        tenantParam: '$1',
-        rangeStartParam: '$2',
-        rangeEndParam: '$3',
-        teamId,
-        scopeParamStart: 4,
-      });
-      const roster = buildReportLearnerRosterCte({
-        tenantParam: '$1',
-        teamId,
-        scopeParamStart: 4,
-      });
-      const r = await reportsQuery<{ m: number; completion_rate: string }>(
-        `WITH ${cohort.sql},
-          ${roster.sql},
-          roster_size AS (
-            SELECT COUNT(*)::numeric AS learner_count
-            FROM report_learners
-          ),
-          learner_month AS (
-            SELECT
-              EXTRACT(MONTH FROM re.enrolled_at)::INT AS m,
-              re.user_id,
-              COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-            FROM report_enrollments re
-            GROUP BY EXTRACT(MONTH FROM re.enrolled_at), re.user_id
-          )
-         SELECT
-           m,
-           COALESCE(ROUND(SUM(completion_rate) / NULLIF((SELECT learner_count FROM roster_size), 0), 2), 0) AS completion_rate
-         FROM learner_month
-         GROUP BY m`,
-        [tenantId, yearStart, yearEnd, ...cohort.params],
-      );
-      for (const row of r.rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
+      const rows = await chartRepository.selectYearCompletionRateByMonth(input);
+      for (const row of rows) result.set(row.m, parseFloat(row.completion_rate) || 0);
       break;
     }
     case 'total_enrollments': {
-      const r = await reportsQuery<{ m: number; cnt: string }>(
-        `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
-                COUNT(e.id) AS cnt
-         FROM enrollments e
-         JOIN team_members tm ON tm.user_id = e.user_id
-         WHERE e.tenant_id = $1 AND e.is_active = true AND tm.team_id = $2
-           AND e.enrolled_at >= $3 AND e.enrolled_at <= $4
-         GROUP BY EXTRACT(MONTH FROM e.enrolled_at)`,
-        [tenantId, teamId, yearStart, yearEnd],
-      );
-      for (const row of r.rows) result.set(row.m, parseInt(row.cnt));
+      const rows = await chartRepository.selectTeamYearEnrollmentsByMonth(input);
+      for (const row of rows) result.set(row.m, parseInt(row.cnt));
       break;
     }
   }
@@ -1607,38 +865,10 @@ export async function getReportCoursePerformance(
   }));
 
   return cachedReportAggregate(tenantId, portfolioCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const rows = await coursesRepository.selectCoursePerformance({
+      tenantId, range, groupId, subgroupId, teamId, limit: safePageSize,
     });
-    const limitParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql},
-        aggregated AS (
-          SELECT
-            re.course_id,
-            MAX(re.course_name) AS name,
-            COUNT(*)::bigint AS total_enrollments,
-            COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-            COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-            COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-          FROM report_enrollments re
-          GROUP BY re.course_id
-        )
-       SELECT *
-       FROM aggregated
-       ORDER BY total_enrollments DESC, completion_rate ASC, name ASC
-       LIMIT $${limitParam}`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, safePageSize],
-    );
-    return result.rows.map((row) => ({
+    return rows.map((row) => ({
       course_id: row.course_id,
       name: row.name,
       total_enrollments: Number(row.total_enrollments) || 0,
@@ -1673,22 +903,8 @@ export async function getReportCourseCount(
   }));
 
   return cachedReportAggregate(tenantId, countCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
-    });
-    const result = await reportsQuery<{ course_count: string }>(
-      `WITH ${cohort.sql}
-       SELECT COUNT(DISTINCT re.course_id)::bigint AS course_count
-       FROM report_enrollments re`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params],
-    );
-    return Number(result.rows[0]?.course_count) || 0;
+    const row = await coursesRepository.selectCourseCount({ tenantId, range, groupId, subgroupId, teamId });
+    return Number(row?.course_count) || 0;
   });
 }
 
@@ -1719,43 +935,14 @@ export async function findReportCoursePerformanceByName(
   }));
 
   return cachedReportAggregate(tenantId, matchingCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const rows = await coursesRepository.selectCoursePerformanceByName({
+      tenantId, range, groupId, subgroupId, teamId, courseName: normalizedName,
     });
-    const courseNameParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql},
-        aggregated AS (
-          SELECT
-            re.course_id,
-            MAX(re.course_name) AS name,
-            COUNT(*)::bigint AS total_enrollments,
-            COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-            COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-            COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-          FROM report_enrollments re
-          GROUP BY re.course_id
-        )
-       SELECT *
-       FROM aggregated
-       WHERE name ILIKE '%' || $${courseNameParam} || '%'
-       ORDER BY total_enrollments DESC, completion_rate ASC, name ASC
-       LIMIT 25`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, normalizedName],
-    );
-    return result.rows.map(toReportCoursePerformance);
+    return rows.map(toReportCoursePerformance);
   });
 }
 
-function toReportCoursePerformance(row: ReportCoursePerformance): ReportCoursePerformance {
+function toReportCoursePerformance(row: CoursePerformanceRow): ReportCoursePerformance {
   return {
     course_id: row.course_id,
     name: row.name,
@@ -1796,33 +983,10 @@ export async function getReportCoursePerformanceById(
   }));
 
   return cachedReportAggregate(tenantId, byIdCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const row = await coursesRepository.selectCoursePerformanceById({
+      tenantId, range, groupId, subgroupId, teamId, courseId: id,
     });
-    const courseIdParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql}
-       SELECT
-         re.course_id,
-         MAX(re.course_name) AS name,
-         COUNT(*)::bigint AS total_enrollments,
-         COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-         COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-         COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-         COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-         COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-       FROM report_enrollments re
-       WHERE re.course_id = $${courseIdParam}
-       GROUP BY re.course_id`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, id],
-    );
-    return result.rows[0] ? toReportCoursePerformance(result.rows[0]) : null;
+    return row ? toReportCoursePerformance(row) : null;
   });
 }
 
@@ -1844,29 +1008,7 @@ export async function getReportCompletionStatusDistribution(
     teamId,
   }));
   return cachedReportAggregate(tenantId, cacheKeyValue, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
-    });
-    const result = await reportsQuery<{
-      not_started: string;
-      in_progress: string;
-      completed: string;
-    }>(
-      `WITH ${cohort.sql}
-       SELECT
-         COUNT(*) FILTER (WHERE NOT has_started)::bigint AS not_started,
-         COUNT(*) FILTER (WHERE has_started AND NOT is_completed)::bigint AS in_progress,
-         COUNT(*) FILTER (WHERE is_completed)::bigint AS completed
-       FROM report_enrollments`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params],
-    );
-    const row = result.rows[0];
+    const row = await coursesRepository.selectCompletionStatusDistribution({ tenantId, range, groupId, subgroupId, teamId });
     return {
       not_started: Number(row?.not_started) || 0,
       in_progress: Number(row?.in_progress) || 0,
@@ -1899,49 +1041,23 @@ export async function getReportCourseCompletionRanking(
     pageSize: safePageSize,
   }));
   return cachedReportAggregate(tenantId, rankingCacheKey, getSummaryCacheTtl(range), async () => {
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const limitParam = 4 + cohort.params.length;
-  const result = await reportsQuery<ReportCourseCompletionRanking & { full_count: string }>(
-    `WITH ${cohort.sql},
-      aggregated AS (
-        SELECT
-          re.course_id,
-          MAX(re.course_name) AS name,
-          COUNT(*)::bigint AS total_enrollments,
-          COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-          COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-        FROM report_enrollments re
-        GROUP BY re.course_id
-      )
-     SELECT aggregated.*, COUNT(*) OVER() AS full_count
-     FROM aggregated
-     ORDER BY completion_rate DESC NULLS LAST, completed_enrollments DESC, total_enrollments DESC, name ASC
-     LIMIT $${limitParam} OFFSET $${limitParam + 1}`,
-    [tenantId, range.startDate, range.endDate, ...cohort.params, safePageSize, (safePage - 1) * safePageSize],
-  );
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
-  return {
-    count: total,
-    total_pages: Math.ceil(total / safePageSize),
-    current_page: safePage,
-    results: result.rows.map(row => ({
-      course_id: row.course_id,
-      name: row.name,
-      total_enrollments: Number(row.total_enrollments) || 0,
-      completed_enrollments: Number(row.completed_enrollments) || 0,
-      incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
-      completion_rate: Number(row.completion_rate) || 0,
-    })),
-  };
+    const rows = await coursesRepository.selectCourseCompletionRanking({
+      tenantId, range, groupId, subgroupId, teamId, limit: safePageSize, offset: (safePage - 1) * safePageSize,
+    });
+    const total = parseInt(rows[0]?.full_count ?? '0', 10);
+    return {
+      count: total,
+      total_pages: Math.ceil(total / safePageSize),
+      current_page: safePage,
+      results: rows.map(row => ({
+        course_id: row.course_id,
+        name: row.name,
+        total_enrollments: Number(row.total_enrollments) || 0,
+        completed_enrollments: Number(row.completed_enrollments) || 0,
+        incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
+        completion_rate: Number(row.completion_rate) || 0,
+      })),
+    };
   });
 }
 
@@ -1978,63 +1094,35 @@ export async function getReportCourseCompletionLearners(
     status,
   });
   return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const params: any[] = [tenantId, range.startDate, range.endDate, ...cohort.params, courseId];
-  let paramIdx = params.length + 1;
-  const filters = [`re.course_id = $${paramIdx - 1}`];
-  if (search?.trim()) {
-    filters.push(`(u.username ILIKE '%' || $${paramIdx} || '%' OR u.email ILIKE '%' || $${paramIdx} || '%' OR u.full_name ILIKE '%' || $${paramIdx} || '%')`);
-    params.push(search.trim());
-    paramIdx++;
-  }
-  const safeStatus = ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
-  if (safeStatus !== 'all') filters.push(`CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END = '${safeStatus}'`);
-  params.push(safePageSize, (safePage - 1) * safePageSize);
-  const result = await reportsQuery<ReportCourseCompletionLearner & { full_count: string }>(
-    `WITH ${cohort.sql}
-     SELECT
-       re.user_id,
-       u.username,
-       u.email,
-       u.full_name,
-       u.avatar_url AS avatar,
-       re.enrolled_at,
-       re.completed_at,
-       re.progress AS progress,
-       CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END AS status,
-       COUNT(*) OVER() AS full_count
-     FROM report_enrollments re
-     JOIN users u ON u.id = re.user_id
-     WHERE ${filters.join(' AND ')}
-     ORDER BY unaccent(LOWER(COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username))), u.username, re.enrollment_id
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
-  return {
-    count: total,
-    total_pages: Math.ceil(total / safePageSize),
-    current_page: safePage,
-    results: result.rows.map(row => ({
-      user_id: row.user_id,
-      username: row.username,
-      email: row.email,
-      full_name: row.full_name || '',
-      avatar: row.avatar,
-      enrolled_at: row.enrolled_at,
-      completed_at: row.completed_at,
-      progress: row.progress === null || row.progress === undefined ? null : Number(row.progress),
-      status: row.status,
-    })),
-  };
+    const rows = await coursesRepository.selectCourseCompletionLearners({
+      tenantId,
+      courseId,
+      range,
+      groupId,
+      subgroupId,
+      teamId,
+      search,
+      status,
+      limit: safePageSize,
+      offset: (safePage - 1) * safePageSize,
+    });
+    const total = parseInt(rows[0]?.full_count ?? '0', 10);
+    return {
+      count: total,
+      total_pages: Math.ceil(total / safePageSize),
+      current_page: safePage,
+      results: rows.map(row => ({
+        user_id: row.user_id,
+        username: row.username,
+        email: row.email,
+        full_name: row.full_name || '',
+        avatar: row.avatar,
+        enrolled_at: row.enrolled_at,
+        completed_at: row.completed_at,
+        progress: row.progress === null || row.progress === undefined ? null : Number(row.progress),
+        status: row.status,
+      })),
+    };
   });
 }
 export async function getReportTopCourses(
@@ -2065,52 +1153,26 @@ export async function getReportTopCourses(
     teamId,
   });
   return cachedReportAggregate(tenantId, topCoursesCacheKey, getReportListCacheTtl(periodEnd), async () => {
-  const offset = (page - 1) * pageSize;
-  const conditions: string[] = ['e.tenant_id = $1', 'e.is_active = true'];
-  const params: any[] = [tenantId];
-  let paramIdx = 2;
+    const offset = (page - 1) * pageSize;
+    // The period: the date range, else the month of the year, else the year; none means all time.
+    const range = dateRange || (month && year) || year
+      ? dateRange
+        ?? (month && year
+          ? getReportRange(month, year)
+          : { startDate: new Date(year!, 0, 1), endDate: new Date(year!, 11, 31, 23, 59, 59, 999), dateFrom: `${year}-01-01`, dateTo: `${year}-12-31` })
+      : undefined;
+    const rows = await coursesRepository.selectTopCourses({
+      tenantId, range, groupId, subgroupId, teamId, limit: pageSize, offset,
+    });
 
-  if (dateRange || (month && year) || year) {
-    const range = dateRange
-      ?? (month && year
-        ? getReportRange(month, year)
-        : { startDate: new Date(year!, 0, 1), endDate: new Date(year!, 11, 31, 23, 59, 59, 999), dateFrom: `${year}-01-01`, dateTo: `${year}-12-31` });
-    conditions.push(`e.enrolled_at >= $${paramIdx} AND e.enrolled_at <= $${paramIdx + 1}`);
-    params.push(range.startDate, range.endDate);
-    paramIdx += 2;
-  }
+    const total = parseInt(rows[0]?.full_count ?? '0');
 
-  const gf = buildGroupFilter(groupId, subgroupId, teamId);
-  const gfConditions = gf.conditions.map(c => c.replace('$PARAM', `$${paramIdx++}`));
-  params.push(...gf.params);
-
-  const whereClause = [...conditions, ...gfConditions].join(' AND ');
-
-  // Single query: count + data using window function
-  params.push(pageSize, offset);
-  const result = await reportsQuery<ReportTopCourse & { full_count: string }>(
-    `SELECT e.course_id, c.display_name AS name,
-            COUNT(DISTINCT e.id) AS enrollments,
-            COUNT(*) OVER() AS full_count
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
-     ${gf.joins}
-     WHERE ${whereClause}
-     GROUP BY e.course_id, c.display_name
-     ORDER BY enrollments DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
-
-  return {
-    count: total,
-    total_pages: Math.ceil(total / pageSize),
-    current_page: page,
-    results: result.rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
-  };
+    return {
+      count: total,
+      total_pages: Math.ceil(total / pageSize),
+      current_page: page,
+      results: rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
+    };
   });
 }
 
@@ -2147,87 +1209,50 @@ export async function getReportLearners(
     status: status ?? null,
   }));
   return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const roster = buildReportLearnerRosterCte({
-    tenantParam: '$1',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const params: any[] = [tenantId, range.startDate, range.endDate, ...cohort.params];
-  let paramIdx = params.length + 1;
-  const searchFilter = search?.trim()
-    ? `(rl.username ILIKE '%' || $${paramIdx} || '%' OR rl.email ILIKE '%' || $${paramIdx} || '%' OR rl.full_name ILIKE '%' || $${paramIdx} || '%')`
-    : '';
-  if (search?.trim()) {
-    params.push(search.trim());
-    paramIdx++;
-  }
-  // A missing status never becomes the filter text 'undefined' (the controller refuses it).
-  const safeStatus = status && ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
-  const statusFilter = safeStatus === 'all' ? '' : `WHERE learner_status.status = '${safeStatus}'`;
-  params.push(safePageSize, (safePage - 1) * safePageSize);
-
-  const result = await reportsQuery<ReportLearner & { full_count: string }>(
-    `WITH ${cohort.sql},
-      ${roster.sql},
-      learner_status AS (
-        SELECT
-          rl.user_id,
-          rl.username,
-          rl.email,
-          rl.avatar_url AS avatar,
-          MAX(re.completed_at) AS last_completion_at,
-          COUNT(re.enrollment_id)::bigint AS enrolled_courses,
-          COUNT(re.enrollment_id) FILTER (WHERE re.is_completed)::bigint AS completed_courses,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate,
-          CASE
-            WHEN COALESCE(AVG(re.progress), 0) >= 100 THEN 'completed'
-            WHEN COALESCE(AVG(re.progress), 0) > 0 THEN 'learning'
-            ELSE 'not_started'
-          END AS status
-        FROM report_learners rl
-        LEFT JOIN report_enrollments re ON re.user_id = rl.user_id
-        ${searchFilter ? `WHERE ${searchFilter}` : ''}
-        GROUP BY rl.user_id, rl.username, rl.email, rl.avatar_url
-      )
-     SELECT learner_status.*, COUNT(*) OVER() AS full_count
-     FROM learner_status
-     ${statusFilter}
-     ORDER BY last_completion_at DESC NULLS LAST, username ASC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
-  return {
-    count: total,
-    total_pages: Math.ceil(total / safePageSize),
-    current_page: safePage,
-    results: result.rows.map(row => ({
-      username: row.username,
-      email: row.email,
-      avatar: row.avatar,
-      last_completion_at: row.last_completion_at,
-      completion_rate: Number(row.completion_rate) || 0,
-      completed_courses: Number(row.completed_courses) || 0,
-      enrolled_courses: Number(row.enrolled_courses) || 0,
-      status: row.status,
-    })),
-  };
+    const rows = await learnersRepository.selectReportLearners({
+      tenantId,
+      range,
+      groupId,
+      subgroupId,
+      teamId,
+      search,
+      status,
+      limit: safePageSize,
+      offset: (safePage - 1) * safePageSize,
+    });
+    const total = parseInt(rows[0]?.full_count ?? '0', 10);
+    return {
+      count: total,
+      total_pages: Math.ceil(total / safePageSize),
+      current_page: safePage,
+      results: rows.map(row => ({
+        username: row.username,
+        email: row.email,
+        avatar: row.avatar,
+        last_completion_at: row.last_completion_at,
+        completion_rate: Number(row.completion_rate) || 0,
+        completed_courses: Number(row.completed_courses) || 0,
+        enrolled_courses: Number(row.enrolled_courses) || 0,
+        status: row.status,
+      })),
+    };
   });
 }
 // ═══════════════════════════════════════════════════════════════
 // Learner Detail
 // ═══════════════════════════════════════════════════════════════
+
+function toLearnerDetailResult(row: LearnerCourseRow): LearnerDetailResult {
+  return {
+    course_id: row.course_id,
+    course_name: row.course_name,
+    enrolled_at: row.enrolled_at,
+    completed_at: row.completed_at,
+    progress: Number(row.progress) || 0,
+    is_completed: Boolean(row.is_completed),
+    status: row.status,
+  };
+}
 
 async function getEnrollmentScopedLearnerDetailRows(options: {
   tenantId: string;
@@ -2249,125 +1274,25 @@ async function getEnrollmentScopedLearnerDetailRows(options: {
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const offset = (safePage - 1) * safePageSize;
-  const params: any[] = [];
-  let sourceCte: string;
 
+  let source: LearnerCoursesSource;
   if (dataScope === 'report_filter') {
     if (!dateRange) return { total_count: 0, total_pages: 0, current_page: safePage, results: [] };
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
-    });
-    params.push(tenantId, dateRange.startDate, dateRange.endDate, ...cohort.params, userId);
-    const userParam = `$${params.length}`;
-    sourceCte = `${cohort.sql},
-      source_enrollments AS (
-        SELECT DISTINCT ON (re.course_id)
-          re.enrollment_id,
-          re.course_id,
-          re.course_name,
-          re.enrolled_at,
-          re.completed_at,
-          re.is_completed,
-          re.has_started,
-          COALESCE(cp.progress, 0) AS progress
-        FROM report_enrollments re
-        LEFT JOIN course_progress cp ON cp.enrollment_id = re.enrollment_id
-        WHERE re.user_id = ${userParam}
-        ORDER BY re.course_id, re.enrolled_at DESC, re.enrollment_id DESC
-      )`;
+    source = { dataScope, range: dateRange };
   } else {
-    params.push(tenantId, userId);
-    sourceCte = `source_enrollments AS (
-      SELECT DISTINCT ON (e.course_id)
-        e.id AS enrollment_id,
-        e.course_id,
-        COALESCE(c.display_name, 'Khóa học không còn hiển thị') AS course_name,
-        e.enrolled_at,
-        cp.completed_at,
-        COALESCE(cp.progress, 0) AS progress,
-        (
-          COALESCE(cp.progress, 0) >= 100
-          OR COALESCE(cp.is_completed, false) = true
-        ) AS is_completed,
-        (
-          COALESCE(cp.progress, 0) > 0
-          OR cp.completed_at IS NOT NULL
-        ) AS has_started
-      FROM enrollments e
-      LEFT JOIN courses c ON c.id = e.course_id
-      LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-      WHERE e.tenant_id = $1
-        AND e.user_id = $2
-      ORDER BY e.course_id, e.enrolled_at DESC, e.id DESC
-    )`;
+    source = { dataScope };
   }
 
-  let paramIdx = params.length + 1;
-  const filters: string[] = [];
-  if (search.trim()) {
-    filters.push(`cr.course_name ILIKE '%' || $${paramIdx} || '%'`);
-    params.push(search.trim());
-    paramIdx++;
-  }
-  const safeStatus: ReportCourseCompletionStatus = ['all', 'not_started', 'learning', 'completed'].includes(status)
-    ? status
-    : 'all';
-  if (safeStatus !== 'all') {
-    filters.push(`cr.status = $${paramIdx}`);
-    params.push(safeStatus);
-    paramIdx++;
-  }
-  const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-  params.push(safePageSize, offset);
+  const rows = await learnersRepository.selectScopedLearnerCourses({
+    tenantId, userId, ...source, groupId, subgroupId, teamId, search, status, limit: safePageSize, offset,
+  });
 
-  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
-    `WITH ${sourceCte},
-      course_rows AS (
-        SELECT
-          se.course_id,
-          se.course_name,
-          se.enrolled_at,
-          se.completed_at,
-          CASE
-            WHEN se.is_completed THEN 100
-            ELSE LEAST(se.progress, 99.99)
-          END AS progress,
-          se.is_completed,
-          CASE
-            WHEN se.is_completed THEN 'completed'
-            WHEN se.has_started THEN 'learning'
-            ELSE 'not_started'
-          END AS status
-        FROM source_enrollments se
-      )
-     SELECT cr.*, COUNT(*) OVER() AS full_count
-     FROM course_rows cr
-     ${whereSql}
-     ORDER BY cr.enrolled_at DESC NULLS LAST, cr.course_name ASC, cr.course_id ASC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
+  const total = parseInt(rows[0]?.full_count ?? '0', 10);
   return {
     total_count: total,
     total_pages: Math.ceil(total / safePageSize),
     current_page: safePage,
-    results: result.rows.map(row => ({
-      course_id: row.course_id,
-      course_name: row.course_name,
-      enrolled_at: row.enrolled_at,
-      completed_at: row.completed_at,
-      progress: Number(row.progress) || 0,
-      is_completed: Boolean(row.is_completed),
-      status: row.status,
-    })),
+    results: rows.map(toLearnerDetailResult),
   };
 }
 export async function getLearnerDetail(
@@ -2388,37 +1313,19 @@ export async function getLearnerDetail(
   const offset = (safePage - 1) * safePageSize;
   const snapshotEndDate = new Date();
 
-  const userScope = dataScope
-    ? buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, 3)
-    : { sql: '', params: [] as string[] };
-  const userResult = await reportsQuery<{ id: string }>(
-    `SELECT u.id
-     FROM users u
-     WHERE u.username = $1
-       AND u.tenant_id = $2
-       AND u.is_active = true
-       AND u.role IN ('learner', 'learner_plus')
-       ${userScope.sql}
-     LIMIT 1`,
-    [username, tenantId, ...userScope.params],
-  );
-  if (userResult.rowCount === 0) {
+  // Following the report filters or the history, the learner must be in the org scope.
+  const user = await learnersRepository.findActiveLearnerId({
+    username,
+    tenantId,
+    scope: dataScope ? { groupId, subgroupId, teamId } : undefined,
+  });
+  if (!user) {
     return { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: safePage };
   }
-  const userId = userResult.rows[0].id;
+  const userId = user.id;
 
   // Groups
-  const groupsResult = await reportsQuery<{ group_name: string; subgroup_name: string }>(
-    `SELECT DISTINCT og.name AS group_name, sg.name AS subgroup_name
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1
-       AND og.tenant_id = $2
-     ORDER BY og.name, sg.name`,
-    [userId, tenantId],
-  );
+  const groups = await learnersRepository.selectLearnerGroups(userId, tenantId);
 
   if (dataScope) {
     const scopedResult = await getEnrollmentScopedLearnerDetailRows({
@@ -2434,126 +1341,19 @@ export async function getLearnerDetail(
       subgroupId,
       teamId,
     });
-    return { username, groups: groupsResult.rows, ...scopedResult };
-  }
-  const params: any[] = [tenantId, snapshotEndDate, userId];
-  let paramIdx = 4;
-  const visibilityFilters: string[] = ['AND u.id = $3'];
-
-  if (teamId) {
-    visibilityFilters.push(`AND t.id = $${paramIdx}`);
-    params.push(teamId);
-    paramIdx++;
-  } else if (subgroupId) {
-    visibilityFilters.push(`AND t.sub_group_id = $${paramIdx}`);
-    params.push(subgroupId);
-    paramIdx++;
-  } else if (groupId) {
-    visibilityFilters.push(`AND sg.org_group_id = $${paramIdx}`);
-    params.push(groupId);
-    paramIdx++;
+    return { username, groups, ...scopedResult };
   }
 
-  if (search.trim()) {
-    visibilityFilters.push(`AND c.display_name ILIKE '%' || $${paramIdx} || '%'`);
-    params.push(search.trim());
-    paramIdx++;
-  }
+  const rows = await learnersRepository.selectVisibleLearnerCourses({
+    tenantId, userId, snapshotEndDate, groupId, subgroupId, teamId, search, status, limit: safePageSize, offset,
+  });
 
-  const safeStatus: ReportCourseCompletionStatus = ['all', 'not_started', 'learning', 'completed'].includes(status)
-    ? status
-    : 'all';
-  let statusFilter = '';
-  if (safeStatus !== 'all') {
-    statusFilter = `WHERE sub.status = $${paramIdx}`;
-    params.push(safeStatus);
-    paramIdx++;
-  }
-
-  params.push(safePageSize, offset);
-  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
-    `WITH
-      ${buildVisibleCourseUsersCte({
-        tenantParam: '$1',
-        snapshotParam: '$2',
-        extraFilterSql: visibilityFilters.join('\n'),
-      })},
-      active_enrollments AS (
-        SELECT DISTINCT ON (e.course_id)
-          e.id,
-          e.course_id,
-          e.enrolled_at
-        FROM enrollments e
-        WHERE e.tenant_id = $1
-          AND e.user_id = $3
-          AND e.is_active = true
-          AND e.enrolled_at <= $2
-        ORDER BY e.course_id, e.enrolled_at DESC, e.id DESC
-      ),
-      learner_courses AS (
-        SELECT
-          v.course_id,
-          v.name AS course_name,
-          ae.enrolled_at,
-          cp.completed_at,
-          (
-            ae.id IS NOT NULL
-            AND (
-              COALESCE(cp.progress, 0) >= 100
-              OR COALESCE(cp.is_completed, false) = true
-            )
-            AND (cp.completed_at IS NULL OR cp.completed_at <= $2)
-          ) AS is_completed,
-          CASE
-            WHEN ae.id IS NULL THEN 'not_started'
-            WHEN (
-              COALESCE(cp.progress, 0) >= 100
-              OR COALESCE(cp.is_completed, false) = true
-            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 'completed'
-            ELSE 'learning'
-          END AS status,
-          CASE
-            WHEN ae.id IS NULL THEN 0
-            WHEN (
-              COALESCE(cp.progress, 0) >= 100
-              OR COALESCE(cp.is_completed, false) = true
-            ) AND (cp.completed_at IS NULL OR cp.completed_at <= $2) THEN 100
-            ELSE LEAST(COALESCE(cp.progress, 0), 99.99)
-          END AS progress
-        FROM visible_course_users v
-        LEFT JOIN active_enrollments ae ON ae.course_id = v.course_id
-        LEFT JOIN course_progress cp ON cp.enrollment_id = ae.id
-      )
-     SELECT sub.*, COUNT(*) OVER() AS full_count
-     FROM learner_courses sub
-     ${statusFilter}
-     ORDER BY
-       CASE sub.status
-         WHEN 'completed' THEN 1
-         WHEN 'learning' THEN 2
-         ELSE 3
-       END,
-       sub.enrolled_at DESC NULLS LAST,
-       sub.course_name ASC,
-       sub.course_id ASC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const total = parseInt(rows[0]?.full_count ?? '0');
 
   return {
     username,
-    groups: groupsResult.rows,
-    results: result.rows.map(r => ({
-      course_id: r.course_id,
-      course_name: r.course_name,
-      enrolled_at: r.enrolled_at,
-      completed_at: r.completed_at,
-      progress: Number(r.progress) || 0,
-      is_completed: Boolean(r.is_completed),
-      status: r.status,
-    })),
+    groups,
+    results: rows.map(toLearnerDetailResult),
     total_count: total,
     total_pages: Math.ceil(total / safePageSize),
     current_page: safePage,
@@ -2564,24 +1364,14 @@ export async function getLearnerDetail(
 // User Badges
 // ═══════════════════════════════════════════════════════════════
 
-type UserBadgeRow = { badge_id: string; earned_at: string; name_override: string | null };
-
 /** Badges of one learner; name_override is the tenant's own display name for the badge, if it set one. */
 export async function getUserBadges(
   username: string,
   tenantId: string,
 ): Promise<{ username: string; badges: UserBadgeRow[] }> {
-  const result = await reportsQuery<UserBadgeRow>(
-    `SELECT ub.badge_id, ub.earned_at, NULLIF(BTRIM(tbs.name_override), '') AS name_override
-     FROM user_badges ub
-     JOIN users u ON u.id = ub.user_id
-     LEFT JOIN tenant_badge_settings tbs ON tbs.tenant_id = u.tenant_id AND tbs.badge_id = ub.badge_id
-     WHERE u.username = $1 AND u.tenant_id = $2
-     ORDER BY ub.earned_at DESC`,
-    [username, tenantId],
-  );
+  const badges = await learnersRepository.selectUserBadges(username, tenantId);
 
-  return { username, badges: result.rows };
+  return { username, badges };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2613,14 +1403,11 @@ export async function getUserStudyTime(
   tenantId: string,
   options: UserStudyTimeOptions = {},
 ): Promise<UserStudyTimeResponse> {
-  const userResult = await reportsQuery<{ id: string }>(
-    `SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1`,
-    [username, tenantId],
-  );
+  const user = await learnersRepository.findUserId(username, tenantId);
 
-  if (userResult.rowCount === 0) return emptyUserStudyTime(username, options);
+  if (!user) return emptyUserStudyTime(username, options);
 
-  const series = await getStudyTimeSeries(userResult.rows[0].id, tenantId, options);
+  const series = await getStudyTimeSeries(user.id, tenantId, options);
 
   return {
     username,
@@ -2635,5 +1422,5 @@ export async function getUserStudyTime(
 
 /** A failure reaches the caller: POST /api/reports/refresh answers it as an error. */
 export async function refreshReportSummary(): Promise<void> {
-  await reportsQuery('SELECT refresh_report_summary()', []);
+  await learnersRepository.refreshSummary();
 }

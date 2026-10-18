@@ -6,7 +6,7 @@
 
 import { reportsQuery } from '../../config/reports-database.js';
 import type { OrgChartDimension, OrgChartEntity, OrgChartMonthValue } from './report-org-chart.logic.js';
-import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte } from './reports.service.js';
+import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte } from './report-sql.js';
 
 /**
  * The units of the chart, with the former loop's statements and order. The

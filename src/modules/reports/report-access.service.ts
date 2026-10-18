@@ -1,6 +1,10 @@
 import { query } from '../../config/database.js';
 import type { UserRole } from '../../types/index.js';
+import { createReportAccessRepository } from './report-access.repository.js';
 import { ReportRequestError } from './report-request-error.js';
+
+// The scope check reads the main pool (it may run inside a request's transaction).
+const repository = createReportAccessRepository({ query });
 
 export interface ReportScopeActor {
   userId: string;
@@ -85,16 +89,7 @@ export async function resolveReportHierarchy(
   requested: RequestedReportScope,
 ): Promise<{ groupId?: string; subgroupId?: string; teamId?: string }> {
   if (requested.teamId) {
-    const result = await query<{ group_id: string; subgroup_id: string; team_id: string }>(
-      `SELECT og.id AS group_id, sg.id AS subgroup_id, t.id AS team_id
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE t.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [requested.teamId, tenantId],
-    );
-    const row = result.rows[0];
+    const row = await repository.findTeamHierarchy(requested.teamId, tenantId);
     if (!row) throw scopeInvalid('Team không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     if (requested.subgroupId && requested.subgroupId !== row.subgroup_id) {
       throw scopeInvalid('Team không thuộc nhóm con đã chọn');
@@ -106,15 +101,7 @@ export async function resolveReportHierarchy(
   }
 
   if (requested.subgroupId) {
-    const result = await query<{ group_id: string; subgroup_id: string }>(
-      `SELECT og.id AS group_id, sg.id AS subgroup_id
-       FROM sub_groups sg
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE sg.id = $1 AND og.tenant_id = $2
-       LIMIT 1`,
-      [requested.subgroupId, tenantId],
-    );
-    const row = result.rows[0];
+    const row = await repository.findSubgroupHierarchy(requested.subgroupId, tenantId);
     if (!row) throw scopeInvalid('Nhóm con không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     if (requested.groupId && requested.groupId !== row.group_id) {
       throw scopeInvalid('Nhóm con không thuộc nhóm đã chọn');
@@ -123,11 +110,7 @@ export async function resolveReportHierarchy(
   }
 
   if (requested.groupId) {
-    const result = await query<{ group_id: string }>(
-      `SELECT id AS group_id FROM org_groups WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-      [requested.groupId, tenantId],
-    );
-    const row = result.rows[0];
+    const row = await repository.findGroup(requested.groupId, tenantId);
     if (!row) throw scopeInvalid('Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại');
     return { groupId: row.group_id };
   }
@@ -137,17 +120,7 @@ export async function resolveReportHierarchy(
 
 /** Groups a learner_plus actor may report on: the groups of their own teams, in their tenant. */
 export async function loadReportAllowedGroupIds(actor: Pick<ReportScopeActor, 'userId' | 'tenantId'>): Promise<string[]> {
-  const result = await query<{ group_id: string }>(
-    `SELECT DISTINCT og.id AS group_id
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1
-       AND og.tenant_id = $2`,
-    [actor.userId, actor.tenantId],
-  );
-  return result.rows.map((row) => row.group_id);
+  return repository.listMemberGroupIds(actor.userId, actor.tenantId);
 }
 
 /**
@@ -160,22 +133,7 @@ export async function canReportOnLearner(actor: ReportScopeActor, username: stri
   if (actor.role !== 'learner_plus') return true;
   const allowedGroupIds = await loadReportAllowedGroupIds(actor);
   if (allowedGroupIds.length === 0) return false;
-  const result = await query<{ visible: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1
-       FROM users u
-       JOIN team_members tm ON tm.user_id = u.id
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE u.username = $1
-         AND u.tenant_id = $2::uuid
-         AND og.tenant_id = $2::uuid
-         AND og.id = ANY($3::uuid[])
-     ) AS visible`,
-    [username, actor.tenantId, allowedGroupIds],
-  );
-  return result.rows[0]?.visible === true;
+  return repository.learnerBelongsToGroups(username, actor.tenantId, allowedGroupIds);
 }
 
 /**
