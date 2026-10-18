@@ -1,13 +1,13 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { assertComponentInstancePlan } from '../../lesson-author-capabilities.logic.js';
+import { assertComponentInstancePlan } from '../lesson-author-capabilities.logic.js';
 import {
   getLessonAuthorSortableItems,
   orderLessonAuthorComponents,
   type LessonAuthorComponentProposal,
 } from '../../../course-authoring/course-authoring.service.js';
-import { renderSemanticLearningHtml } from '../../lesson-author-component-registry.logic.js';
-import { layoutGeneratedDiagramNodes, normalizeDiagramDisplayText } from '../../lesson-author-diagram-layout.logic.js';
+import { renderSemanticLearningHtml } from '../lesson-author-component-registry.logic.js';
+import { layoutGeneratedDiagramNodes, normalizeDiagramDisplayText } from '../lesson-author-diagram-layout.logic.js';
 import { MIN_UNIT_HTML_TEXT_CHARS, MAX_COMPONENTS_PER_UNIT } from './constants.js';
 import {
   asRecord,

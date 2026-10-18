@@ -1,0 +1,1861 @@
+// ═══════════════════════════════════════════════════════════════
+// KB Service — Knowledge Base + Document CRUD
+// ═══════════════════════════════════════════════════════════════
+
+import { randomUUID } from 'crypto';
+import { getClient, query } from '../../../config/database.js';
+import { invalidateTenantAiCaches } from '../../../config/cache-invalidation.js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { uploadFile, uploadFileFromPath, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../../config/storage.js';
+import { extractLocalSourceContentFromFile } from './kb-local-source-content.js';
+import { readFaqSheetSummary } from './kb-faq-sheet.service.js';
+import { signKbDocumentSourceUrl } from './kb-source-download-url.logic.js';
+import { publish, QUEUES } from '../../../config/rabbitmq/index.js';
+import { getRedisClient } from '../../../config/redis.js';
+import { AppError } from '../../../middleware/error-handler.js';
+import { normalizeKbDocumentDisplayName,
+  type CreateKbInput, type UpdateKbInput, type CreateArticleInput, type UpdateArticleInput } from './kb.validator.js';
+import * as XLSX from 'xlsx';
+import { env } from '../../../config/env.js';
+import { enqueueKbOperation, hasQueuedKnowledgebaseDeletion } from './kb-operation.service.js';
+import {
+  deleteFileSearchStoreIfExists,
+  deleteFromStore,
+  getGeminiApiKeyFingerprint,
+  getGeminiClient,
+  getOptionalGeminiApiKeyFingerprint,
+} from '../ai-platform/gemini.service.js';
+import type { AiEngine } from '../ai-platform/ai-engine.types.js';
+import { logSwallowedError } from '../../../utils/best-effort.js';
+
+const KB_RESTORE_LOCK_TTL_SECONDS = 6 * 60 * 60;
+const ACTIVE_RESTORE_STATES = new Set(['queued', 'restoring', 'uploading']);
+const RESTORE_REQUIRED_STORE_STATUSES = new Set(['key_changed', 'permission_denied', 'not_found']);
+
+// ── Types ──
+export interface Knowledgebase {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  document_count?: number;
+  restore_state?: KbRestoreState;
+  active_restore_job_id?: string | null;
+  restore_error_reason?: string | null;
+  restore_started_at?: string | null;
+  restore_finished_at?: string | null;
+  restore_required?: boolean;
+  restore_reason?: string | null;
+  restore_progress?: KbRestoreProgress | null;
+  ai_active_engine?: AiEngine;
+  ai_transition_state?: KbAiTransitionState;
+  ai_pending_engine?: AiEngine | null;
+  ai_transition_progress?: KbAiTransitionProgress | null;
+}
+
+type KbRestoreState = 'idle' | 'queued' | 'restoring' | 'uploading' | 'completed' | 'failed';
+type KbAiTransitionState = 'idle' | 'queued' | 'running' | 'failed';
+
+interface KbRestoreProgress {
+  total_docs: number;
+  enqueued_docs: number;
+  learned_docs: number;
+  failed_docs: number;
+  skipped_docs: number;
+}
+
+interface KbAiTransitionProgress {
+  phase: string | null;
+  total_documents: number;
+  processed_documents: number;
+  cleanup_processed_documents: number;
+  last_error: string | null;
+}
+
+export interface KbDocument {
+  id: string;
+  tenant_id: string;
+  kb_id: string;
+  type: string;
+  name: string;
+  status: string;
+  error_reason: string | null;
+  source_info: Record<string, unknown>;
+  file_path: string | null;
+  content: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface KbGeminiStore {
+  id: string;
+  store_name: string;
+  api_key_fingerprint: string | null;
+  remote_status: string;
+  remote_error_code: string | null;
+  remote_error_reason: string | null;
+}
+
+interface KbGeminiMapping {
+  gemini_path: string;
+}
+
+export interface RestoreKnowledgebaseResult {
+  restored: number;
+  enqueued: number;
+  failed_to_enqueue: number;
+  skipped_no_file: number;
+  deleted_stores: number;
+  deleted_mappings: number;
+  orphaned_stores: number;
+  upload_publish_failed: boolean;
+}
+
+export interface EnqueueRestoreKnowledgebaseResult {
+  queued: true;
+  job_id: string;
+  kb_id: string;
+  lock_ttl_seconds: number;
+}
+
+async function getKbGeminiStores(kbId: string): Promise<KbGeminiStore[]> {
+  const stores = await query<KbGeminiStore>(
+    `SELECT id, store_name, api_key_fingerprint, remote_status, remote_error_code, remote_error_reason
+     FROM kb_google_store
+     WHERE kb_id = $1`,
+    [kbId],
+  );
+  return stores.rows;
+}
+
+async function getKbGeminiMappings(kbId: string, tenantId: string): Promise<KbGeminiMapping[]> {
+  const mappings = await query<KbGeminiMapping>(
+    `SELECT m.gemini_path FROM kb_doc_gemini_mapping m
+     JOIN kb_documents d ON d.id = m.document_id
+     WHERE d.kb_id = $1 AND d.tenant_id = $2`,
+    [kbId, tenantId],
+  );
+  return mappings.rows;
+}
+
+export async function deleteKbGeminiRemoteResources(
+  kbId: string,
+  tenantId: string,
+): Promise<{ deletedStores: number; deletedMappings: number }> {
+  const [stores, mappings] = await Promise.all([
+    getKbGeminiStores(kbId),
+    getKbGeminiMappings(kbId, tenantId),
+  ]);
+
+  if (stores.length === 0 && mappings.length === 0) {
+    return { deletedStores: 0, deletedMappings: 0 };
+  }
+
+  const aiClient = await getGeminiClient(tenantId);
+  if (stores.length > 0) {
+    for (const store of stores) {
+      await deleteFileSearchStoreIfExists(store.store_name, aiClient);
+    }
+  } else if (mappings.length > 0) {
+    await deleteFromStore(mappings.map(m => m.gemini_path), aiClient);
+  }
+
+  return { deletedStores: stores.length, deletedMappings: mappings.length };
+}
+
+export async function deleteDocumentGeminiMappingsStrict(
+  docIds: string[],
+  tenantId: string,
+): Promise<number> {
+  if (docIds.length === 0) return 0;
+
+  const mappings = await query<KbGeminiMapping>(
+    `SELECT m.gemini_path FROM kb_doc_gemini_mapping m
+     JOIN kb_documents d ON d.id = m.document_id
+     WHERE d.id = ANY($1) AND d.tenant_id = $2`,
+    [docIds, tenantId],
+  );
+
+  if (!mappings.rowCount || mappings.rowCount === 0) return 0;
+  const aiClient = await getGeminiClient(tenantId);
+  await deleteFromStore(mappings.rows.map(r => r.gemini_path), aiClient);
+  return mappings.rows.length;
+}
+
+function isRedisPermissionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /NOPERM|No permissions to access a key/i.test(message);
+}
+
+export async function releaseKnowledgebaseRestoreLock(lockKey: string, lockToken: string): Promise<void> {
+  const redis = getRedisClient();
+  if (!redis) return;
+
+  try {
+    const current = await redis.get(lockKey);
+    if (current === lockToken) await redis.del(lockKey);
+  } catch (err) {
+    if (isRedisPermissionError(err)) {
+      console.warn('[AI Chatbot] Redis ACL blocked KB restore lock cleanup. Check cache key prefix permissions.');
+    }
+    // Lock cleanup is best-effort; TTL is the fallback.
+  }
+}
+
+function isRestoreActiveState(state?: string | null): boolean {
+  return ACTIVE_RESTORE_STATES.has(state || '');
+}
+
+function getRestoreReasonFromStore(
+  store: Pick<KbGeminiStore, 'api_key_fingerprint' | 'remote_status' | 'remote_error_reason'> | null | undefined,
+  currentFingerprint: string | null,
+): string | null {
+  if (!store) return null;
+  if (RESTORE_REQUIRED_STORE_STATUSES.has(store.remote_status)) {
+    return store.remote_error_reason || store.remote_status;
+  }
+  if (store.remote_status !== 'active') return null;
+  if (!currentFingerprint) return 'Gemini API key is missing. Configure a key before restoring this KB.';
+  if (store.api_key_fingerprint && store.api_key_fingerprint !== currentFingerprint) return 'Gemini API key was changed.';
+  return null;
+}
+
+function restoreRequiredSql(currentFingerprintParam: string): string {
+  return `(
+    kgs.id IS NOT NULL
+    AND (
+      kgs.remote_status IN ('key_changed', 'permission_denied', 'not_found')
+      OR (
+        kgs.remote_status = 'active'
+        AND kgs.api_key_fingerprint IS NOT NULL
+        AND ${currentFingerprintParam}::text IS NOT NULL
+        AND kgs.api_key_fingerprint <> ${currentFingerprintParam}::text
+      )
+    )
+  )`;
+}
+
+function mapKnowledgebaseRow<T extends Record<string, any>>(row: T): Knowledgebase {
+  const {
+    full_count,
+    total_docs,
+    enqueued_docs,
+    learned_docs,
+    failed_docs,
+    skipped_docs,
+    ai_transition_phase,
+    ai_transition_total_documents,
+    ai_transition_processed_documents,
+    ai_transition_cleanup_processed_documents,
+    ai_transition_last_error,
+    ...rest
+  } = row;
+  const progress =
+    total_docs !== undefined && total_docs !== null
+      ? {
+          total_docs: Number(total_docs) || 0,
+          enqueued_docs: Number(enqueued_docs) || 0,
+          learned_docs: Number(learned_docs) || 0,
+          failed_docs: Number(failed_docs) || 0,
+          skipped_docs: Number(skipped_docs) || 0,
+        }
+      : null;
+  const aiTransitionProgress =
+    ai_transition_total_documents !== undefined && ai_transition_total_documents !== null
+      ? {
+          phase: ai_transition_phase ?? null,
+          total_documents: Number(ai_transition_total_documents) || 0,
+          processed_documents: Number(ai_transition_processed_documents) || 0,
+          cleanup_processed_documents: Number(ai_transition_cleanup_processed_documents) || 0,
+          last_error: ai_transition_last_error ?? null,
+        }
+      : null;
+  return {
+    ...(rest as unknown as Knowledgebase),
+    restore_required: Boolean(rest.restore_required),
+    restore_reason: rest.restore_reason ?? null,
+    restore_progress: progress,
+    ai_transition_progress: aiTransitionProgress,
+  };
+}
+
+async function assertNoActiveAiEngineTransition(
+  tenantId: string,
+  actionLabel = 'thay doi tai lieu',
+): Promise<void> {
+  const transition = await query<{ transition_state: string | null }>(
+    `SELECT transition_state
+     FROM tenant_ai_settings
+     WHERE tenant_id = $1
+       AND transition_state IN ('queued', 'running')
+     LIMIT 1`,
+    [tenantId],
+  );
+  if (transition.rows[0]) {
+    throw new AppError(
+      `Hệ thống AI đang chuyển dữ liệu, tạm thời không thể ${actionLabel}.`,
+      409,
+      'AI_ENGINE_TRANSITION_ACTIVE',
+    );
+  }
+}
+
+async function assertKnowledgebaseMutable(
+  kbId: string,
+  tenantId: string,
+  actionLabel = 'thay doi tai lieu',
+): Promise<void> {
+  const currentFingerprint = await getOptionalGeminiApiKeyFingerprint(tenantId);
+  const result = await query<{
+    id: string;
+    restore_state: string | null;
+    api_key_fingerprint: string | null;
+    remote_status: string | null;
+    remote_error_reason: string | null;
+  }>(
+    `SELECT kb.id, kb.restore_state,
+            kgs.api_key_fingerprint, kgs.remote_status, kgs.remote_error_reason
+     FROM knowledgebases kb
+     LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
+     WHERE kb.id = $1 AND kb.tenant_id = $2
+     LIMIT 1`,
+    [kbId, tenantId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new AppError('Knowledge Base khong ton tai', 404);
+  if (isRestoreActiveState(row.restore_state)) {
+    throw new AppError(`Kho tri thuc dang khoi phuc, tam thoi khong the ${actionLabel}.`, 409);
+  }
+  if (await hasQueuedKnowledgebaseDeletion(kbId, tenantId)) {
+    throw new AppError(`Kho tri thuc dang duoc xoa, tam thoi khong the ${actionLabel}.`, 409);
+  }
+  await assertNoActiveAiEngineTransition(tenantId, actionLabel);
+  const reason = getRestoreReasonFromStore(
+    row.remote_status
+      ? {
+          api_key_fingerprint: row.api_key_fingerprint,
+          remote_status: row.remote_status,
+          remote_error_reason: row.remote_error_reason,
+        }
+      : null,
+    currentFingerprint,
+  );
+  if (reason) {
+    throw new AppError(`Kho tri thuc can khoi phuc truoc khi ${actionLabel}. Ly do: ${reason}`, 409);
+  }
+}
+
+// ═══════════════════════════════════════
+// Knowledge Base CRUD
+// ═══════════════════════════════════════
+
+export async function listKnowledgebases(
+  tenantId: string,
+  opts: { page?: number; pageSize?: number; search?: string } = {},
+): Promise<{ data: Knowledgebase[]; total: number }> {
+  const { page = 1, pageSize = 10, search } = opts;
+  const offset = (page - 1) * pageSize;
+  const currentFingerprint = await getOptionalGeminiApiKeyFingerprint(tenantId);
+
+  const conditions: string[] = [
+    'kb.tenant_id = $1',
+    `NOT EXISTS (
+       SELECT 1 FROM kb_operation_jobs operation_job
+       WHERE operation_job.kb_id = kb.id
+         AND operation_job.tenant_id = kb.tenant_id
+         AND operation_job.operation = 'knowledgebase_delete'
+         AND operation_job.status IN ('queued', 'running')
+     )`,
+  ];
+  const params: unknown[] = [tenantId, currentFingerprint];
+  let idx = 3;
+
+  if (search?.trim()) {
+    conditions.push(`kb.name ILIKE $${idx++}`);
+    params.push(`%${search.trim()}%`);
+  }
+
+  const where = conditions.join(' AND ');
+  params.push(pageSize, offset);
+
+  const result = await query<Record<string, any>>(
+    `SELECT kb.*, COALESCE(dc.cnt, 0)::int AS document_count,
+            ${restoreRequiredSql('$2')} AS restore_required,
+            CASE
+              WHEN ${restoreRequiredSql('$2')} THEN
+                COALESCE(kgs.remote_error_reason, 'Gemini API key changed or cannot access the current store.')
+              ELSE NULL
+            END AS restore_reason,
+            j.total_docs, j.enqueued_docs, j.learned_docs, j.failed_docs, j.skipped_docs,
+            tas.active_engine AS ai_active_engine,
+            tas.transition_state AS ai_transition_state,
+            aitj.to_engine AS ai_pending_engine,
+            aitj.phase AS ai_transition_phase,
+            aitj.total_documents::text AS ai_transition_total_documents,
+            aitj.processed_documents::text AS ai_transition_processed_documents,
+            aitj.cleanup_processed_documents::text AS ai_transition_cleanup_processed_documents,
+            aitj.last_error AS ai_transition_last_error,
+            COUNT(*) OVER() AS full_count
+     FROM knowledgebases kb
+     LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
+     LEFT JOIN (
+       SELECT kb_id, COUNT(*)::int AS cnt FROM kb_documents GROUP BY kb_id
+     ) dc ON dc.kb_id = kb.id
+     LEFT JOIN kb_restore_jobs j ON j.id = kb.active_restore_job_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = kb.tenant_id
+     LEFT JOIN ai_engine_transition_jobs aitj ON aitj.id = tas.active_transition_job_id
+     WHERE ${where}
+     ORDER BY kb.created_at DESC
+     LIMIT $${idx++} OFFSET $${idx++}`,
+    params,
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const data = result.rows.map(mapKnowledgebaseRow);
+
+  return { data, total };
+}
+
+export async function getKnowledgebase(id: string, tenantId: string): Promise<Knowledgebase | null> {
+  const currentFingerprint = await getOptionalGeminiApiKeyFingerprint(tenantId);
+  const result = await query<Record<string, any>>(
+    `SELECT kb.*, COALESCE(dc.cnt, 0)::int AS document_count,
+            ${restoreRequiredSql('$3')} AS restore_required,
+            CASE
+              WHEN ${restoreRequiredSql('$3')} THEN
+                COALESCE(kgs.remote_error_reason, 'Gemini API key changed or cannot access the current store.')
+              ELSE NULL
+            END AS restore_reason,
+            j.total_docs, j.enqueued_docs, j.learned_docs, j.failed_docs, j.skipped_docs,
+            tas.active_engine AS ai_active_engine,
+            tas.transition_state AS ai_transition_state,
+            aitj.to_engine AS ai_pending_engine,
+            aitj.phase AS ai_transition_phase,
+            aitj.total_documents::text AS ai_transition_total_documents,
+            aitj.processed_documents::text AS ai_transition_processed_documents,
+            aitj.cleanup_processed_documents::text AS ai_transition_cleanup_processed_documents,
+            aitj.last_error AS ai_transition_last_error
+     FROM knowledgebases kb
+     LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
+     LEFT JOIN (
+       SELECT kb_id, COUNT(*)::int AS cnt FROM kb_documents GROUP BY kb_id
+     ) dc ON dc.kb_id = kb.id
+     LEFT JOIN kb_restore_jobs j ON j.id = kb.active_restore_job_id
+     LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = kb.tenant_id
+     LEFT JOIN ai_engine_transition_jobs aitj ON aitj.id = tas.active_transition_job_id
+     WHERE kb.id = $1 AND kb.tenant_id = $2
+     LIMIT 1`,
+    [id, tenantId, currentFingerprint],
+  );
+  return result.rows[0] ? mapKnowledgebaseRow(result.rows[0]) : null;
+}
+
+export async function createKnowledgebase(tenantId: string, input: CreateKbInput, userId: string): Promise<Knowledgebase> {
+  const result = await query<Knowledgebase>(
+    `INSERT INTO knowledgebases (tenant_id, name, description, created_by)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [tenantId, input.name, input.description || '', userId],
+  );
+  await invalidateTenantAiCaches(tenantId);
+  return result.rows[0];
+}
+
+export async function updateKnowledgebase(id: string, tenantId: string, input: UpdateKbInput): Promise<Knowledgebase | null> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  let idx = 1;
+
+  if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
+  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
+  sets.push(`updated_at = now()`);
+
+  if (sets.length <= 1) return getKnowledgebase(id, tenantId); // nothing to update
+
+  params.push(id, tenantId);
+  const result = await query<Knowledgebase>(
+    `UPDATE knowledgebases SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx++} RETURNING *`,
+    params,
+  );
+  if (result.rows[0]) await invalidateTenantAiCaches(tenantId);
+  return result.rows[0] || null;
+}
+
+// ═══════════════════════════════════════
+// Document CRUD
+// ═══════════════════════════════════════
+
+interface ListDocumentsOptions {
+  kbId: string;
+  tenantId: string;
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  status?: string;
+  type?: string;
+}
+
+export async function listDocuments(opts: ListDocumentsOptions): Promise<{ data: KbDocument[]; total: number }> {
+  const { kbId, tenantId, page = 1, pageSize = 20, search, status, type } = opts;
+  const offset = (page - 1) * pageSize;
+
+  // Build WHERE dynamically — always filter by kb_id + tenant_id
+  const conditions: string[] = ['kb_id = $1', 'tenant_id = $2'];
+  const params: unknown[] = [kbId, tenantId];
+  let idx = 3;
+
+  if (search?.trim()) {
+    conditions.push(`name ILIKE $${idx++}`);
+    params.push(`%${search.trim()}%`);
+  }
+  if (status?.trim()) {
+    conditions.push(`status = $${idx++}`);
+    params.push(status.trim());
+  }
+  if (type?.trim()) {
+    conditions.push(`type = $${idx++}`);
+    params.push(type.trim());
+  }
+
+  const where = conditions.join(' AND ');
+
+  // Single query with window function COUNT(*) OVER() — more efficient than 2 queries
+  params.push(pageSize, offset);
+  const result = await query<KbDocument & { full_count: string }>(
+    `SELECT *, COUNT(*) OVER() AS full_count
+     FROM kb_documents
+     WHERE ${where}
+     ORDER BY created_at DESC
+     LIMIT $${idx++} OFFSET $${idx++}`,
+    params,
+  );
+
+  const total = parseInt(result.rows[0]?.full_count ?? '0');
+  const data = result.rows.map(r => {
+    const { full_count, ...rest } = r;
+    return rest as unknown as KbDocument;
+  });
+
+  return { data, total };
+}
+
+export async function getDocument(docId: string, tenantId: string): Promise<KbDocument | null> {
+  const result = await query<KbDocument>(
+    `SELECT * FROM kb_documents WHERE id = $1 AND tenant_id = $2`,
+    [docId, tenantId],
+  );
+  return result.rows[0] || null;
+}
+
+/**
+ * Delete a single document.
+ * Order: Gemini → DB → Storage (prevents orphan docs on Gemini)
+ */
+export async function deleteDocument(docId: string, kbId: string, tenantId: string): Promise<boolean> {
+  // 1. Get gemini mappings + doc info BEFORE deleting anything
+  const doc = await getDocument(docId, tenantId);
+  if (!doc) return false;
+  if (doc.kb_id !== kbId) return false;
+  await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
+  if (doc.status === 'learning') throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409);
+
+  // 2. Delete from Gemini FIRST (synchronous, not queue)
+  await deleteDocumentGeminiMappingsStrict([docId], tenantId);
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
+
+  // 3. Delete from DB (CASCADE handles mapping table)
+  const result = await query(
+    `DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+    [docId, kbId, tenantId],
+  );
+
+  // 4. Cleanup storage (non-critical)
+  if (doc.file_path) {
+    try { await deleteFile(doc.file_path); } catch (error) { logSwallowedError('kb.storage_cleanup', error); }
+  }
+
+  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
+  return (result.rowCount || 0) > 0;
+}
+
+/**
+ * Bulk delete multiple documents in one operation.
+ * Order: Gemini → DB → Storage (prevents orphan docs on Gemini)
+ */
+export async function bulkDeleteDocuments(
+  docIds: string[],
+  kbId: string,
+  tenantId: string,
+): Promise<{ deleted: number }> {
+  if (docIds.length === 0) return { deleted: 0 };
+  await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
+
+  // Filter out docs that are currently learning
+  const statusCheck = await query<{ id: string; status: string }>(
+    `SELECT id, status FROM kb_documents WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3`,
+    [docIds, kbId, tenantId],
+  );
+  const learningIds = statusCheck.rows.filter(r => r.status === 'learning').map(r => r.id);
+  const foundIds = statusCheck.rows.map(r => r.id);
+  const safeIds = foundIds.filter(id => !learningIds.includes(id));
+  if (safeIds.length === 0) {
+    if (learningIds.length > 0) throw new AppError('Tất cả tài liệu đang được huấn luyện, không thể xoá', 409);
+    return { deleted: 0 };
+  }
+
+  // 2. Get all file paths in a single query
+  const filePaths = await query<{ id: string; file_path: string | null }>(
+    `SELECT id, file_path FROM kb_documents WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3`,
+    [safeIds, kbId, tenantId],
+  );
+
+  // 3. Delete from Gemini FIRST. If this fails, do not delete DB/storage.
+  await deleteDocumentGeminiMappingsStrict(safeIds, tenantId);
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, safeIds);
+
+  // 4. Bulk delete from DB
+  const result = await query(
+    `DELETE FROM kb_documents WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3`,
+    [safeIds, kbId, tenantId],
+  );
+
+  // 5. Cleanup storage files (non-critical)
+  for (const f of filePaths.rows) {
+    if (f.file_path) {
+      try { await deleteFile(f.file_path); } catch (error) { logSwallowedError('kb.storage_cleanup', error); }
+    }
+  }
+
+  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
+  return { deleted: result.rowCount || 0 };
+}
+
+async function failKnowledgebaseRestoreJob(
+  jobId: string,
+  kbId: string,
+  tenantId: string,
+  errorReason: string,
+): Promise<void> {
+  const safeReason = errorReason.slice(0, 1000);
+  await query(
+    `UPDATE kb_restore_jobs
+     SET status = 'failed',
+         error_reason = $4,
+         finished_at = COALESCE(finished_at, now()),
+         updated_at = now()
+     WHERE id = $1 AND kb_id = $2 AND tenant_id = $3 AND status <> 'completed'`,
+    [jobId, kbId, tenantId, safeReason],
+  );
+  await query(
+    `UPDATE knowledgebases
+     SET restore_state = 'failed',
+         restore_error_reason = $3,
+         restore_finished_at = now(),
+         updated_at = now()
+     WHERE id = $1 AND tenant_id = $2 AND active_restore_job_id = $4`,
+    [kbId, tenantId, safeReason, jobId],
+  );
+  await invalidateTenantAiCaches(tenantId);
+}
+
+export async function markKnowledgebaseRestoreFailed(
+  jobId: string,
+  kbId: string,
+  tenantId: string,
+  errorReason: string,
+): Promise<void> {
+  await failKnowledgebaseRestoreJob(jobId, kbId, tenantId, errorReason);
+}
+
+export async function setRestoreJobNewStore(
+  jobId: string,
+  kbId: string,
+  tenantId: string,
+  storeName: string,
+): Promise<void> {
+  await query(
+    `UPDATE kb_restore_jobs
+     SET new_store_name = COALESCE(new_store_name, $4),
+         updated_at = now()
+     WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+    [jobId, kbId, tenantId, storeName],
+  );
+}
+
+export async function claimRestoreDocumentForUpload(
+  jobId: string,
+  documentId: string,
+  kbId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const result = await query(
+    `UPDATE kb_restore_job_documents
+     SET status = 'uploading',
+         updated_at = now()
+     WHERE job_id = $1
+       AND document_id = $2
+       AND kb_id = $3
+       AND tenant_id = $4
+       AND status = 'queued'`,
+    [jobId, documentId, kbId, tenantId],
+  );
+  return (result.rowCount || 0) > 0;
+}
+
+export async function resetRestoreDocumentForRetry(
+  jobId: string,
+  documentId: string,
+  kbId: string,
+  tenantId: string,
+  errorReason: string,
+): Promise<void> {
+  await query(
+    `UPDATE kb_restore_job_documents
+     SET status = 'queued',
+         error_reason = $5,
+         updated_at = now()
+     WHERE job_id = $1
+       AND document_id = $2
+       AND kb_id = $3
+       AND tenant_id = $4
+       AND status = 'uploading'`,
+    [jobId, documentId, kbId, tenantId, errorReason.slice(0, 1000)],
+  );
+}
+
+export async function recordRestoreDocumentFinished(
+  jobId: string,
+  documentId: string,
+  kbId: string,
+  tenantId: string,
+  success: boolean,
+  errorReason?: string,
+): Promise<void> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const docUpdate = await client.query(
+      `UPDATE kb_restore_job_documents
+       SET status = $5,
+           error_reason = $6,
+           finished_at = now(),
+           updated_at = now()
+       WHERE job_id = $1
+         AND document_id = $2
+         AND kb_id = $3
+         AND tenant_id = $4
+         AND status IN ('queued', 'uploading')
+       RETURNING document_id`,
+      [jobId, documentId, kbId, tenantId, success ? 'learned' : 'failed', errorReason?.slice(0, 1000) ?? null],
+    );
+
+    if ((docUpdate.rowCount || 0) === 0) {
+      await client.query('COMMIT');
+      return;
+    }
+
+    const jobUpdate = await client.query<{
+      total_docs: number;
+      learned_docs: number;
+      failed_docs: number;
+      skipped_docs: number;
+    }>(
+      `UPDATE kb_restore_jobs
+       SET learned_docs = learned_docs + $4,
+           failed_docs = failed_docs + $5,
+           updated_at = now()
+       WHERE id = $1 AND kb_id = $2 AND tenant_id = $3
+       RETURNING total_docs, learned_docs, failed_docs, skipped_docs`,
+      [jobId, kbId, tenantId, success ? 1 : 0, success ? 0 : 1],
+    );
+    const job = jobUpdate.rows[0];
+    if (job && Number(job.learned_docs) + Number(job.failed_docs) + Number(job.skipped_docs) >= Number(job.total_docs)) {
+      const finalStatus = Number(job.failed_docs) > 0 ? 'failed' : 'completed';
+      await client.query(
+        `UPDATE kb_restore_jobs
+         SET status = $4,
+             finished_at = now(),
+             updated_at = now()
+         WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+        [jobId, kbId, tenantId, finalStatus],
+      );
+      await client.query(
+        `UPDATE knowledgebases
+         SET restore_state = $4,
+             restore_error_reason = CASE WHEN $4 = 'failed' THEN 'Mot so tai lieu khoi phuc that bai. Kiem tra danh sach tai lieu loi.' ELSE NULL END,
+             restore_finished_at = now(),
+             updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND active_restore_job_id = $3`,
+        [kbId, tenantId, jobId, finalStatus],
+      );
+    }
+    await client.query('COMMIT');
+    await invalidateTenantAiCaches(tenantId);
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function markRestoreDocumentEnqueued(
+  jobId: string,
+  documentId: string,
+  kbId: string,
+  tenantId: string,
+): Promise<void> {
+  const result = await query(
+    `UPDATE kb_restore_job_documents
+     SET enqueued_at = COALESCE(enqueued_at, now()),
+         updated_at = now()
+     WHERE job_id = $1
+       AND document_id = $2
+       AND kb_id = $3
+       AND tenant_id = $4
+       AND status = 'queued'
+       AND enqueued_at IS NULL`,
+    [jobId, documentId, kbId, tenantId],
+  );
+  if ((result.rowCount || 0) > 0) {
+    await query(
+      `UPDATE kb_restore_jobs
+       SET enqueued_docs = enqueued_docs + 1,
+           updated_at = now()
+       WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+      [jobId, kbId, tenantId],
+    );
+  }
+}
+
+async function publishQueuedRestoreDocuments(
+  jobId: string,
+  kbId: string,
+  tenantId: string,
+  includeAlreadyEnqueued = false,
+): Promise<{ enqueued: number }> {
+  const batchSize = 500;
+  let enqueued = 0;
+  let afterDocumentId: string | null = null;
+
+  for (;;) {
+    const docs: { rowCount: number | null; rows: Array<{ document_id: string }> } = await query<{ document_id: string }>(
+      `SELECT document_id
+       FROM kb_restore_job_documents
+       WHERE job_id = $1
+         AND kb_id = $2
+         AND tenant_id = $3
+         AND status = 'queued'
+         AND ($5::boolean OR enqueued_at IS NULL)
+         AND ($6::uuid IS NULL OR document_id > $6::uuid)
+       ORDER BY document_id
+       LIMIT $4`,
+      [jobId, kbId, tenantId, batchSize, includeAlreadyEnqueued, afterDocumentId],
+    );
+    if (!docs.rowCount || docs.rowCount === 0) break;
+
+    for (const doc of docs.rows as Array<{ document_id: string }>) {
+      await publish(QUEUES.GEMINI_UPLOAD, {
+        documentId: doc.document_id,
+        kbId,
+        tenantId,
+        mode: 'file',
+        restoreJobId: jobId,
+      });
+      await markRestoreDocumentEnqueued(jobId, doc.document_id, kbId, tenantId);
+      enqueued++;
+      afterDocumentId = doc.document_id;
+    }
+  }
+
+  return { enqueued };
+}
+
+async function restoreKnowledgebaseTracked(
+  kbId: string,
+  tenantId: string,
+  jobId: string,
+): Promise<RestoreKnowledgebaseResult> {
+  await getGeminiClient(tenantId);
+  const currentFingerprint = await getGeminiApiKeyFingerprint(tenantId);
+
+  const client = await getClient();
+  let restoreDocs = 0;
+  let skippedNoFile = 0;
+  let deletedMappings = 0;
+  let orphanedStores = 0;
+  let resumeQueuedDocuments = false;
+
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kb-restore:${tenantId}:${kbId}`]);
+
+    const jobResult = await client.query<{ status: string }>(
+      `SELECT status
+       FROM kb_restore_jobs
+       WHERE id = $1 AND kb_id = $2 AND tenant_id = $3
+       FOR UPDATE`,
+      [jobId, kbId, tenantId],
+    );
+    const job = jobResult.rows[0];
+    if (!job) throw new AppError('Restore job khong ton tai', 404);
+    if (job.status === 'completed' || job.status === 'failed') {
+      await client.query('COMMIT');
+      return {
+        restored: 0,
+        enqueued: 0,
+        failed_to_enqueue: 0,
+        skipped_no_file: 0,
+        deleted_stores: 0,
+        deleted_mappings: 0,
+        orphaned_stores: 0,
+        upload_publish_failed: false,
+      };
+    }
+
+    resumeQueuedDocuments = job.status === 'uploading';
+
+    if (job.status !== 'uploading') {
+      await client.query(
+        `UPDATE kb_restore_jobs
+         SET status = 'restoring',
+             started_at = COALESCE(started_at, now()),
+             new_key_fingerprint = $4,
+             updated_at = now()
+         WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+        [jobId, kbId, tenantId, currentFingerprint],
+      );
+      await client.query(
+        `UPDATE knowledgebases
+         SET restore_state = 'restoring',
+             restore_error_reason = NULL,
+             restore_started_at = COALESCE(restore_started_at, now()),
+             restore_finished_at = NULL,
+             updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND active_restore_job_id = $3`,
+        [kbId, tenantId, jobId],
+      );
+
+      const busyDocs = await client.query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt
+         FROM kb_documents
+         WHERE kb_id = $1 AND tenant_id = $2 AND status IN ('learning', 'deleting')`,
+        [kbId, tenantId],
+      );
+      if ((busyDocs.rows[0]?.cnt ?? 0) > 0) {
+        throw new AppError('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.', 409);
+      }
+
+      const stores = await client.query<KbGeminiStore>(
+        `SELECT id, store_name, api_key_fingerprint, remote_status, remote_error_code, remote_error_reason
+         FROM kb_google_store
+         WHERE kb_id = $1
+         FOR UPDATE`,
+        [kbId],
+      );
+      const primaryStore = stores.rows[0] ?? null;
+      const restoreReason = getRestoreReasonFromStore(primaryStore, currentFingerprint);
+      if (!restoreReason) {
+        throw new AppError('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.', 409);
+      }
+
+      const counts = await client.query<{ total_docs: number; restore_docs: number; skipped_docs: number }>(
+        `SELECT COUNT(*)::int AS total_docs,
+                COUNT(*) FILTER (WHERE file_path IS NOT NULL)::int AS restore_docs,
+                COUNT(*) FILTER (WHERE file_path IS NULL)::int AS skipped_docs
+         FROM kb_documents
+         WHERE kb_id = $1 AND tenant_id = $2`,
+        [kbId, tenantId],
+      );
+      restoreDocs = Number(counts.rows[0]?.restore_docs ?? 0);
+      skippedNoFile = Number(counts.rows[0]?.skipped_docs ?? 0);
+
+      for (const store of stores.rows) {
+        await client.query(
+          `INSERT INTO kb_gemini_orphaned_stores (
+             tenant_id, kb_id, store_name, api_key_fingerprint, reason, error_code, error_reason
+           )
+           VALUES ($1, $2, $3, $4, 'key_changed_restore_skip_remote_delete', $5, $6)`,
+          [
+            tenantId,
+            kbId,
+            store.store_name,
+            store.api_key_fingerprint,
+            store.remote_error_code || 'KEY_CHANGED',
+            store.remote_error_reason || restoreReason,
+          ],
+        );
+      }
+      orphanedStores = stores.rowCount || 0;
+
+      const mappingDelete = await client.query(
+        `DELETE FROM kb_doc_gemini_mapping m
+         USING kb_documents d
+         WHERE d.id = m.document_id
+           AND d.kb_id = $1
+           AND d.tenant_id = $2`,
+        [kbId, tenantId],
+      );
+      deletedMappings = mappingDelete.rowCount || 0;
+
+      await client.query(`DELETE FROM kb_google_store WHERE kb_id = $1`, [kbId]);
+
+      await client.query(
+        `INSERT INTO kb_restore_job_documents (
+           job_id, document_id, tenant_id, kb_id, status, error_reason, finished_at
+         )
+         SELECT $1, id, tenant_id, kb_id,
+                CASE WHEN file_path IS NULL THEN 'skipped' ELSE 'queued' END,
+                CASE WHEN file_path IS NULL THEN 'Khong co file goc de khoi phuc lai kho tri thuc' ELSE NULL END,
+                CASE WHEN file_path IS NULL THEN now() ELSE NULL END
+         FROM kb_documents
+         WHERE kb_id = $2 AND tenant_id = $3
+         ON CONFLICT (job_id, document_id) DO NOTHING`,
+        [jobId, kbId, tenantId],
+      );
+
+      await client.query(
+        `UPDATE kb_documents
+         SET status = 'learning',
+             error_reason = NULL,
+             updated_at = now()
+         WHERE kb_id = $1 AND tenant_id = $2 AND file_path IS NOT NULL`,
+        [kbId, tenantId],
+      );
+      await client.query(
+        `UPDATE kb_documents
+         SET status = 'error',
+             error_reason = 'Khong co file goc de khoi phuc lai kho tri thuc',
+             updated_at = now()
+         WHERE kb_id = $1 AND tenant_id = $2 AND file_path IS NULL AND status <> 'draft'`,
+        [kbId, tenantId],
+      );
+
+      const nextStatus = restoreDocs > 0 ? 'uploading' : 'completed';
+      await client.query(
+        `UPDATE kb_restore_jobs
+         SET status = $4,
+             total_docs = $5,
+             skipped_docs = $6,
+             finished_at = CASE WHEN $4 = 'completed' THEN now() ELSE finished_at END,
+             updated_at = now()
+         WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+        [jobId, kbId, tenantId, nextStatus, Number(counts.rows[0]?.total_docs ?? 0), skippedNoFile],
+      );
+      await client.query(
+        `UPDATE knowledgebases
+         SET restore_state = $4,
+             restore_error_reason = NULL,
+             restore_finished_at = CASE WHEN $4 = 'completed' THEN now() ELSE NULL END,
+             updated_at = now()
+         WHERE id = $1 AND tenant_id = $2 AND active_restore_job_id = $3`,
+        [kbId, tenantId, jobId, nextStatus],
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const publishResult = await publishQueuedRestoreDocuments(jobId, kbId, tenantId, resumeQueuedDocuments);
+  await invalidateTenantAiCaches(tenantId);
+
+  return {
+    restored: restoreDocs,
+    enqueued: publishResult.enqueued,
+    failed_to_enqueue: 0,
+    skipped_no_file: skippedNoFile,
+    deleted_stores: 0,
+    deleted_mappings: deletedMappings,
+    orphaned_stores: orphanedStores,
+    upload_publish_failed: false,
+  };
+}
+
+export async function enqueueKnowledgebaseRestore(
+  kbId: string,
+  tenantId: string,
+): Promise<EnqueueRestoreKnowledgebaseResult> {
+  await getGeminiClient(tenantId);
+  const currentFingerprint = await getGeminiApiKeyFingerprint(tenantId);
+  const jobId = randomUUID();
+  // query() joins runAuditedTransaction through AsyncLocalStorage. The DB
+  // active-job constraint/advisory lock is authoritative; a Redis lock could
+  // outlive a later Audit rollback and falsely block the next request.
+  await query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kb-restore:${tenantId}:${kbId}`]);
+
+  const kbResult = await query<{
+        id: string;
+        restore_state: string | null;
+        store_id: string | null;
+        store_name: string | null;
+        api_key_fingerprint: string | null;
+        remote_status: string | null;
+        remote_error_reason: string | null;
+      }>(
+        `SELECT kb.id, kb.restore_state,
+                kgs.id AS store_id, kgs.store_name, kgs.api_key_fingerprint, kgs.remote_status, kgs.remote_error_reason
+         FROM knowledgebases kb
+         LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id
+         WHERE kb.id = $1 AND kb.tenant_id = $2
+         LIMIT 1
+         FOR UPDATE OF kb`,
+        [kbId, tenantId],
+      );
+  const row = kbResult.rows[0];
+  if (!row) throw new AppError('Knowledge Base khong ton tai', 404);
+  if (isRestoreActiveState(row.restore_state)) {
+    throw new AppError('Kho tri thuc dang duoc khoi phuc. Vui long cho job hien tai hoan tat.', 409);
+  }
+
+  const restoreReason = getRestoreReasonFromStore(
+        row.store_id
+          ? {
+              api_key_fingerprint: row.api_key_fingerprint,
+              remote_status: row.remote_status || 'active',
+              remote_error_reason: row.remote_error_reason,
+            }
+          : null,
+        currentFingerprint,
+  );
+  if (!restoreReason) {
+    throw new AppError('Kho tri thuc nay chua can khoi phuc theo key Gemini hien tai.', 409);
+  }
+
+  const activeDocs = await query<{ cnt: number }>(
+        `SELECT COUNT(*)::int AS cnt
+         FROM kb_documents
+         WHERE kb_id = $1 AND tenant_id = $2 AND status IN ('learning', 'deleting')`,
+        [kbId, tenantId],
+  );
+  if ((activeDocs.rows[0]?.cnt ?? 0) > 0) {
+    throw new AppError('Kho tri thuc dang co tai lieu dang xu ly. Vui long cho xong roi khoi phuc lai.', 409);
+  }
+
+  await query(
+        `INSERT INTO kb_restore_jobs (
+           id, tenant_id, kb_id, status, reason, old_store_name,
+           old_key_fingerprint, new_key_fingerprint, started_at
+         )
+         VALUES ($1, $2, $3, 'queued', 'key_changed', $4, $5, $6, now())`,
+        [jobId, tenantId, kbId, row.store_name, row.api_key_fingerprint, currentFingerprint],
+  );
+  await query(
+        `UPDATE knowledgebases
+         SET restore_state = 'queued',
+             active_restore_job_id = $3,
+             restore_error_reason = NULL,
+             restore_started_at = now(),
+             restore_finished_at = NULL,
+             updated_at = now()
+         WHERE id = $1 AND tenant_id = $2`,
+        [kbId, tenantId, jobId],
+  );
+  return {
+    queued: true,
+    job_id: jobId,
+    kb_id: kbId,
+    lock_ttl_seconds: KB_RESTORE_LOCK_TTL_SECONDS,
+  };
+}
+
+export interface RestoreDispatchTarget {
+  jobId: string;
+  kbId: string;
+  tenantId: string;
+}
+
+async function recordRestoreDispatchAttempt(target: RestoreDispatchTarget, confirmed: boolean): Promise<void> {
+  await query(
+    `UPDATE kb_restore_jobs
+     SET dispatch_attempted_at = now(),
+         dispatch_failures = CASE WHEN $4 THEN 0 ELSE dispatch_failures + 1 END,
+         updated_at = now()
+     WHERE id = $1 AND kb_id = $2 AND tenant_id = $3
+       AND status IN ('queued', 'restoring', 'uploading')`,
+    [target.jobId, target.kbId, target.tenantId, confirmed],
+  );
+}
+
+/** Dispatch after the audited transaction committed; recovery handles broker outages. */
+export async function dispatchKnowledgebaseRestore(target: RestoreDispatchTarget): Promise<boolean> {
+  try {
+    await publish(QUEUES.GEMINI_RESTORE, {
+      jobId: target.jobId,
+      kbId: target.kbId,
+      tenantId: target.tenantId,
+    });
+    await recordRestoreDispatchAttempt(target, true);
+    return true;
+  } catch (error) {
+    await recordRestoreDispatchAttempt(target, false).catch((recordError) => {
+      console.error(`[KB restore] Failed to record deferred dispatch for job ${target.jobId}:`, recordError);
+    });
+    console.error(`[KB restore] Broker dispatch deferred for job ${target.jobId}:`, error);
+    return false;
+  }
+}
+
+/** Database-backed recovery for a message lost after the Audit transaction committed. */
+export async function redispatchRecoverableKnowledgebaseRestores(limit = 50): Promise<number> {
+  const safeLimit = Math.max(1, Math.min(limit, 200));
+  const jobs = await query<RestoreDispatchTarget>(
+    `SELECT id AS "jobId", kb_id AS "kbId", tenant_id AS "tenantId"
+     FROM kb_restore_jobs
+     WHERE (status = 'queued' AND (
+              dispatch_attempted_at IS NULL
+              OR dispatch_attempted_at < now() - interval '1 minute'
+            ))
+        OR (status IN ('restoring', 'uploading')
+            AND updated_at < now() - interval '15 minutes'
+            AND (dispatch_attempted_at IS NULL OR dispatch_attempted_at < now() - interval '5 minutes'))
+     ORDER BY updated_at ASC, id ASC
+     LIMIT $1`,
+    [safeLimit],
+  );
+  let dispatched = 0;
+  for (const job of jobs.rows) {
+    if (await dispatchKnowledgebaseRestore(job)) dispatched += 1;
+  }
+  return dispatched;
+}
+
+/**
+ * Restore a KB through the tracked restore job flow.
+ */
+export async function restoreKnowledgebase(
+  kbId: string,
+  tenantId: string,
+  jobId: string,
+): Promise<RestoreKnowledgebaseResult> {
+  return restoreKnowledgebaseTracked(kbId, tenantId, jobId);
+}
+/**
+ * Update document status (used by workers).
+ */
+export async function updateDocumentStatus(
+  docId: string,
+  status: 'draft' | 'learning' | 'learned' | 'error',
+  errorReason?: string,
+): Promise<void> {
+  const result = await query<{ tenant_id: string }>(
+    `WITH updated AS (
+       UPDATE kb_documents
+          SET status = $1, error_reason = $2, updated_at = now()
+        WHERE id = $3
+        RETURNING id, tenant_id, kb_id, status, updated_at
+     )
+     SELECT tenant_id,
+            pg_notify('lesson_author_source_document_event', json_build_object(
+              'document_id', id, 'tenant_id', tenant_id, 'kb_id', kb_id,
+              'status', status, 'updated_at', updated_at
+            )::text)
+       FROM updated`,
+    [status, errorReason || null, docId],
+  );
+  const tenantId = result.rows[0]?.tenant_id;
+  if (tenantId) await invalidateTenantAiCaches(tenantId);
+}
+
+let sourceUrlSigningClient: SupabaseClient | null = null;
+
+/**
+ * SEP-1: signed URL (TTL AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS) the AI service downloads one KB
+ * source through, instead of holding the storage service key. The URL is a bearer credential:
+ * pass it straight to the index request and never log or persist it.
+ */
+export async function createKbDocumentSourceDownloadUrl(filePath: string, tenantId: string): Promise<string> {
+  return signKbDocumentSourceUrl({
+    filePath,
+    tenantId,
+    bucket: STORAGE_BUCKET,
+    ttlSeconds: env.AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS,
+    origin: env.AI_RAG_STORAGE_SIGNED_URL_ORIGIN,
+    sign: async (bucket, objectPath, ttlSeconds) => {
+      sourceUrlSigningClient ??= createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
+        auth: { autoRefreshToken: false, persistSession: false },
+      });
+      const { data, error } = await sourceUrlSigningClient.storage.from(bucket).createSignedUrl(objectPath, ttlSeconds);
+      if (error || !data?.signedUrl) throw new Error('KB_SOURCE_SIGNED_URL_FAILED');
+      return data.signedUrl;
+    },
+  });
+}
+
+/**
+ * Link a document with its Gemini file search mapping.
+ */
+export async function linkDocumentGemini(
+  documentId: string,
+  storeId: string,
+  geminiPath: string,
+): Promise<boolean> {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kb-doc-gemini-mapping:${documentId}`]);
+
+    const existing = await client.query<{ id: string }>(
+      `SELECT id FROM kb_doc_gemini_mapping WHERE document_id = $1 LIMIT 1`,
+      [documentId],
+    );
+    if (existing.rowCount && existing.rowCount > 0) {
+      await client.query('COMMIT');
+      return false;
+    }
+
+    await client.query(
+      `INSERT INTO kb_doc_gemini_mapping (document_id, store_id, gemini_path) VALUES ($1, $2, $3)`,
+      [documentId, storeId, geminiPath],
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// ═══════════════════════════════════════
+// FAQ Upload
+// ═══════════════════════════════════════
+
+/**
+ * Generate FAQ template xlsx buffer (in-memory).
+ */
+export function generateFaqTemplate(): Buffer {
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['Question', 'Answer'],
+    ['Sản phẩm này giá bao nhiêu?', 'Sản phẩm có giá 500.000 VNĐ.'],
+    ['Thời gian giao hàng bao lâu?', 'Giao hàng từ 3-5 ngày làm việc.'],
+  ]);
+  // Set column widths
+  ws['!cols'] = [{ wch: 40 }, { wch: 60 }];
+  XLSX.utils.book_append_sheet(wb, ws, 'FAQs');
+  return Buffer.from(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
+}
+
+// ═══════════════════════════════════════
+// Article CRUD
+// ═══════════════════════════════════════
+
+/**
+ * Simple HTML → Markdown converter.
+ * Strips images (Gemini can't learn from images), keeps text structure.
+ */
+function htmlToMarkdown(html: string): string {
+  let md = html;
+  // Remove images (Gemini can't learn from them)
+  md = md.replace(/<img[^>]*>/gi, '');
+  // Headings
+  md = md.replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n');
+  md = md.replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n');
+  md = md.replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n');
+  // Bold / Italic
+  md = md.replace(/<(strong|b)>(.*?)<\/\1>/gi, '**$2**');
+  md = md.replace(/<(em|i)>(.*?)<\/\1>/gi, '*$2*');
+  // Lists
+  md = md.replace(/<li[^>]*>(.*?)<\/li>/gi, '- $1\n');
+  md = md.replace(/<\/?[uo]l[^>]*>/gi, '\n');
+  // Links
+  md = md.replace(/<a[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)');
+  // Paragraphs / breaks
+  md = md.replace(/<br\s*\/?>/gi, '\n');
+  md = md.replace(/<\/p>/gi, '\n\n');
+  md = md.replace(/<p[^>]*>/gi, '');
+  // Strip remaining tags
+  md = md.replace(/<[^>]+>/g, '');
+  // Decode entities
+  md = md.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  // Collapse whitespace
+  md = md.replace(/\n{3,}/g, '\n\n').trim();
+  return md;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Durable operation helpers
+// ═══════════════════════════════════════════════════════════════
+// These are the only KB mutation helpers used by the HTTP controller.  They
+// deliberately split a Storage staging step from the database mutation so the
+// caller can make the document/job/Audit Log one transaction and compensate a
+// staged object if that transaction rolls back.
+
+export interface StagedKbSource {
+  /** Text-backed sources intentionally have no public Storage object. */
+  storagePath: string | null;
+  sourceInfo: Record<string, unknown>;
+  content: string | null;
+  name: string;
+  type: 'file' | 'faq' | 'article';
+}
+
+/** An uploaded source as multer's disk storage delivers it (kb-upload-storage.ts). */
+export interface KbUploadedTempFile {
+  path: string;
+  originalname: string;
+  mimetype: string;
+  size: number;
+}
+
+/** Streams the uploaded temp file to Storage (never read whole into the heap). */
+async function stageKbSource(
+  tenantId: string,
+  folder: Parameters<typeof buildStoragePath>[1],
+  name: string,
+  mimetype: string,
+  filePath: string,
+  sourceInfo: Record<string, unknown>,
+  type: StagedKbSource['type'],
+  content: string | null = null,
+  suffix?: string,
+): Promise<StagedKbSource> {
+  const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const safeName = suffix || buildFileName(name);
+  const storagePath = buildStoragePath(tenantId, folder, safeName, dateFolder);
+  await uploadFileFromPath(storagePath, filePath, mimetype);
+  return { storagePath, sourceInfo, content, name, type };
+}
+
+export async function discardStagedKbSource(staged: Pick<StagedKbSource, 'storagePath'> | null | undefined): Promise<void> {
+  if (!staged?.storagePath) return;
+  try { await deleteFile(staged.storagePath); } catch (error) { logSwallowedError('kb.storage_cleanup', error); /* reconciliation is the fail-safe */ }
+}
+
+/**
+ * Create a KB file source from server-generated text. This is used for
+ * reviewed artifacts such as a lesson-author video transcript. Keeping the
+ * content in the tenant-scoped document row avoids copying the artifact to
+ * the public asset bucket before it has been indexed.
+ */
+export async function stageTextBackedDocumentSource(
+  kbId: string,
+  tenantId: string,
+  input: { name: string; content: string; sourceInfo: Record<string, unknown> },
+): Promise<StagedKbSource> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'luu ban chep loi');
+  return {
+    storagePath: null,
+    sourceInfo: input.sourceInfo,
+    content: input.content,
+    name: input.name,
+    type: 'file',
+  };
+}
+
+export async function stageDocumentSource(
+  kbId: string,
+  tenantId: string,
+  file: KbUploadedTempFile,
+): Promise<StagedKbSource> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'tai tai lieu moi');
+  const displayName = normalizeKbDocumentDisplayName(file.originalname);
+  const ext = displayName.substring(displayName.lastIndexOf('.')).toLowerCase();
+  const localContent = await extractLocalSourceContentFromFile(ext, file.path);
+  return stageKbSource(
+    tenantId,
+    'kb-files',
+    displayName,
+    file.mimetype,
+    file.path,
+    { name: displayName, size: file.size, extension: ext, mime_type: file.mimetype },
+    'file',
+    localContent,
+  );
+}
+
+export async function stageFaqSource(
+  kbId: string,
+  tenantId: string,
+  file: KbUploadedTempFile,
+): Promise<StagedKbSource> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'tai FAQ');
+  const displayName = normalizeKbDocumentDisplayName(file.originalname);
+  // Parsed in a worker thread (kb-faq-sheet.service.ts), never on the event loop.
+  const sheet = await readFaqSheetSummary(file.path);
+  if (sheet.kind === 'no_sheet') throw new AppError('File xlsx không có sheet nào', 400);
+  if (sheet.kind === 'empty') throw new AppError('File xlsx trống, không có dữ liệu', 400);
+  if (sheet.kind === 'bad_template') {
+    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${sheet.headers.join(', ')}`, 400);
+  }
+  const { rowCount, emptyRows } = sheet;
+  return stageKbSource(
+    tenantId,
+    'kb-faqs',
+    displayName,
+    file.mimetype,
+    file.path,
+    {
+      name: displayName,
+      size: file.size,
+      extension: '.xlsx',
+      mime_type: file.mimetype,
+      row_count: rowCount,
+      valid_rows: rowCount - emptyRows,
+    },
+    'faq',
+  );
+}
+
+export async function stageArticleSource(
+  kbId: string,
+  tenantId: string,
+  input: Pick<CreateArticleInput, 'title' | 'content'>,
+  documentId: string = randomUUID(),
+): Promise<StagedKbSource> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'tao bai viet');
+  const markdown = Buffer.from(`# ${input.title}\n\n${htmlToMarkdown(input.content)}\n`, 'utf8');
+  const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50) || 'article';
+  // A replacement must never overwrite the source currently used by Gemini;
+  // the worker removes that previous object only after its re-upload succeeds.
+  const storagePath = buildStoragePath(
+    tenantId,
+    'kb-articles',
+    `${slug}-${documentId.slice(0, 8)}-${randomUUID().slice(0, 8)}.md`,
+    dateFolder,
+  );
+  await uploadFile(storagePath, markdown, 'text/markdown');
+  return {
+    storagePath,
+    sourceInfo: { title: input.title, content_length: input.content.length },
+    content: input.content,
+    name: input.title,
+    type: 'article',
+  };
+}
+
+export async function createQueuedDocumentFromStagedSource(
+  kbId: string,
+  tenantId: string,
+  userId: string,
+  staged: StagedKbSource,
+): Promise<KbDocument> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'luu tai lieu moi');
+  const inserted = await query<KbDocument>(
+    `INSERT INTO kb_documents
+       (tenant_id, kb_id, type, name, status, source_info, content, file_path, created_by)
+     VALUES ($1, $2, $3, $4, 'learning', $5::jsonb, $6, $7, $8)
+     RETURNING *`,
+    [tenantId, kbId, staged.type, staged.name, JSON.stringify(staged.sourceInfo), staged.content, staged.storagePath, userId],
+  );
+  const document = inserted.rows[0];
+  await enqueueKbOperation({
+    tenantId,
+    kbId,
+    documentId: document.id,
+    operation: 'document_upload',
+  });
+  return document;
+}
+
+const BLUEPRINT_SOURCE_CHANGED_REASON = 'Tài liệu nguồn trong Kho tri thức đã thay đổi hoặc bị xóa. Vui lòng tạo lại bản thiết kế khóa học.';
+
+export type QueuedDocumentDeletion = {
+  document: KbDocument;
+  detachedTranscriptJobIds: string[];
+};
+
+export type QueuedBulkDocumentDeletion = {
+  deleted: number;
+  documents: KbDocument[];
+  detachedTranscriptJobIds: string[];
+};
+
+function isLessonAuthorBlueprintSchemaUnavailable(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+  return code === '42P01';
+}
+
+/**
+ * A Blueprint is a review snapshot, not a live course specification.  Mark it
+ * stale before a source mutation commits so an old source can never be used to
+ * generate a later chapter. Empty source_documents means the Blueprint used
+ * the whole KB, so every document mutation invalidates it deliberately.
+ */
+async function supersedeLessonAuthorBlueprintsForDocuments(
+  tenantId: string,
+  kbId: string,
+  documentIds: readonly string[],
+): Promise<void> {
+  if (documentIds.length === 0) return;
+  try {
+    await query(
+      `UPDATE lesson_author_blueprints blueprint
+       SET status = 'superseded',
+           error_reason = $4,
+           updated_at = now()
+       WHERE blueprint.tenant_id = $1
+         AND blueprint.kb_id = $2
+         AND blueprint.status = 'proposed'
+         AND (
+           jsonb_array_length(blueprint.source_documents) = 0
+           OR EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(blueprint.source_documents) AS source(document)
+             WHERE source.document ->> 'document_id' = ANY($3::text[])
+           )
+         )`,
+      [tenantId, kbId, [...documentIds], BLUEPRINT_SOURCE_CHANGED_REASON],
+    );
+  } catch (error) {
+    // Safe rolling deployment: old database nodes do not have this additive
+    // table yet. All other database failures must stop the source mutation.
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return;
+    throw error;
+  }
+}
+
+async function supersedeLessonAuthorBlueprintsForKnowledgebase(
+  tenantId: string,
+  kbId: string,
+): Promise<void> {
+  try {
+    await query(
+      `UPDATE lesson_author_blueprints
+       SET status = 'superseded',
+           error_reason = $3,
+           updated_at = now()
+       WHERE tenant_id = $1 AND kb_id = $2 AND status = 'proposed'`,
+      [tenantId, kbId, BLUEPRINT_SOURCE_CHANGED_REASON],
+    );
+  } catch (error) {
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return;
+    throw error;
+  }
+}
+
+async function detachTranscriptJobsForKnowledgebaseDocuments(
+  tenantId: string,
+  kbId: string,
+  documentIds: readonly string[],
+): Promise<string[]> {
+  if (documentIds.length === 0) return [];
+  try {
+    const detached = await query<{ id: string }>(
+      `UPDATE lesson_author_transcription_jobs
+       SET status = 'succeeded',
+           kb_document_id = NULL,
+           last_error = NULL,
+           updated_at = now()
+       WHERE tenant_id = $1
+         AND kb_id = $2
+         AND kb_document_id = ANY($3::uuid[])
+       RETURNING id::text`,
+      [tenantId, kbId, [...documentIds]],
+    );
+    return detached.rows.map(job => job.id);
+  } catch (error) {
+    if (isLessonAuthorBlueprintSchemaUnavailable(error)) return [];
+    throw error;
+  }
+}
+
+export async function queueDocumentDeletion(docId: string, kbId: string, tenantId: string): Promise<QueuedDocumentDeletion | null> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
+  const current = await query<KbDocument>(
+    `SELECT * FROM kb_documents
+     WHERE id = $1 AND kb_id = $2 AND tenant_id = $3
+     FOR UPDATE`,
+    [docId, kbId, tenantId],
+  );
+  const document = current.rows[0] || null;
+  if (!document) return null;
+  if (document.status === 'learning') {
+    throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409, 'KB_DOCUMENT_LEARNING');
+  }
+  const mappings = await query<{ gemini_path: string }>(
+    `SELECT gemini_path FROM kb_doc_gemini_mapping WHERE document_id = $1`,
+    [docId],
+  );
+  const detachedTranscriptJobIds = await detachTranscriptJobsForKnowledgebaseDocuments(tenantId, kbId, [docId]);
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
+  // Delete the tenant row before adding the small outbox/audit rows. At a hard
+  // quota boundary this preserves the customer's ability to free space while
+  // still rolling everything back if the outbox or Audit Log cannot be saved.
+  const removed = await query(
+    `DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+    [docId, kbId, tenantId],
+  );
+  if ((removed.rowCount || 0) !== 1) return null;
+  await enqueueKbOperation({
+    tenantId,
+    kbId,
+    documentId: null,
+    targetDocumentId: docId,
+    operation: 'document_delete',
+    payload: { file_path: document.file_path, gemini_paths: mappings.rows.map(row => row.gemini_path) },
+  });
+  return { document, detachedTranscriptJobIds };
+}
+
+export async function queueBulkDocumentDeletion(
+  docIds: string[],
+  kbId: string,
+  tenantId: string,
+): Promise<QueuedBulkDocumentDeletion> {
+  if (docIds.length === 0) return { deleted: 0, documents: [], detachedTranscriptJobIds: [] };
+  await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
+  const documents = await query<KbDocument>(
+    `SELECT * FROM kb_documents
+     WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3
+       AND status <> 'learning' AND status <> 'deleting'
+     FOR UPDATE`,
+    [docIds, kbId, tenantId],
+  );
+  if (documents.rows.length === 0) return { deleted: 0, documents: [], detachedTranscriptJobIds: [] };
+  const mappings = await query<{ document_id: string; gemini_path: string }>(
+    `SELECT document_id, gemini_path
+     FROM kb_doc_gemini_mapping
+     WHERE document_id = ANY($1)`,
+    [documents.rows.map(document => document.id)],
+  );
+  const pathsByDocument = new Map<string, string[]>();
+  for (const mapping of mappings.rows) {
+    const paths = pathsByDocument.get(mapping.document_id) || [];
+    paths.push(mapping.gemini_path);
+    pathsByDocument.set(mapping.document_id, paths);
+  }
+  const detachedTranscriptJobIds = await detachTranscriptJobsForKnowledgebaseDocuments(
+    tenantId,
+    kbId,
+    documents.rows.map((document) => document.id),
+  );
+  await supersedeLessonAuthorBlueprintsForDocuments(
+    tenantId,
+    kbId,
+    documents.rows.map((document) => document.id),
+  );
+  for (const document of documents.rows) {
+    const removed = await query(
+      `DELETE FROM kb_documents WHERE id = $1 AND kb_id = $2 AND tenant_id = $3`,
+      [document.id, kbId, tenantId],
+    );
+    if ((removed.rowCount || 0) !== 1) throw new AppError('Không thể đưa tài liệu vào hàng đợi xoá', 409);
+    await enqueueKbOperation({
+      tenantId,
+      kbId,
+      documentId: null,
+      targetDocumentId: document.id,
+      operation: 'document_delete',
+      payload: { file_path: document.file_path, gemini_paths: pathsByDocument.get(document.id) || [] },
+    });
+  }
+  return { deleted: documents.rows.length, documents: documents.rows, detachedTranscriptJobIds };
+}
+
+export async function queueDocumentRetry(docIds: string[], kbId: string, tenantId: string): Promise<{ retried: number }> {
+  if (docIds.length === 0) return { retried: 0 };
+  await assertKnowledgebaseMutable(kbId, tenantId, 'thu lai tai lieu');
+  const updated = await query<KbDocument>(
+    `UPDATE kb_documents
+     SET status = 'learning', error_reason = NULL, updated_at = now()
+     WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3
+       AND status = 'error' AND file_path IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM kb_operation_jobs failed_delete
+         WHERE failed_delete.target_document_id = kb_documents.id
+           AND failed_delete.operation = 'document_delete'
+           AND failed_delete.status = 'failed'
+       )
+     RETURNING *`,
+    [docIds, kbId, tenantId],
+  );
+  // A first-upload failure is retried through the re-upload workflow so it can
+  // also clean up a partial Gemini mapping. Remove only terminal leftovers;
+  // active jobs are excluded by the status/error transition above.
+  if (updated.rows.length > 0) {
+    await query(
+      `DELETE FROM kb_operation_jobs
+       WHERE document_id = ANY($1)
+         AND operation IN ('document_upload', 'document_reupload')
+         AND status = 'failed'`,
+      [updated.rows.map(document => document.id)],
+    );
+  }
+  for (const document of updated.rows) {
+    await enqueueKbOperation({ tenantId, kbId, documentId: document.id, operation: 'document_reupload' });
+  }
+  return { retried: updated.rows.length };
+}
+
+export async function queueKnowledgebaseDeletion(id: string, tenantId: string): Promise<boolean> {
+  const kb = await query<Knowledgebase>(
+    `SELECT * FROM knowledgebases WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+    [id, tenantId],
+  );
+  if (!kb.rows[0]) return false;
+  await assertNoActiveAiEngineTransition(tenantId, 'xoa Kho tri thuc');
+  if (isRestoreActiveState(kb.rows[0].restore_state)) {
+    throw new AppError('Không thể xoá Kho tri thức đang được khôi phục', 409);
+  }
+  const bots = await query<{ cnt: number }>(
+    `SELECT COUNT(*)::int AS cnt FROM chatbots WHERE kb_id = $1 AND tenant_id = $2`,
+    [id, tenantId],
+  );
+  const assignments = await query<{ cnt: number }>(
+    `SELECT COUNT(*)::int AS cnt FROM tenant_kb_assignments WHERE kb_id = $1 AND tenant_id = $2`,
+    [id, tenantId],
+  );
+  if ((bots.rows[0]?.cnt || 0) > 0) throw new AppError(`Không thể xoá KB — đang có ${bots.rows[0].cnt} bot sử dụng`, 409);
+  if ((assignments.rows[0]?.cnt || 0) > 0) throw new AppError('Không thể xoá KB đang được gán cho chuyên gia bài học', 409);
+  await supersedeLessonAuthorBlueprintsForKnowledgebase(tenantId, id);
+  await enqueueKbOperation({ tenantId, kbId: id, operation: 'knowledgebase_delete' });
+  return true;
+}
+
+export async function updateArticleFromStagedSource(
+  docId: string,
+  kbId: string,
+  tenantId: string,
+  input: UpdateArticleInput,
+  staged: StagedKbSource,
+): Promise<{ document: KbDocument; previousName: string } | null> {
+  await assertKnowledgebaseMutable(kbId, tenantId, 'sua bai viet');
+  const current = await query<KbDocument>(
+    `SELECT * FROM kb_documents
+     WHERE id = $1 AND kb_id = $2 AND tenant_id = $3 AND type = 'article'
+     FOR UPDATE`,
+    [docId, kbId, tenantId],
+  );
+  const existing = current.rows[0];
+  if (!existing) return null;
+  if (existing.status === 'learning' || existing.status === 'deleting') {
+    throw new AppError('Không thể sửa bài viết đang được xử lý', 409);
+  }
+  if (input.expected_updated_at && existing.updated_at
+      && new Date(input.expected_updated_at).getTime() !== new Date(existing.updated_at).getTime()) {
+    throw new AppError('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.', 409);
+  }
+  const updated = await query<KbDocument>(
+    `UPDATE kb_documents
+     SET name = $1, content = $2, file_path = $3, status = 'learning', source_info = $4::jsonb,
+         error_reason = NULL, updated_at = now()
+     WHERE id = $5 AND kb_id = $6 AND tenant_id = $7
+     RETURNING *`,
+    [staged.name, staged.content, staged.storagePath, JSON.stringify(staged.sourceInfo), docId, kbId, tenantId],
+  );
+  const document = updated.rows[0] || null;
+  if (!document) return null;
+  await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
+  await enqueueKbOperation({
+    tenantId,
+    kbId,
+    documentId: docId,
+    operation: 'document_reupload',
+    payload: { previous_file_path: existing.file_path },
+  });
+  return { document, previousName: existing.name };
+}

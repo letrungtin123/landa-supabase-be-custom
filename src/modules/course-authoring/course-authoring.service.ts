@@ -24,7 +24,7 @@ import {
   isLessonAuthorMediaProtectedBlock,
   orderLessonAuthorComponents,
 } from './lesson-author-components.logic.js';
-import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/lesson-author-component-registry.logic.js';
+import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/ai-id/lesson-author-component-registry.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
 import { COURSE_AUTHOR_NOTES_KEY, preserveAuthorNotesSql, readCourseAuthorNotes, withoutServerOwnedAuthorNotes,
   type CourseAuthorNotesV1 } from './course-author-notes.logic.js';
@@ -34,7 +34,7 @@ import {
   formatChapterTitle,
   stripLessonAuthorSourceRangeSuffix,
   type LessonAuthorIntentPlan,
-} from '../ai-chatbot/lesson-author-intent.logic.js';
+} from '../ai-chatbot/ai-id/lesson-author-intent.logic.js';
 import {
   beginCoursePublishCandidate,
   finishCoursePublishCandidate,

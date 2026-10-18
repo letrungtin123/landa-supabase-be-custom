@@ -1,5 +1,5 @@
 import { pool, query, withDatabaseTransaction } from '../config/database.js';
-import { enqueueKbOperation } from '../modules/ai-chatbot/kb-operation.service.js';
+import { enqueueKbOperation } from '../modules/ai-chatbot/kb/kb-operation.service.js';
 import { RFC_UUID_PATTERN } from '../utils/uuid.js';
 
 const DEFAULT_LIMIT = 25;

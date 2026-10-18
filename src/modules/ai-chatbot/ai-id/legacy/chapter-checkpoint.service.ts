@@ -1,28 +1,28 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../../lesson-author-source-snapshot.logic.js';
-import { resolveLessonAuthorDraftLocale } from '../../lesson-author-intent.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
+import { resolveLessonAuthorDraftLocale } from '../lesson-author-intent.logic.js';
 import { createHash, randomUUID } from 'crypto';
 import { query } from '../../../../config/database.js';
-import { generationSnapshotHash } from '../../lesson-author-generation-job.logic.js';
+import { generationSnapshotHash } from '../lesson-author-generation-job.logic.js';
 import {
   chapterCheckpointRepository,
   assertChapterCheckpointReady,
   logChapterCheckpoint,
-} from '../../lesson-author-chapter-runtime.service.js';
+} from '../lesson-author-chapter-runtime.service.js';
 import {
   ChapterCheckpointError,
   assertChapterSnapshot,
   type ChapterUnitPayload,
   type ChapterCheckpointOwner,
-} from '../../lesson-author-chapter-checkpoint.logic.js';
+} from '../lesson-author-chapter-checkpoint.logic.js';
 import {
   runChapterCheckpoint,
   ChapterWorkflowTimeout,
   chapterExternalFailureCode,
   chapterFailureMessage,
   type ChapterUsageLedger,
-} from '../../lesson-author-chapter-runner.logic.js';
+} from '../lesson-author-chapter-runner.logic.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import { type LessonAuthorProposal } from '../../../course-authoring/course-authoring.service.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
@@ -30,31 +30,31 @@ import {
   isCourseComponentType,
   type CourseComponentType,
 } from '../../../tenants/tenant-course-components.constants.js';
-import { getTenantAiRuntimeSettings } from '../../ai-settings.service.js';
+import { getTenantAiRuntimeSettings } from '../../ai-platform/ai-settings.service.js';
 import {
   finalizeTenantAiTokens,
   releaseTenantAiTokenReservation,
   reserveTenantAiTokens,
-} from '../../ai-token-quota.service.js';
+} from '../../ai-platform/ai-token-quota.service.js';
 import {
   generateRagLessonAuthorCheckpoint,
   RagServiceError,
   type RagLessonAuthorRequest,
-} from '../../ai-rag-client.service.js';
+} from '../../ai-platform/ai-rag-client.service.js';
 import {
   assertLessonAuthorProposalComponentsValid,
   AI_COMPONENT_REGISTRY,
-} from '../../lesson-author-component-registry.logic.js';
-import { assertLessonAuthorPedagogicalQuality } from '../../lesson-author-pedagogical-validator.logic.js';
-import { HISTORY_CONTEXT_LIMIT, HISTORY_MESSAGE_MAX_CHARS } from '../../chat.constants.js';
-import type { ConversationContext, ChatStreamOptions, ChatStreamSideEvent } from '../../chat.types.js';
+} from '../lesson-author-component-registry.logic.js';
+import { assertLessonAuthorPedagogicalQuality } from '../lesson-author-pedagogical-validator.logic.js';
+import { HISTORY_CONTEXT_LIMIT, HISTORY_MESSAGE_MAX_CHARS } from '../../chat/chat.constants.js';
+import type { ConversationContext, ChatStreamOptions, ChatStreamSideEvent } from '../../chat/chat.types.js';
 import {
   loadConversationContext,
   isValidUUID,
   getActiveKbAssignmentFresh,
   markRateLimit,
-} from '../../chat-turn-runtime.service.js';
-import { buildAiTurnTokenBudget, grantedOutputTokenLimit, toRagChatHistory } from '../../chat-turn.logic.js';
+} from '../../chat/chat-turn-runtime.service.js';
+import { buildAiTurnTokenBudget, grantedOutputTokenLimit, toRagChatHistory } from '../../chat/chat-turn.logic.js';
 import { MAX_PROPOSAL_UNITS, MAX_PROPOSAL_LESSONS } from './constants.js';
 import { createLessonAuthorJob } from './job-store.service.js';
 import { assertDurableBlueprintActor } from './durable-blueprint.service.js';

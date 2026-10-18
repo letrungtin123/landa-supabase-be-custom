@@ -1,9 +1,9 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { projectBlueprintDraftArchitecture } from '../../lesson-author-blueprint-draft-architecture.logic.js';
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../../lesson-author-source-snapshot.logic.js';
-import { composeV5BlueprintPolicy } from '../../lesson-author-prompt-policy.logic.js';
-import { createComponentCapabilities, readComponentCapabilities } from '../../lesson-author-capabilities.logic.js';
+import { projectBlueprintDraftArchitecture } from '../lesson-author-blueprint-draft-architecture.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
+import { composeV5BlueprintPolicy } from '../lesson-author-prompt-policy.logic.js';
+import { createComponentCapabilities, readComponentCapabilities } from '../lesson-author-capabilities.logic.js';
 import { createHash } from 'crypto';
 import { query } from '../../../../config/database.js';
 import {
@@ -11,39 +11,39 @@ import {
   generationSnapshotHash,
   hasCompleteGenerationUsage,
   type GenerationJobRow,
-} from '../../lesson-author-generation-job.logic.js';
-import type { PreparedGenerationJob } from '../../lesson-author-generation-job.repository.js';
-import type { GenerationAdmissionStage } from '../../lesson-author-generation-admission.logic.js';
+} from '../lesson-author-generation-job.logic.js';
+import type { PreparedGenerationJob } from '../lesson-author-generation-job.repository.js';
+import type { GenerationAdmissionStage } from '../lesson-author-generation-admission.logic.js';
 import { env } from '../../../../config/env.js';
 import { getRedisClient } from '../../../../config/redis.js';
-import { type DistributedStreamLock } from '../../chat-stream-lock.js';
+import { type DistributedStreamLock } from '../../chat/chat-stream-lock.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import type { UserRole } from '../../../../types/index.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
 import { isCourseComponentType } from '../../../tenants/tenant-course-components.constants.js';
-import { getTenantAiRuntimeSettings } from '../../ai-settings.service.js';
-import { finalizeTenantAiTokens, normalizeAiUsage, reserveTenantAiTokens } from '../../ai-token-quota.service.js';
-import { generateRagLessonAuthorBlueprint, type RagLessonAuthorRequest } from '../../ai-rag-client.service.js';
-import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../../lesson-author-intent.logic.js';
+import { getTenantAiRuntimeSettings } from '../../ai-platform/ai-settings.service.js';
+import { finalizeTenantAiTokens, normalizeAiUsage, reserveTenantAiTokens } from '../../ai-platform/ai-token-quota.service.js';
+import { generateRagLessonAuthorBlueprint, type RagLessonAuthorRequest } from '../../ai-platform/ai-rag-client.service.js';
+import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../lesson-author-intent.logic.js';
 import {
   buildNormalizedLessonAuthorCommand,
   isSimpleDeterministicLessonAuthorCommand,
-} from '../../lesson-author-command.logic.js';
-import { AI_COMPONENT_REGISTRY } from '../../lesson-author-component-registry.logic.js';
+} from '../lesson-author-command.logic.js';
+import { AI_COMPONENT_REGISTRY } from '../lesson-author-component-registry.logic.js';
 import {
   acceptAndPersistLessonAuthorBlueprint,
   blueprintBoundaryCounts,
-} from '../../lesson-author-blueprint-acceptance.logic.js';
-import { runStoredInputFilter } from '../../input-filter/input-filter.service.js';
-import { withLaunchBriefIdentity } from '../../lesson-author-launch-brief.logic.js';
-import { hasAiIdCoursePermission } from '../../lesson-author-ai-id-access.service.js';
+} from '../lesson-author-blueprint-acceptance.logic.js';
+import { runStoredInputFilter } from '../../ai-platform/input-filter/input-filter.service.js';
+import { withLaunchBriefIdentity } from '../lesson-author-launch-brief.logic.js';
+import { hasAiIdCoursePermission } from '../lesson-author-ai-id-access.service.js';
 import {
   MAX_USER_MESSAGE_LENGTH,
   HISTORY_CONTEXT_LIMIT,
   HISTORY_MESSAGE_MAX_CHARS,
   RAG_LESSON_AUTHOR_BLUEPRINT_MAX_OUTPUT_TOKENS,
-} from '../../chat.constants.js';
-import type { ChatStreamOptions } from '../../chat.types.js';
+} from '../../chat/chat.constants.js';
+import type { ChatStreamOptions } from '../../chat/chat.types.js';
 import {
   streamLocks,
   acquireDistributedStreamLock,
@@ -52,8 +52,8 @@ import {
   getActiveKbAssignmentFresh,
   markRateLimit,
   logLessonAuthorFlow,
-} from '../../chat-turn-runtime.service.js';
-import { buildAiTurnTokenBudget, grantedOutputTokenLimit, toRagChatHistory } from '../../chat-turn.logic.js';
+} from '../../chat/chat-turn-runtime.service.js';
+import { buildAiTurnTokenBudget, grantedOutputTokenLimit, toRagChatHistory } from '../../chat/chat-turn.logic.js';
 import { asRecord } from './component-normalize.logic.js';
 import type { LessonAuthorBlueprint, BlueprintDraftContext } from './types.js';
 import {

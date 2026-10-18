@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { readChatServiceSource } from '../ai-chatbot/chat-service-source.fixture.js';
+import { readChatServiceSource } from '../ai-chatbot/chat/chat-service-source.fixture.js';
 
 // Source-level boundary contract for AI ID author notes (QC 364564, N6). The
 // behavior of each helper is covered in course-author-notes.logic.test.ts;

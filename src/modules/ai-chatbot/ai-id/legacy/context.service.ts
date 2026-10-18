@@ -1,20 +1,20 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { lessonAuthorSourceInfoSummary as getSourceInfoSummary } from '../../lesson-author-source-snapshot.logic.js';
+import { lessonAuthorSourceInfoSummary as getSourceInfoSummary } from '../lesson-author-source-snapshot.logic.js';
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
-import { type RagWorkflowDiagnostics } from '../../ai-rag-client.service.js';
+import { type RagWorkflowDiagnostics } from '../../ai-platform/ai-rag-client.service.js';
 import { withoutAuthorOnlyMetadata } from '../../../course-authoring/course-author-notes.logic.js';
-import { LESSON_AUTHOR_TARGET } from '../../chat.constants.js';
+import { LESSON_AUTHOR_TARGET } from '../../chat/chat.constants.js';
 import type {
   ChatStreamSideEvent,
   CourseOutlineEntry,
   ConversationContext,
   LessonAuthorSourceDocument,
   LessonAuthorSourceDocumentInput,
-} from '../../chat.types.js';
-import { isValidUUID } from '../../chat-turn-runtime.service.js';
-import { stripHtml } from '../../chat-turn.logic.js';
+} from '../../chat/chat.types.js';
+import { isValidUUID } from '../../chat/chat-turn-runtime.service.js';
+import { stripHtml } from '../../chat/chat-turn.logic.js';
 import { MAX_SOURCE_DOCUMENTS, MAX_SOURCE_DOCUMENT_EXCERPT_CHARS } from './constants.js';
 import type { LessonAuthorBlueprint, DraftCourseOutline, LessonAuthorOutlineMention } from './types.js';
 

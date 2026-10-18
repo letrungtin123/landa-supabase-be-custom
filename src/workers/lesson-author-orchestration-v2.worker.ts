@@ -8,25 +8,25 @@ import {
   createRabbitChannel,
   getChannel,
 } from '../config/rabbitmq/index.js';
-import { logRagServiceMetaOnce } from '../modules/ai-chatbot/ai-rag-client.service.js';
-import { createOrchestrationV2OutboxRepository } from '../modules/ai-chatbot/lesson-author-orchestration-v2-outbox.repository.js';
-import { assertOrchestrationV2ProductionProcessFence } from '../modules/ai-chatbot/lesson-author-orchestration-v2-process-fence.js';
+import { logRagServiceMetaOnce } from '../modules/ai-chatbot/ai-platform/ai-rag-client.service.js';
+import { createOrchestrationV2OutboxRepository } from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-outbox.repository.js';
+import { assertOrchestrationV2ProductionProcessFence } from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-process-fence.js';
 import {
   runOrchestrationV2DispatcherLoop,
   runOrchestrationV2WorkerRecoveryLoop,
   startOrchestrationV2RabbitConsumer,
   type OrchestrationV2RabbitConsumer,
-} from '../modules/ai-chatbot/lesson-author-orchestration-v2-rabbit.service.js';
-import { readOrchestrationV2RuntimeConfig } from '../modules/ai-chatbot/lesson-author-orchestration-v2-runtime.config.js';
+} from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-rabbit.service.js';
+import { readOrchestrationV2RuntimeConfig } from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-runtime.config.js';
 import {
   createOrchestrationV2WorkerRuntimeDependencies,
   orchestrationV2Database,
   orchestrationV2RuntimeReporter,
-} from '../modules/ai-chatbot/lesson-author-orchestration-v2-runtime.service.js';
-import { verifyOrchestrationV2Schema } from '../modules/ai-chatbot/lesson-author-orchestration-v2-schema.repository.js';
+} from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-runtime.service.js';
+import { verifyOrchestrationV2Schema } from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-schema.repository.js';
 // Last, so the module evaluation order stays as before (the imports above already load both).
 import { startBlacklistSweeper } from '../middleware/authenticate.js';
-import { startChatCacheSweepers } from '../modules/ai-chatbot/chat.service.js';
+import { startChatCacheSweepers } from '../modules/ai-chatbot/chat/chat.service.js';
 import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 const shutdown = new AbortController();

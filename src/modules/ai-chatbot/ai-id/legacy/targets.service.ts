@@ -12,16 +12,16 @@ import {
   stripLessonAuthorStructuralPrefix,
   stripLessonAuthorSourceRangeSuffix,
   type LessonAuthorIntentPlan,
-} from '../../lesson-author-intent.logic.js';
+} from '../lesson-author-intent.logic.js';
 import {
   normalizeLessonAuthorEditorContext,
   validateResolvedLessonAuthorEditorContext,
   type ResolvedLessonAuthorEditorEntity,
   type ValidatedLessonAuthorEditorContext,
-} from '../../lesson-author-command.logic.js';
-import { LESSON_AUTHOR_TARGET } from '../../chat.constants.js';
-import type { ConversationContext } from '../../chat.types.js';
-import { isValidUUID } from '../../chat-turn-runtime.service.js';
+} from '../lesson-author-command.logic.js';
+import { LESSON_AUTHOR_TARGET } from '../../chat/chat.constants.js';
+import type { ConversationContext } from '../../chat/chat.types.js';
+import { isValidUUID } from '../../chat/chat-turn-runtime.service.js';
 import type { LessonAuthorOutlineMention, MentionContextRow } from './types.js';
 import { foldVietnameseText, stringifyBlockExcerpt, isSingleHtmlComponentRequest } from './context.service.js';
 

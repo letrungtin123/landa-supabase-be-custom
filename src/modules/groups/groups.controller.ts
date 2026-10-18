@@ -12,7 +12,7 @@ import {
 } from '../../middleware/audit-log.js';
 // Group/subgroup/team names feed the chat-report org-unit catalog (Redis, 60 s):
 // every committed create/rename/delete invalidates it for the tenant.
-import { invalidateReportOrgUnitCatalog } from '../ai-chatbot/report-org-unit-resolver.service.js';
+import { invalidateReportOrgUnitCatalog } from '../ai-chatbot/ai-report/report-org-unit-resolver.service.js';
 
 // ═══ Org Groups ═══
 

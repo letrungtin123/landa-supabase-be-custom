@@ -9,7 +9,7 @@ import {
 } from './course-publish-governance-schema.repository.js';
 
 const sql = readManualSql('20261006_0900_course_publish_governance_cp5.sql');
-const applyRepository = readFileSync(new URL('../ai-chatbot/lesson-author-workspace-apply.repository.ts',
+const applyRepository = readFileSync(new URL('../ai-chatbot/ai-id/lesson-author-workspace-apply.repository.ts',
   import.meta.url), 'utf8');
 
 function functionBody(name: string): string {

@@ -24,7 +24,7 @@ const EXIT_DEADLINE_MS = 60_000;
 const NOT_IMPORTED = new Set([
   'index.ts',
   // A worker_threads entry: it reads workerData at its top level.
-  'modules/ai-chatbot/kb-faq-sheet.worker.ts',
+  'modules/ai-chatbot/kb/kb-faq-sheet.worker.ts',
 ]);
 const NOT_IMPORTED_DIRECTORIES = ['workers/', 'scripts/', 'test-support/', 'types/'];
 

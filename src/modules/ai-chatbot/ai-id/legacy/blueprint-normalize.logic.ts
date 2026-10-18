@@ -1,21 +1,21 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { assertComponentInstancePlan, readComponentCapabilities } from '../../lesson-author-capabilities.logic.js';
+import { assertComponentInstancePlan, readComponentCapabilities } from '../lesson-author-capabilities.logic.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import { type CourseComponentType } from '../../../tenants/tenant-course-components.constants.js';
-import { type RagRetrievalDiagnostics } from '../../ai-rag-client.service.js';
-import { stripLessonAuthorSourceRangeSuffix } from '../../lesson-author-intent.logic.js';
-import { getLessonAuthorBlueprintReviewNotes } from '../../lesson-author-blueprint-quality.logic.js';
+import { type RagRetrievalDiagnostics } from '../../ai-platform/ai-rag-client.service.js';
+import { stripLessonAuthorSourceRangeSuffix } from '../lesson-author-intent.logic.js';
+import { getLessonAuthorBlueprintReviewNotes } from '../lesson-author-blueprint-quality.logic.js';
 import {
   normalizeSemanticLearningBlocks,
   readServerOwnedSourceFactIds,
   type ComponentPlannerDiagnostic,
-} from '../../lesson-author-component-registry.logic.js';
+} from '../lesson-author-component-registry.logic.js';
 import {
   normalizeLessonAuthorSourceMap,
   normalizeSourceChapterPolicy,
   type BlueprintArchitectureValidationResult,
-} from '../../lesson-author-blueprint-validator.logic.js';
+} from '../lesson-author-blueprint-validator.logic.js';
 import {
   MAX_BLUEPRINT_CHAPTERS,
   MAX_COMPACT_BLUEPRINT_LESSONS_PER_CHAPTER,

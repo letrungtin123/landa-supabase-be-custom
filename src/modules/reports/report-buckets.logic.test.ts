@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { REPORT_AUTO_BUCKET_RULE, resolveAutoReportBucket } from './report-buckets.logic.js';
 import { getReportChart, resolveReportChartGranularity, type ReportDateRange } from './reports.service.js';
-import { resolveSnapshotChartGranularity } from '../ai-chatbot/report-time-expression.logic.js';
+import { resolveSnapshotChartGranularity } from '../ai-chatbot/ai-report/report-time-expression.logic.js';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 

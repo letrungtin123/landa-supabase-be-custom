@@ -4,9 +4,9 @@
 // Writes only to the given directory. No database, storage or AI calls.
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { allReportPdfFixtures } from '../modules/ai-chatbot/report-pdf.fixture.js';
-import { composeReportPdfDocument, paginateReportPdfDocument } from '../modules/ai-chatbot/report-pdf.service.js';
-import { createReportPdfRenderer, getReportPdfRendererConfigFromEnv } from '../modules/ai-chatbot/report-pdf-renderer.service.js';
+import { allReportPdfFixtures } from '../modules/ai-chatbot/ai-report/report-pdf.fixture.js';
+import { composeReportPdfDocument, paginateReportPdfDocument } from '../modules/ai-chatbot/ai-report/report-pdf.service.js';
+import { createReportPdfRenderer, getReportPdfRendererConfigFromEnv } from '../modules/ai-chatbot/ai-report/report-pdf-renderer.service.js';
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name);

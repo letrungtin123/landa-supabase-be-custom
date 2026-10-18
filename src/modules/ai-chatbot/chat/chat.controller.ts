@@ -1,0 +1,707 @@
+// ═══════════════════════════════════════════════════════════════
+// Chat Controller — HTTP handlers + SSE streaming
+// Optimized: UUID validation, tenant isolation, cursor pagination
+// ═══════════════════════════════════════════════════════════════
+
+import type { Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
+import { AI_BUSY_CODE, AI_BUSY_ERROR, AI_BUSY_RETRY_AFTER_SECONDS } from '../ai-platform/ai-chat-admission.logic.js';
+import { countActiveSlots, createChatAnswerGate } from '../ai-platform/ai-chat-admission.service.js';
+import { processRolePlan } from '../../../config/process-role.js';
+import { recordAiChatAdmissionRefused, registerAiChatAdmissionGauge } from '../../metrics/metrics.service.js';
+import { CHAT_ANSWER_STOPPED_BY_CLIENT } from './chat-provider-turn.logic.js';
+import { env } from '../../../config/env.js';
+import { trackShutdownWork } from '../../../config/process-lifecycle.js';
+import { tryEnqueueDurableBlueprint } from '../ai-id/lesson-author-durable-blueprint.service.js';
+import { respondToGenerationAdmission } from '../ai-id/lesson-author-generation-admission.logic.js';
+import { resolveLessonAuthorAction } from '../ai-id/lesson-author-action.logic.js';
+import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../middleware/audit-log.js';
+import { query } from '../../../config/database.js';
+import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../../config/cache-invalidation.js';
+import { AppError } from '../../../middleware/error-handler.js';
+import { hasPermission } from '../../../middleware/authorize.js';
+import { sendSuccess, sendError } from '../../../utils/response.js';
+import { isIsoTimestamp, sendClientError } from '../../../utils/client-error.js';
+import { isDemoIframeSession } from '../../demo-login/demo-iframe.service.js';
+import { parseReportFilters } from '../ai-report/report-chat-filter.logic.js';
+import { REPORT_PERMISSION_CHECK_FAILED_CODE, reportChatErrorBody, type ReportChatErrorCode } from '../ai-report/report-chat-error.logic.js';
+import * as chatService from './chat.service.js';
+import { assertChatCourseAccess, ChatCourseScopeError } from './chat-course-scope.service.js';
+import * as botService from './bot.service.js';
+import * as kbService from '../kb/kb.service.js';
+import { UUID_PATTERN, isUuid } from '../../../utils/uuid.js';
+
+// Chat answers streamed at once (H10): per tenant and in total, for the whole
+// cluster when several API processes run (ai-chat-admission.service.ts).
+// The metrics gauge reports the answers this process streams.
+const chatAnswerGate = countActiveSlots(createChatAnswerGate(processRolePlan, {
+  perKey: env.AI_CHAT_TENANT_CONCURRENCY,
+  total: env.AI_CHAT_GLOBAL_CONCURRENCY,
+}));
+registerAiChatAdmissionGauge(() => chatAnswerGate.active());
+
+/** Body `locale` first (validated in sendMessage), then the dashboard's X-UI-Locale header. */
+function readReportRequestLocale(req: Request, bodyLocale: unknown): 'vi' | 'en' {
+  if (bodyLocale === 'en' || bodyLocale === 'vi') return bodyLocale;
+  return req.get('X-UI-Locale')?.trim().toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+/**
+ * A client-supplied courseId must be a live course of the caller's tenant (and
+ * one a learner may open) before any outline or lesson text reaches the model.
+ * Answers the refusal itself and returns false.
+ */
+async function checkChatCourse(req: Request, res: Response, courseId: string | undefined, bodyLocale?: unknown): Promise<boolean> {
+  if (!courseId) return true;
+  try {
+    await assertChatCourseAccess(courseId, { tenantId: req.user!.tenantId, userId: req.user!.id, role: req.user!.role });
+    return true;
+  } catch (error) {
+    if (!(error instanceof ChatCourseScopeError)) throw error;
+    res.status(error.statusCode).json({
+      success: false,
+      code: error.code,
+      message: error.localizedMessage(readReportRequestLocale(req, bodyLocale)),
+    });
+    return false;
+  }
+}
+
+function sendReportChatError(res: Response, code: ReportChatErrorCode, locale: 'vi' | 'en'): void {
+  const { status, body } = reportChatErrorBody(code, locale);
+  res.status(status).json(body);
+}
+
+function sendLessonAuthorApplyError(res: Response, error: unknown): void {
+  if (error instanceof AppError) {
+    res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+      ...(error.code ? { code: error.code } : {}),
+    });
+    return;
+  }
+
+  console.error('[LessonAuthorFlow] apply_request_failed', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+  sendError(res, 'Không thể áp dụng đề xuất vào cấu trúc khóa học. Vui lòng thử lại sau.', 500);
+}
+
+function getRawTarget(req: Request): string | undefined {
+  const queryTarget = req.query.target;
+  if (typeof queryTarget === 'string') return queryTarget;
+
+  const body = req.body as { target?: unknown } | undefined;
+  return typeof body?.target === 'string' ? body.target : undefined;
+}
+
+function resolveTarget(req: Request): chatService.ChatTarget {
+  const raw = getRawTarget(req) || 'admin';
+  return chatService.isChatTarget(raw) ? raw : 'admin';
+}
+
+function resolveExplicitTarget(req: Request): chatService.ChatTarget | undefined {
+  const raw = getRawTarget(req);
+  return raw && chatService.isChatTarget(raw) ? raw : undefined;
+}
+
+function resolveCourseId(req: Request): string | undefined {
+  const raw = (req.query.courseId as string) || (req.body?.courseId as string);
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+type PublicPersonaPreview = Pick<
+  botService.BotPersona,
+  | 'id'
+  | 'bot_id'
+  | 'template_id'
+  | 'template_name'
+  | 'template_description'
+  | 'template_avatar_url'
+  | 'template_fullbody_url'
+  | 'custom_name'
+  | 'custom_description'
+>;
+
+function toPublicPersonaPreview(persona: botService.BotPersona): PublicPersonaPreview {
+  return {
+    id: persona.id,
+    bot_id: persona.bot_id,
+    template_id: persona.template_id,
+    template_name: persona.template_name,
+    template_description: persona.template_description,
+    template_avatar_url: persona.template_avatar_url,
+    template_fullbody_url: persona.template_fullbody_url,
+    custom_name: persona.custom_name,
+    custom_description: persona.custom_description,
+  };
+}
+
+// ── Bot Assignments ──
+
+export async function getAssignments(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const assignments = await chatService.getAssignments(tenantId);
+    sendSuccess(res, assignments);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function assignBot(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const { target, bot_id } = req.body ?? {};
+
+  if (!target || typeof target !== 'string' || !chatService.isChatTarget(target)) {
+    sendError(res, 'target phải là "admin", "learner" hoặc "lesson_author"', 400); return;
+  }
+  if (!bot_id || !isUuid(bot_id)) {
+    sendError(res, 'bot_id không hợp lệ', 400); return;
+  }
+
+  try {
+    const bot = await botService.getBot(bot_id, tenantId);
+    await runAuditedTransaction(
+      () => chatService.assignBot(tenantId, target, bot_id),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: bot?.name || bot_id, related_entity_type: 'chatbot' } }, target, bot?.name || bot_id),
+    );
+    sendSuccess(res, { message: 'Đã gán bot' });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function unassignBot(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const { target } = req.params;
+
+  if (!chatService.isChatTarget(target)) {
+    sendError(res, 'target không hợp lệ', 400); return;
+  }
+
+  try {
+    const active = await chatService.getActiveBot(tenantId, target);
+    const deleted = await runAuditedTransaction(
+      () => chatService.unassignBot(tenantId, target),
+      (didDelete) => didDelete ? createTransactionalAuditEntry(req, 'DELETE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: active?.bot_name || target, related_entity_type: 'chatbot' } }, target, active?.bot_name || target) : null,
+    );
+    if (!deleted) { sendError(res, 'Không có bot nào được gán cho target này', 404); return; }
+    sendSuccess(res, { message: 'Đã bỏ gán bot' });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+// ── Active Bot for Chat ──
+
+export async function getLessonAuthorSettings(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const settings = await chatService.getLessonAuthorSettings(tenantId);
+    sendSuccess(res, settings);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function getLessonAuthorChatSettings(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const settings = await chatService.getLessonAuthorSettings(tenantId);
+    sendSuccess(res, {
+      ...settings,
+      active_kb: settings.active_kb ? { ...settings.active_kb, store_name: null } : null,
+    });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function assignLessonAuthorKb(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const { kb_id } = req.body ?? {};
+
+  if (!kb_id || !isUuid(kb_id)) {
+    sendError(res, 'kb_id không hợp lệ', 400); return;
+  }
+
+  try {
+    const kb = await kbService.getKnowledgebase(kb_id, tenantId);
+    await runAuditedTransaction(
+      () => chatService.assignLessonAuthorKb(tenantId, kb_id),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: kb?.name || kb_id, related_entity_type: 'knowledgebase' } }, tenantId, kb?.name || kb_id),
+    );
+    sendSuccess(res, { message: 'Đã gán KB chuyên gia bài học' });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function unassignLessonAuthorKb(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  try {
+    const activeKb = await chatService.getActiveKbAssignment(tenantId);
+    const deleted = await runAuditedTransaction(
+      () => chatService.unassignLessonAuthorKb(tenantId),
+      (didDelete) => didDelete ? createTransactionalAuditEntry(req, 'DELETE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: activeKb?.kb_name || tenantId, related_entity_type: 'knowledgebase' } }, tenantId, activeKb?.kb_name || tenantId) : null,
+    );
+    if (!deleted) { sendError(res, 'Chưa có KB active', 404); return; }
+    sendSuccess(res, { message: 'Đã bỏ gán KB chuyên gia bài học' });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function applyLessonAuthorJob(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const userId = req.user!.id;
+  const { jobId } = req.params;
+
+  if (!UUID_PATTERN.test(jobId)) {
+    sendError(res, 'jobId không hợp lệ', 400); return;
+  }
+
+  try {
+    const result = await runAuditedTransaction(
+      () => chatService.applyLessonAuthorJob(jobId, userId, tenantId),
+      async (updated) => {
+        if (updated.already_applied) return null;
+        const course = await query<{ display_name: string }>(
+          'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2',
+          [updated.course_id, tenantId],
+        );
+        return createTransactionalAuditEntry(
+          req, 'UPDATE', 'lesson_author_job',
+          { code: 'lesson_author.job.applied', context: { course_id: updated.course_id, course_name: course.rows[0]?.display_name, affected_count: updated.created_count + updated.updated_count } },
+          jobId, course.rows[0]?.display_name,
+        );
+      },
+    );
+    const { already_applied: _alreadyApplied, ...publicResult } = result;
+    const changedBlockIds = [...result.created_block_ids, ...result.updated_block_ids];
+    try {
+      await Promise.all([
+        invalidateCourseReadCaches(result.course_id, tenantId),
+        changedBlockIds.length > 0 ? invalidateBlockReadCaches(changedBlockIds) : Promise.resolve(),
+      ]);
+    } catch (cacheError) {
+      // The database transaction already committed. A cache miss is safer than
+      // returning an error that would make the client retry a completed Apply.
+      console.error('[LessonAuthorFlow] apply_cache_invalidation_failed', {
+        job_id: result.job_id,
+        course_id: result.course_id,
+        error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+      });
+    }
+    sendSuccess(res, publicResult);
+  } catch (err: unknown) { sendLessonAuthorApplyError(res, err); }
+}
+
+export async function getActiveBot(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const target = resolveTarget(req);
+  try {
+    const bot = await chatService.getActiveBot(tenantId, target);
+    sendSuccess(res, bot);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function getActiveBotPersonas(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const target = resolveTarget(req);
+
+  try {
+    const bot = await chatService.getActiveBot(tenantId, target);
+    if (!bot) {
+      sendSuccess(res, []);
+      return;
+    }
+
+    const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
+    sendSuccess(res, personas.map(toPublicPersonaPreview));
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function listLessonAuthorSourceDocuments(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user!.tenantId!;
+  const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+  const rawLimit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : NaN;
+  const limit = Number.isFinite(rawLimit) ? rawLimit : undefined;
+
+  try {
+    const documents = await chatService.listLessonAuthorSourceDocuments(tenantId, { search, limit });
+    sendSuccess(res, documents);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function getDemoIframePreview(req: Request, res: Response): Promise<void> {
+  const tenantId = req.user?.tenantId;
+  const target = resolveTarget(req);
+
+  if (!req.user || req.user.role !== 'learner' || !isDemoIframeSession(req.user) || !tenantId) {
+    sendError(res, 'Không có quyền xem preview demo iframe', 403);
+    return;
+  }
+
+  if (target !== 'learner') {
+    sendError(res, 'Demo iframe chỉ hỗ trợ target learner', 400);
+    return;
+  }
+
+  try {
+    const bot = await chatService.getActiveBot(tenantId, 'learner');
+    if (!bot) {
+      sendSuccess(res, { bot: null, personas: [] });
+      return;
+    }
+
+    const personas = await botService.listBotPersonas(bot.bot_id, tenantId);
+    sendSuccess(res, {
+      bot,
+      personas: personas.map(toPublicPersonaPreview),
+    });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+// ── Conversations ──
+
+export async function listConversations(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  if (isDemoIframeSession(req.user)) {
+    sendSuccess(res, []);
+    return;
+  }
+
+  try {
+    const target = resolveTarget(req);
+    const courseId = resolveCourseId(req);
+    const activeBot = await chatService.getActiveBot(tenantId, target);
+    if (!activeBot) { sendSuccess(res, []); return; }
+
+    const conversations = await chatService.listConversations(userId, activeBot.bot_id, tenantId, target, courseId);
+    sendSuccess(res, conversations);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function createConversation(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể tạo hội thoại', 403);
+    return;
+  }
+  const { persona_id } = req.body ?? {};
+  const target = resolveTarget(req);
+
+  if (target !== 'lesson_author' && (!persona_id || !isUuid(persona_id))) {
+    sendError(res, 'persona_id không hợp lệ', 400); return;
+  }
+
+  try {
+    const courseId = resolveCourseId(req);
+    if (!await checkChatCourse(req, res, courseId)) return;
+    const activeBot = await chatService.getActiveBot(tenantId, target);
+    if (!activeBot) { sendError(res, 'Chưa có bot nào được kích hoạt', 400); return; }
+
+    const conversation = await chatService.createConversation(
+      userId,
+      tenantId,
+      activeBot.bot_id,
+      typeof persona_id === 'string' ? persona_id : null,
+      target,
+      courseId,
+    );
+    sendSuccess(res, conversation);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+export async function deleteConversation(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id } = req.params;
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể xóa hội thoại', 403);
+    return;
+  }
+
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+
+  try {
+    const deleted = await chatService.deleteConversation(id, userId, tenantId, resolveExplicitTarget(req));
+    if (!deleted) { sendError(res, 'Cuộc hội thoại không tồn tại', 404); return; }
+    sendSuccess(res, { message: 'Đã xoá' });
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+// ── Messages — cursor-based pagination ──
+
+export async function getMessages(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id } = req.params;
+  const rawCursor = req.query.cursor;
+  const cursor = rawCursor === undefined ? undefined : typeof rawCursor === 'string' ? rawCursor : '';
+  if (isDemoIframeSession(req.user)) {
+    sendSuccess(res, { messages: [], has_more: false, next_cursor: null });
+    return;
+  }
+
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  // The cursor is the created_at of the oldest loaded message (ISO-8601).
+  if (cursor !== undefined && !isIsoTimestamp(cursor)) { sendError(res, 'Không tải thêm được tin nhắn. Vui lòng tải lại trang.', 400); return; }
+
+  try {
+    const result = await chatService.getConversationMessages(id, userId, tenantId, cursor, resolveExplicitTarget(req));
+    sendSuccess(res, result);
+  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+}
+
+/**
+ * POST /conversations/:id/messages — SSE streaming
+ * Sends user message, streams Gemini response as Server-Sent Events.
+ *
+ * SSE format:
+ *   data: {"type":"chunk","text":"..."}
+ *   data: {"type":"done"}
+ *   data: {"type":"error","message":"..."}
+ */
+export async function getChapterCheckpoint(req: Request,res: Response):Promise<void> {
+  res.setHeader('Cache-Control','no-store');
+  if (isDemoIframeSession(req.user) || !req.user?.tenantId) {sendError(res,'Không có quyền truy cập.',403);return;}
+  const id=req.params.conversationId;
+  const draftId=typeof req.query.draft_id==='string'?req.query.draft_id:undefined;
+  if (!UUID_PATTERN.test(id ?? '') || (draftId!==undefined && !UUID_PATTERN.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
+  try {sendSuccess(res,await chatService.getChapterCheckpointStatus(id,req.user.id,req.user.tenantId,draftId));}
+  catch (error) {
+    const code=error instanceof AppError?error.code:'CHAPTER_CHECKPOINT_UNAVAILABLE';
+    res.status(error instanceof AppError?error.statusCode:503).json({success:false,code,message:'Chưa thể đọc trạng thái chương.'});
+  }
+}
+
+export async function sendMessage(req: Request, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const tenantId = req.user!.tenantId!;
+  const { id: conversationId } = req.params;
+  let {
+    content,
+    mode,
+    outline_mentions,
+    editor_context,
+    source_documents,
+    blueprint_id,
+    blueprint_chapter_index,
+    input_mode,
+    locale,
+    report_filters,
+    chapter_resume,
+  } = req.body ?? {};
+  const target = resolveTarget(req);
+  const courseId = resolveCourseId(req);
+  let buttonAction: ReturnType<typeof resolveLessonAuthorAction>;
+  try {
+    buttonAction = resolveLessonAuthorAction(req.body ?? {}, target);
+    if (buttonAction) { content = buttonAction.content; mode = buttonAction.mode; }
+  } catch {
+    res.status(400).json({ success: false, code: 'LESSON_AUTHOR_ACTION_INVALID', message: 'Thao tác Chuyên gia bài học không hợp lệ.' });
+    return;
+  }
+  if (isDemoIframeSession(req.user)) {
+    sendError(res, 'Phiên demo iframe không thể gửi tin nhắn', 403);
+    return;
+  }
+
+  if (!UUID_PATTERN.test(conversationId)) {
+    sendError(res, 'ID không hợp lệ', 400); return;
+  }
+  if (!content || typeof content !== 'string') {
+    sendError(res, 'content không hợp lệ', 400); return;
+  }
+  if (input_mode !== undefined && input_mode !== 'text' && input_mode !== 'voice') {
+    sendError(res, 'input_mode không hợp lệ', 400); return;
+  }
+  if (locale !== undefined && locale !== 'vi' && locale !== 'en') {
+    sendError(res, 'locale không hợp lệ', 400); return;
+  }
+  if (blueprint_id !== undefined && !isUuid(blueprint_id)) {
+    sendError(res, 'blueprint_id không hợp lệ', 400); return;
+  }
+  if (blueprint_chapter_index !== undefined
+    && (!Number.isInteger(blueprint_chapter_index) || blueprint_chapter_index < 0 || blueprint_chapter_index >= 12)) {
+    sendError(res, 'blueprint_chapter_index không hợp lệ', 400); return;
+  }
+  const inputMode = input_mode === 'voice' ? 'voice' : 'text';
+  const checkpointKey = req.header('X-Lesson-Author-Chapter-Key');
+  if ((checkpointKey !== undefined && !UUID_PATTERN.test(checkpointKey)) || (chapter_resume !== undefined &&
+    (!chapter_resume || typeof chapter_resume!=='object' || Array.isArray(chapter_resume)
+      || Object.keys(chapter_resume).sort().join(',')!=='draft_id,previous_attempt_id'
+      || !UUID_PATTERN.test(chapter_resume.draft_id ?? '') || !UUID_PATTERN.test(chapter_resume.previous_attempt_id ?? '')
+      || !checkpointKey || target!=='lesson_author'))) {
+    sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
+  }
+  if (!await checkChatCourse(req, res, courseId, locale)) return;
+  const reportLocale = readReportRequestLocale(req, locale);
+  const reportFiltersResult = parseReportFilters(report_filters);
+  if (!reportFiltersResult.ok) {
+    sendReportChatError(res, reportFiltersResult.code, reportLocale);
+    return;
+  }
+  const parsedReportFilters = reportFiltersResult.value;
+  let canAccessReports = false;
+  if (target === 'admin') {
+    try {
+      canAccessReports = await hasPermission(req.user!, 'report_summary', 'can_view');
+    } catch (error) {
+      console.error('[ReportChat] permission check failed:', error);
+      sendReportChatError(res, REPORT_PERMISSION_CHECK_FAILED_CODE, reportLocale);
+      return;
+    }
+  }
+
+  // Opt-in transport contract: a queued Blueprint returns promptly, before SSE.
+  // Older clients and ineligible operations keep their existing streaming path.
+  const generationKey = req.header('X-Lesson-Author-Job-Key');
+  if (generationKey && target === 'lesson_author' && !chapter_resume) {
+    const handled = await respondToGenerationAdmission(res, admission =>
+      tryEnqueueDurableBlueprint(conversationId, userId, tenantId, content, generationKey, {
+        target, courseId, mode: mode === 'draft_lesson' ? 'draft_lesson' : mode === 'course_blueprint' ? 'course_blueprint' : mode === 'chat' ? 'chat' : 'auto',
+        outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [], editorContext: editor_context,
+        sourceDocuments: Array.isArray(source_documents) ? source_documents : [], blueprintId: blueprint_id,
+        inputMode, locale: locale === 'en' ? 'en' : 'vi',
+        lessonAuthorAction: buttonAction?.action,
+      }, admission), { conversationId });
+    if (handled) return;
+  }
+
+  // Admission before the stream opens, so a busy answer is a plain 429.
+  const releaseChatSlot = await chatAnswerGate.tryAcquire(tenantId);
+  if (!releaseChatSlot) {
+    recordAiChatAdmissionRefused();
+    const [status, vi, en] = AI_BUSY_ERROR;
+    res.setHeader('Retry-After', String(AI_BUSY_RETRY_AFTER_SECONDS));
+    res.status(status).json({ success: false, code: AI_BUSY_CODE, message: reportLocale === 'en' ? en : vi });
+    return;
+  }
+  // Also freed when the response closes, whatever path ends the turn.
+  res.once('close', releaseChatSlot);
+  // The client may have left while a shared admission waited for Redis.
+  if (res.destroyed) { releaseChatSlot(); return; }
+
+  // Set SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const correlationId = randomUUID();
+  const stream = createChatStreamLifecycle(res, {
+    correlation_id: correlationId, conversation_id: conversationId,
+  }, record => console.info('[ChatStream]', JSON.stringify(record)));
+  let clientDisconnected = false;
+  // Stops the provider calls when the client leaves (metering still settles what started).
+  const answerAbort = new AbortController();
+
+  // Helper to write SSE event
+  const writeSSE = (data: Record<string, unknown>): boolean => {
+    if (clientDisconnected || res.writableEnded || res.destroyed) return false;
+    try {
+      return stream.writeEvent(data);
+    } catch {
+      clientDisconnected = true;
+      return false;
+    }
+  };
+
+  const endSSE = () => {
+    if (clientDisconnected || res.writableEnded || res.destroyed) return;
+    try {
+      stream.finish();
+    } catch {
+      clientDisconnected = true;
+    }
+  };
+
+  // Handle real response disconnects. req.close can fire after the request body is read on long SSE responses.
+  const onAborted = () => {
+    clientDisconnected = true;
+    stream.disconnect();
+    if (!answerAbort.signal.aborted) answerAbort.abort(new Error(CHAT_ANSWER_STOPPED_BY_CLIENT));
+  };
+  const onClosed = () => { if (!res.writableEnded) onAborted(); };
+  req.on('aborted', onAborted);
+  res.on('close', onClosed);
+
+  // Commit the streaming response before the Lesson Author performs source,
+  // course, and intent lookups. This prevents same-origin proxies from seeing
+  // an idle request while that preparation is still in progress.
+  res.flushHeaders();
+  if (target === 'lesson_author') {
+    writeSSE({
+      type: 'progress',
+      stage: 'REQUEST_ACCEPTED',
+      detail: 'Yêu cầu đã được máy chủ tiếp nhận',
+    });
+  }
+
+  // A shutdown waits (bounded) for this answer to settle its metering.
+  // Intentionally not awaited: the promise resolves in the finally below, once
+  // the answer settled, and never rejects; the lifecycle only observes it.
+  let answerSettled: () => void = () => {};
+  void trackShutdownWork(new Promise<void>((resolve) => { answerSettled = resolve; }));
+  try {
+  await chatService.sendMessageStream(
+    conversationId,
+    userId,
+    tenantId,
+    content,
+    {
+      correlationId,
+      lessonAuthorAction: buttonAction?.action,
+      target,
+      courseId,
+      mode: mode === 'draft_lesson'
+        ? 'draft_lesson'
+        : mode === 'course_blueprint'
+          ? 'course_blueprint'
+        : mode === 'chat'
+          ? 'chat'
+          : target === 'lesson_author'
+            ? 'auto'
+            : 'chat',
+      outlineMentions: Array.isArray(outline_mentions) ? outline_mentions : [],
+      editorContext: editor_context,
+      sourceDocuments: Array.isArray(source_documents) ? source_documents : [],
+      blueprintId: blueprint_id,
+      blueprintChapterIndex: blueprint_chapter_index,
+      chapterCheckpointKey: checkpointKey,
+      ...(chapter_resume ? {chapterResume:{draftId:chapter_resume.draft_id,previousAttemptId:chapter_resume.previous_attempt_id}} : {}),
+      inputMode,
+      locale: locale === 'en' ? 'en' : 'vi',
+      canAccessReports,
+      reportActorRole: req.user!.role,
+      reportFilters: parsedReportFilters,
+      abortSignal: answerAbort.signal,
+    },
+    (text: string) => {
+      if (!clientDisconnected) writeSSE({ type: 'chunk', text });
+    },
+    () => {
+      if (!clientDisconnected) {
+        writeSSE({ type: 'done' });
+        endSSE();
+      }
+    },
+    (err: Error) => {
+      if (!clientDisconnected) {
+        writeSSE({
+          type: 'error',
+          message: err.message,
+          ...((err as { code?: string }).code ? { code: (err as { code?: string }).code } : {}),
+        });
+        endSSE();
+      }
+    },
+    (event) => {
+      if (!clientDisconnected) writeSSE(event);
+    },
+  );
+  } finally {
+    answerSettled();
+    releaseChatSlot();
+    stream.dispose();
+    req.off('aborted', onAborted);
+    res.off('close', onClosed);
+  }
+}
+

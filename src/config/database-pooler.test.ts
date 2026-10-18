@@ -75,9 +75,9 @@ const SESSION_BOUND = /LISTEN \$\{|pg_advisory_lock(?:_shared)?\b|pg_try_advisor
 const KNOWN_SESSION_USERS = [
   'config/cluster-bus.ts',
   'index.ts',
-  'modules/ai-chatbot/kb-operation.worker.ts',
-  'modules/ai-chatbot/lesson-author-source-stream.service.ts',
-  'modules/ai-chatbot/lesson-author-workspace-stream.service.ts',
+  'modules/ai-chatbot/kb/kb-operation.worker.ts',
+  'modules/ai-chatbot/ai-id/lesson-author-source-stream.service.ts',
+  'modules/ai-chatbot/ai-id/lesson-author-workspace-stream.service.ts',
   'modules/assignments/email-outbox.service.ts',
   'workers/tenant-data-quota.worker.ts',
 ];

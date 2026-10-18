@@ -2,7 +2,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from '../../config/env.js';
-import { createConcurrencyGate } from '../ai-chatbot/ai-chat-admission.logic.js';
+import { createConcurrencyGate } from '../ai-chatbot/ai-platform/ai-chat-admission.logic.js';
 import { ReportsBusyError, createWaitingConcurrencyGate } from './report-admission.logic.js';
 
 export type ReportExportSlot =

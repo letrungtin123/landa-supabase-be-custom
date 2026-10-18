@@ -113,20 +113,20 @@ function boot(role: Role, flags: Record<string, string> = {}, script = entry): P
 /** In-memory cache sweepers (sign-out blacklist, chat rate limit, course outline cache, one-time sign-in tokens). */
 const IN_MEMORY_SWEEPERS = [
   'middleware/authenticate.ts every 300000 ms',
-  'modules/ai-chatbot/chat.service.ts every 300000 ms',
-  'modules/ai-chatbot/chat.service.ts every 600000 ms',
+  'modules/ai-chatbot/chat/chat.service.ts every 300000 ms',
+  'modules/ai-chatbot/chat/chat.service.ts every 600000 ms',
   'modules/auth/auth.service.ts every 60000 ms',
 ];
 /** The cluster bus LISTEN connection health check (more than one process). */
 const CLUSTER_BUS = ['config/cluster-bus.ts every 30000 ms'];
 /** Queue workers and their database pollers (the RabbitMQ consumers step). */
 const QUEUE_WORKERS = [
-  'modules/ai-chatbot/ai-engine-transition.worker.ts every 15000 ms',
-  'modules/ai-chatbot/kb-operation.worker.ts every 10000 ms',
-  'modules/ai-chatbot/lesson-author-session-deletion.worker.ts every 30000 ms',
-  'modules/ai-chatbot/lesson-author-transcription.worker.ts every 10000 ms',
-  'modules/ai-chatbot/lesson-author-transcription.worker.ts every 21600000 ms',
-  'modules/ai-chatbot/restore.worker.ts every 30000 ms',
+  'modules/ai-chatbot/ai-platform/ai-engine-transition.worker.ts every 15000 ms',
+  'modules/ai-chatbot/kb/kb-operation.worker.ts every 10000 ms',
+  'modules/ai-chatbot/ai-id/lesson-author-session-deletion.worker.ts every 30000 ms',
+  'modules/ai-chatbot/ai-id/lesson-author-transcription.worker.ts every 10000 ms',
+  'modules/ai-chatbot/ai-id/lesson-author-transcription.worker.ts every 21600000 ms',
+  'modules/ai-chatbot/kb/restore.worker.ts every 30000 ms',
   'modules/course-deletion/course-deletion.worker.ts every 30000 ms',
   'modules/learner/progress-recalculation.worker.ts every 60000 ms',
   'modules/users/user-deletion.worker.ts every 30000 ms',
@@ -137,7 +137,7 @@ const MAINTENANCE = [
   'index.ts every 21600000 ms',
   'index.ts every 86400000 ms',
   'index.ts every 86400000 ms',
-  'modules/ai-chatbot/ai-token-quota.service.ts every 30000 ms',
+  'modules/ai-chatbot/ai-platform/ai-token-quota.service.ts every 30000 ms',
 ];
 /** Course asset temp residue sweep (only when other processes share the temp directory). */
 const COURSE_ASSET_TEMP_SWEEP = ['index.ts every 21600000 ms'];
@@ -348,8 +348,8 @@ expectWorker('email-outbox', {
 expectWorker('lesson-author-orchestration-v2', {
   intervals: [
     'middleware/authenticate.ts every 300000 ms',
-    'modules/ai-chatbot/chat.service.ts every 300000 ms',
-    'modules/ai-chatbot/chat.service.ts every 600000 ms',
+    'modules/ai-chatbot/chat/chat.service.ts every 300000 ms',
+    'modules/ai-chatbot/chat/chat.service.ts every 600000 ms',
   ],
   consumedQueues: [],
   stillRunning: true,

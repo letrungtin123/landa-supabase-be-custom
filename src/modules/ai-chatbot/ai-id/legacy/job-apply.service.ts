@@ -6,9 +6,9 @@ import {
   applyLessonAuthorProposalToCourse,
   LESSON_AUTHOR_OUTLINE_BUSY_CODE,
 } from '../../../course-authoring/course-authoring.service.js';
-import { formatLessonAuthorApprovalMessage } from '../../lesson-author-message.logic.js';
+import { formatLessonAuthorApprovalMessage } from '../lesson-author-message.logic.js';
 import { requestBlockDeletion } from '../../../course-deletion/course-deletion.service.js';
-import { isValidUUID, logLessonAuthorFlow } from '../../chat-turn-runtime.service.js';
+import { isValidUUID, logLessonAuthorFlow } from '../../chat/chat-turn-runtime.service.js';
 import { getLessonAuthorJobLocale } from './job-store.service.js';
 import { getBlueprintChapterIndexForJob } from './message-hydration.service.js';
 import type { AppliedLessonAuthorJob, LessonAuthorJobRow } from './types.js';

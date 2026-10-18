@@ -1,0 +1,190 @@
+// ═══════════════════════════════════════════════════════════════
+// Gemini-written PDF narrative (behind REPORT_PDF_AI_NARRATIVE_ENABLED).
+// Gemini receives only fact statements built from the snapshot, with course and
+// unit names replaced by tokens. The answer is schema-checked and every number
+// must match a cited fact; otherwise the caller keeps the rule-based narrative.
+// Token usage goes through the tenant AI quota (reserve -> finalize/release).
+// ═══════════════════════════════════════════════════════════════
+import { env } from '../../../config/env.js';
+import type { AiUsage, TenantAiRuntimeSettings } from '../ai-platform/ai-engine.types.js';
+import { getTenantAiRuntimeSettings } from '../ai-platform/ai-settings.service.js';
+import {
+  estimateTokensFromText,
+  finalizeTenantAiTokens,
+  releaseTenantAiTokenReservation,
+  reserveTenantAiTokens,
+} from '../ai-platform/ai-token-quota.service.js';
+import { aiUsageFromGeminiMetadata } from '../ai-platform/ai-usage.logic.js';
+import { getGeminiClient } from '../ai-platform/gemini.service.js';
+import { REPORT_AI_THINKING_HEADROOM_TOKENS, reportAiGenerationConfig, resolveReportAiModel } from './report-ai-model.js';
+import { isUnaccentedVietnamese, VIETNAMESE_DIACRITICS_INSTRUCTION } from './report-locale-text.logic.js';
+import type { ReportInsights } from './report-insights.logic.js';
+import type { ReportPdfLocale } from './report-pdf-i18n.js';
+import {
+  buildReportPdfAiNarrativeRequest,
+  ReportPdfAiNarrativeSchema,
+  toReportPdfAiNarrative,
+  validateReportPdfNarrative,
+  type ReportPdfNarrative,
+} from './report-pdf-narrative.logic.js';
+import { swallowAndLog } from '../../../utils/best-effort.js';
+
+const MAX_OUTPUT_TOKENS = 1_600;
+const MIN_OUTPUT_TOKENS = 500;
+
+const RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    headline: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] },
+    findings: { type: 'ARRAY', items: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] } },
+    risks: { type: 'ARRAY', items: { type: 'OBJECT', properties: { text: { type: 'STRING' }, fact_ids: { type: 'ARRAY', items: { type: 'STRING' } } }, required: ['text', 'fact_ids'] } },
+    recommendations: { type: 'ARRAY', items: { type: 'OBJECT', properties: { rec_id: { type: 'STRING' }, text: { type: 'STRING' } }, required: ['rec_id', 'text'] } },
+  },
+  required: ['headline', 'findings', 'risks', 'recommendations'],
+} as const;
+
+export interface ReportPdfAiGenerateInput {
+  tenantId: string;
+  model: string;
+  systemInstruction: string;
+  payload: string;
+  /** Visible answer budget; reportAiGenerationConfig adds the thinking headroom on top. */
+  maxOutputTokens: number;
+  signal: AbortSignal;
+}
+
+export interface ReportPdfAiNarrativeDeps {
+  enabled: () => boolean;
+  timeoutMs: number;
+  getSettings: (tenantId: string) => Promise<TenantAiRuntimeSettings>;
+  reserve: typeof reserveTenantAiTokens;
+  finalize: typeof finalizeTenantAiTokens;
+  release: typeof releaseTenantAiTokenReservation;
+  generate: (input: ReportPdfAiGenerateInput) => Promise<{ text: string; usage: Partial<AiUsage> | null; finishReason?: string | null }>;
+  log: (event: Record<string, unknown>) => void;
+}
+
+async function generateWithGemini(input: ReportPdfAiGenerateInput): Promise<{ text: string; usage: Partial<AiUsage> | null; finishReason: string | null }> {
+  const client = await getGeminiClient(input.tenantId);
+  const response = await client.models.generateContent({
+    model: input.model,
+    contents: [{ role: 'user', parts: [{ text: input.payload }] }],
+    config: {
+      systemInstruction: input.systemInstruction,
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA as unknown as Record<string, unknown>,
+      ...reportAiGenerationConfig(input.model, input.maxOutputTokens, { temperature: 0.3 }),
+      abortSignal: input.signal,
+    },
+  });
+  return {
+    text: response.text ?? '',
+    finishReason: response.candidates?.[0]?.finishReason ?? null,
+    usage: aiUsageFromGeminiMetadata(response.usageMetadata),
+  };
+}
+
+export const defaultReportPdfAiNarrativeDeps: ReportPdfAiNarrativeDeps = {
+  enabled: () => env.REPORT_PDF_AI_NARRATIVE_ENABLED,
+  timeoutMs: env.REPORT_PDF_AI_NARRATIVE_TIMEOUT_MS,
+  getSettings: (tenantId) => getTenantAiRuntimeSettings(tenantId),
+  reserve: reserveTenantAiTokens,
+  finalize: finalizeTenantAiTokens,
+  release: releaseTenantAiTokenReservation,
+  generate: generateWithGemini,
+  log: (event) => console.info(`[ReportPdf] ${JSON.stringify(event)}`),
+};
+
+/**
+ * Returns a writer for composeReportPdfDocument. It never throws: any failure
+ * (disabled, no key, quota, timeout, invalid JSON, unverifiable number) yields
+ * null so the deterministic narrative is used.
+ */
+export function createReportPdfAiNarrativeWriter(
+  context: { tenantId: string; userId: string; conversationId: string; requestId: string },
+  deps: ReportPdfAiNarrativeDeps = defaultReportPdfAiNarrativeDeps,
+): (insights: ReportInsights, locale: ReportPdfLocale) => Promise<ReportPdfNarrative | null> {
+  return async (insights, locale) => {
+    if (!deps.enabled() || !insights.available) return null;
+    const base = { event: 'report_pdf_ai_narrative', request_id: context.requestId, tenant_id: context.tenantId };
+    const request = buildReportPdfAiNarrativeRequest(insights, locale);
+    let reservationId: string | null = null;
+    try {
+      const settings = await deps.getSettings(context.tenantId);
+      if (!settings.hasGoogleAiStudioKey) {
+        deps.log({ ...base, outcome: 'skipped', reason: 'no_provider_key' });
+        return null;
+      }
+      const model = resolveReportAiModel(settings.chatModel);
+      const systemInstruction = locale === 'vi' ? `${request.systemInstruction} ${VIETNAMESE_DIACRITICS_INSTRUCTION}` : request.systemInstruction;
+      const inputTokens = estimateTokensFromText(systemInstruction, request.payload);
+      // Thinking tokens are billed as output: reserve the headroom the request may use.
+      const headroom = REPORT_AI_THINKING_HEADROOM_TOKENS;
+      const grant = await deps.reserve({
+        tenantId: context.tenantId,
+        userId: context.userId,
+        conversationId: context.conversationId,
+        target: 'admin',
+        engine: settings.activeEngine,
+        provider: settings.provider,
+        model,
+        operation: 'chat',
+        minimumTokens: inputTokens + MIN_OUTPUT_TOKENS + headroom,
+        maximumTokens: inputTokens + MAX_OUTPUT_TOKENS + headroom,
+        budget: { inputTokens, outputTokens: MAX_OUTPUT_TOKENS + headroom, maxOutputTokens: MAX_OUTPUT_TOKENS + headroom, metadata: { budget_version: 2, operation: 'chat', report_pdf: true } },
+      });
+      reservationId = grant.id;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
+      let response: Awaited<ReturnType<ReportPdfAiNarrativeDeps['generate']>>;
+      try {
+        response = await deps.generate({
+          tenantId: context.tenantId,
+          model,
+          systemInstruction,
+          payload: request.payload,
+          maxOutputTokens: Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, grant.reservedTokens - inputTokens - headroom)),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      const usedInput = response.usage?.inputTokens ?? inputTokens;
+      const usedOutput = response.usage?.outputTokens ?? estimateTokensFromText(response.text);
+      const usage: AiUsage = { inputTokens: usedInput, outputTokens: usedOutput, embeddingTokens: 0,
+        totalTokens: response.usage?.totalTokens ?? usedInput + usedOutput,
+        ...(response.usage?.cachedInputTokens ? { cachedInputTokens: response.usage.cachedInputTokens } : {}) };
+      await deps.finalize({ reservationId, tenantId: context.tenantId, usage, metadata: { report_pdf: true } });
+      reservationId = null;
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(response.text); } catch { parsed = null; }
+      const narrative = toReportPdfAiNarrative(parsed, insights, locale);
+      if (!narrative) {
+        // Shape only (finish reason, sizes, failing paths): never the narrative text.
+        const issues = parsed === null ? [] : ReportPdfAiNarrativeSchema.safeParse(parsed).error?.issues ?? [];
+        deps.log({ ...base, outcome: 'rejected', reason: 'schema', model, finish_reason: response.finishReason ?? null,
+          text_chars: response.text.length, json: parsed !== null,
+          issues: issues.slice(0, 8).map((issue) => `${issue.path.join('.')}:${issue.code}`) });
+        return null;
+      }
+      const prose = [narrative.headline, ...narrative.findings, ...narrative.risks, ...narrative.recommendations].map((item) => item.text);
+      if (locale === 'vi' && isUnaccentedVietnamese(prose)) {
+        deps.log({ ...base, outcome: 'rejected', reason: 'unaccented_vietnamese', model });
+        return null;
+      }
+      const validation = validateReportPdfNarrative(narrative, insights, locale);
+      if (!validation.ok) {
+        // Issue codes only (they contain no narrative text or tenant data).
+        deps.log({ ...base, outcome: 'rejected', reason: 'validation', issues: validation.issues.map((issue) => issue.split(':').slice(0, 2).join(':')).slice(0, 10) });
+        return null;
+      }
+      deps.log({ ...base, outcome: 'accepted' });
+      return narrative;
+    } catch (error) {
+      if (reservationId) await deps.release(reservationId, context.tenantId).catch(swallowAndLog('ai_tokens.reservation_release'));
+      const code = (error as { code?: unknown })?.code;
+      deps.log({ ...base, outcome: 'failed', reason: typeof code === 'string' ? code : error instanceof Error ? error.name : 'unknown' });
+      return null;
+    }
+  };
+}

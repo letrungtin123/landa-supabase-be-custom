@@ -3,7 +3,7 @@
 // Plan AI-ID PLAN/AI_CREDIT_LIMIT_PLAN_2026-10-17.md.
 import { query } from '../../config/database.js';
 import { AppError } from '../../utils/errors.js';
-import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from '../ai-chatbot/ai-settings.service.js';
+import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from '../ai-chatbot/ai-platform/ai-settings.service.js';
 import { aiCreditState, availableMonths, buildUsageBreakdown, monthKey, monthStart, nextMonthStart, pointsFromUsd } from './ai-credit.logic.js';
 import { AI_CREDIT_DEFAULT_PLAN_CODE, ensureCreditMonth, recomputeCreditMonth } from './ai-credit.repository.js';
 

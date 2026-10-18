@@ -9,42 +9,42 @@ import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission, hasPermission } from '../../middleware/authorize.js';
 import { query, withDatabaseTransaction } from '../../config/database.js';
-import { createGenerationJobRepository } from './lesson-author-generation-job.repository.js';
-import { createGenerationStatusHandler } from './lesson-author-generation-status.controller.js';
-import { createWorkspaceReadHandlers } from './lesson-author-workspace-read.controller.js';
-import { createWorkspaceStreamHandler } from './lesson-author-workspace-stream.controller.js';
-import { workspaceCommitHub } from './lesson-author-workspace-stream.service.js';
-import { createSourceDocumentStreamHandler } from './lesson-author-source-stream.controller.js';
-import { sourceDocumentHub } from './lesson-author-source-stream.service.js';
-import { createWorkspaceLaunchHandlers } from './lesson-author-workspace-launch.controller.js';
-import { createLessonAuthorWorkspace, isLessonAuthorWorkspaceReady } from './lesson-author-workspace-runtime.service.js';
-import { createWorkspaceV2LaunchService } from './lesson-author-workspace-v2-launch.service.js';
-import { createWorkspaceEditHandlers } from './lesson-author-workspace-edit.controller.js';
-import { createWorkspaceApplyHandler } from './lesson-author-workspace-apply.controller.js';
-import { createWorkspaceApplyRepository } from './lesson-author-workspace-apply.repository.js';
-import { createWorkspaceAcceptance } from './lesson-author-workspace-storyboard.repository.js';
-import { createOrchestrationV2AdmissionRepository } from './lesson-author-orchestration-v2-admission.repository.js';
-import { createOrchestrationV2AdmissionService } from './lesson-author-orchestration-v2-admission.service.js';
+import { createGenerationJobRepository } from './ai-id/lesson-author-generation-job.repository.js';
+import { createGenerationStatusHandler } from './ai-id/lesson-author-generation-status.controller.js';
+import { createWorkspaceReadHandlers } from './ai-id/lesson-author-workspace-read.controller.js';
+import { createWorkspaceStreamHandler } from './ai-id/lesson-author-workspace-stream.controller.js';
+import { workspaceCommitHub } from './ai-id/lesson-author-workspace-stream.service.js';
+import { createSourceDocumentStreamHandler } from './ai-id/lesson-author-source-stream.controller.js';
+import { sourceDocumentHub } from './ai-id/lesson-author-source-stream.service.js';
+import { createWorkspaceLaunchHandlers } from './ai-id/lesson-author-workspace-launch.controller.js';
+import { createLessonAuthorWorkspace, isLessonAuthorWorkspaceReady } from './ai-id/lesson-author-workspace-runtime.service.js';
+import { createWorkspaceV2LaunchService } from './ai-id/lesson-author-workspace-v2-launch.service.js';
+import { createWorkspaceEditHandlers } from './ai-id/lesson-author-workspace-edit.controller.js';
+import { createWorkspaceApplyHandler } from './ai-id/lesson-author-workspace-apply.controller.js';
+import { createWorkspaceApplyRepository } from './ai-id/lesson-author-workspace-apply.repository.js';
+import { createWorkspaceAcceptance } from './ai-id/lesson-author-workspace-storyboard.repository.js';
+import { createOrchestrationV2AdmissionRepository } from './ai-id/lesson-author-orchestration-v2-admission.repository.js';
+import { createOrchestrationV2AdmissionService } from './ai-id/lesson-author-orchestration-v2-admission.service.js';
 import {
   loadOrchestrationV2AdmissionRuntime, orchestrationV2IdmAdmissionWarning, selectOrchestrationV2AdmissionPipeline,
-} from './lesson-author-orchestration-v2-execution.config.js';
-import { verifyOrchestrationV2Schema } from './lesson-author-orchestration-v2-schema.repository.js';
-import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
-import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
+} from './ai-id/lesson-author-orchestration-v2-execution.config.js';
+import { verifyOrchestrationV2Schema } from './ai-id/lesson-author-orchestration-v2-schema.repository.js';
+import { createWorkspaceAuthority } from './ai-id/lesson-author-workspace-authority.repository.js';
+import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat/chat.service.js';
 import { sendError } from '../../utils/response.js';
-import * as kbCtrl from './kb.controller.js';
-import { createKbTempUpload } from './kb-upload-storage.js';
-import * as botCtrl from './bot.controller.js';
-import { parseBotAvatarUpload } from './bot-avatar-upload.js';
-import * as chatCtrl from './chat.controller.js';
-import * as transcriptCtrl from './lesson-author-transcription.controller.js';
-import { getAiOverviewController } from './ai-report.controller.js';
-import { reportPdfHandlers } from './report-pdf.controller.js';
+import * as kbCtrl from './kb/kb.controller.js';
+import { createKbTempUpload } from './kb/kb-upload-storage.js';
+import * as botCtrl from './chat/bot.controller.js';
+import { parseBotAvatarUpload } from './chat/bot-avatar-upload.js';
+import * as chatCtrl from './chat/chat.controller.js';
+import * as transcriptCtrl from './ai-id/lesson-author-transcription.controller.js';
+import { getAiOverviewController } from './ai-report/ai-report.controller.js';
+import { reportPdfHandlers } from './ai-report/report-pdf.controller.js';
 import { env } from '../../config/env.js';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
+import { normalizeLessonAuthorUploadAttemptId } from './ai-id/lesson-author-transcription.logic.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog } from '../../middleware/audit-log.js';
 import {
@@ -52,17 +52,17 @@ import {
   createLessonAuthorAuthorGuard,
   createLessonAuthorCourseEditorGuard,
   createLessonAuthorSessionOwnerGuard,
-} from './lesson-author-session-access.controller.js';
-import { findLessonAuthorSessionOwner } from './lesson-author-session-access.repository.js';
-import { parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument } from './lesson-author-source-upload.controller.js';
+} from './ai-id/lesson-author-session-access.controller.js';
+import { findLessonAuthorSessionOwner } from './ai-id/lesson-author-session-access.repository.js';
+import { parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument } from './ai-id/lesson-author-source-upload.controller.js';
 import {
   deleteLessonAuthorSessionController,
   getLessonAuthorSessionDeleteImpactController,
   getLessonAuthorSessionDeletionStatusController,
   listLessonAuthorSessionController,
   renameLessonAuthorSessionController,
-} from './lesson-author-session.controller.js';
-import { hasAiIdCoursePermission } from './lesson-author-ai-id-access.service.js';
+} from './ai-id/lesson-author-session.controller.js';
+import { hasAiIdCoursePermission } from './ai-id/lesson-author-ai-id-access.service.js';
 
 const router = Router();
 

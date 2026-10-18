@@ -15,8 +15,8 @@ if (!process.argv.includes('--live')) {
   throw new Error('Explicit --live is required for expiring Redis capability probes');
 }
 const { env } = await import('../config/env.js');
-const { chatStreamLockKey, createChatStreamLocks } = await import('../modules/ai-chatbot/chat-stream-lock.js');
-type LockRedis = import('../modules/ai-chatbot/chat-stream-lock.js').ChatStreamLockRedis;
+const { chatStreamLockKey, createChatStreamLocks } = await import('../modules/ai-chatbot/chat/chat-stream-lock.js');
+type LockRedis = import('../modules/ai-chatbot/chat/chat-stream-lock.js').ChatStreamLockRedis;
 
 const client = createClient({
   url: env.REDIS_URL,

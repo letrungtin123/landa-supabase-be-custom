@@ -1,7 +1,7 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { projectBlueprintDraftArchitecture } from '../../lesson-author-blueprint-draft-architecture.logic.js';
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../../lesson-author-source-snapshot.logic.js';
+import { projectBlueprintDraftArchitecture } from '../lesson-author-blueprint-draft-architecture.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
 import { createHash } from 'crypto';
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
@@ -10,22 +10,22 @@ import {
   type LessonAuthorComponentType,
   type LessonAuthorProposal,
 } from '../../../course-authoring/course-authoring.service.js';
-import { type RagLessonAuthorRequest } from '../../ai-rag-client.service.js';
+import { type RagLessonAuthorRequest } from '../../ai-platform/ai-rag-client.service.js';
 import {
   extractLessonAuthorTargetNumberPath,
   isLessonAuthorNewChapterDraftRequest,
   matchesLessonAuthorBlueprintChapterDraft,
-} from '../../lesson-author-intent.logic.js';
-import { getNextBlueprintChapterIndex } from '../../lesson-author-blueprint-sequencing.logic.js';
-import { validateLessonAuthorGeneratedUnitCoverage } from '../../lesson-author-content-contract.logic.js';
-import { readServerOwnedSourceFactIds } from '../../lesson-author-component-registry.logic.js';
+} from '../lesson-author-intent.logic.js';
+import { getNextBlueprintChapterIndex } from '../lesson-author-blueprint-sequencing.logic.js';
+import { validateLessonAuthorGeneratedUnitCoverage } from '../lesson-author-content-contract.logic.js';
+import { readServerOwnedSourceFactIds } from '../lesson-author-component-registry.logic.js';
 import { swallowAndLog } from '../../../../utils/best-effort.js';
 import type {
   ConversationContext,
   LessonAuthorSourceDocument,
   LessonAuthorSourceDocumentInput,
-} from '../../chat.types.js';
-import { logLessonAuthorFlow, isValidUUID } from '../../chat-turn-runtime.service.js';
+} from '../../chat/chat.types.js';
+import { logLessonAuthorFlow, isValidUUID } from '../../chat/chat-turn-runtime.service.js';
 import { asRecord } from './component-normalize.logic.js';
 import { getBlueprintChapterDraftProgress, formatBlueprintDraftSequenceError } from './message-hydration.service.js';
 import type {

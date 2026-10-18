@@ -1,6 +1,6 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { assessmentGapMessage, ComponentCapabilityError } from '../../lesson-author-capabilities.logic.js';
+import { assessmentGapMessage, ComponentCapabilityError } from '../lesson-author-capabilities.logic.js';
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import {
@@ -11,13 +11,13 @@ import {
   type LessonAuthorProposal,
   type LessonAuthorUnitProposal,
 } from '../../../course-authoring/course-authoring.service.js';
-import { RagServiceError } from '../../ai-rag-client.service.js';
+import { RagServiceError } from '../../ai-platform/ai-rag-client.service.js';
 import {
   formatLessonAuthorBlueprintReadyMessage,
   formatLessonAuthorProposalReadyMessage,
   formatBlueprintProviderTimeout,
-} from '../../lesson-author-message.logic.js';
-import { redactGeminiApiKeys, sanitizeGeminiError, isValidUUID } from '../../chat-turn-runtime.service.js';
+} from '../lesson-author-message.logic.js';
+import { redactGeminiApiKeys, sanitizeGeminiError, isValidUUID } from '../../chat/chat-turn-runtime.service.js';
 import { componentTypeLabel } from './component-normalize.logic.js';
 import type { LessonAuthorOutlineMention, LessonAuthorBlueprint, LessonAuthorBlueprintQualityReport } from './types.js';
 import { foldVietnameseText } from './context.service.js';

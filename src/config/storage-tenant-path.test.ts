@@ -53,7 +53,7 @@ test('deleteTenantFileByUrl never deletes another tenant\'s object', async (t) =
 });
 
 test('avatar_url can no longer be chosen by a request (bot, admin user update, own profile)', async () => {
-  const { updateBotSchema } = await import('../modules/ai-chatbot/bot.validator.js');
+  const { updateBotSchema } = await import('../modules/ai-chatbot/chat/bot.validator.js');
   const { updateUserSchema } = await import('../modules/users/users.validator.js');
   const foreign = `${TENANT_B}/branding/logo.png`;
 

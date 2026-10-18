@@ -22,11 +22,11 @@ import { invalidateTenantCache } from '../../middleware/tenant-context.js';
 import {
   getTenantAiAdminSettings,
   updateTenantAiSettings,
-} from '../ai-chatbot/ai-settings.service.js';
+} from '../ai-chatbot/ai-platform/ai-settings.service.js';
 import {
   createAiPricingRateCardController,
   listAiPricingRateCardsController,
-} from '../ai-chatbot/ai-report.controller.js';
+} from '../ai-chatbot/ai-report/ai-report.controller.js';
 
 export { createAiPricingRateCardController, listAiPricingRateCardsController };
 

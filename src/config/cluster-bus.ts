@@ -18,7 +18,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterCommit, getSessionClient, pool } from './database.js';
 import { processRolePlan } from './process-role.js';
-import { listenRetryDelayMs } from '../modules/ai-chatbot/lesson-author-listen-retry.logic.js';
+import { listenRetryDelayMs } from '../modules/ai-chatbot/ai-id/lesson-author-listen-retry.logic.js';
 
 export const CLUSTER_BUS_CHANNEL = 'landa_cluster_bus';
 /** PostgreSQL refuses NOTIFY payloads of 8000 bytes or more. */

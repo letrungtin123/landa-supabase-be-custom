@@ -17,10 +17,10 @@ import {
 import { AppError } from '../../utils/errors.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
-import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';
+import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/ai-platform/gemini.service.js';
 import { getTenantDataQuota } from './tenant-data-quota.service.js';
 import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';
-import { removeAiSecretsFromTenantSettings } from '../ai-chatbot/ai-settings.service.js';
+import { removeAiSecretsFromTenantSettings } from '../ai-chatbot/ai-platform/ai-settings.service.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
 

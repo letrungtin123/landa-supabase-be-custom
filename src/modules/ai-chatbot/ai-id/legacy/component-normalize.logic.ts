@@ -1,18 +1,18 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { assertComponentInstancePlan } from '../../lesson-author-capabilities.logic.js';
+import { assertComponentInstancePlan } from '../lesson-author-capabilities.logic.js';
 import {
   type LessonAuthorComponentPlan,
   type LessonAuthorComponentProposal,
   type LessonAuthorComponentType,
 } from '../../../course-authoring/course-authoring.service.js';
-import { stripLessonAuthorSourceRangeSuffix } from '../../lesson-author-intent.logic.js';
+import { stripLessonAuthorSourceRangeSuffix } from '../lesson-author-intent.logic.js';
 import {
   sanitizeLessonAuthorHtml,
   validateLessonAuthorHtmlContract,
-} from '../../lesson-author-content-contract.logic.js';
-import { readServerOwnedSourceFactIds } from '../../lesson-author-component-registry.logic.js';
-import { stripHtml } from '../../chat-turn.logic.js';
+} from '../lesson-author-content-contract.logic.js';
+import { readServerOwnedSourceFactIds } from '../lesson-author-component-registry.logic.js';
+import { stripHtml } from '../../chat/chat-turn.logic.js';
 import { MIN_UNIT_HTML_TEXT_CHARS, MAX_UNIT_HTML_CHARS } from './constants.js';
 
 export function extractJsonObject(text: string): unknown {

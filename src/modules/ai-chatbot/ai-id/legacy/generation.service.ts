@@ -7,16 +7,16 @@ import {
   type LessonAuthorUnitProposal,
 } from '../../../course-authoring/course-authoring.service.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
-import { getGeminiClient } from '../../gemini.service.js';
-import { shouldUseBoundedLessonAuthorGeneration } from '../../lesson-author-content-contract.logic.js';
-import { readServerOwnedSourceFactIds } from '../../lesson-author-component-registry.logic.js';
+import { getGeminiClient } from '../../ai-platform/gemini.service.js';
+import { shouldUseBoundedLessonAuthorGeneration } from '../lesson-author-content-contract.logic.js';
+import { readServerOwnedSourceFactIds } from '../lesson-author-component-registry.logic.js';
 import {
   RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS,
   BLUEPRINT_MAX_GENERATION_ATTEMPTS,
   RAG_LESSON_AUTHOR_BLUEPRINT_MAX_OUTPUT_TOKENS,
-} from '../../chat.constants.js';
-import type { ConversationContext, LessonAuthorSourceDocument } from '../../chat.types.js';
-import { getCachedStoreName, logLessonAuthorFlow } from '../../chat-turn-runtime.service.js';
+} from '../../chat/chat.constants.js';
+import type { ConversationContext, LessonAuthorSourceDocument } from '../../chat/chat.types.js';
+import { getCachedStoreName, logLessonAuthorFlow } from '../../chat/chat-turn-runtime.service.js';
 import {
   GEMINI_MODEL,
   MAX_PROPOSAL_LESSONS,

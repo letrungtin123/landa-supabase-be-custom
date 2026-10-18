@@ -10,11 +10,11 @@ const pg = await import('pg');
 const { pool } = await import('../../config/database.js');
 const { AppError } = await import('../../middleware/error-handler.js');
 const access = await import('./report-access.service.js');
-const reportChat = await import('../ai-chatbot/report-chat.service.js');
-const { getReportPdfExportError } = await import('../ai-chatbot/report-pdf-export.service.js');
+const reportChat = await import('../ai-chatbot/ai-report/report-chat.service.js');
+const { getReportPdfExportError } = await import('../ai-chatbot/ai-report/report-pdf-export.service.js');
 const { isKbStorePermissionFailure, readReportDomainErrorCode } =
-  await import('../ai-chatbot/report-chat-error.logic.js');
-const { tinyReportFixture } = await import('../ai-chatbot/report-pdf.fixture.js');
+  await import('../ai-chatbot/ai-report/report-chat-error.logic.js');
+const { tinyReportFixture } = await import('../ai-chatbot/ai-report/report-pdf.fixture.js');
 
 test.after(async () => {
   await pool.end();

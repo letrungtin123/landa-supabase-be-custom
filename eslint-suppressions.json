@@ -78,134 +78,27 @@
       "count": 3
     }
   },
-  "src/modules/ai-chatbot/ai-metered-call.service.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 8
-    }
-  },
-  "src/modules/ai-chatbot/ai-pricing.service.test.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
-  "src/modules/ai-chatbot/chat-admission.controller.test.ts": {
-    "@typescript-eslint/no-misused-promises": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/chat-course-scope.service.ts": {
-    "no-control-regex": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/chat-turn-runtime.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/chat.controller.ts": {
-    "prefer-const": {
-      "count": 9
-    }
-  },
-  "src/modules/ai-chatbot/chat.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 19
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/gemini.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 14
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/filters/gibberish.filter.ts": {
-    "no-control-regex": {
-      "count": 1
-    },
-    "no-misleading-character-class": {
-      "count": 3
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/filters/language.filter.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    },
-    "no-misleading-character-class": {
-      "count": 3
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/filters/length.filter.ts": {
-    "no-misleading-character-class": {
-      "count": 3
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/filters/repeat.filter.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/types/filter.types.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/input-filter/core/utils/normalize.ts": {
-    "no-misleading-character-class": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/kb-local-source-content.ts": {
-    "no-control-regex": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/kb-upload-disk.test.ts": {
-    "@typescript-eslint/no-misused-promises": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/kb.controller.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/kb.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    }
-  },
-  "src/modules/ai-chatbot/kb.validator.ts": {
-    "no-control-regex": {
-      "count": 1
-    }
-  },
-  "src/modules/ai-chatbot/lesson-author-chapter-checkpoint-schema.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-chapter-checkpoint-schema.test.ts": {
     "no-useless-escape": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-chapter-cross-language.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-chapter-cross-language.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 6
     }
   },
-  "src/modules/ai-chatbot/lesson-author-chapter-runner.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-chapter-runner.logic.ts": {
     "@typescript-eslint/await-thenable": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-component-registry.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-component-registry.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 10
     }
   },
-  "src/modules/ai-chatbot/lesson-author-component-registry.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-component-registry.logic.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
     },
@@ -213,12 +106,12 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-diagram-layout.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-diagram-layout.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-generation-admission.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-generation-admission.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -226,7 +119,7 @@
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-generation-status.controller.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-generation-status.controller.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     },
@@ -234,57 +127,57 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-acceptance.cross-language.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-acceptance.cross-language.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-architecture.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-architecture.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-chain.fixture.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-chain.fixture.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-intent.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-intent.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-scope-view.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-scope-view.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm-workspace.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm-workspace.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm.contract.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm.contract.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-idm.fixture.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-idm.fixture.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-launch-brief.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-launch-brief.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-accounting.service.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-accounting.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-admission-http.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-admission-http.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     },
@@ -292,27 +185,27 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-admission.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-admission.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-apply.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-apply.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-deployment.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-deployment.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-idm-execution.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-idm-execution.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-inventory.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-inventory.logic.ts": {
     "@typescript-eslint/no-empty-object-type": {
       "count": 1
     },
@@ -320,47 +213,47 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-launch.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-launch.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-provider-stop.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-provider-stop.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-rag-contract.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-rag-contract.logic.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-orchestration-v2-rag-contract.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-rag-contract.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-pedagogical-validator.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-pedagogical-validator.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-session-access.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-session-access.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-session.service.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-session.service.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-transcription.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-transcription.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-transcription.service.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-transcription.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -368,17 +261,17 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-accounting.service.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-accounting.service.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-accounting.service.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-accounting.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-admission.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-admission.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -386,17 +279,17 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-apply.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-apply.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-apply.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-apply.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 15
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-apply.repository.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-apply.repository.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -407,27 +300,27 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-author-notes.repository.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-author-notes.repository.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-chapter-validation.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-chapter-validation.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-chapter-validation.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-chapter-validation.logic.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 9
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-component.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-component.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 37
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-component.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-component.logic.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 8
     },
@@ -438,12 +331,12 @@
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-content.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-content.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-edit.controller.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-edit.controller.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
     },
@@ -451,12 +344,12 @@
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-edit.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-edit.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-edit.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-edit.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -464,12 +357,12 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-inventory.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-inventory.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-launch.controller.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-launch.controller.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
     },
@@ -477,17 +370,17 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-launch.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-launch.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-problem.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-problem.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-read.controller.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-read.controller.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
     },
@@ -495,42 +388,42 @@
       "count": 4
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-read.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-read.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-read.repository.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-read.repository.ts": {
     "no-useless-escape": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-runtime.service.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-runtime.service.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-storyboard.logic.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.logic.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-storyboard.logic.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-storyboard.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-stream.controller.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-stream.controller.ts": {
     "no-control-regex": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-v2-launch.service.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-v2-launch.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -538,7 +431,7 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/lesson-author-workspace-work-item.repository.test.ts": {
+  "src/modules/ai-chatbot/ai-id/lesson-author-workspace-work-item.repository.test.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },
@@ -546,27 +439,134 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/report-chat-narrative.service.ts": {
+  "src/modules/ai-chatbot/ai-platform/ai-metered-call.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 8
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/ai-pricing.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/gemini.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 14
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/filters/gibberish.filter.ts": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/filters/language.filter.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    },
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/filters/length.filter.ts": {
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/filters/repeat.filter.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/report-date.logic.ts": {
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/types/filter.types.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/ai-platform/input-filter/core/utils/normalize.ts": {
+    "no-misleading-character-class": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/ai-report/report-chat-narrative.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/ai-report/report-date.logic.ts": {
     "@typescript-eslint/only-throw-error": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/report-pdf-quality.logic.test.ts": {
+  "src/modules/ai-chatbot/ai-report/report-pdf-quality.logic.test.ts": {
     "no-irregular-whitespace": {
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/restore.worker.ts": {
+  "src/modules/ai-chatbot/chat/chat-admission.controller.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat-course-scope.service.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat-turn-runtime.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat.controller.ts": {
+    "prefer-const": {
+      "count": 9
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 19
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb/kb-local-source-content.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb/kb-upload-disk.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb/kb.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb/kb.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/kb/kb.validator.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb/restore.worker.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
     }
   },
-  "src/modules/ai-chatbot/upload.worker.ts": {
+  "src/modules/ai-chatbot/kb/upload.worker.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
