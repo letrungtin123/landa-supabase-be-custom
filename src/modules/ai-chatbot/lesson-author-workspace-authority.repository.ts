@@ -6,6 +6,7 @@ import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import { lessonAuthorSourceSnapshotHash, type LessonAuthorSnapshotDocument } from './lesson-author-source-snapshot.logic.js';
 import { normalizeCourseComponentTypes } from '../tenants/tenant-course-components.constants.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 const sameIds = (left: unknown, right: unknown): boolean => Array.isArray(left) && Array.isArray(right)
   && left.length === right.length && left.every(value => typeof value === 'string' && right.includes(value));
@@ -31,8 +32,7 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
   const subject = Object.freeze({ ...subjectInput });
   const sessionOwnerId = options.sessionOwnerId && UUID_PATTERN.test(options.sessionOwnerId) ? options.sessionOwnerId : null;
   function validSubject(owner: WorkspaceReadOwner): boolean {
-    return subject.sessionMode === 'normal' && ['staff', 'superuser', 'superadmin'].includes(subject.role)
-      && UUID_PATTERN.test(subject.id) && !!subject.tenantId && UUID_PATTERN.test(subject.tenantId) && subject.tenantId === owner.tenantId;
+    return isAiIdActor(subject) && subject.tenantId === owner.tenantId;
   }
   /** canEdit always evaluates the authenticated subject itself. */
   function matches(owner: WorkspaceReadOwner): boolean {

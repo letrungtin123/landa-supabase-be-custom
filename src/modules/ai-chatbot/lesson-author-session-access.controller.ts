@@ -7,9 +7,8 @@ import {
   type LessonAuthorSessionErrorCode,
 } from './lesson-author-session-access.logic.js';
 import { findLessonAuthorSessionOwner, listLessonAuthorActiveRuns } from './lesson-author-session-access.repository.js';
-import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
-
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
+import { isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 export interface LessonAuthorSessionAccessDependencies {
   db: Pick<GenerationJobSql, 'query'>;
@@ -31,11 +30,6 @@ function refuse(req: Request, res: Response, code: LessonAuthorSessionErrorCode)
   sendLessonAuthorSessionError(req, res, new LessonAuthorSessionError(code));
 }
 
-function courseEditorCandidate(user: AuthUser | undefined): user is AuthUser & { tenantId: string } {
-  return !!user && user.sessionMode === 'normal' && AUTHOR_ROLES.has(user.role)
-    && isUuid(user.tenantId) && UUID_PATTERN.test(user.id);
-}
-
 /**
  * Write boundary for every lesson-author route keyed by a conversation: only
  * the creator may continue the session. A course editor of the same tenant who
@@ -49,7 +43,7 @@ export function createLessonAuthorSessionOwnerGuard(deps: LessonAuthorSessionAcc
     async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       const user = req.user;
       const conversationId = req.params[conversationParam];
-      if (!courseEditorCandidate(user) || !isUuid(conversationId)) { next(); return; }
+      if (!isAiIdActor(user) || !isUuid(conversationId)) { next(); return; }
       const courseId = options.courseParam ? req.params[options.courseParam] : undefined;
       try {
         const owner = await findLessonAuthorSessionOwner(deps.db, {
@@ -73,7 +67,7 @@ export function createLessonAuthorCourseEditorGuard(deps: Pick<LessonAuthorSessi
     if (readTarget(req) !== 'lesson_author') { next(); return; }
     const user = req.user;
     try {
-      if (!courseEditorCandidate(user) || !await deps.canEditCourses(user)) { refuse(req, res, 'COURSE_EDIT_REQUIRED'); return; }
+      if (!isAiIdActor(user) || !await deps.canEditCourses(user)) { refuse(req, res, 'COURSE_EDIT_REQUIRED'); return; }
       next();
     } catch (error) { next(error); }
   };
@@ -91,7 +85,7 @@ export function createLessonAuthorAuthorGuard(deps: Pick<LessonAuthorSessionAcce
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     try {
-      if (!courseEditorCandidate(user) || !await deps.canEditCourses(user)) { refuse(req, res, 'COURSE_EDIT_REQUIRED'); return; }
+      if (!isAiIdActor(user) || !await deps.canEditCourses(user)) { refuse(req, res, 'COURSE_EDIT_REQUIRED'); return; }
       next();
     } catch (error) { next(error); }
   };
@@ -102,7 +96,7 @@ export function createLessonAuthorActiveRunsHandler(deps: Pick<LessonAuthorSessi
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     res.setHeader('Cache-Control', 'no-store');
     const user = req.user, courseId = req.params.courseId;
-    if (!courseEditorCandidate(user)) { refuse(req, res, 'FORBIDDEN'); return; }
+    if (!isAiIdActor(user)) { refuse(req, res, 'FORBIDDEN'); return; }
     if (typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)
       || Object.keys(req.query).some(key => key !== 'ui_locale')) { refuse(req, res, 'INPUT_INVALID'); return; }
     try {

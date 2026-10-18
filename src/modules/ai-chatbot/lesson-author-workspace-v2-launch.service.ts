@@ -11,6 +11,7 @@ import {
 } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
 import { createCourseAccessRepository } from '../courses/course-access.repository.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 type Query = (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
 type ExistingWorkspace = {
@@ -82,9 +83,8 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
   }
 
   function validInput(user: AuthUser, input: WorkspaceLaunchInput): user is AuthUser & { tenantId: string } {
-    return user.sessionMode === 'normal' && typeof user.tenantId === 'string'
-      && ['staff', 'superuser', 'superadmin'].includes(user.role)
-      && [user.id, user.tenantId, input.conversationId, input.operationId].every(value => UUID_PATTERN.test(value))
+    return isAiIdActor(user)
+      && [input.conversationId, input.operationId].every(value => UUID_PATTERN.test(value))
       && typeof input.courseId === 'string' && input.courseId.trim().length > 0 && input.courseId.length <= 255
       && !/[\x00-\x1f\x7f]/.test(input.courseId)
       && input.sourceDocumentIds.length >= 1 && input.sourceDocumentIds.length <= 5

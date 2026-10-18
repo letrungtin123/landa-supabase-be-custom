@@ -8,6 +8,7 @@ import {
   parseLaunchBrief, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
 } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 const states=['queued','designing','drafting','ready','needs_action','failed','canceled'];
 const BASE_CREATE_KEYS='content_locale,operation_id,source_document_ids';
@@ -40,8 +41,7 @@ export function createWorkspaceLaunchHandlers(deps:{
       };
       const user=req.user,courseId=req.params.courseId;
       if(!user){failure(401,'AUTH_REQUIRED');return;}
-      if(user.sessionMode!=='normal'||!user.tenantId||![user.id,user.tenantId].every(id=>UUID_PATTERN.test(id))
-        ||!['staff','superuser','superadmin'].includes(user.role)){failure(403,'WORKSPACE_READ_FORBIDDEN');return;}
+      if(!isAiIdActor(user)){failure(403,'WORKSPACE_READ_FORBIDDEN');return;}
       if(typeof courseId!=='string'||!courseId.trim()||courseId.length>255||/[\x00-\x1f\x7f]/.test(courseId)
         ||Object.keys(req.query).some(k=>k!=='ui_locale')||(req.query.ui_locale!==undefined&&!['en','vi'].includes(req.query.ui_locale as string))){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
       if(!deps.readEnabled()||(action==='create'&&!deps.executionReady())){failure(503,'WORKSPACE_EXECUTION_DISABLED');return;}

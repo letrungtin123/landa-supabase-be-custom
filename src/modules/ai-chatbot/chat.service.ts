@@ -12,7 +12,6 @@ import { resolveLessonAuthorDraftLocale } from './lesson-author-intent.logic.js'
 import { assessmentGapMessage, assertComponentInstancePlan, ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from './lesson-author-capabilities.logic.js';
 import { createHash, randomUUID } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
-import { hasPermission } from '../../middleware/authorize.js';
 import { GenerationJobError, generationSnapshotHash, hasCompleteGenerationUsage, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
 import type { PreparedGenerationJob } from './lesson-author-generation-job.repository.js';
 import type { GenerationAdmissionStage } from './lesson-author-generation-admission.logic.js';
@@ -165,6 +164,7 @@ import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-not
 import { assertChatCourseAccess } from './chat-course-scope.service.js';
 import { withLaunchBriefIdentity, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { hasAiIdCoursePermission } from './lesson-author-ai-id-access.service.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -1757,7 +1757,8 @@ export async function withLessonAuthorConversationLock<T>(conversationId: string
   } finally { streamLocks.delete(conversationId); await lock?.release(); }
 }
 
-/** Fresh worker authorization: no JWT/role or provider secret is persisted in jobs. */
+/** Fresh worker authorization: no JWT/role or provider secret is persisted in jobs.
+ * Roles: AI_ID_AUTHOR_ROLES (lesson-author-ai-id-access.logic.ts), re-read from the database. */
 export async function assertDurableBlueprintActor(userId: string, tenantId: string): Promise<void> {
   const result = await query<{ role: UserRole }>(`SELECT u.role FROM users u
     JOIN tenants t ON t.id=$2 AND t.is_active=true
@@ -1765,7 +1766,7 @@ export async function assertDurableBlueprintActor(userId: string, tenantId: stri
       AND (u.role='superadmin' OR u.tenant_id=$2 OR (u.role='superuser' AND EXISTS
         (SELECT 1 FROM user_tenants ut WHERE ut.user_id=u.id AND ut.tenant_id=$2)))`, [userId, tenantId]);
   const role = result.rows[0]?.role;
-  if (!role || !await hasPermission({ id: userId, tenantId, role }, 'courses', 'can_edit')) {
+  if (!role || !await hasAiIdCoursePermission({ id: userId, tenantId, role })) {
     throw new AppError('Không có quyền tạo khóa học.', 403, 'GENERATION_FORBIDDEN');
   }
 }

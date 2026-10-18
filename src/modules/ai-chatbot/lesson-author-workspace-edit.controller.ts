@@ -7,6 +7,7 @@ import { WorkspaceComponentError } from './lesson-author-workspace-component.log
 import { WorkspaceContractError, WORKSPACE_CONTENT_MAX_BYTES, type WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 const ERRORS = {
   AUTH_REQUIRED: [401, 'Chưa xác thực.', 'Authentication is required.'],
@@ -87,8 +88,7 @@ export function createWorkspaceEditHandlers(deps: Dependencies) {
       };
       const user = req.user ? Object.freeze({ ...req.user }) : null;
       if (!user) { reject('AUTH_REQUIRED'); return; }
-      if (!user.tenantId || !UUID_PATTERN.test(user.tenantId) || !UUID_PATTERN.test(user.id) || !['staff', 'superuser', 'superadmin'].includes(user.role)
-        || user.sessionMode !== 'normal') { reject('WORKSPACE_EDIT_FORBIDDEN'); return; }
+      if (!isAiIdActor(user)) { reject('WORKSPACE_EDIT_FORBIDDEN'); return; }
       stage = 'workspace_edit_input';
       if (!UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(nodeId ?? '')
         || typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)

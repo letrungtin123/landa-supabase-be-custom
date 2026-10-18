@@ -5,8 +5,8 @@ import type { GenerationJobSql } from './lesson-author-generation-job.repository
 import type { SourceDocumentHint } from './lesson-author-source-stream.service.js';
 import { onShutdownStart } from '../../config/process-lifecycle.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const HEARTBEAT_MS = 20_000;
 const AUTH_LEASE_MS = 60_000;
 
@@ -80,8 +80,7 @@ export function createSourceDocumentStreamHandler(deps: {
       res.status(status).json({ success: false, code,
         message: locale === 'en' ? 'The source status stream is unavailable.' : 'Chưa thể theo dõi trạng thái tài liệu.', request_id: requestId });
     };
-    if (!user || !user.tenantId || !UUID_PATTERN.test(user.tenantId) || !UUID_PATTERN.test(user.id)
-      || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
+    if (!isAiIdActor(user)) {
       reject(user ? 403 : 401, user ? 'SOURCE_STREAM_FORBIDDEN' : 'AUTH_REQUIRED'); return;
     }
     if (!UUID_PATTERN.test(documentId ?? '') || Object.keys(req.query).some(key => key !== 'ui_locale')

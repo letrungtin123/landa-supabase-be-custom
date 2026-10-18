@@ -19,6 +19,7 @@ import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import { assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 import { createCourseAccessRepository } from '../courses/course-access.repository.js';
+import { isAiIdActor, isAiIdAuthorRole } from './lesson-author-ai-id-access.logic.js';
 
 /** Injectable composition seam; production exports below retain their signatures.
  * Importing this module performs no config/connection/service initialization. */
@@ -76,7 +77,7 @@ function code(error:unknown){const e=error&&typeof error==='object'?error as {co
 async function authority(tx:GenerationJobSql,target:WorkspaceAdmissionTarget){
   const found=await tx.query(`SELECT role FROM users WHERE id=$1 AND is_active=true FOR SHARE`,[target.userId]);
   const role=found.rows[0]?.role;
-  if(found.rows.length!==1||!['staff','superuser','superadmin'].includes(String(role)))reject('WORKSPACE_RUNTIME_FORBIDDEN');
+  if(found.rows.length!==1||!isAiIdAuthorRole(role))reject('WORKSPACE_RUNTIME_FORBIDDEN');
   return adapters.createWorkspaceAuthority({id:target.userId,tenantId:target.tenantId,role:role as AuthUser['role'],username:'',sessionMode:'normal'});
 }
 async function canEdit(tx:GenerationJobSql,target:WorkspaceAdmissionTarget){return(await authority(tx,target)).canEdit(tx,target);}
@@ -214,8 +215,7 @@ function admission(){
  * provider call or independent correlation is generated on replay. */
 async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief}){
   if(!ready||!isDurableBlueprintWorkerReady())throw new AppError('Workspace worker is not ready.',503,'WORKSPACE_EXECUTION_DISABLED');
-  if(user.sessionMode!=='normal'||!user.tenantId||!['staff','superuser','superadmin'].includes(user.role)
-    ||![user.id,user.tenantId,input.conversationId,input.operationId].every(id=>UUID_PATTERN.test(id))
+  if(!isAiIdActor(user)||![input.conversationId,input.operationId].every(id=>UUID_PATTERN.test(id))
     ||!input.sourceDocumentIds.length||input.sourceDocumentIds.length>5||new Set(input.sourceDocumentIds).size!==input.sourceDocumentIds.length
     ||input.sourceDocumentIds.some(id=>!UUID_PATTERN.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
   // QLT-6: this V1 path designs a course with the old blueprint generator; it can never keep a document as it is.

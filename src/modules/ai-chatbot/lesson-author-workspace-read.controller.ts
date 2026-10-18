@@ -5,10 +5,10 @@ import type { GenerationJobSql } from './lesson-author-generation-job.repository
 import { createWorkspaceReadRepository, WorkspaceReadError } from './lesson-author-workspace-read.repository.js';
 import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 type ReadKind = 'status' | 'events' | 'detail' | 'graph';
 type Locale = 'vi' | 'en';
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const ERRORS = {
   AUTH_REQUIRED: [401, 'Chưa xác thực.', 'Authentication is required.'],
   WORKSPACE_READ_FORBIDDEN: [403, 'Bạn không có quyền xem bản thảo này.', 'You do not have permission to view this draft.'],
@@ -90,8 +90,7 @@ export function createWorkspaceReadHandlers(deps: Dependencies) {
       };
       const user = req.user ? Object.freeze({ ...req.user }) : null;
       if (!user) { reject('AUTH_REQUIRED'); return; }
-      if (!user.tenantId || !UUID_PATTERN.test(user.tenantId) || !UUID_PATTERN.test(user.id)
-        || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
+      if (!isAiIdActor(user)) {
         reject('WORKSPACE_READ_FORBIDDEN'); return;
       }
       stage = 'workspace_read_input';

@@ -4,8 +4,8 @@ import {
   generationJobStatusView, type GenerationJobOwner, type GenerationJobRow,
 } from './lesson-author-generation-job.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { isAiIdAuthorRole } from './lesson-author-ai-id-access.logic.js';
 
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 
 interface GenerationStatusDependencies {
   enabled: () => boolean;
@@ -34,7 +34,7 @@ export function createGenerationStatusHandler(deps: GenerationStatusDependencies
     }
     // No superadmin cross-tenant/conversation-owner exception. Tenant selection
     // is resolved by existing tenantContext before reaching this handler.
-    if (!user.tenantId || !AUTHOR_ROLES.has(user.role) || user.sessionMode === 'demo_iframe') {
+    if (!user.tenantId || !isAiIdAuthorRole(user.role) || user.sessionMode === 'demo_iframe') {
       reject(403, 'GENERATION_STATUS_FORBIDDEN', 'Không có quyền xem tác vụ tạo khóa học.');
       return;
     }

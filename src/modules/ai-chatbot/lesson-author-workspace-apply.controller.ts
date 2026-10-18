@@ -3,9 +3,9 @@ import type { Request, Response } from 'express';
 import type { AuthUser } from '../../types/express.js';
 import { WorkspaceApplyConflictError, type WorkspaceApplyConflictDetails } from './lesson-author-workspace-apply-conflict.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 const HASH = /^[0-9a-f]{64}$/;
-const roles = new Set(['staff', 'superuser', 'superadmin']);
 /** [HTTP status, Vietnamese, English]. Codes stay machine-only; messages are for people. */
 export const WORKSPACE_APPLY_ERRORS = {
   AUTH_REQUIRED: [401, 'Chưa xác thực.', 'Authentication is required.'],
@@ -55,7 +55,7 @@ export function createWorkspaceApplyHandler(deps: {
     };
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Request-ID', requestId);
     if (!user) { fail('AUTH_REQUIRED'); return; }
-    if (!user.tenantId || !roles.has(user.role) || user.sessionMode !== 'normal' || !UUID_PATTERN.test(user.id) || !UUID_PATTERN.test(user.tenantId)) { fail('WORKSPACE_APPLY_FORBIDDEN'); return; }
+    if (!isAiIdActor(user)) { fail('WORKSPACE_APPLY_FORBIDDEN'); return; }
     if (!deps.enabled()) { fail('WORKSPACE_APPLY_DISABLED'); return; }
     if (!UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(nodeId ?? '') || !operationId || !UUID_PATTERN.test(operationId)
       || !courseId || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)

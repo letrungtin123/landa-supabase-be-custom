@@ -6,6 +6,7 @@ import type {
   OrchestrationV2AdmissionTarget,
 } from './lesson-author-orchestration-v2-admission.repository.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 type Dependencies = {
   enabled(): boolean;
@@ -47,8 +48,7 @@ export function createOrchestrationV2AdmissionHandler(deps: Dependencies) {
     const queryKeys = Object.keys(req.query);
     const body = req.body as unknown;
     if (!user) { fail(401, 'AUTH_REQUIRED'); return; }
-    if (user.sessionMode !== 'normal' || !user.tenantId || !UUID_PATTERN.test(user.id) || !UUID_PATTERN.test(user.tenantId)
-      || !['staff', 'superuser', 'superadmin'].includes(user.role)) {
+    if (!isAiIdActor(user)) {
       fail(403, 'ORCHESTRATION_V2_ADMISSION_FORBIDDEN'); return;
     }
     if (!deps.enabled()) { fail(503, 'ORCHESTRATION_V2_ADMISSION_DISABLED'); return; }
