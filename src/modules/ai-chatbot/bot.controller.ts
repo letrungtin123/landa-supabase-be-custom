@@ -9,6 +9,7 @@ import { isUuid, sendClientError } from '../../utils/client-error.js';
 import { createBotSchema, updateBotSchema } from './bot.validator.js';
 import * as botService from './bot.service.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+import { botAvatarFileError } from './bot-avatar-upload.js';
 
 /** Ids are UUIDs: anything else is simply not found (never a database error). */
 function botIdValid(req: Request, res: Response): boolean {
@@ -102,10 +103,9 @@ export async function uploadAvatar(req: Request, res: Response): Promise<void> {
   const file = req.file as Express.Multer.File | undefined;
   if (!file) { sendError(res, 'Chưa upload file ảnh', 400); return; }
 
-  // Validate image
-  const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-  if (!allowed.includes(file.mimetype)) { sendError(res, 'Chỉ hỗ trợ JPEG, PNG, WebP, GIF', 400); return; }
-  if (file.size > 5 * 1024 * 1024) { sendError(res, 'File ảnh tối đa 5MB', 400); return; }
+  // Validate image (parseBotAvatarUpload answers a file over the limit the same way)
+  const fileError = botAvatarFileError(file);
+  if (fileError) { sendError(res, fileError, 400); return; }
 
   try {
     const bot = await botService.uploadBotAvatar(
