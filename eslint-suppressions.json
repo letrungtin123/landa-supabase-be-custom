@@ -104,12 +104,7 @@
       "count": 33
     },
     "@typescript-eslint/no-unused-vars": {
-      "count": 5
-    }
-  },
-  "src/modules/ai-chatbot/delete.worker.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
+      "count": 3
     }
   },
   "src/modules/ai-chatbot/gemini.service.ts": {
@@ -174,9 +169,6 @@
   "src/modules/ai-chatbot/kb.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/modules/ai-chatbot/kb.validator.ts": {
@@ -707,7 +699,7 @@
       "count": 56
     },
     "@typescript-eslint/no-unused-vars": {
-      "count": 3
+      "count": 2
     }
   },
   "src/modules/course-authoring/course-markup-scrubber.logic.ts": {
@@ -927,19 +919,11 @@
   "src/modules/reports/reports.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 11
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/modules/sso/sso.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 7
-    }
-  },
-  "src/modules/sso/sso.service.ts": {
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/modules/storage/storage.routes.ts": {
