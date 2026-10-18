@@ -15,6 +15,7 @@ import { getGeminiApiKey } from './gemini.service.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { fixMulterFilename } from '../../config/storage.js';
 import { withKbTempUploadCleanup } from './kb-upload-storage.js';
+import { KB_FAQ_SHEET_READ_CODE_PREFIX, KB_FAQ_SHEET_READ_ERRORS, KbFaqSheetReadError } from './kb-faq-sheet.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { describeKbDocumentDeletionFailure } from './kb-document-deletion.logic.js';
 import { syncLessonAuthorTranscriptMessagesById } from './lesson-author-transcription.service.js';
@@ -353,6 +354,15 @@ async function uploadFaqDocumentFromTempFile(req: Request, res: Response): Promi
       throw err;
     }
   } catch (err) {
+    if (err instanceof KbFaqSheetReadError) {
+      const [status, vi, en] = KB_FAQ_SHEET_READ_ERRORS[err.code];
+      res.status(status).json({
+        success: false,
+        code: `${KB_FAQ_SHEET_READ_CODE_PREFIX}${err.code}`,
+        message: requestUiLocaleOf(req) === 'en' ? en : vi,
+      });
+      return;
+    }
     sendClientError(req, res, err, 'KnowledgeBase');
   }
 }

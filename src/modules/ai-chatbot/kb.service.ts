@@ -9,6 +9,7 @@ import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { uploadFile, uploadFileFromPath, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../config/storage.js';
 import { extractLocalSourceContent, extractLocalSourceContentFromFile } from './kb-local-source-content.js';
+import { readFaqSheetSummary } from './kb-faq-sheet.service.js';
 import { signKbDocumentSourceUrl } from './kb-source-download-url.logic.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { getRedisClient } from '../../config/redis.js';
@@ -1899,18 +1900,14 @@ export async function stageFaqSource(
 ): Promise<StagedKbSource> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'tai FAQ');
   const displayName = normalizeKbDocumentDisplayName(file.originalname);
-  const workbook = XLSX.read(await fs.readFile(file.path), { type: 'buffer' });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new AppError('File xlsx không có sheet nào', 400);
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]);
-  if (rows.length === 0) throw new AppError('File xlsx trống, không có dữ liệu', 400);
-  const headers = Object.keys(rows[0]);
-  const qKey = headers.find(h => h.trim().toLowerCase() === 'question');
-  const aKey = headers.find(h => h.trim().toLowerCase() === 'answer');
-  if (!qKey || !aKey) {
-    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${headers.join(', ')}`, 400);
+  // Parsed in a worker thread (kb-faq-sheet.service.ts), never on the event loop.
+  const sheet = await readFaqSheetSummary(file.path);
+  if (sheet.kind === 'no_sheet') throw new AppError('File xlsx không có sheet nào', 400);
+  if (sheet.kind === 'empty') throw new AppError('File xlsx trống, không có dữ liệu', 400);
+  if (sheet.kind === 'bad_template') {
+    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${sheet.headers.join(', ')}`, 400);
   }
-  const emptyRows = rows.filter(row => !String(row[qKey] || '').trim() || !String(row[aKey] || '').trim()).length;
+  const { rowCount, emptyRows } = sheet;
   return stageKbSource(
     tenantId,
     'kb-faqs',
@@ -1922,8 +1919,8 @@ export async function stageFaqSource(
       size: file.size,
       extension: '.xlsx',
       mime_type: file.mimetype,
-      row_count: rows.length,
-      valid_rows: rows.length - emptyRows,
+      row_count: rowCount,
+      valid_rows: rowCount - emptyRows,
     },
     'faq',
   );

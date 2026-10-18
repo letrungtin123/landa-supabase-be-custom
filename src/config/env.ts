@@ -415,6 +415,11 @@ export const env = {
   KB_OPERATION_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
   KB_OPERATION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
   KB_RESTORE_RECOVERY_POLL_INTERVAL_MS: optionalBoundedInt('KB_RESTORE_RECOVERY_POLL_INTERVAL_MS', 30_000, 5_000, 300_000),
+  // Uploaded FAQ workbooks are parsed in a worker thread (never on the event
+  // loop): its deadline, its heap limit, and how many run at once per process.
+  KB_FAQ_SHEET_READ_TIMEOUT_MS: optionalBoundedInt('KB_FAQ_SHEET_READ_TIMEOUT_MS', 60_000, 1_000, 600_000),
+  KB_FAQ_SHEET_READ_MAX_MEMORY_MB: optionalBoundedInt('KB_FAQ_SHEET_READ_MAX_MEMORY_MB', 1_024, 64, 8_192),
+  KB_FAQ_SHEET_READ_CONCURRENCY: optionalBoundedInt('KB_FAQ_SHEET_READ_CONCURRENCY', 2, 1, 16),
 
   // Lesson-author video transcription. The upload route streams to a private
   // bucket; these limits are enforced before expensive media processing.
