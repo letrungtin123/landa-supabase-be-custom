@@ -19,7 +19,7 @@ import {
   type UserDeletionAuditTarget,
 } from './user-deletion.service.js';
 import { UserAuthorityError, requestUiLocale } from './user-authority.logic.js';
-import { swallowAndLog } from '../../utils/best-effort.js';
+import { bestEffort, swallowAndLog } from '../../utils/best-effort.js';
 
 function userDeletionAuditLabel(target: UserDeletionAuditTarget): string {
   const displayName = target.full_name?.trim();
@@ -273,7 +273,7 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
     const oldUser = await usersService.getUserById(userId);
     // avatar_url may predate the schema lockdown: delete only inside the caller's tenant.
     if (oldUser?.avatar_url) {
-      await deleteTenantFileByUrl(oldUser.avatar_url, tenantId).catch(() => false);
+      await bestEffort('users.old_avatar_cleanup', () => deleteTenantFileByUrl(oldUser.avatar_url, tenantId));
     }
 
     const file = req.file;

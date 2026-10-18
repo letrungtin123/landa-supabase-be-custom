@@ -4,6 +4,7 @@ import { env } from '../../config/env.js';
 import { getRedisClient, isRedisConfigured, markRedisUnhealthy, redisConnectionEpoch, withRedisDeadline } from '../../config/redis.js';
 import { parseExpiresIn } from '../../utils/jwt.js';
 import { clusterBus } from '../../config/cluster-bus.js';
+import { logSwallowedError } from '../../utils/best-effort.js';
 
 const REVOCATION_KEY_PREFIX = 'auth:revoked:';
 /** Clock-skew margin on top of the access-token lifetime when copying recent revocations. */
@@ -114,7 +115,11 @@ export function resyncAccessRevocationMirror(): Promise<boolean> {
       || copiesStarted !== mirrorCopiesStarted || mirrorCopiesInFlight > 0) return false;
     trustedEpoch = epoch;
     return true;
-  })().catch(() => false).finally(() => { resyncInFlight = null; });
+  })().catch((error: unknown) => {
+    // The copy stays untrusted (checks keep reading the database); retried after MIRROR_RESYNC_MIN_INTERVAL_MS.
+    logSwallowedError('auth.revocation_mirror_resync', error);
+    return false;
+  }).finally(() => { resyncInFlight = null; });
   return resyncInFlight;
 }
 

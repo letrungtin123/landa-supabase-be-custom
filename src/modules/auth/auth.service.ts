@@ -83,7 +83,7 @@ async function getDisplayLabelsForTenant(tenantId: string | null | undefined) {
 function startLoginLookup<T>(needed: boolean, lookup: () => Promise<T>): Promise<T> | null {
   if (!needed) return null;
   const pending = lookup();
-  pending.catch(() => undefined);
+  pending.catch(() => undefined); // marks the rejection handled; the caller's await surfaces it
   return pending;
 }
 
