@@ -15,7 +15,7 @@ const body:Record<string,unknown>={operation_id:id(4),source_document_ids:[id(5)
 const brief={design_mode:'instructional_design',learner_audience:'Nhân viên mới',course_purpose:'Giúp nhân viên mới hiểu công ty trong tuần đầu.'} as const;
 const dto:WorkspaceLaunchResult={workspace_id:id(6),conversation_id:id(3),correlation_id:id(7),content_locale:'vi',status:'designing',launch_brief:brief};
 function fixture(){
-  const state={read:true,execution:true,edit:true,allowed:true,empty:false,invalid:false,throwCreate:false,logThrows:false,transactions:0,
+  const state={read:true,execution:true,edit:true,allowed:true,coursesModuleOn:true,empty:false,invalid:false,throwCreate:false,logThrows:false,transactions:0,
     storedBrief:{...brief,version:1} as unknown};
   const logs:Record<string,unknown>[]=[],creates:WorkspaceLaunchInput[]=[],sqlCalls:{sql:string;params:unknown[]}[]=[];
   const operations=new Set<string>();
@@ -23,6 +23,8 @@ function fixture(){
     sqlCalls.push({sql,params:p});let rows:Record<string,unknown>[];
     if(sql.includes('FROM users u'))rows=[{role:user.role,tenant_id:user.tenantId,is_active:true,tenant_active:true}];
     else if(sql.includes('FROM user_permission_groups'))rows=[{can_edit:state.allowed}];
+    else if(sql.includes('FROM modules m WHERE'))rows=[{id:id(50),is_active:true}];
+    else if(sql.includes('FROM tenant_modules tm'))rows=[{is_enabled:state.coursesModuleOn}];
     else if(sql.includes('FROM lesson_author_workspaces w'))rows=state.empty?[]:[{...dto,launch_brief:state.storedBrief,...(state.invalid?{correlation_id:'invalid'}:{})}];
     else throw new Error('Unexpected fixture query');
     return{rows:rows as T[],rowCount:rows.length};
@@ -90,6 +92,13 @@ test('Fresh authorization denial and malformed persisted receipts fail closed',a
   const denied=fixture();denied.state.allowed=false;assert.equal((await denied.invoke('latest')).status,403);
   assert.ok(!denied.sqlCalls.some(c=>c.sql.includes('FROM lesson_author_workspaces w')));
   for(const action of ['latest','create'] as const){const f=fixture();f.state.invalid=true;assert.equal((await f.invoke(action)).status,503);}
+});
+test('Latest refuses a tenant whose courses module is turned off exactly as the workspace read routes do',async()=>{
+  const off=fixture();off.state.coursesModuleOn=false;const r=await off.invoke('latest');
+  // The read routes answer canRead=false (decidePermission: module_disabled) with 403 WORKSPACE_READ_FORBIDDEN.
+  assert.equal(r.status,403);assert.equal(r.payload.code,'WORKSPACE_READ_FORBIDDEN');
+  assert.equal(off.sqlCalls.some(c=>c.sql.includes('FROM lesson_author_workspaces w')),false,'no workspace is read');
+  assert.equal((await fixture().invoke('latest')).status,200,'turned on: unchanged');
 });
 test('Operational failures use safe codes/ENVI messages, never exception or document/provider contents',async()=>{
   const f=fixture();f.state.throwCreate=true;

@@ -157,6 +157,8 @@ interface Script {
   courseGate?: Promise<void>;
   courseMissing?: boolean;
   deleted?: boolean;
+  /** The tenant's courses module switch is off. */
+  coursesModuleOff?: boolean;
 }
 function scriptedDb(script: Script) {
   const one = (row: Record<string, unknown>) => ({ rows: [row], rowCount: 1 });
@@ -170,6 +172,8 @@ function scriptedDb(script: Script) {
         return one({ role, tenant_id: TENANT, is_active: true, tenant_active: true });
       }
       if (sql.includes('SELECT pgm.can_edit')) return params[0] === NO_EDIT ? none : one({ can_edit: true });
+      if (sql.includes('FROM modules m WHERE')) return one({ id: id(40), is_active: true });
+      if (sql.includes('FROM tenant_modules tm')) return one({ is_enabled: !script.coursesModuleOff });
       if (sql.startsWith('SET LOCAL')) return none;
       if (sql.includes('pg_try_advisory_xact_lock')) {
         const key = String(params[0]);
@@ -242,6 +246,14 @@ test('a staff member without course edit rights cannot Apply, before any lock is
   assert.equal(script.calls.some(call => call.sql.includes('pg_try_advisory_xact_lock')), false);
 });
 
+test('a tenant whose courses module is turned off cannot Apply, before any lock is taken', async () => {
+  const script: Script = { locks: new Set(), calls: [], coursesModuleOff: true };
+  const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
+  await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' });
+  await assert.rejects(repository.apply(actor(SUPERUSER, 'superuser'), target(SUPERUSER), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' }, 'superuser too');
+  assert.equal(script.calls.some(call => call.sql.includes('pg_try_advisory_xact_lock')), false);
+  assert.equal(script.calls.some(call => call.sql.includes('ai_chatbot')), false, 'never the AI module');
+});
 test('another editor applies the creator\'s session; a deleted course block stops it without overwriting anything', async () => {
   const script: Script = { locks: new Set(), calls: [], deleted: true };
   const audits: unknown[] = [];

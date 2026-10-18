@@ -27,13 +27,16 @@ function fixture() {
   let rows: Row[] = [{ revision: 0, parent_revision: null, origin: 'ai_baseline', actor_id: null, operation_id: uuid(90),
     content: structuredClone(baseline), content_hash: generationSnapshotHash(baseline), user_modified: false, validation_contract: 'fixture' }];
   let events: Row[] = [], pointer = 0;
-  const state = { enabled: true, grant: true, settings: { course_authoring: { allowed_component_types: ['html'] } },
+  const state = { enabled: true, grant: true, coursesModuleChecks: [] as boolean[], settings: { course_authoring: { allowed_component_types: ['html'] } },
     sourceChanged: false, validatorError: false, invalidProof: false, loggerError: false, transactions: 0, validations: 0, inserts: 0 };
   const calls: Array<{ sql: string; params: unknown[] }> = [], logs: WorkspaceEditDiagnostic[] = [];
   const tx: GenerationJobSql = { async query<T extends Record<string, unknown>>(sql: string, p: unknown[] = []) {
     calls.push({ sql, params: p }); let result: Row[];
     if (sql.includes('FROM users u')) result = [{ role: user.role, tenant_id: user.tenantId, is_active: true, tenant_active: true }];
     else if (sql.includes('FROM user_permission_groups')) result = [{ can_edit: state.grant }];
+    else if (sql.includes('FROM modules m WHERE')) result = [{ id: uuid(70), is_active: true }];
+    // One answer per check, in order (the switch can change between the two checks of a Save); then on.
+    else if (sql.includes('FROM tenant_modules tm')) result = [{ is_enabled: state.coursesModuleChecks.shift() ?? true }];
     else if (sql.startsWith('SELECT settings')) result = [{ settings: state.settings }];
     else if (sql.startsWith('SELECT id FROM courses')) result = [{ id: params.courseId }];
     else if (sql.includes('FROM lesson_author_session_deletion_jobs')) result = [];
@@ -121,6 +124,20 @@ test('current permission revocation and foreign workspace are rejected without v
   const f = fixture(); f.state.grant = false; assert.equal((await f.invoke()).status, 403); assert.equal(f.state.validations, 0);
   const other = fixture(); const r = await other.invoke('save', { params: { ...params, workspaceId: uuid(90) } });
   assert.equal(r.status, 404); assert.equal(other.state.validations, 0); assert.equal(other.logs[0].correlation_id, null);
+});
+test('a tenant whose courses module is turned off cannot Save or Reset; the second check fences a Save in flight', async () => {
+  for (const operation of ['save', 'reset'] as const) {
+    const f = fixture(); f.state.coursesModuleChecks = [false];
+    const r = await f.invoke(operation, operation === 'reset' ? { body: { operation_id: uuid(11), expected_revision: 0 } } : {});
+    assert.equal(r.status, 403, operation); assert.equal(r.body.code, 'WORKSPACE_EDIT_FORBIDDEN');
+    assert.equal(f.state.validations, 0); assert.equal(f.state.inserts, 0);
+  }
+  // Turned off while the Save was being validated: the commit-time re-check refuses it.
+  const inFlight = fixture(); inFlight.state.coursesModuleChecks = [true, false];
+  const r = await inFlight.invoke();
+  assert.equal(r.status, 403); assert.equal(r.body.code, 'WORKSPACE_EDIT_FORBIDDEN');
+  assert.equal(inFlight.state.validations, 1); assert.equal(inFlight.state.inserts, 0);
+  assert.equal((await fixture().invoke()).status, 200, 'turned on: unchanged');
 });
 test('source drift and typed component rejection retain root correlation with safe external errors', async () => {
   const sourceFailure = fixture(); sourceFailure.state.sourceChanged = true;

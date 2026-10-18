@@ -16,8 +16,9 @@
 // and checked where those settings are read, not here.
 //
 // The workspace write fence (createWorkspaceAuthority.canEdit) re-reads the
-// role, the active flags and the courses.can_edit grants with row locks and no
-// cache inside the write transaction; it uses isAiIdActor for the caller shape.
+// role, the active flags, the tenant's courses module switch and the
+// courses.can_edit grants with row locks and no cache inside the write
+// transaction; it uses isAiIdActor for the caller shape.
 
 import type { AuthUser } from '../../types/express.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';

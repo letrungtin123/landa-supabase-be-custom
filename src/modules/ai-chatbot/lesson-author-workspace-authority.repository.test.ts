@@ -10,6 +10,7 @@ import { lessonAuthorSourceInfoSummary, lessonAuthorSourceSnapshotHash } from '.
 import { COURSE_COMPONENT_TYPES } from '../tenants/tenant-course-components.constants.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const COURSES_MODULE = uuid(50);
 const user: AuthUser = { id: uuid(1), tenantId: uuid(2), role: 'staff', sessionMode: 'normal', username: 'synthetic' };
 const owner = { userId: user.id, tenantId: user.tenantId!, courseId: 'course-v1:TEST+AUTHORITY+2026', conversationId: uuid(3) };
 const source = { document_id: uuid(4), name: 'Synthetic VI / EN.pdf', status: 'learned', type: 'file',
@@ -23,6 +24,9 @@ function fixture(subject: AuthUser = user) {
   const state = {
     actor: { role: subject.role, tenant_id: subject.tenantId, is_active: true, tenant_active: true },
     membership: true, grants: [false, true], settings: {} as unknown,
+    // The tenant's courses module switch: its modules row and tenant_modules row (null: no row).
+    coursesModule: { id: COURSES_MODULE, is_active: true } as Record<string, unknown> | null,
+    tenantModule: { is_enabled: true } as Record<string, unknown> | null,
     workspace: { kb_id: uuid(5), bot_id: uuid(10), source_document_ids: [source.document_id], source_snapshot_hash: hash,
       blueprint_id: uuid(11) as string | null },
     workspacePresent: true, blueprint: true,
@@ -37,6 +41,8 @@ function fixture(subject: AuthUser = user) {
     let rows: Record<string, unknown>[];
     if (sql.includes('FROM users u')) rows = [state.actor];
     else if (sql.includes('FROM user_tenants')) rows = state.membership ? [{ user_id: user.id }] : [];
+    else if (sql.includes('FROM modules m WHERE')) rows = state.coursesModule ? [state.coursesModule] : [];
+    else if (sql.includes('FROM tenant_modules tm')) rows = state.tenantModule ? [state.tenantModule] : [];
     else if (sql.includes('FROM user_permission_groups')) rows = state.grants.map(can_edit => ({ can_edit }));
     else if (sql.includes('FROM lesson_author_workspaces w')) rows = state.workspacePresent ? [state.workspace] : [];
     else if (sql.includes('FROM lesson_author_blueprints b')) rows = state.blueprint ? [{ id: uuid(11) }] : [];
@@ -109,6 +115,41 @@ test('superuser needs primary tenant or current managed membership; superadmin s
   const admin = fixture({ ...user, role: 'superadmin' }); admin.state.actor.tenant_id = uuid(25);
   assert.equal(await admin.authority.canEdit(admin.tx, owner), true);
   assert.equal(await admin.authority.canEdit(admin.tx, { ...owner, userId: uuid(40) }), false);
+});
+test('the courses module switch fences writes like decidePermission fences the read routes; never ai_chatbot', async () => {
+  type State = ReturnType<typeof fixture>['state'];
+  const switchedOff: Array<[string, (s: State) => void]> = [
+    ['no tenant_modules row', s => { s.tenantModule = null; }],
+    ['turned off for the tenant', s => { s.tenantModule = { is_enabled: false }; }],
+    ['module inactive globally', s => { s.coursesModule = { id: COURSES_MODULE, is_active: false }; }],
+  ];
+  for (const [label, off] of switchedOff) {
+    for (const role of ['staff', 'superuser'] as const) {
+      const f = fixture({ ...user, role }); off(f.state);
+      assert.equal(await f.authority.canEdit(f.tx, owner), false, `${role}: ${label}`);
+      assert.equal(f.calls.some(c => /FROM (user_permission_groups|user_tenants)/.test(c.sql)), false, 'refused before any grant is read');
+    }
+    const admin = fixture({ ...user, role: 'superadmin' }); off(admin.state);
+    assert.equal(await admin.authority.canEdit(admin.tx, owner), true, `superadmin is not gated: ${label}`);
+    assert.equal(admin.calls.some(c => c.sql.includes('modules')), false);
+  }
+  // Turned on: unchanged, both rows read with row locks on the supplied transaction.
+  for (const role of ['staff', 'superuser'] as const) {
+    const on = fixture({ ...user, role });
+    assert.equal(await on.authority.canEdit(on.tx, owner), true, role);
+    const moduleRow = on.calls.find(c => c.sql.includes('FROM modules m WHERE'))!;
+    assert.match(moduleRow.sql, /m\.code='courses'/); assert.match(moduleRow.sql, /FOR SHARE OF m$/);
+    const switchRow = on.calls.find(c => c.sql.includes('FROM tenant_modules tm'))!;
+    assert.deepEqual(switchRow.params, [owner.tenantId, COURSES_MODULE]); assert.match(switchRow.sql, /FOR SHARE OF tm$/);
+    assert.ok(on.calls.every(c => c.sql.includes('FOR SHARE') && !c.sql.includes('ai_chatbot')), 'locked reads, never the AI module');
+  }
+  // No courses module in the catalog: not gated, as decidePermission treats codes that are not modules.
+  const none = fixture(); none.state.coursesModule = null;
+  assert.equal(await none.authority.canEdit(none.tx, owner), true);
+  assert.equal(none.calls.some(c => c.sql.includes('FROM tenant_modules tm')), false);
+  // A grant is still required when the module is on.
+  const denied = fixture(); denied.state.grants = [false];
+  assert.equal(await denied.authority.canEdit(denied.tx, owner), false);
 });
 test('request principal is captured, not mutable by a later caller', async () => {
   const mutable = { ...user }, f = fixture(mutable); mutable.role = 'superadmin';

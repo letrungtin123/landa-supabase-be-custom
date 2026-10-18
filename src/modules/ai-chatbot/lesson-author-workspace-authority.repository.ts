@@ -42,6 +42,17 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
   function matchesSession(owner: WorkspaceReadOwner): boolean {
     return validSubject(owner) && (subject.id === owner.userId || owner.userId === sessionOwnerId);
   }
+  /** Like tenant-module-state: on when the module is active and the tenant has an
+   * enabled row; a catalog without a courses module is not gated. Both rows are
+   * locked, so switching the module off waits for this write to commit. */
+  async function coursesModuleOn(tx: GenerationJobSql, tenantId: string): Promise<boolean> {
+    const catalog = await tx.query(`SELECT m.id,m.is_active FROM modules m WHERE m.code='courses' FOR SHARE OF m`, []);
+    const courses = catalog.rows[0];
+    if (!courses) return true;
+    const tenantSwitch = await tx.query(`SELECT tm.is_enabled FROM tenant_modules tm
+      WHERE tm.tenant_id=$1 AND tm.module_id=$2 FOR SHARE OF tm`, [tenantId, courses.id]);
+    return courses.is_active === true && tenantSwitch.rows[0]?.is_enabled === true;
+  }
   async function canEdit(tx: GenerationJobSql, owner: WorkspaceReadOwner): Promise<boolean> {
     if (!matches(owner)) return false;
     try {
@@ -52,12 +63,16 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
       const row = result.rows[0];
       if (result.rows.length !== 1 || !row || row.is_active !== true || row.tenant_active !== true || row.role !== subject.role) return false;
       if (row.role === 'superadmin') return true; // Exact workspace ownership remains required in edit SQL.
+      if (row.role !== 'superuser' && row.tenant_id !== owner.tenantId) return false;
+      // The tenant's courses module switch, as decidePermission applies it to
+      // the read routes (superadmin aside, superuser included), but read here
+      // with row locks and no cache. Never the ai_chatbot module (owner rule).
+      if (!await coursesModuleOn(tx, owner.tenantId)) return false;
       if (row.role === 'superuser') {
         if (row.tenant_id === owner.tenantId) return true;
         const membership = await tx.query(`SELECT user_id FROM user_tenants WHERE user_id=$1 AND tenant_id=$2 FOR SHARE`, [owner.userId, owner.tenantId]);
         return membership.rows.length === 1;
       }
-      if (row.tenant_id !== owner.tenantId) return false;
       // Same UNION-of-grants courses.can_edit policy as hasPermission, but
       // no five-minute cache. Lock actual rows (aggregates cannot FOR SHARE).
       const permissions = await tx.query(`SELECT pgm.can_edit
