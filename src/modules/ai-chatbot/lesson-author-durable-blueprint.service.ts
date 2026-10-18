@@ -166,12 +166,20 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let stopping: AbortController | null = null;
 let draining: Promise<void> | null = null;
 
-export async function startDurableBlueprintWorker(): Promise<void> {
+/**
+ * `loop: false` (an API process with LANDA_PROCESS_ROLE=api): the same
+ * checks, then jobs are accepted here and run by the background process.
+ */
+export async function startDurableBlueprintWorker(options: { loop?: boolean } = {}): Promise<void> {
   if (!env.LESSON_AUTHOR_GENERATION_ENABLED || stopping) return;
   await verifyDurableBlueprintSchema();
   if (env.AI_TOKEN_RESERVATION_SECONDS < 600) throw new GenerationJobError('GENERATION_JOB_CONTRACT_INVALID');
   stopping = new AbortController();
   ready = true;
+  if (options.loop === false) {
+    log({ event: 'generation_admission_ready', worker_in_process: false });
+    return;
+  }
   const signal = stopping.signal;
   const tick = async () => {
     if (signal.aborted) return;

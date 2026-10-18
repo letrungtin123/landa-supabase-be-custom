@@ -82,10 +82,15 @@ async function maintainChapterCheckpoints() {
       ORDER BY d.expires_at LIMIT 8 FOR UPDATE SKIP LOCKED)`,draftTenantFence.params);
   });
 }
-export async function startChapterCheckpointMaintenance() {
+/** `loop: false` (an API process with LANDA_PROCESS_ROLE=api): checkpoints are usable here; the background process maintains them. */
+export async function startChapterCheckpointMaintenance(options: { loop?: boolean } = {}) {
   if (!env.LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED || !stopped) return;
   await verifyChapterCheckpointSchema();
   stopped=false; ready=true;
+  if (options.loop === false) {
+    logChapterCheckpoint({event:'chapter_checkpoint_ready',checkpoint_version:1,maintenance_in_process:false});
+    return;
+  }
   const tick = () => {
     if (stopped) return;
     active = maintainChapterCheckpoints().catch(() => logChapterCheckpoint({event:'chapter_maintenance_failed',

@@ -7,7 +7,11 @@ import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
 import { getClient, pool, query } from './config/database.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
-import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
+import { connectRabbitMQ, assertQueue, cancelConsumers, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
+import { processRolePlan, signalProcessReady } from './config/process-role.js';
+import { shutdownStepsFor, startProcess } from './config/process-startup.js';
+import { clusterBus } from './config/cluster-bus.js';
+import { COURSE_ASSET_TEMP_MAX_AGE_MS, cleanupStaleCourseAssetTempFiles } from './modules/course-authoring/course-asset-temp.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
@@ -49,6 +53,8 @@ const LARGE_ASSET_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
 // slightly later than that.
 const KEEP_ALIVE_TIMEOUT_MS = 65 * 1000;
 const REQUEST_HEADERS_TIMEOUT_MS = 66 * 1000;
+// Course asset temp residue (background process only; see course-asset-temp.ts).
+const COURSE_ASSET_TEMP_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let httpServer: Server | null = null;
 
@@ -140,9 +146,11 @@ async function runAuditLogRetentionCleanup(trigger: 'startup' | 'daily'): Promis
 }
 
 /**
- * Init RabbitMQ — MANDATORY. Crash if cannot connect.
+ * Init RabbitMQ — MANDATORY. Crash if cannot connect (every role).
+ * `consumers`: also start the queue consumers (processes that run the
+ * background work); an API process only publishes.
  */
-async function initRabbitMQ(): Promise<void> {
+async function initRabbitMQ(consumers: boolean): Promise<void> {
   try {
     await connectRabbitMQ(env.RABBITMQ_URL);
     // Assert queues (creates if not exists)
@@ -155,6 +163,10 @@ async function initRabbitMQ(): Promise<void> {
     await assertQueue(QUEUES.EMAIL_OUTBOX);
     await assertQueue(QUEUES.COURSE_PROGRESS_RECALC);
     console.log(`[RabbitMQ] Queues ready: ${QUEUES.GEMINI_UPLOAD}, ${QUEUES.GEMINI_DELETE}, ${QUEUES.GEMINI_RESTORE}, ${QUEUES.COURSE_DELETE}, ${QUEUES.USER_DELETE}, ${QUEUES.LESSON_AUTHOR_SESSION_DELETE}, ${QUEUES.EMAIL_OUTBOX}, ${QUEUES.COURSE_PROGRESS_RECALC}`);
+    if (!consumers) {
+      console.log('[RabbitMQ] Publishing only; the consumers run in the background process');
+      return;
+    }
 
     // Start consumers (workers)
     await startUploadWorker();
@@ -178,12 +190,86 @@ async function initRabbitMQ(): Promise<void> {
   }
 }
 
-// ── Bootstrap ──
-async function bootstrap() {
-  console.log('[RuntimeTenantFence]', JSON.stringify(runtimeTenantDiagnostics()));
-  // 1. Init RabbitMQ (MUST succeed — crash otherwise)
-  await initRabbitMQ();
-  await connectRedis();
+/** Startup-only cleanups; they run once per deployment (the process that runs the background work). */
+async function runStartupCleanups(): Promise<void> {
+  // With several processes, an API process may be receiving an upload right now.
+  if (processRolePlan.sharesStateAcrossProcesses) cleanupStaleCourseAssetTempFiles({ minAgeMs: COURSE_ASSET_TEMP_MAX_AGE_MS });
+  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
+  // Dọn tokens ngay khi start
+  try {
+    const deleted = await cleanupExpiredTokens();
+    if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired/revoked tokens`);
+  } catch { /* ignore */ }
+
+  try {
+    const deleted = await cleanupExpiredAuthRevocations();
+    if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired access revocations`);
+  } catch { /* ignore */ }
+
+  try {
+    const deleted = await cleanupCompletedDeletionJobs();
+    if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
+  } catch { /* ignore */ }
+
+  // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
+  await runAuditLogRetentionCleanup('startup');
+}
+
+/** Sweepers and maintenance timers: only in the process that runs the background work. */
+function startBackgroundTimers(): void {
+  // Expired AI token/point reservations are returned in the background (never in the AI call path).
+  stopOnShutdown(startAiTokenReservationSweeper());
+  // (The inline email outbox worker, when enabled, is started by app.ts in this role.)
+
+  if (processRolePlan.sharesStateAcrossProcesses) {
+    stopOnShutdown(setInterval(() => {
+      cleanupStaleCourseAssetTempFiles({ minAgeMs: COURSE_ASSET_TEMP_MAX_AGE_MS });
+    }, COURSE_ASSET_TEMP_CLEANUP_INTERVAL_MS));
+  }
+
+  // Dọn refresh tokens hết hạn mỗi 6 giờ
+  stopOnShutdown(setInterval(async function cleanupTokens() {
+    if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
+    try {
+      const deleted = await cleanupExpiredTokens();
+      if (deleted > 0) {
+        console.log(`[Cleanup] Removed ${deleted} expired/revoked refresh tokens`);
+      }
+    } catch (err) {
+      console.error('[Cleanup] Error:', err);
+    }
+  }, 6 * 60 * 60 * 1000));
+
+  // Keep deletion metadata only for a finite operational support window.
+  stopOnShutdown(setInterval(async function cleanupDeletionJobs() {
+    if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
+    try {
+      const deleted = await cleanupCompletedDeletionJobs();
+      if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} completed deletion job records`);
+    } catch (err) {
+      console.error('[Cleanup] Deletion job cleanup error:', err);
+    }
+  }, 24 * 60 * 60 * 1000));
+
+  // Access-token revocations only need to live through the maximum access-token TTL.
+  stopOnShutdown(setInterval(async function cleanupAccessRevocations() {
+    if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
+    try {
+      const deleted = await cleanupExpiredAuthRevocations();
+      if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} expired access revocations`);
+    } catch (err) {
+      console.error('[Cleanup] Access revocation cleanup error:', err);
+    }
+  }, 6 * 60 * 60 * 1000));
+
+  // Dọn audit logs cũ hơn 30 ngày — chạy mỗi 24 giờ
+  stopOnShutdown(setInterval(async function cleanupAuditLogs() {
+    if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
+    await runAuditLogRetentionCleanup('daily');
+  }, 24 * 60 * 60 * 1000));
+}
+
+async function prepareAuthRevocation(): Promise<void> {
   if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION && !getRedisClient()) {
     throw new Error('Redis is required in production for constant-time durable access-token revocation. Configure REDIS_URL or explicitly set AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION=false after accepting the database fallback load.');
   }
@@ -196,61 +282,67 @@ async function bootstrap() {
     const ready = await resyncAccessRevocationMirror();
     console.log(`[Auth] Access revocations in Redis: ${ready ? 'ready' : 'not ready yet, the database answers'}`);
   }
-  await startDurableBlueprintWorker();
-  await startLessonAuthorWorkspaceWorker();
-  await startChapterCheckpointMaintenance();
-  // Expired AI token/point reservations are returned in the background (never in the AI call path).
-  stopOnShutdown(startAiTokenReservationSweeper());
+}
 
-  // 2. Ensure temp dir for Gemini worker
-  try {
-    await fs.mkdir(env.GEMINI_TEMP_DIR, { recursive: true });
-  } catch { /* ignore */ }
+/** `loop: false` (API process): the runtimes accept work; the background process runs it. */
+async function startLessonAuthorRuntimes(loop: boolean): Promise<void> {
+  await startDurableBlueprintWorker({ loop });
+  await startLessonAuthorWorkspaceWorker({ loop });
+  await startChapterCheckpointMaintenance({ loop });
+}
 
-  // 3. Start Express server
-  const server = app.listen(env.PORT, env.BIND_HOST, async function onListen() {
-    console.log(`[Server] LANDA Backend listening on ${env.BIND_HOST}:${env.PORT}`);
-    console.log(`[Server] Environment: ${env.NODE_ENV}`);
-    console.log(`[Server] CORS origin: ${env.CORS_ORIGIN}`);
+function listen(): Promise<void> {
+  return new Promise((resolve) => {
+    const server = app.listen(env.PORT, env.BIND_HOST, function onListen() {
+      console.log(`[Server] LANDA Backend listening on ${env.BIND_HOST}:${env.PORT}`);
+      console.log(`[Server] Environment: ${env.NODE_ENV}`);
+      console.log(`[Server] CORS origin: ${env.CORS_ORIGIN}`);
+      resolve();
+    });
 
-    // Ensure storage bucket exists
-    try {
-      await ensureBucket();
-      console.log(`[Storage] Bucket ready`);
-    } catch (err) {
-      console.error('[Storage] Bucket init failed:', err);
-    }
-
-    if (env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) {
-      // Dọn tokens ngay khi start
-      try {
-        const deleted = await cleanupExpiredTokens();
-        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired/revoked tokens`);
-      } catch { /* ignore */ }
-
-      try {
-        const deleted = await cleanupExpiredAuthRevocations();
-        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired access revocations`);
-      } catch { /* ignore */ }
-
-      try {
-        const deleted = await cleanupCompletedDeletionJobs();
-        if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
-      } catch { /* ignore */ }
-
-      // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
-      await runAuditLogRetentionCleanup('startup');
-    }
+    // Node defaults to a five-minute request budget. That can cut off a valid
+    // 300MB course asset on slower enterprise connections before Multer finishes
+    // receiving it. The public upload gateway is required to apply matching body
+    // limits and idle-time protections; do not expose this process directly.
+    server.requestTimeout = LARGE_ASSET_REQUEST_TIMEOUT_MS;
+    server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+    server.headersTimeout = REQUEST_HEADERS_TIMEOUT_MS;
+    httpServer = server;
   });
+}
 
-  // Node defaults to a five-minute request budget. That can cut off a valid
-  // 300MB course asset on slower enterprise connections before Multer finishes
-  // receiving it. The public upload gateway is required to apply matching body
-  // limits and idle-time protections; do not expose this process directly.
-  server.requestTimeout = LARGE_ASSET_REQUEST_TIMEOUT_MS;
-  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
-  server.headersTimeout = REQUEST_HEADERS_TIMEOUT_MS;
-  httpServer = server;
+// ── Bootstrap ── (order per role: config/process-startup.ts)
+async function bootstrap() {
+  console.log('[RuntimeTenantFence]', JSON.stringify(runtimeTenantDiagnostics()));
+  console.log(`[Process] role=${processRolePlan.role} api_instances=${processRolePlan.apiInstances}`);
+  await startProcess(processRolePlan, {
+    // MUST succeed — the process exits otherwise.
+    rabbitmq: ({ consumers }) => initRabbitMQ(consumers),
+    redis: connectRedis,
+    clusterBus: () => clusterBus.start(),
+    authRevocation: prepareAuthRevocation,
+    lessonAuthor: ({ loop }) => startLessonAuthorRuntimes(loop),
+    backgroundTimers: startBackgroundTimers,
+    // Ensure temp dir for Gemini worker
+    tempDirectories: async () => {
+      try {
+        await fs.mkdir(env.GEMINI_TEMP_DIR, { recursive: true });
+      } catch { /* ignore */ }
+    },
+    listen,
+    // PM2 wait_ready (cluster reloads wait for this before stopping the old process).
+    ready: () => { signalProcessReady(); },
+    // Ensure storage bucket exists
+    storageBucket: async () => {
+      try {
+        await ensureBucket();
+        console.log(`[Storage] Bucket ready`);
+      } catch (err) {
+        console.error('[Storage] Bucket init failed:', err);
+      }
+    },
+    startupCleanups: runStartupCleanups,
+  });
 }
 
 bootstrap().catch(err => {
@@ -258,66 +350,30 @@ bootstrap().catch(err => {
   process.exit(1);
 });
 
-// Dọn refresh tokens hết hạn mỗi 6 giờ
-stopOnShutdown(setInterval(async function cleanupTokens() {
-  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
-  try {
-    const deleted = await cleanupExpiredTokens();
-    if (deleted > 0) {
-      console.log(`[Cleanup] Removed ${deleted} expired/revoked refresh tokens`);
-    }
-  } catch (err) {
-    console.error('[Cleanup] Error:', err);
-  }
-}, 6 * 60 * 60 * 1000));
-
-// Keep deletion metadata only for a finite operational support window.
-stopOnShutdown(setInterval(async function cleanupDeletionJobs() {
-  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
-  try {
-    const deleted = await cleanupCompletedDeletionJobs();
-    if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} completed deletion job records`);
-  } catch (err) {
-    console.error('[Cleanup] Deletion job cleanup error:', err);
-  }
-}, 24 * 60 * 60 * 1000));
-
-// Access-token revocations only need to live through the maximum access-token TTL.
-stopOnShutdown(setInterval(async function cleanupAccessRevocations() {
-  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
-  try {
-    const deleted = await cleanupExpiredAuthRevocations();
-    if (deleted > 0) console.log(`[Cleanup] Removed ${deleted} expired access revocations`);
-  } catch (err) {
-    console.error('[Cleanup] Access revocation cleanup error:', err);
-  }
-}, 6 * 60 * 60 * 1000));
-
-// Dọn audit logs cũ hơn 30 ngày — chạy mỗi 24 giờ
-stopOnShutdown(setInterval(async function cleanupAuditLogs() {
-  if (!env.RUNTIME_GLOBAL_MAINTENANCE_ENABLED) return;
-  await runAuditLogRetentionCleanup('daily');
-}, 24 * 60 * 60 * 1000));
-
 // Graceful shutdown (see config/graceful-shutdown.ts): stop intake, drain
 // in-flight requests (bounded), then close RabbitMQ, Redis and the pool.
+// The steps per role: config/process-startup.ts.
 const gracefulShutdown = createGracefulShutdown({
   getServer: () => httpServer,
   lifecycle: processLifecycle,
-  stopIntake: [
-    { name: 'lesson-author workspace worker', run: stopLessonAuthorWorkspaceWorker },
-    { name: 'durable Blueprint worker', run: stopDurableBlueprintWorker },
-    { name: 'chapter checkpoint maintenance', run: stopChapterCheckpointMaintenance },
-    { name: 'inline email outbox worker', run: stopEmailOutboxWorker },
-  ],
-  closeResources: [
+  ...shutdownStepsFor(processRolePlan, {
+    workers: [
+      { name: 'lesson-author workspace worker', run: stopLessonAuthorWorkspaceWorker },
+      { name: 'durable Blueprint worker', run: stopDurableBlueprintWorker },
+      { name: 'chapter checkpoint maintenance', run: stopChapterCheckpointMaintenance },
+      { name: 'inline email outbox worker', run: stopEmailOutboxWorker },
+    ],
+    consumers: { name: 'RabbitMQ consumers', run: cancelConsumers },
     // LISTEN connections first: the pool cannot end while they are checked out.
-    { name: 'lesson-author LISTEN connections', run: () => Promise.all([workspaceCommitHub.stop(), sourceDocumentHub.stop()]) },
-    { name: 'report PDF renderer', run: shutdownReportPdfRenderer },
-    { name: 'RabbitMQ', run: closeRabbitMQ },
-    { name: 'Redis', run: closeRedis },
-    { name: 'database pool', run: () => pool.end() },
-  ],
+    listenConnections: {
+      name: 'LISTEN connections',
+      run: () => Promise.all([clusterBus.stop(), workspaceCommitHub.stop(), sourceDocumentHub.stop()]),
+    },
+    pdfRenderer: { name: 'report PDF renderer', run: shutdownReportPdfRenderer },
+    rabbitmq: { name: 'RabbitMQ', run: closeRabbitMQ },
+    redis: { name: 'Redis', run: closeRedis },
+    pool: { name: 'database pool', run: () => pool.end() },
+  }),
   exit: (code) => process.exit(code),
 });
 

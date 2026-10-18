@@ -15,6 +15,8 @@ import { sendError } from '../../utils/response.js';
 import { isUuid } from '../../utils/client-error.js';
 import * as ctrl from './course-authoring.controller.js';
 import * as publishGovernance from './course-publish-governance.controller.js';
+import { COURSE_ASSET_TEMP_DIR, cleanupStaleCourseAssetTempFiles } from './course-asset-temp.js';
+import { processRolePlan } from '../../config/process-role.js';
 
 const router = Router();
 
@@ -24,27 +26,12 @@ router.param('blockId', (req: Request, res: Response, next: NextFunction, value:
   if (!isUuid(value)) { sendError(res, 'Không tìm thấy nội dung khóa học này.', 404); return; }
   next();
 });
-const courseAssetTempDir = path.join(process.cwd(), 'tmp', 'course-assets');
+const courseAssetTempDir = COURSE_ASSET_TEMP_DIR;
 
-function cleanupStaleCourseAssetTempFiles(): void {
-  try {
-    fs.mkdirSync(courseAssetTempDir, { recursive: true });
-    const entries = fs.readdirSync(courseAssetTempDir, { withFileTypes: true });
-    let deleted = 0;
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      fs.unlinkSync(path.join(courseAssetTempDir, entry.name));
-      deleted += 1;
-    }
-    if (deleted > 0) {
-      console.log(`[CourseAssets] Removed ${deleted} stale temp upload file(s)`);
-    }
-  } catch (err) {
-    console.warn('[CourseAssets] Failed to cleanup stale temp upload files:', err);
-  }
-}
-
-cleanupStaleCourseAssetTempFiles();
+// A single 'all' process clears the temp dir at start, as before. With
+// several processes another API process may be receiving an upload: the
+// background process removes only old crash residue (index.ts).
+if (processRolePlan.role === 'all') cleanupStaleCourseAssetTempFiles();
 
 const upload = multer({
   storage: multer.diskStorage({

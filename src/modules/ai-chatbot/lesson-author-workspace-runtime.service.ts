@@ -451,7 +451,8 @@ async function tick(signal:AbortSignal){
 let ready=false,timer:ReturnType<typeof setTimeout>|null=null,stopping:AbortController|null=null,draining:Promise<void>|null=null;
 let starting:Promise<void>|null=null,stopInProgress:Promise<void>|null=null;
 function isLessonAuthorWorkspaceReady(){return ready;}
-async function startLessonAuthorWorkspaceWorker(){
+/** `loop: false` (an API process with LANDA_PROCESS_ROLE=api): accept workspaces; the background process runs them. */
+async function startLessonAuthorWorkspaceWorker(options:{loop?:boolean}={}){
   if(starting)return starting;
   if(!env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED||stopping||stopInProgress)return;
   const controller=new AbortController();stopping=controller;
@@ -466,6 +467,10 @@ async function startLessonAuthorWorkspaceWorker(){
       if(!env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED||!env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED||!isDurableBlueprintWorkerReady())
         reject('WORKSPACE_RUNTIME_NOT_READY');
       const signal=controller.signal;ready=true;
+      if(options.loop===false){
+        log({event:'workspace_admission_ready',correlation_id:null,worker_in_process:false,schema_status:schema.status});
+        return;
+      }
       const schedule=()=>{
         timer=null;if(signal.aborted)return;
         draining=tick(signal).catch(error=>log({event:'workspace_worker_poll_failed',correlation_id:null,
@@ -522,7 +527,7 @@ export function isLessonAuthorWorkspaceReady(){return production?.isLessonAuthor
 export async function createLessonAuthorWorkspace(...args:Parameters<ReturnType<typeof createWorkspaceRuntime>['createLessonAuthorWorkspace']>){
   return(await productionRuntime()).createLessonAuthorWorkspace(...args);
 }
-export async function startLessonAuthorWorkspaceWorker(){return(await productionRuntime()).startLessonAuthorWorkspaceWorker();}
+export async function startLessonAuthorWorkspaceWorker(options:{loop?:boolean}={}){return(await productionRuntime()).startLessonAuthorWorkspaceWorker(options);}
 export async function stopLessonAuthorWorkspaceWorker(){
   // Do not initialize production services just to stop an unstarted worker.
   const runtime=production??(loading?await loading:null);await runtime?.stopLessonAuthorWorkspaceWorker();
