@@ -24,7 +24,6 @@ interface TenantAiSettingsRow {
   tenant_id: string;
   active_engine: AiEngine;
   provider: AiProvider;
-  monthly_token_limit: string | null;
   token_timezone: string;
   chat_model: string;
   lesson_author_model: string;
@@ -53,14 +52,18 @@ export interface TenantAiAdminSettings extends TenantAiRuntimeSettings {
   tokenEmbeddingUsed: string;
   tokenTotalUsed: string;
   tokenReserved: string;
-  tokenRemaining: string | null;
+  /**
+   * Retired monthly token limit: always null (no token limit; AI limits are
+   * points). Kept in the answer so older dashboards keep working.
+   */
+  monthlyTokenLimit: null;
+  tokenRemaining: null;
   estimatedCostVnd: string;
   pendingEngine: AiEngine | null;
 }
 
 export interface UpdateTenantAiSettingsInput {
   activeEngine?: AiEngine;
-  monthlyTokenLimit?: string | null;
   googleAiStudioApiKey?: string | null;
   clearGoogleAiStudioApiKey?: boolean;
   chatModel?: string;
@@ -109,7 +112,6 @@ async function loadSettingsRow(tenantId: string, requireExisting = false): Promi
        s.tenant_id::text,
        s.active_engine,
        s.provider,
-       s.monthly_token_limit::text,
        s.token_timezone,
        s.chat_model,
        s.lesson_author_model,
@@ -224,7 +226,6 @@ export async function getTenantAiRuntimeSettings(tenantId: string, options: { re
     tenantId,
     activeEngine: row.active_engine,
     provider: row.provider,
-    monthlyTokenLimit: row.monthly_token_limit,
     tokenTimezone: row.token_timezone,
     chatModel: row.chat_model,
     lessonAuthorModel: row.lesson_author_model,
@@ -269,10 +270,6 @@ export async function getTenantAiAdminSettings(tenantId: string): Promise<Tenant
         [runtime.activeTransitionJobId, tenantId],
       )
     : null;
-  const used = BigInt(row.total_tokens);
-  const reserved = BigInt(row.reserved_tokens);
-  const limit = runtime.monthlyTokenLimit === null ? null : BigInt(runtime.monthlyTokenLimit);
-  const remaining = limit === null ? null : String(limit - used - reserved > 0n ? limit - used - reserved : 0n);
   return {
     ...runtime,
     tokenPeriodStart: row.period_start.slice(0, 10),
@@ -281,7 +278,8 @@ export async function getTenantAiAdminSettings(tenantId: string): Promise<Tenant
     tokenEmbeddingUsed: row.embedding_tokens,
     tokenTotalUsed: row.total_tokens,
     tokenReserved: row.reserved_tokens,
-    tokenRemaining: remaining,
+    monthlyTokenLimit: null,
+    tokenRemaining: null,
     estimatedCostVnd: row.estimated_cost_vnd,
     pendingEngine: transition?.rows[0]?.to_engine ?? null,
   };
@@ -334,14 +332,6 @@ export async function updateTenantAiSettings(
   if (input.embeddingDimensions !== undefined && input.embeddingDimensions !== 768) {
     throw new AppError('Số chiều embedding hiện chỉ hỗ trợ 768', 400, 'AI_EMBEDDING_DIMENSION_INVALID');
   }
-  const normalizedLimit = input.monthlyTokenLimit === undefined
-    ? undefined
-    : input.monthlyTokenLimit === null || input.monthlyTokenLimit.trim() === ''
-      ? null
-      : input.monthlyTokenLimit.trim();
-  if (normalizedLimit !== undefined && normalizedLimit !== null && !/^\d+$/.test(normalizedLimit)) {
-    throw new AppError('Hạn mức token phải là số nguyên không âm', 400, 'AI_TOKEN_LIMIT_INVALID');
-  }
 
   await withDatabaseTransaction(async () => {
     await ensureSettingsRow(tenantId);
@@ -389,7 +379,6 @@ export async function updateTenantAiSettings(
       params.push(value);
     };
 
-    if (normalizedLimit !== undefined) addSet('monthly_token_limit = ?::bigint', normalizedLimit);
     if (input.chatModel !== undefined && input.chatModel.trim()) addSet('chat_model = ?', input.chatModel.trim());
     if (input.lessonAuthorModel !== undefined && input.lessonAuthorModel.trim()) addSet('lesson_author_model = ?', input.lessonAuthorModel.trim());
     if (input.embeddingModel !== undefined && input.embeddingModel.trim()) addSet('embedding_model = ?', normalizeEmbeddingModel(input.embeddingModel));

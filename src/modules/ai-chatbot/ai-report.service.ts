@@ -134,10 +134,6 @@ export async function getTenantAiOverview(tenantId: string) {
     reserved_tokens: '0',
     estimated_cost_vnd: '0',
   };
-  const limit = runtime.monthlyTokenLimit === null ? null : BigInt(runtime.monthlyTokenLimit);
-  const used = BigInt(usage.total_tokens);
-  const reserved = BigInt(usage.reserved_tokens);
-  const remaining = limit === null ? null : String(limit > used + reserved ? limit - used - reserved : 0n);
   const unpricedEvents = breakdownResult.rows.reduce(
     (sum, row) => sum + Number(row.unpriced_event_count ?? 0),
     0,
@@ -147,13 +143,14 @@ export async function getTenantAiOverview(tenantId: string) {
     periodStart: usage.period_start.slice(0, 10),
     tokenTimezone: runtime.tokenTimezone,
     quota: {
-      monthlyLimit: runtime.monthlyTokenLimit,
+      // The monthly token limit is retired (AI limits are points): no limit, nothing "remaining".
+      monthlyLimit: null,
       inputUsed: usage.input_tokens,
       outputUsed: usage.output_tokens,
       embeddingUsed: usage.embedding_tokens,
       totalUsed: usage.total_tokens,
       reserved: usage.reserved_tokens,
-      remaining,
+      remaining: null,
     },
     cost: {
       currency: 'VND' as const,

@@ -54,9 +54,9 @@ test('a failed call releases its reservation and rethrows', async () => {
   assert.deepEqual(calls.map(c => c.kind), ['reserve', 'release']);
 });
 
-test('a reached limit stops the call before the provider is asked', async () => {
+test('used-up AI points stop the call before the provider is asked', async () => {
   let ran = false;
-  const { deps } = harness({ reserve: (async () => { throw Object.assign(new Error('limit'), { code: 'AI_TOKEN_LIMIT_REACHED' }); }) as any });
+  const { deps } = harness({ reserve: (async () => { throw Object.assign(new Error('limit'), { code: 'AI_CREDIT_LIMIT_REACHED' }); }) as any });
   await assert.rejects(withMeteredAiCall(call, async () => { ran = true; return { value: 1, usage: null }; }, deps), /limit/);
   assert.equal(ran, false);
 });

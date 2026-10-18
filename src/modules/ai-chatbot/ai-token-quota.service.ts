@@ -14,7 +14,6 @@ import { calculateAiUsageCost, estimateMaxAiCallCostUsd } from './ai-pricing.ser
 import { aiLedgerFeature } from './ai-usage.logic.js';
 import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from './ai-settings.service.js';
 
-export const AI_TOKEN_LIMIT_REACHED_CODE = 'AI_TOKEN_LIMIT_REACHED';
 /** The tenant's AI points of the month are spent (new work is blocked; running AI ID runs finish). */
 export const AI_CREDIT_LIMIT_REACHED_CODE = 'AI_CREDIT_LIMIT_REACHED';
 
@@ -75,7 +74,9 @@ export interface AiTokenReservationGrant {
   reservedTokens: number;
   minimumTokens: number;
   maximumTokens: number;
-  remainingTokens: string | null;
+  /** Always null: tokens are counted, never limited (AI limits are points). Kept for existing callers. */
+  remainingTokens: null;
+  /** The points left fit only the minimum (a shorter answer). */
   isPartialGrant: boolean;
 }
 
@@ -91,8 +92,8 @@ function toSafeNonNegativeInteger(value: number | null | undefined): number {
 
 /**
  * This remains deliberately conservative. Provider-side usage metadata is the
- * source of truth at finalization, while this budget prevents concurrent calls
- * from consuming the tenant's remaining monthly quota first.
+ * source of truth at finalization, while this budget sizes what a call holds
+ * against the tenant's AI points before it is made.
  */
 export function estimateTokensFromText(...parts: Array<string | null | undefined>): number {
   const chars = parts.reduce((total, part) => total + (part?.length ?? 0), 0);
@@ -115,14 +116,6 @@ export function normalizeAiUsage(input: Partial<AiUsage> | null | undefined): Ai
     totalTokens,
     ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}),
   };
-}
-
-function tokenLimitError(): AppError {
-  return new AppError(
-    'Hạn mức dùng AI đã chạm ngưỡng, vui lòng liên hệ quản trị viên.',
-    429,
-    AI_TOKEN_LIMIT_REACHED_CODE,
-  );
 }
 
 function creditLimitError(): AppError {
@@ -214,8 +207,12 @@ export function startAiTokenReservationSweeper(intervalMs = RESERVATION_SWEEP_IN
 }
 
 /**
- * Atomically grants up to maximumTokens but never below minimumTokens. This is
- * what enables a concise answer when a tenant has a small usable balance left.
+ * Atomically grants up to maximumTokens but never below minimumTokens. Only
+ * the tenant's AI points can refuse or shorten a call: when the points left fit
+ * the minimum but not the maximum, a concise answer is granted. Tokens are
+ * still counted (monthly usage, reserved tokens, ledger) for reconciliation;
+ * the old monthly token limit (tenant_ai_settings.monthly_token_limit) is retired
+ * and never read here.
  */
 export async function reserveTenantAiTokens(input: ReservationInput): Promise<AiTokenReservationGrant> {
   const { minimumTokens, maximumTokens } = reservationBounds(input);
@@ -244,32 +241,18 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
        ON CONFLICT (tenant_id, period_start) DO NOTHING`,
       [input.tenantId, periodStart],
     );
-    // Lock order: monthly token row (M), then the credit row (C).
-    const usage = await query<{
-      total_tokens: string;
-      reserved_tokens: string;
-      monthly_token_limit: string | null;
-    }>(
-      `SELECT usage.total_tokens::text, usage.reserved_tokens::text, settings.monthly_token_limit::text
+    // Lock order: monthly token row (M), then the credit row (C). The row is
+    // locked first (finalize and release take the same order), not read for a limit.
+    const usage = await query<{ period_start: string }>(
+      `SELECT usage.period_start::text
        FROM ai_token_monthly_usage usage
-       JOIN tenant_ai_settings settings ON settings.tenant_id = usage.tenant_id
        WHERE usage.tenant_id = $1 AND usage.period_start = $2::date
        FOR UPDATE OF usage`,
       [input.tenantId, periodStart],
     );
-    const row = usage.rows[0];
-    if (!row) throw new AppError('Không tìm thấy thống kê token AI', 404, 'AI_TOKEN_USAGE_NOT_FOUND');
+    if (!usage.rows[0]) throw new AppError('Không tìm thấy thống kê token AI', 404, 'AI_TOKEN_USAGE_NOT_FOUND');
 
     let grantedTokens = maximumTokens;
-    let availableTokens: bigint | null = null;
-    if (row.monthly_token_limit !== null) {
-      const limit = BigInt(row.monthly_token_limit);
-      const consumed = BigInt(row.total_tokens) + BigInt(row.reserved_tokens);
-      availableTokens = limit > consumed ? limit - consumed : 0n;
-      if (availableTokens < BigInt(minimumTokens)) throw tokenLimitError();
-      const maximum = BigInt(maximumTokens);
-      grantedTokens = Number(availableTokens < maximum ? availableTokens : maximum);
-    }
 
     // AI points: hold the most this grant can cost; when the full grant does
     // not fit, try the minimum (a shorter answer) before refusing.
@@ -290,7 +273,6 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
       if (reservedUsd !== null) grantedTokens = minimumTokens;
     }
     if (reservedUsd === null) throw creditLimitError();
-    const remainingTokens = availableTokens === null ? null : String(availableTokens - BigInt(grantedTokens));
 
     const requestedOutputBudget = toSafeNonNegativeInteger(budget.outputTokens);
     const grantedOutputBudget = Math.max(0, Math.min(
@@ -344,7 +326,7 @@ export async function reserveTenantAiTokens(input: ReservationInput): Promise<Ai
       reservedTokens: grantedTokens,
       minimumTokens,
       maximumTokens,
-      remainingTokens,
+      remainingTokens: null,
       isPartialGrant: grantedTokens < maximumTokens,
     };
   });

@@ -9,7 +9,7 @@ test('workspace existing-only runtime settings perform SELECT only; legacy initi
     calls.push(sql);
     if(sql.trimStart().startsWith('INSERT'))return{rows:[],rowCount:0};
     assert.match(sql,/FROM tenant_ai_settings s/);
-    return{rows:missing?[]:[{tenant_id:'fixture',active_engine:'self_built_rag',provider:'google',monthly_token_limit:null,
+    return{rows:missing?[]:[{tenant_id:'fixture',active_engine:'self_built_rag',provider:'google',
       token_timezone:'Asia/Ho_Chi_Minh',chat_model:'fixture-chat',lesson_author_model:'fixture-lesson',
       embedding_model:'gemini-embedding-001',embedding_dimensions:768,transition_state:'idle',active_transition_job_id:null,
       encrypted_api_key:'opaque-fixture-not-decrypted',api_key_fingerprint:'fixture-fingerprint'}]};

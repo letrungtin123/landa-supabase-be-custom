@@ -54,6 +54,7 @@ export const updateTenantCourseComponentPermissionsSchema = z.object({
 
 export const updateTenantAiSettingsSchema = z.object({
   active_engine: z.enum(['gemini_file_search', 'self_built_rag']).optional(),
+  /** Retired (AI limits are points): still accepted from older dashboards, then ignored. */
   monthly_token_limit: z.string()
     .regex(/^\d+$/, 'Hạn mức token phải là số nguyên không âm')
     .nullable()
