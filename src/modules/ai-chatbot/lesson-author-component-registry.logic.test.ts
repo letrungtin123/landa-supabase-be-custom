@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { aiRagPythonSkip } from '../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -60,7 +61,7 @@ test('capability diagnostics exclude arbitrary content and gap message never cla
   assert.equal(assessmentGapMessage('UNRECOGNIZED', 'vi'), undefined);
 });
 
-test('Python compiler/allocation → Node plan → staged Python generation → Node acceptance preserves two assessment instances', { timeout: 30_000 }, async (t) => {
+test('Python compiler/allocation → Node plan → staged Python generation → Node acceptance preserves two assessment instances', { timeout: 30_000, skip: aiRagPythonSkip }, async (t) => {
   // Real pure serializers live in the service module. Block external boundaries
   // BEFORE importing it; a regression must never touch the configured database.
   t.mock.method(pg.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
@@ -235,7 +236,7 @@ test('Python compiler/allocation → Node plan → staged Python generation → 
   assert.match(validateLessonAuthorGeneratedUnitCoverage(unit, swapped)!, /instance/);
 });
 
-test('real Python Blueprint endpoint depth repair → Node acceptance → chapter drafting → proposal validation', { timeout: 30_000 }, async (t) => {
+test('real Python Blueprint endpoint depth repair → Node acceptance → chapter drafting → proposal validation', { timeout: 30_000, skip: aiRagPythonSkip }, async (t) => {
   t.mock.method(pg.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(globalThis, 'fetch', () => { throw new Error('TEST_HTTP_ACCESS_FORBIDDEN'); });
@@ -551,7 +552,7 @@ function htmlComponent(data = '<p>Nội dung hợp lệ.</p>'): LessonAuthorComp
   return { type: 'html', title: 'HTML', data };
 }
 
-test('ordered semantic HTML retains heading/table/list adjacency with Python acceptance parity', () => {
+test('ordered semantic HTML retains heading/table/list adjacency with Python acceptance parity', { skip: aiRagPythonSkip }, () => {
   const ordered = { version: 2, sections: [
     { heading: 'Framework A', learning_block_ids: ['a'], blocks: [
       { kind: 'paragraph', text: 'Explanation A' },

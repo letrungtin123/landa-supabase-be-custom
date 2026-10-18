@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { aiRagPythonSkip } from '../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -127,7 +128,7 @@ test('V5 source chapter policy preserves identity and rejects cross-document/pri
   assert.throws(() => normalizeSourceChapterPolicy({ ...candidate.source_chapter_policy, chapters: [...bindings, ...bindings] }), /SOURCE_CHAPTER_POLICY_INVALID/);
 });
 
-test('V5 Python/Node action coherence is scoped to assigned unit objectives in EN and VI', () => {
+test('V5 Python/Node action coherence is scoped to assigned unit objectives in EN and VI', { skip: aiRagPythonSkip }, () => {
   for (const locale of ['en', 'vi'] as const) {
     const { candidate, map, lesson } = mixedObjectiveFixture(locale);
     assert.deepEqual(pythonCoherenceCodes(candidate), []);
@@ -139,7 +140,7 @@ test('V5 Python/Node action coherence is scoped to assigned unit objectives in E
   }
 });
 
-test('V5 every assessment objective requires its own compatible prior primary teaching', () => {
+test('V5 every assessment objective requires its own compatible prior primary teaching', { skip: aiRagPythonSkip }, () => {
   const { candidate, map, lesson } = mixedObjectiveFixture();
   lesson.assessment_required = true;
   lesson.assessment_objective_refs = ['lo_1', 'lo_2'];

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { aiRagPythonSkip } from '../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -79,7 +80,7 @@ test('unit contract is deterministic, bounded and uses provider-compatible stabl
   assert.equal(contractHash, orchestrationV2Hash(base));
 });
 
-test('CP3B sends table and visual relations through the real Python writer adapter without ownership drift', () => {
+test('CP3B sends table and visual relations through the real Python writer adapter without ownership drift', { skip: aiRagPythonSkip }, () => {
   const { assembly, sourceFacts } = fixture();
   const sourceRevision = hash('cp3b-source-revision');
   const assetRevision = hash('cp3b-visual-asset');
@@ -366,7 +367,7 @@ test('chunk table metadata alone does not require an unreconstructable HTML tabl
   assert.deepEqual(contract.component_plan[0]!.required_artifacts, []);
 });
 
-test('Python deterministic fallback for every component type passes the production Node normalizer', async t => {
+test('Python deterministic fallback for every component type passes the production Node normalizer', { skip: aiRagPythonSkip }, async t => {
   const pg = await import('pg');
   t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
@@ -438,7 +439,7 @@ test('Python deterministic fallback for every component type passes the producti
   }
 });
 
-test('density-v3 Python fallback preserves supporting-only interaction evidence through Node acceptance', async t => {
+test('density-v3 Python fallback preserves supporting-only interaction evidence through Node acceptance', { skip: aiRagPythonSkip }, async t => {
   const pg = await import('pg');
   t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
@@ -496,7 +497,7 @@ test('density-v3 Python fallback preserves supporting-only interaction evidence 
   assert.equal(publication.quality_state, 'review_required');
 });
 
-test('CP2A frozen reviewer candidates survive Python schema/binding and the production Node adapter', async t => {
+test('CP2A frozen reviewer candidates survive Python schema/binding and the production Node adapter', { skip: aiRagPythonSkip }, async t => {
   const pg = await import('pg');
   t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });

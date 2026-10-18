@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { aiRagPythonSkip } from '../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -12,7 +13,7 @@ import { assertLessonAuthorProposalComponentsValid } from './lesson-author-compo
 import { assertLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
 import { COURSE_COMPONENT_TYPES } from '../tenants/tenant-course-components.constants.js';
 
-test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node acceptance', async t => {
+test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node acceptance', { skip: aiRagPythonSkip }, async t => {
   const pg = await import('pg');
   t.mock.method(pg.default.Pool.prototype, 'query', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
   t.mock.method(pg.default.Pool.prototype, 'connect', () => { throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN'); });
@@ -47,7 +48,7 @@ test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node a
   assert.deepEqual(diagram.covered_source_fact_ids, diagram.source_fact_ids);
 });
 
-test('offline Node→Python unit contract→timeout→explicit resume→Python whole validation→Node acceptance→mock publication',async t=>{
+test('offline Node→Python unit contract→timeout→explicit resume→Python whole validation→Node acceptance→mock publication',{ skip: aiRagPythonSkip },async t=>{
   const pg=await import('pg');
   t.mock.method(pg.default.Pool.prototype,'query',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});
   t.mock.method(pg.default.Pool.prototype,'connect',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});
@@ -137,7 +138,7 @@ test('wiring retains legacy paths, four-step UI, safe metadata and explicit roll
 });
 
 for (const action of ['instance_repair', 'coverage_repair', 'duplicate_claim_repair', 'null_claim_repair'] as const)
-test(`offline ${action}→scoped repair→Python full validation→Node acceptance`,async t=>{
+test(`offline ${action}→scoped repair→Python full validation→Node acceptance`,{ skip: aiRagPythonSkip },async t=>{
   const pg=await import('pg');
   t.mock.method(pg.default.Pool.prototype,'query',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});
   t.mock.method(pg.default.Pool.prototype,'connect',()=>{throw new Error('TEST_DATABASE_ACCESS_FORBIDDEN');});

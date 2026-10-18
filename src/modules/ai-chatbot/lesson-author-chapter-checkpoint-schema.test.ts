@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 
 // Read-only migration-file regression tests. These do not execute PostgreSQL,
 // validate PL/pgSQL semantics, or replace manual staging acceptance.
-const file = new URL('../../../../supabase/manual_sql/20260926_0237_lesson_author_chapter_checkpoints.sql', import.meta.url);
-const sql = readFileSync(file, 'utf8');
+const sql = readManualSql('20260926_0237_lesson_author_chapter_checkpoints.sql');
 const executable = sql.split(/\r?\n/).filter(line => !line.trimStart().startsWith('--')).join('\n');
 
-test('startup guard fingerprints match the approved SQL, without executing SQL or importing runtime', () => {
+test('startup guard fingerprints match the approved SQL, without executing SQL or importing runtime', { skip: manualSqlSkip }, () => {
   const runtime = readFileSync(new URL('./lesson-author-chapter-runtime.service.ts', import.meta.url), 'utf8');
   for (const name of ['guard_lesson_author_chapter_draft', 'guard_lesson_author_chapter_attempt',
     'guard_lesson_author_chapter_unit', 'assert_lesson_author_chapter_publication']) {
@@ -30,7 +30,7 @@ function functionBody(name: string): string {
   return executable.slice(start, end);
 }
 
-test('manual chapter SQL is additive, transactional, and does not alter course/Apply/Blueprint jobs', () => {
+test('manual chapter SQL is additive, transactional, and does not alter course/Apply/Blueprint jobs', { skip: manualSqlSkip }, () => {
   assert.match(executable.trim(), /^BEGIN;/);
   assert.match(executable.trim(), /COMMIT;$/);
   assert.equal((executable.match(/CREATE TABLE public\./g) ?? []).length, 3);
@@ -40,7 +40,7 @@ test('manual chapter SQL is additive, transactional, and does not alter course/A
   assert.match(sql, /Direct execution by Codex: Forbidden/);
 });
 
-test('all checkpoint relations have tenant composite ownership, RLS, quota and deletion registration', () => {
+test('all checkpoint relations have tenant composite ownership, RLS, quota and deletion registration', { skip: manualSqlSkip }, () => {
   for (const name of ['lesson_author_chapter_drafts', 'lesson_author_chapter_attempts', 'lesson_author_chapter_units']) {
     assert.match(executable, new RegExp(`CREATE TABLE public\.${name} \\(`));
     assert.ok(executable.includes(`'${name}'`));
@@ -55,7 +55,7 @@ test('all checkpoint relations have tenant composite ownership, RLS, quota and d
   assert.match(executable, /SELECT public\.tenant_data_quota_assert_coverage\(\);\s*COMMIT;/);
 });
 
-test('draft identities are immutable and bind exact source/Blueprint/unit inventory', () => {
+test('draft identities are immutable and bind exact source/Blueprint/unit inventory', { skip: manualSqlSkip }, () => {
   const body = functionBody('guard_lesson_author_chapter_draft');
   for (const field of ['blueprint_hash', 'source_snapshot_hash', 'course_outline_hash', 'runtime_config_hash', 'unit_contracts', 'locale', 'model', 'requested_by']) {
     assert.ok(body.includes(`NEW.${field}`) && body.includes(`OLD.${field}`));
@@ -66,7 +66,7 @@ test('draft identities are immutable and bind exact source/Blueprint/unit invent
   assert.match(body, /Duplicate chapter unit address/);
 });
 
-test('resuming is a new explicit attempt, not redispatch of an ended paid call', () => {
+test('resuming is a new explicit attempt, not redispatch of an ended paid call', { skip: manualSqlSkip }, () => {
   const body = functionBody('guard_lesson_author_chapter_attempt');
   assert.match(body, /previous\.status NOT IN \('timed_out', 'outcome_unknown'\)/);
   assert.match(body, /NEW\.previous_attempt_id IS DISTINCT FROM previous\.id/);
@@ -78,7 +78,7 @@ test('resuming is a new explicit attempt, not redispatch of an ended paid call',
   assert.match(body, /Cannot dispatch an invalid or completed unit/);
 });
 
-test('unknown usage remains held and reservations are bound to exact new attempt', () => {
+test('unknown usage remains held and reservations are bound to exact new attempt', { skip: manualSqlSkip }, () => {
   assert.match(executable, /la_chapter_unknown_usage_hold CHECK \([\s\S]*?accounting_state = 'pending_reconciliation'/);
   const body = functionBody('guard_lesson_author_chapter_attempt');
   assert.ok(body.includes("r.budget_metadata->>'durable_generation' = 'true'"));
@@ -88,7 +88,7 @@ test('unknown usage remains held and reservations are bound to exact new attempt
   assert.match(executable, /ai_reservation_id UUID NOT NULL UNIQUE/);
 });
 
-test('late responses, changed contracts and checkpoint replacement remain fenced', () => {
+test('late responses, changed contracts and checkpoint replacement remain fenced', { skip: manualSqlSkip }, () => {
   const body = functionBody('guard_lesson_author_chapter_unit');
   for (const condition of [
     "attempt.status <> 'running'", 'attempt.lease_token <> NEW.lease_token',
@@ -103,7 +103,7 @@ test('late responses, changed contracts and checkpoint replacement remain fenced
   assert.match(executable, /octet_length\(payload::text\) <= 2097152/);
 });
 
-test('only full chapter publication can reference a proposed review job', () => {
+test('only full chapter publication can reference a proposed review job', { skip: manualSqlSkip }, () => {
   const body = functionBody('guard_lesson_author_chapter_draft');
   assert.match(body, /count\(\*\)[\s\S]*?<> NEW\.total_units/);
   assert.match(body, /j\.status = 'proposed'/);
@@ -112,7 +112,7 @@ test('only full chapter publication can reference a proposed review job', () => 
   assert.match(functionBody('assert_lesson_author_chapter_publication'), /Chapter publication must commit with completed attempt/);
 });
 
-test('rollback cannot be run accidentally with install and refuses nonempty history', () => {
+test('rollback cannot be run accidentally with install and refuses nonempty history', { skip: manualSqlSkip }, () => {
   assert.match(sql, /-- ROLLBACK IS COMMENTS ONLY/);
   const rollback = sql.slice(sql.indexOf('-- ROLLBACK IS COMMENTS ONLY'));
   assert.ok(rollback.split(/\r?\n/).every(line => !line.trim() || line.startsWith('--')));

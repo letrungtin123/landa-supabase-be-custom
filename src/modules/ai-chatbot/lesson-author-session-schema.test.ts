@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 
-const sql = readFileSync(new URL('../../../../supabase/manual_sql/20261002_2345_lesson_author_session_deletion_jobs.sql', import.meta.url), 'utf8');
+const sql = readManualSql('20261002_2345_lesson_author_session_deletion_jobs.sql');
 const service = readFileSync(new URL('./lesson-author-session.service.ts', import.meta.url), 'utf8');
 const routes = readFileSync(new URL('./ai-chatbot.routes.ts', import.meta.url), 'utf8');
 const chatService = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
@@ -10,7 +11,7 @@ const controller = readFileSync(new URL('./lesson-author-session.controller.ts',
 const worker = readFileSync(new URL('./lesson-author-session-deletion.worker.ts', import.meta.url), 'utf8');
 const executable = sql.split(/\r?\n/).filter(line => !line.trimStart().startsWith('--')).join('\n');
 
-test('session deletion schema is additive, private and keeps terminal jobs after conversation purge', () => {
+test('session deletion schema is additive, private and keeps terminal jobs after conversation purge', { skip: manualSqlSkip }, () => {
   assert.match(sql, /MANUAL INSTALLATION PENDING/);
   assert.match(sql, /Direct execution by Codex: Forbidden/);
   assert.match(executable.trim(), /^BEGIN;/);

@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 import {
   COURSE_PUBLISH_GOVERNANCE_FUNCTIONS,
   COURSE_PUBLISH_GOVERNANCE_TABLES,
   coursePublishFunctionBodyHash,
 } from './course-publish-governance-schema.repository.js';
 
-const sql = readFileSync(new URL('../../../../supabase/manual_sql/20261006_0900_course_publish_governance_cp5.sql',
-  import.meta.url), 'utf8');
+const sql = readManualSql('20261006_0900_course_publish_governance_cp5.sql');
 const applyRepository = readFileSync(new URL('../ai-chatbot/lesson-author-workspace-apply.repository.ts',
   import.meta.url), 'utf8');
 
@@ -20,7 +20,7 @@ function functionBody(name: string): string {
   return match[2]!;
 }
 
-test('manual SQL is additive/private and keeps legacy Apply row fingerprints stable', () => {
+test('manual SQL is additive/private and keeps legacy Apply row fingerprints stable', { skip: manualSqlSkip }, () => {
   for (const table of COURSE_PUBLISH_GOVERNANCE_TABLES) {
     assert.match(sql, new RegExp(`CREATE TABLE public\\.${table.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}`));
   }
@@ -31,14 +31,14 @@ test('manual SQL is additive/private and keeps legacy Apply row fingerprints sta
   assert.match(sql, /Backfill only after quota\/deletion triggers are active/);
 });
 
-test('reviewed database guard bodies are pinned exactly', () => {
+test('reviewed database guard bodies are pinned exactly', { skip: manualSqlSkip }, () => {
   for (const [signature, expected] of Object.entries(COURSE_PUBLISH_GOVERNANCE_FUNCTIONS)) {
     const name = signature.slice(0, signature.indexOf('('));
     assert.equal(coursePublishFunctionBodyHash(functionBody(name)), expected, signature);
   }
 });
 
-test('publish and every structural mutation share one per-course transaction lock', () => {
+test('publish and every structural mutation share one per-course transaction lock', { skip: manualSqlSkip }, () => {
   const fence = functionBody('fence_course_publish_mutation');
   const evidenceFence = functionBody('fence_course_publish_evidence_mutation');
   const begin = functionBody('begin_course_publish_candidate');
@@ -50,7 +50,7 @@ test('publish and every structural mutation share one per-course transaction loc
   assert.equal((sql.match(/CREATE TRIGGER trg_course_publish_evidence_mutation_fence/g) ?? []).length, 5);
 });
 
-test('high-risk publish has no approval, stale receipt, critical finding or assessment bypass', () => {
+test('high-risk publish has no approval, stale receipt, critical finding or assessment bypass', { skip: manualSqlSkip }, () => {
   const begin = functionBody('begin_course_publish_candidate');
   for (const code of ['COURSE_PUBLISH_APPROVAL_REQUIRED', 'COURSE_PUBLISH_QUALITY_RECEIPT_STALE',
     'COURSE_PUBLISH_ASSESSMENT_REVIEW_REQUIRED', 'COURSE_PUBLISH_CRITICAL_FINDINGS_UNRESOLVED']) {
@@ -68,21 +68,21 @@ test('high-risk publish has no approval, stale receipt, critical finding or asse
   assert.match(sql, /OLD\.policy='high_risk_hse' AND NEW\.policy<>'high_risk_hse'/);
 });
 
-test('publication requires a deferred receipt and snapshot recheck at commit', () => {
+test('publication requires a deferred receipt and snapshot recheck at commit', { skip: manualSqlSkip }, () => {
   assert.match(sql, /trg_course_publish_commit_atomic[\s\S]*DEFERRABLE INITIALLY DEFERRED/);
   const commit = functionBody('assert_course_publish_commit');
   assert.match(commit, /course_publish_receipts/);
   assert.match(commit, /course_publish_candidate_snapshot_matches\(candidate_id\)/);
 });
 
-test('every private table is deletion-fenced and quota-accounted with transition tables', () => {
+test('every private table is deletion-fenced and quota-accounted with transition tables', { skip: manualSqlSkip }, () => {
   assert.match(sql, /trg_deletion_fence_course_write BEFORE INSERT OR UPDATE/);
   assert.match(sql, /tenant_data_quota_direct_insert AFTER INSERT[\s\S]*REFERENCING NEW TABLE AS new_rows/);
   assert.match(sql, /tenant_data_quota_direct_update AFTER UPDATE[\s\S]*REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows/);
   assert.match(sql, /tenant_data_quota_direct_delete AFTER DELETE[\s\S]*REFERENCING OLD TABLE AS old_rows/);
 });
 
-test('immutable evidence permits only owner-driven course and candidate cascades', () => {
+test('immutable evidence permits only owner-driven course and candidate cascades', { skip: manualSqlSkip }, () => {
   assert.match(functionBody('guard_course_publish_policy'),
     /NOT EXISTS\(SELECT 1 FROM public\.courses WHERE id=OLD\.course_id\) THEN RETURN OLD/);
   assert.match(functionBody('guard_course_publish_candidate'),
@@ -94,7 +94,7 @@ test('immutable evidence permits only owner-driven course and candidate cascades
   }
 });
 
-test('revision ledgers are private and row identity cannot move across courses or tenants', () => {
+test('revision ledgers are private and row identity cannot move across courses or tenants', { skip: manualSqlSkip }, () => {
   const ledger = functionBody('guard_course_publish_revision_ledger');
   const fence = functionBody('fence_course_publish_mutation');
   assert.match(ledger, /course_publish_revision_write/);
@@ -104,7 +104,7 @@ test('revision ledgers are private and row identity cannot move across courses o
   assert.match(sql, /SELECT set_config\('app\.course_publish_revision_write','1',true\);[\s\S]*INSERT INTO public\.course_publish_block_revisions/);
 });
 
-test('high-risk semantic and assessment gates are scoped to exact candidate units', () => {
+test('high-risk semantic and assessment gates are scoped to exact candidate units', { skip: manualSqlSkip }, () => {
   const begin = functionBody('begin_course_publish_candidate');
   assert.match(begin, /mapping\.target_block_id=snapshot\.block_id/);
   assert.match(begin, /obligation\.unit_path=CASE WHEN node\.kind='component'/);
@@ -112,7 +112,7 @@ test('high-risk semantic and assessment gates are scoped to exact candidate unit
   assert.match(begin, /ORDER BY artifact\.created_at DESC,artifact\.id DESC LIMIT 1/);
 });
 
-test('re-Apply advances mapping freshness while publish-only fields do not invalidate quality evidence', () => {
+test('re-Apply advances mapping freshness while publish-only fields do not invalidate quality evidence', { skip: manualSqlSkip }, () => {
   assert.match(applyRepository, /receipt_id=EXCLUDED\.receipt_id,updated_at=clock_timestamp\(\)/);
   const begin = functionBody('begin_course_publish_candidate');
   assert.match(begin, /current_revision\.updated_at<=mapping\.updated_at/);
@@ -126,7 +126,7 @@ test('re-Apply advances mapping freshness while publish-only fields do not inval
     /authoring_revision=authoring_revision\+1/);
 });
 
-test('revision backfill preserves the course deletion fence and excludes deletion-owned courses', () => {
+test('revision backfill preserves the course deletion fence and excludes deletion-owned courses', { skip: manualSqlSkip }, () => {
   assert.match(sql,
     /INSERT INTO public\.course_publish_block_revisions\(block_id,tenant_id,course_id\)[\s\S]*?JOIN public\.courses course ON course\.id=block\.course_id[\s\S]*?WHERE course\.deleted_at IS NULL;/);
   assert.match(sql,

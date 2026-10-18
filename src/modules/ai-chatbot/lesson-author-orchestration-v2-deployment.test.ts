@@ -2,13 +2,11 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 
 const require = createRequire(import.meta.url);
 const dedicatedPath = new URL('../../../ecosystem.lesson-author-orchestration-v2.config.cjs', import.meta.url);
 const mainPath = new URL('../../../ecosystem.config.cjs', import.meta.url);
-const applyReceiptPatchPath = new URL('../../../../supabase/manual_sql/20261002_1915_lesson_author_v2_apply_receipt_runtime_binding.sql', import.meta.url);
-const applyReceiptAliasHotfixPath = new URL('../../../../supabase/manual_sql/20261002_2015_lesson_author_apply_receipt_alias_hotfix.sql', import.meta.url);
-const applyMappingEnumHotfixPath = new URL('../../../../supabase/manual_sql/20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql', import.meta.url);
 
 test('V2 PM2 roles are isolated, explicit opt-in and readiness fenced', () => {
   const dedicated = require(dedicatedPath.pathname.replace(/^\/(.:)/, '$1')) as { apps: any[] };
@@ -52,8 +50,8 @@ test('worker signals readiness only after schema, Rabbit and role setup', () => 
   assert.match(source, /runtime_stopped/);
 });
 
-test('V2 Apply receipt guard patch preserves lane identity and sealed source authority', () => {
-  const sql = readFileSync(applyReceiptPatchPath.pathname.replace(/^\/(.:)/, '$1'), 'utf8');
+test('V2 Apply receipt guard patch preserves lane identity and sealed source authority', { skip: manualSqlSkip }, () => {
+  const sql = readManualSql('20261002_1915_lesson_author_v2_apply_receipt_runtime_binding.sql');
   assert.match(sql, /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_apply_receipt\(\)/);
   assert.match(sql, /IF w\.blueprint_id IS NOT NULL THEN/);
   assert.match(sql, /FROM public\.lesson_author_workspace_runs r/);
@@ -69,8 +67,8 @@ test('V2 Apply receipt guard patch preserves lane identity and sealed source aut
     'patch must only replace the guard function; it must not rewrite persisted rows or schema');
 });
 
-test('Apply receipt alias hotfix removes every PL/pgSQL row-variable/table-alias collision', () => {
-  const sql = readFileSync(applyReceiptAliasHotfixPath.pathname.replace(/^\/(.:)/, '$1'), 'utf8');
+test('Apply receipt alias hotfix removes every PL/pgSQL row-variable/table-alias collision', { skip: manualSqlSkip }, () => {
+  const sql = readManualSql('20261002_2015_lesson_author_apply_receipt_alias_hotfix.sql');
   assert.match(sql, /mapped_node public\.lesson_author_workspace_nodes%ROWTYPE/);
   assert.match(sql, /lesson_author_workspace_nodes node_row/);
   assert.match(sql, /lesson_author_workspace_revisions revision_row/);
@@ -81,8 +79,8 @@ test('Apply receipt alias hotfix removes every PL/pgSQL row-variable/table-alias
     'hotfix may replace the trigger function but must not rewrite persisted rows or schema');
 });
 
-test('Apply mapping hotfix compares the block_type enum through its reviewed text representation', () => {
-  const sql = readFileSync(applyMappingEnumHotfixPath.pathname.replace(/^\/(.:)/, '$1'), 'utf8');
+test('Apply mapping hotfix compares the block_type enum through its reviewed text representation', { skip: manualSqlSkip }, () => {
+  const sql = readManualSql('20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql');
   assert.match(sql, /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_apply_mapping\(\)/);
   assert.match(sql, /b\.block_type::text<>expected_type/);
   assert.match(sql, /b\.block_type::text<>NEW\.target_block_type/);

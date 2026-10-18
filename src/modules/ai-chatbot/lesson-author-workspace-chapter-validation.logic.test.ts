@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { aiRagPythonSkip } from '../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -30,7 +31,7 @@ function components():LessonAuthorComponentProposal[]{return[
     {id:'n1',type:'customShape',position:{x:0,y:0},data:{label:'Observe',shape:'rounded'}},
     {id:'n2',type:'customShape',position:{x:320,y:0},data:{label:'Record',shape:'rectangle'}}],edges:[{id:'e1',source:'n1',target:'n2',label:'then'}]}]}),
 ];}
-test('all six CMS adapters satisfy the strict Python wire contract and non-single-choice problems stay rejected, no provider',()=>{
+test('all six CMS adapters satisfy the strict Python wire contract and non-single-choice problems stay rejected, no provider',{ skip: aiRagPythonSkip },()=>{
   const originals=components(),before=structuredClone(originals),wire=originals.map(c=>workspaceComponentValidationWire(c,allowed));
   const root=fileURLToPath(new URL('../../../../landa-ai-rag/',import.meta.url));
   const python=resolve(root,process.platform==='win32'?'.venv-dev/Scripts/python.exe':'.venv-dev/bin/python');
@@ -81,7 +82,7 @@ test('partial or invalid CMS baseline cannot be sent to Python or certified read
   assert.throws(()=>workspaceChapterValidationUnits(g.context),/WORKSPACE_CHAPTER_VALIDATION_FAILED/);
 });
 
-test('stored CMS → validation wire → actual Python full-chapter gates → Node acceptance preserves the baseline',()=>{
+test('stored CMS → validation wire → actual Python full-chapter gates → Node acceptance preserves the baseline',{ skip: aiRagPythonSkip },()=>{
   const f=fixture();
   const plan=componentPlanId('chapter_1.lesson_1.unit_1','html',['block_1']);
   f.context.blueprint.chapters[0].lessons[0].units[0].component_plan[0].component_plan_id=plan;

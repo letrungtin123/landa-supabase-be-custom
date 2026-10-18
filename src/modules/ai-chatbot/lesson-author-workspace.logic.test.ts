@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 import { readFileSync } from 'node:fs';
 import {
   WORKSPACE_CONTRACT_VERSION, WORKSPACE_CONTENT_MAX_BYTES, WorkspaceContractError,
@@ -146,9 +147,9 @@ test('foundation module has no DB/provider/runtime imports or implicit course wr
   assert.doesNotMatch(source, /\b(?:fetch|setInterval|setTimeout)\(/);
 });
 
-const sql = readFileSync(new URL('../../../../supabase/manual_sql/20260929_1611_lesson_author_workspace_foundation.sql', import.meta.url), 'utf8');
+const sql = readManualSql('20260929_1611_lesson_author_workspace_foundation.sql');
 const install = sql.split('-- MANUAL VERIFICATION')[0];
-test('manual SQL foundation is additive, transactional and has no runtime/Apply/provider mutation', () => {
+test('manual SQL foundation is additive, transactional and has no runtime/Apply/provider mutation', { skip: manualSqlSkip }, () => {
   assert.match(install, /BEGIN;/); assert.match(install, /COMMIT;/);
   assert.equal((install.match(/CREATE TABLE public\./g) ?? []).length, 4);
   assert.doesNotMatch(install, /(?:UPDATE|DELETE FROM|INSERT INTO|ALTER TABLE) public\.(?:courses|course_blocks|lesson_author_blueprints|ai_token_reservations)\b/i);
@@ -157,7 +158,7 @@ test('manual SQL foundation is additive, transactional and has no runtime/Apply/
   assert.doesNotMatch(install, /DROP (?:TABLE|FUNCTION)/i);
 });
 
-test('SQL registers all four scoped relations for RLS, quota and course deletion fencing', () => {
+test('SQL registers all four scoped relations for RLS, quota and course deletion fencing', { skip: manualSqlSkip }, () => {
   assert.match(install, /'lesson_author_workspaces','lesson_author_workspace_nodes',\s*'lesson_author_workspace_revisions','lesson_author_workspace_events'/);
   for (const guard of ['ENABLE ROW LEVEL SECURITY', 'REVOKE ALL ON TABLE', 'assert_active_course_deletion_fence',
     'tenant_data_quota_table_registry', 'tenant_data_quota_ownership_manifest',
@@ -170,7 +171,7 @@ test('SQL registers all four scoped relations for RLS, quota and course deletion
   assert.match(install, /content_locale IN \('vi','en'\)/);
 });
 
-test('SQL baseline/reset/CAS, node inventory seal and event cursor are protected', () => {
+test('SQL baseline/reset/CAS, node inventory seal and event cursor are protected', { skip: manualSqlSkip }, () => {
   for (const invariant of ['Revisions are append only', 'Workspace revision conflict',
     'Reset must restore exact AI baseline', 'User modified flag must match content',
     'Node structure and provenance are immutable', 'Accepted workspace inventory is sealed',

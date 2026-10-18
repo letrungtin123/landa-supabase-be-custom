@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 
 // Static artifact regression only. No DB/provider/runtime imports or SQL execution.
 // This does not parse/execute PL/pgSQL or prove locking, ACL, rollback or concurrency.
-const sql = readFileSync(new URL('../../../../supabase/manual_sql/20260929_1833_lesson_author_workspace_execution_apply.sql', import.meta.url), 'utf8');
-const foundation = readFileSync(new URL('../../../../supabase/manual_sql/20260929_1611_lesson_author_workspace_foundation.sql', import.meta.url), 'utf8');
+const sql = readManualSql('20260929_1833_lesson_author_workspace_execution_apply.sql');
+const foundation = readManualSql('20260929_1611_lesson_author_workspace_foundation.sql');
 const executable = sql.split(/\r?\n/).filter(line => !line.trimStart().startsWith('--')).join('\n');
 const tables = ['lesson_author_workspace_runs', 'lesson_author_workspace_work_items',
   'lesson_author_workspace_apply_mappings', 'lesson_author_workspace_apply_receipts'];
@@ -25,7 +25,7 @@ function table(name: string) {
   return executable.slice(start, end);
 }
 
-test('one transactional manual artifact, four additive tables, no installed guard replacement or course/accounting DML', () => {
+test('one transactional manual artifact, four additive tables, no installed guard replacement or course/accounting DML', { skip: manualSqlSkip }, () => {
   assert.match(executable.trim(), /^BEGIN;/);
   assert.match(executable.trim(), /COMMIT;$/);
   assert.equal((executable.match(/CREATE TABLE public\./g) ?? []).length, 4);
@@ -37,7 +37,7 @@ test('one transactional manual artifact, four additive tables, no installed guar
   assert.match(sql, /MANUAL INSTALLATION PENDING/);
 });
 
-test('preflight pins all seven unchanged foundation function bodies and rejects incompatible history', () => {
+test('preflight pins all seven unchanged foundation function bodies and rejects incompatible history', { skip: manualSqlSkip }, () => {
   const functions = [...foundation.matchAll(/CREATE FUNCTION public\.(\w+)\(\)[\s\S]*?AS \$guard\$([\s\S]*?)\$guard\$;/g)];
   assert.equal(functions.length, 7);
   for (const match of functions) {
@@ -51,7 +51,7 @@ test('preflight pins all seven unchanged foundation function bodies and rejects 
   assert.match(executable, /r\.revision=0 AND n\.kind IN \('unit','component'\)/);
 });
 
-test('every new relation gets no-browser ACL/RLS, direct quota and deletion guards', () => {
+test('every new relation gets no-browser ACL/RLS, direct quota and deletion guards', { skip: manualSqlSkip }, () => {
   for (const name of tables) assert.ok(executable.includes(`'${name}'`));
   for (const required of ['ENABLE ROW LEVEL SECURITY', 'REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated',
     'CREATE TRIGGER trg_deletion_fence_course_write', 'CREATE TRIGGER tenant_data_quota_direct_insert',
@@ -65,7 +65,7 @@ test('every new relation gets no-browser ACL/RLS, direct quota and deletion guar
   for (const name of tables) assert.match(table(name), /FOREIGN KEY \(workspace_id,(?:node_id,)?tenant_id,course_id\)/);
 });
 
-test('manifest names match main builder and totals derive from all canonical units plus chapter validation', () => {
+test('manifest names match main builder and totals derive from all canonical units plus chapter validation', { skip: manualSqlSkip }, () => {
   const schema = table('lesson_author_workspace_runs');
   assert.match(schema, /budget_manifest->'version'='1'::jsonb/);
   assert.match(schema, /jsonb_typeof\(budget_manifest->'entries'\)='array'/);
@@ -82,7 +82,7 @@ test('manifest names match main builder and totals derive from all canonical uni
   assert.doesNotMatch(schema, /expires_at|paused_at|queue_deadline/);
 });
 
-test('validation-only work has zero output/attempts while input and retrieval remain in the budget', () => {
+test('validation-only work has zero output/attempts while input and retrieval remain in the budget', { skip: manualSqlSkip }, () => {
   const guard = body('guard_lesson_author_workspace_run');
   assert.match(guard, /n\.kind='chapter'[\s\S]*?max_output_tokens'\)::integer<>0 OR \(item->>'max_provider_attempts'\)::integer<>0/);
   assert.match(guard, /n\.kind='chapter' AND \(item->>'output_tokens'\)::bigint<>0/);
@@ -92,7 +92,7 @@ test('validation-only work has zero output/attempts while input and retrieval re
   assert.match(body('guard_lesson_author_workspace_work_item'), /NEW\.kind='validate_chapter' AND NEW\.observed_usage->>'usage_source'='no_generation'/);
 });
 
-test('admission is one exact reserved claim per ordinal, and never a dispatched replay', () => {
+test('admission is one exact reserved claim per ordinal, and never a dispatched replay', { skip: manualSqlSkip }, () => {
   const schema = table('lesson_author_workspace_work_items');
   assert.match(schema, /UNIQUE \(workspace_id,ordinal\)/);
   assert.match(schema, /UNIQUE \(workspace_id,idempotency_key\)/);
@@ -110,7 +110,7 @@ test('admission is one exact reserved claim per ordinal, and never a dispatched 
   assert.ok(guard.includes("r.budget_metadata->>'durable_generation' IS DISTINCT FROM 'true'"));
 });
 
-test('unknown execution cannot release quota or silently continue the run', () => {
+test('unknown execution cannot release quota or silently continue the run', { skip: manualSqlSkip }, () => {
   const guard = body('guard_lesson_author_workspace_work_item');
   assert.match(guard, /Dispatched expired work is outcome_unknown, not safe timeout/);
   assert.match(guard, /NEW\.accounting_state='pending_reconciliation' AND \(r\.status<>'reserved'/);
@@ -122,7 +122,7 @@ test('unknown execution cannot release quota or silently continue the run', () =
   assert.match(body('assert_lesson_author_workspace_run_commit'), /Stopped\/ready run cannot retain a live work item/);
 });
 
-test('generated baseline operation id is an actual live work item; inventory metadata remains allowed', () => {
+test('generated baseline operation id is an actual live work item; inventory metadata remains allowed', { skip: manualSqlSkip }, () => {
   const guard = body('fence_lesson_author_workspace_baseline');
   assert.match(guard, /n\.kind NOT IN \('unit','component'\) THEN RETURN NEW/);
   assert.match(guard, /id=NEW\.operation_id FOR UPDATE/);
@@ -132,7 +132,7 @@ test('generated baseline operation id is an actual live work item; inventory met
   assert.match(guard, /NEW\.validation_contract<>'workspace-unit-baseline-1'/);
 });
 
-test('CASE expressions in the three IF guards are parenthesized so inner THEN cannot terminate the condition', () => {
+test('CASE expressions in the three IF guards are parenthesized so inner THEN cannot terminate the condition', { skip: manualSqlSkip }, () => {
   // Regression for user-reported PostgreSQL 42601 at the manifest IF (line 360).
   // This is a targeted static check, not a substitute for PL/pgSQL compilation.
   assert.doesNotMatch(executable, /IS\s+DISTINCT\s+FROM\s+CASE\b/i);
@@ -141,7 +141,7 @@ test('CASE expressions in the three IF guards are parenthesized so inner THEN ca
   assert.match(body('fence_lesson_author_workspace_baseline'), /a\.node_id IS DISTINCT FROM \(CASE WHEN n\.kind='unit' THEN n\.id ELSE n\.parent_id END\)/);
 });
 
-test('concrete unit publication API requires token and exact unit set with a final database CAS', () => {
+test('concrete unit publication API requires token and exact unit set with a final database CAS', { skip: manualSqlSkip }, () => {
   const publish = body('publish_lesson_author_workspace_unit', 'publish');
   assert.match(publish, /a\.lease_token IS DISTINCT FROM p_lease_token/);
   assert.match(publish, /jsonb_array_length\(p_baselines\)<>expected_count/);
@@ -161,7 +161,7 @@ test('concrete unit publication API requires token and exact unit set with a fin
   assert.match(executable, /trg_la_workspace_item_commit[\s\S]*?DEFERRABLE INITIALLY DEFERRED/);
 });
 
-test('Apply binds exact effective revisions and scope; no metadata Save receipt can authorize it', () => {
+test('Apply binds exact effective revisions and scope; no metadata Save receipt can authorize it', { skip: manualSqlSkip }, () => {
   const schema = table('lesson_author_workspace_apply_receipts');
   assert.match(schema, /validation_contract='workspace-scoped-apply-1'/);
   assert.match(schema, /UNIQUE \(workspace_id,scope_node_id,revision_set_hash\)/);
@@ -177,7 +177,7 @@ test('Apply binds exact effective revisions and scope; no metadata Save receipt 
   assert.match(schema, /"dependencies":"PASS"/);
 });
 
-test('mapping identity and actual block hierarchy/type/order are preserved and receipt backed', () => {
+test('mapping identity and actual block hierarchy/type/order are preserved and receipt backed', { skip: manualSqlSkip }, () => {
   const guard = body('guard_lesson_author_workspace_apply_mapping');
   assert.match(table('lesson_author_workspace_apply_mappings'), /target_block_id UUID NOT NULL UNIQUE/);
   assert.match(guard, /Mapping identity\/order is immutable; new receipt required/);
@@ -198,7 +198,7 @@ test('mapping identity and actual block hierarchy/type/order are preserved and r
   assert.match(body('workspace_course_block_hash', 'hash'), /to_jsonb\(b\)::text/);
 });
 
-test('rollback is entirely commented, refuses populated evidence and removes only the additive increment', () => {
+test('rollback is entirely commented, refuses populated evidence and removes only the additive increment', { skip: manualSqlSkip }, () => {
   const rollback = sql.slice(sql.indexOf('-- ROLLBACK IS COMMENTS ONLY'));
   assert.ok(rollback.startsWith('-- ROLLBACK IS COMMENTS ONLY'));
   assert.ok(rollback.split(/\r?\n/).every(line => !line.trim() || line.startsWith('--')));

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 import {
   verifyWorkspaceSchema,
   workspaceSchemaContract,
@@ -117,12 +117,12 @@ test('catalog exception text is not leaked', async () => {
   await assert.rejects(verifyWorkspaceSchema({ query: async () => { throw new Error('secret connection data'); } }, true),
     error => error instanceof Error && error.message === 'WORKSPACE_SCHEMA_UNAVAILABLE');
 });
-test('pinned runtime function bodies match manual SQL artifacts; no stale hash after editing SQL', () => {
+test('pinned runtime function bodies match manual SQL artifacts; no stale hash after editing SQL', { skip: manualSqlSkip }, () => {
   for (const [file, guards] of [
     ['20260929_1611_lesson_author_workspace_foundation.sql', WORKSPACE_FOUNDATION_GUARDS],
     ['20260929_1833_lesson_author_workspace_execution_apply.sql', WORKSPACE_EXECUTION_GUARDS],
   ] as const) {
-    const sql = readFileSync(new URL(`../../../../supabase/manual_sql/${file}`, import.meta.url), 'utf8');
+    const sql = readManualSql(file);
     const bodies = [...sql.matchAll(/CREATE FUNCTION public\.(\w+)\s*\([^]*?\)\s*RETURNS\s+\w+[^]*?AS \$(\w+)\$([^]*?)\$\2\$/g)];
     assert.equal(bodies.length, Object.keys(guards).length);
     for (const [signature, expected] of Object.entries(guards)) {
@@ -132,10 +132,7 @@ test('pinned runtime function bodies match manual SQL artifacts; no stale hash a
     }
   }
 
-  const hotfixSql = readFileSync(
-    new URL('../../../../supabase/manual_sql/20261002_2230_lesson_author_four_level_apply_scope.sql', import.meta.url),
-    'utf8',
-  );
+  const hotfixSql = readManualSql('20261002_2230_lesson_author_four_level_apply_scope.sql');
   const hotfixBody = hotfixSql.match(
     /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_apply_receipt\(\)[^]*?AS \$guard\$([^]*?)\$guard\$/,
   );
@@ -148,10 +145,7 @@ test('pinned runtime function bodies match manual SQL artifacts; no stale hash a
     WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES['guard_lesson_author_workspace_apply_receipt()'],
   );
 
-  const mappingHotfixSql = readFileSync(
-    new URL('../../../../supabase/manual_sql/20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql', import.meta.url),
-    'utf8',
-  );
+  const mappingHotfixSql = readManualSql('20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql');
   const mappingHotfixBody = mappingHotfixSql.match(
     /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_apply_mapping\(\)[^]*?AS \$guard\$([^]*?)\$guard\$/,
   );

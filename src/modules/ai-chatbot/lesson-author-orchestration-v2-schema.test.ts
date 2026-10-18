@@ -1,73 +1,25 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 import { ORCHESTRATION_V2_GUARDS } from './lesson-author-orchestration-v2-schema.repository.js';
 
-const sql = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261001_1100_lesson_author_orchestration_v2.sql', import.meta.url),
-  'utf8',
-);
-const runningTaskGuardCorrection = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261001_1445_lesson_author_orchestration_v2_running_task_guard.sql', import.meta.url),
-  'utf8',
-);
-const completionGuardCorrection = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261001_1700_lesson_author_orchestration_v2_completion_guard_hotfix.sql', import.meta.url),
-  'utf8',
-);
-const outcomeReplayGuard = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261001_1715_lesson_author_orchestration_v2_outcome_replay_guard.sql', import.meta.url),
-  'utf8',
-);
-const deterministicFallbackGuard = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261002_2355_lesson_author_orchestration_v2_fallback_success_guard.sql', import.meta.url),
-  'utf8',
-);
-const deterministicFallbackBaselineFence = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261005_1149_lesson_author_v2_fallback_baseline_fence.sql', import.meta.url),
-  'utf8',
-);
-const cp1QualityEvidence = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261005_1800_lesson_author_cp1_quality_evidence.sql', import.meta.url),
-  'utf8',
-);
-const cp1AttemptRunAuthorityHotfix = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql', import.meta.url),
-  'utf8',
-);
-const outboxRecoveryHotfix = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1045_lesson_author_v2_outbox_recovery_hotfix.sql', import.meta.url),
-  'utf8',
-);
-const outboxGuardSchemaOnly = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1105_lesson_author_v2_outbox_guard_schema_only.sql', import.meta.url),
-  'utf8',
-);
-const progressBackpressureHotfix = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1300_lesson_author_v2_progress_backpressure_hotfix.sql', import.meta.url),
-  'utf8',
-);
-const assessmentAuthorityBackpressureHotfix = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1330_lesson_author_v2_assessment_authority_backpressure_hotfix.sql', import.meta.url),
-  'utf8',
-);
-const workConservingCapacityWake = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1500_lesson_author_v2_work_conserving_capacity_wake.sql', import.meta.url),
-  'utf8',
-);
-const providerReplayEvidenceFence = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql', import.meta.url),
-  'utf8',
-);
-const needsActionNodeEditGuard = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql', import.meta.url),
-  'utf8',
-);
-const cp2bAssessmentObligations = readFileSync(
-  new URL('../../../../supabase/manual_sql/20261005_1930_lesson_author_cp2b_assessment_obligations.sql', import.meta.url),
-  'utf8',
-);
+const sql = readManualSql('20261001_1100_lesson_author_orchestration_v2.sql');
+const runningTaskGuardCorrection = readManualSql('20261001_1445_lesson_author_orchestration_v2_running_task_guard.sql');
+const completionGuardCorrection = readManualSql('20261001_1700_lesson_author_orchestration_v2_completion_guard_hotfix.sql');
+const outcomeReplayGuard = readManualSql('20261001_1715_lesson_author_orchestration_v2_outcome_replay_guard.sql');
+const deterministicFallbackGuard = readManualSql('20261002_2355_lesson_author_orchestration_v2_fallback_success_guard.sql');
+const deterministicFallbackBaselineFence = readManualSql('20261005_1149_lesson_author_v2_fallback_baseline_fence.sql');
+const cp1QualityEvidence = readManualSql('20261005_1800_lesson_author_cp1_quality_evidence.sql');
+const cp1AttemptRunAuthorityHotfix = readManualSql('20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql');
+const outboxRecoveryHotfix = readManualSql('20261006_1045_lesson_author_v2_outbox_recovery_hotfix.sql');
+const outboxGuardSchemaOnly = readManualSql('20261006_1105_lesson_author_v2_outbox_guard_schema_only.sql');
+const progressBackpressureHotfix = readManualSql('20261006_1300_lesson_author_v2_progress_backpressure_hotfix.sql');
+const assessmentAuthorityBackpressureHotfix = readManualSql('20261006_1330_lesson_author_v2_assessment_authority_backpressure_hotfix.sql');
+const workConservingCapacityWake = readManualSql('20261006_1500_lesson_author_v2_work_conserving_capacity_wake.sql');
+const providerReplayEvidenceFence = readManualSql('20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql');
+const needsActionNodeEditGuard = readManualSql('20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql');
+const cp2bAssessmentObligations = readManualSql('20261005_1930_lesson_author_cp2b_assessment_obligations.sql');
 const executable = sql
   .split(/\r?\n/)
   .filter((line) => !line.trimStart().startsWith('--'))
@@ -85,7 +37,7 @@ const tables = [
   'lesson_author_workspace_v2_completion_receipts',
 ] as const;
 
-test('reviewed guard hashes exactly match the manual SQL bodies', () => {
+test('reviewed guard hashes exactly match the manual SQL bodies', { skip: manualSqlSkip }, () => {
   for (const [signature, expected] of Object.entries(ORCHESTRATION_V2_GUARDS)) {
     const name = signature.slice(0, -2);
     const pattern = new RegExp(`CREATE (?:OR REPLACE )?FUNCTION public\\.${name}\\(\\)[\\s\\S]*?AS \\$guard\\$\\r?\\n([\\s\\S]*?)\\r?\\n\\$guard\\$;`);
@@ -113,7 +65,7 @@ test('reviewed guard hashes exactly match the manual SQL bodies', () => {
   }
 });
 
-test('needs-action workspaces retain exact revision editing authority without weakening node fences', () => {
+test('needs-action workspaces retain exact revision editing authority without weakening node fences', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_node\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = needsActionNodeEditGuard.match(pattern)?.[1];
   assert.ok(body);
@@ -135,7 +87,7 @@ test('needs-action workspaces retain exact revision editing authority without we
   assert.doesNotMatch(executableHotfix, /SECURITY\s+DEFINER/i);
 });
 
-test('work-conserving capacity wake is guarded, data-neutral and indexed for bounded selection', () => {
+test('work-conserving capacity wake is guarded, data-neutral and indexed for bounded selection', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_v2_outbox\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = workConservingCapacityWake.match(pattern)?.[1];
   assert.ok(body);
@@ -157,7 +109,7 @@ test('work-conserving capacity wake is guarded, data-neutral and indexed for bou
     /\b(?:INSERT\s+INTO|UPDATE\s+public\.|DELETE\s+FROM|TRUNCATE|DISABLE TRIGGER)\b/i);
 });
 
-test('assessment authority/backpressure hotfix is additive, transactional and lifecycle exact', () => {
+test('assessment authority/backpressure hotfix is additive, transactional and lifecycle exact', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_v2_assessment_obligation\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = assessmentAuthorityBackpressureHotfix.match(pattern)?.[1];
   assert.ok(body);
@@ -195,7 +147,7 @@ test('assessment authority/backpressure hotfix is additive, transactional and li
     /\b(?:INSERT\s+INTO|UPDATE\s+public\.|DELETE\s+FROM|TRUNCATE|DISABLE TRIGGER|DROP\s+)/i);
 });
 
-test('production outbox guard hotfix is schema-only and release-coordinated', () => {
+test('production outbox guard hotfix is schema-only and release-coordinated', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_v2_outbox\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = outboxGuardSchemaOnly.match(pattern)?.[1];
   assert.ok(body);
@@ -214,7 +166,7 @@ test('production outbox guard hotfix is schema-only and release-coordinated', ()
     /e58a1340-bd10-467b-91c1-7a6615d224f1|0fe69d8c-045e-438e-8b3c-b6ef7ec7f763/);
 });
 
-test('progress/backpressure hotfix is transactional, data-neutral and fail-closed', () => {
+test('progress/backpressure hotfix is transactional, data-neutral and fail-closed', { skip: manualSqlSkip }, () => {
   const hotfix = progressBackpressureHotfix.split(/\r?\n/)
     .filter(line => !line.trimStart().startsWith('--')).join('\n');
   assert.match(hotfix, /^\s*BEGIN;/m);
@@ -226,7 +178,7 @@ test('progress/backpressure hotfix is transactional, data-neutral and fail-close
   assert.doesNotMatch(hotfix, /\b(?:TRUNCATE|DISABLE TRIGGER)\b/i);
 });
 
-test('outbox hotfix forbids confirmed-message republish and repairs only the reviewed stranded row', () => {
+test('outbox hotfix forbids confirmed-message republish and repairs only the reviewed stranded row', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_v2_outbox\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = outboxRecoveryHotfix.match(pattern)?.[1];
   assert.ok(body);
@@ -252,7 +204,7 @@ test('outbox hotfix forbids confirmed-message republish and repairs only the rev
   assert.doesNotMatch(executableHotfix, /\b(?:DROP|TRUNCATE|DISABLE TRIGGER)\b/i);
 });
 
-test('CP1 attempt hotfix reads model/runtime authority only from the scoped run row', () => {
+test('CP1 attempt hotfix reads model/runtime authority only from the scoped run row', { skip: manualSqlSkip }, () => {
   const attemptPattern = /CREATE OR REPLACE FUNCTION public\.guard_lesson_author_workspace_v2_attempt_event\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const capturePattern = /CREATE OR REPLACE FUNCTION public\.capture_lesson_author_workspace_v2_task_attempt\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const attemptBody = cp1AttemptRunAuthorityHotfix.match(attemptPattern)?.[1];
@@ -273,7 +225,7 @@ test('CP1 attempt hotfix reads model/runtime authority only from the scoped run 
   assert.doesNotMatch(cp1AttemptRunAuthorityHotfix, /\b(?:DROP|ALTER TABLE|CREATE POLICY)\b/i);
 });
 
-test('CP1 quality evidence is transactional, metadata-only and keeps V1 Apply compatible', () => {
+test('CP1 quality evidence is transactional, metadata-only and keeps V1 Apply compatible', { skip: manualSqlSkip }, () => {
   const cp1Executable = cp1QualityEvidence.split(/\r?\n/)
     .filter(line => !line.trimStart().startsWith('--')).join('\n');
   assert.match(cp1Executable, /^\s*BEGIN;/m);
@@ -299,7 +251,7 @@ test('CP1 quality evidence is transactional, metadata-only and keeps V1 Apply co
   assert.doesNotMatch(cp1Executable, /CREATE\s+(?:OR\s+REPLACE\s+)?POLICY/i);
 });
 
-test('CP2B assessment obligations are additive, private and never learner components', () => {
+test('CP2B assessment obligations are additive, private and never learner components', { skip: manualSqlSkip }, () => {
   const cp2bExecutable = cp2bAssessmentObligations.split(/\r?\n/)
     .filter(line => !line.trimStart().startsWith('--')).join('\n');
   assert.match(cp2bExecutable, /^\s*BEGIN;/m);
@@ -323,7 +275,7 @@ test('CP2B assessment obligations are additive, private and never learner compon
   assert.doesNotMatch(cp2bExecutable, /SECURITY\s+DEFINER/i);
 });
 
-test('CP2B completion guard keeps ready and review-required outcomes mutually exclusive', () => {
+test('CP2B completion guard keeps ready and review-required outcomes mutually exclusive', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.assert_lesson_author_workspace_v2_completion_commit\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = cp2bAssessmentObligations.match(pattern)?.[1];
   assert.ok(body);
@@ -335,7 +287,7 @@ test('CP2B completion guard keeps ready and review-required outcomes mutually ex
   assert.match(cp2bAssessmentObligations, /current_hash NOT IN \('397e0d0394703136479379d064739faf'\)/);
 });
 
-test('outcome replay guard requires pessimistic accounting before one bounded retry', () => {
+test('outcome replay guard requires pessimistic accounting before one bounded retry', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.guard_lesson_author_workspace_v2_task\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = outcomeReplayGuard.match(pattern)?.[1];
   assert.ok(body);
@@ -352,7 +304,7 @@ test('outcome replay guard requires pessimistic accounting before one bounded re
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('deterministic unit fallback is the only undispatched provider success admitted by the current guard', () => {
+test('deterministic unit fallback is the only undispatched provider success admitted by the current guard', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.guard_lesson_author_workspace_v2_task\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = providerReplayEvidenceFence.match(pattern)?.[1];
   assert.ok(body);
@@ -371,7 +323,7 @@ test('deterministic unit fallback is the only undispatched provider success admi
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('baseline fence admits only an evidenced deterministic fallback while preserving the paid-provider lane', () => {
+test('baseline fence admits only an evidenced deterministic fallback while preserving the paid-provider lane', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.fence_lesson_author_workspace_baseline\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = providerReplayEvidenceFence.match(pattern)?.[1];
   assert.ok(body);
@@ -397,7 +349,7 @@ test('baseline fence admits only an evidenced deterministic fallback while prese
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('running-task correction is drift-fenced and exactly matches the reviewed install body', () => {
+test('running-task correction is drift-fenced and exactly matches the reviewed install body', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.guard_lesson_author_workspace_v2_task\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const installBody = sql.match(pattern)?.[1];
   const correctionBody = runningTaskGuardCorrection.match(pattern)?.[1];
@@ -414,7 +366,7 @@ test('running-task correction is drift-fenced and exactly matches the reviewed i
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('completion correction removes task_id ambiguity and matches the reviewed install body', () => {
+test('completion correction removes task_id ambiguity and matches the reviewed install body', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.assert_lesson_author_workspace_v2_completion_commit\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const installBody = sql.match(pattern)?.[1];
   const correctionBody = completionGuardCorrection.match(pattern)?.[1];
@@ -433,7 +385,7 @@ test('completion correction removes task_id ambiguity and matches the reviewed i
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('V2 manual SQL is additive, transactional and cannot silently rerun', () => {
+test('V2 manual SQL is additive, transactional and cannot silently rerun', { skip: manualSqlSkip }, () => {
   assert.match(executable, /^\s*BEGIN;/m);
   assert.match(executable, /SELECT public\.tenant_data_quota_assert_coverage\(\);\s*COMMIT;\s*$/);
   assert.equal([...executable.matchAll(/CREATE TABLE public\.(\w+)/g)].length, tables.length);
@@ -459,7 +411,7 @@ test('V2 manual SQL is additive, transactional and cannot silently rerun', () =>
   assert.doesNotMatch(executable, /(?:INSERT INTO|UPDATE|DELETE FROM) public\.lesson_author_workspace_(?:events|nodes|revisions|runs|work_items|apply_mappings|apply_receipts)\b/i);
 });
 
-test('legacy workspace guards remain fail-closed while admitting exact V2 inventory and unit evidence', () => {
+test('legacy workspace guards remain fail-closed while admitting exact V2 inventory and unit evidence', { skip: manualSqlSkip }, () => {
   assert.match(compact, /t\.kind='publish_inventory' AND t\.status='succeeded' AND t\.validation_contract='inventory-publication-v2'/);
   assert.match(compact, /a\.artifact_kind='inventory_receipt' AND a\.validation_contract='inventory-publication-v2'/);
   assert.match(compact, /NEW\.validation_contract='lesson-author-inventory-publication-v2'/);
@@ -471,7 +423,7 @@ test('legacy workspace guards remain fail-closed while admitting exact V2 invent
   assert.match(compact, /Entire V2 unit baseline, artifact, unit_ready and success must commit atomically/);
 });
 
-test('all V2 relations are server-only, quota-owned and deletion-fenced', () => {
+test('all V2 relations are server-only, quota-owned and deletion-fenced', { skip: manualSqlSkip }, () => {
   assert.match(compact, /ALTER TABLE public\.%I ENABLE ROW LEVEL SECURITY/);
   assert.match(compact, /REVOKE ALL ON TABLE public\.%I FROM PUBLIC, anon, authenticated/);
   assert.match(compact, /trg_deletion_fence_course_write BEFORE INSERT OR UPDATE/);
@@ -484,7 +436,7 @@ test('all V2 relations are server-only, quota-owned and deletion-fenced', () => 
   assert.doesNotMatch(executable, /GRANT\s+[^;]*(?:anon|authenticated)/i);
 });
 
-test('source ledger is immutable, hash-bound and seals only exact admitted facts', () => {
+test('source ledger is immutable, hash-bound and seals only exact admitted facts', { skip: manualSqlSkip }, () => {
   assert.match(compact, /source_document_ids UUID\[\] NOT NULL CHECK \(cardinality\(source_document_ids\) BETWEEN 1 AND 5\)/);
   assert.match(compact, /encode\(pg_catalog\.sha256\(convert_to\(NEW\.fact_text,'UTF8'\)\),'hex'\)<>NEW\.fact_hash/);
   assert.match(compact, /s\.status='building' AND d\.status='learned' AND NEW\.document_id=ANY\(s\.source_document_ids\)/);
@@ -494,7 +446,7 @@ test('source ledger is immutable, hash-bound and seals only exact admitted facts
   assert.match(compact, /Sealed\/failed source snapshot is immutable/);
 });
 
-test('task DAG has bounded provider work, backward dependencies and dispatch fences', () => {
+test('task DAG has bounded provider work, backward dependencies and dispatch fences', { skip: manualSqlSkip }, () => {
   for (const kind of ['source_snapshot', 'course_skeleton', 'chapter_blueprint', 'validate_architecture', 'publish_inventory', 'generate_unit', 'validate_chapter', 'finalize_course']) {
     assert.match(executable, new RegExp(`'${kind}'`));
   }
@@ -515,7 +467,7 @@ test('task DAG has bounded provider work, backward dependencies and dispatch fen
   assert.match(compact, /payload JSONB NOT NULL CHECK \(jsonb_typeof\(payload\)='object' AND octet_length\(payload::text\)<=16777216\)/);
 });
 
-test('ready is gated by immutable all-task and exact all-fact completion evidence', () => {
+test('ready is gated by immutable all-task and exact all-fact completion evidence', { skip: manualSqlSkip }, () => {
   assert.match(compact, /duplicate_fact_count INTEGER NOT NULL CHECK \(duplicate_fact_count=0\)/);
   assert.match(compact, /unresolved_fact_count INTEGER NOT NULL CHECK \(unresolved_fact_count=0\)/);
   assert.match(compact, /admitted_fact_count=allocated_fact_count AND admitted_fact_count=covered_fact_count/);
@@ -530,7 +482,7 @@ test('ready is gated by immutable all-task and exact all-fact completion evidenc
   assert.match(compact, /V2 completion receipt is immutable/);
 });
 
-test('rollback remains reviewable comments and refuses nonempty evidence', () => {
+test('rollback remains reviewable comments and refuses nonempty evidence', { skip: manualSqlSkip }, () => {
   const rollback = sql.slice(sql.indexOf('-- ROLLBACK SQL'));
   assert.ok(rollback.startsWith('-- ROLLBACK SQL'));
   assert.ok(rollback.split(/\r?\n/).every((line) => line.length === 0 || line.trimStart().startsWith('--')));
