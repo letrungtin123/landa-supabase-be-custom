@@ -25,7 +25,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const srcRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// Timers are attributed to files under src/ (BOOT_HARNESS_SRC_ROOT: another
+// tree with the same layout, e.g. dist/ after a build).
+const srcRoot = process.env.BOOT_HARNESS_SRC_ROOT
+  ? path.resolve(process.env.BOOT_HARNESS_SRC_ROOT)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outFile = process.env.BOOT_HARNESS_OUT;
 
 const seen = {
