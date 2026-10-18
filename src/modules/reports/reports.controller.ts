@@ -42,16 +42,30 @@ import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js'
 import {
   canReportOnLearner,
   enforceReportScope as enforceSharedReportScope,
-  readReportScopeId,
   type ReportScope,
 } from './report-access.service.js';
+import {
+  reportChartQuerySchema,
+  reportCourseLearnersQuerySchema,
+  reportCourseRankingQuerySchema,
+  reportExportQuerySchema,
+  reportLearnerDetailQuerySchema,
+  reportLearnersQuerySchema,
+  reportSummaryQuerySchema,
+  reportTopCoursesQuerySchema,
+  reportUserBadgesQuerySchema,
+  reportUserStudyTimeQuerySchema,
+  type ReportChartQuery,
+  type ReportExportQuery,
+  type ReportPeriodQuery,
+} from './reports.validator.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
 
 /** Level names of an Excel export: the tenant's labels, else the names the client sent, else the defaults. */
-async function getExportLabels(req: Request, tenantId: string, locale: ReportExcelLocale) {
+async function getExportLabels(query: ReportExportQuery, tenantId: string, locale: ReportExcelLocale) {
   return resolveReportExcelLabels(
     await getTenantGroupLabels(tenantId),
-    { group: req.query.group_label, subgroup: req.query.subgroup_label, team: req.query.team_label },
+    { group: query.group_label, subgroup: query.subgroup_label, team: query.team_label },
     locale,
   );
 }
@@ -99,17 +113,13 @@ function abortWhenClientLeaves(res: Response): AbortSignal {
 }
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
-const VALID_COURSE_COMPLETION_STATUSES = new Set(['all', 'not_started', 'learning', 'completed']);
 const VALID_CHART_WINDOW_DIRECTIONS = new Set(['initial', 'before', 'after']);
 const YMD_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-function getQueryString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function parseReportDateRange(req: Request): svc.ReportDateRange | undefined {
-  const dateFrom = getQueryString(req.query.date_from);
-  const dateTo = getQueryString(req.query.date_to);
+/** The date range of the query (parsed date_from / date_to); a bad one is a 400. */
+function parseReportDateRange(query: Pick<ReportPeriodQuery, 'date_from' | 'date_to'>): svc.ReportDateRange | undefined {
+  const dateFrom = query.date_from;
+  const dateTo = query.date_to;
   if (!dateFrom && !dateTo) return undefined;
   if (!dateFrom || !dateTo) {
     throw new AppError('Vui lòng chọn cả ngày bắt đầu và ngày kết thúc.', 400);
@@ -132,34 +142,23 @@ function parseReportDateRange(req: Request): svc.ReportDateRange | undefined {
   return { startDate, endDate, dateFrom, dateTo };
 }
 
-function parseChartGranularity(value: unknown): svc.ReportChartGranularity {
-  return value === 'day' || value === 'week' || value === 'month' ? value : 'auto';
-}
-
-function parsePositiveInteger(value: unknown): number | undefined {
-  if (typeof value !== 'string' || !value.trim()) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function parseChartWindowOptions(req: Request): svc.ReportChartWindowOptions {
-  const mode = req.query.mode === 'window' ? 'window' : 'range';
-  const rawDirection = typeof req.query.direction === 'string' ? req.query.direction : 'initial';
+function parseChartWindowOptions(query: ReportChartQuery): svc.ReportChartWindowOptions {
+  const rawDirection = query.direction;
   if (rawDirection && !VALID_CHART_WINDOW_DIRECTIONS.has(rawDirection)) {
     throw new AppError('Hướng xem tiếp của biểu đồ không hợp lệ.', 400);
   }
 
-  const anchorBucket = getQueryString(req.query.anchor_bucket);
+  const anchorBucket = query.anchor_bucket;
   if (anchorBucket && !YMD_PATTERN.test(anchorBucket)) {
     throw new AppError('Mốc thời gian của biểu đồ không hợp lệ.', 400);
   }
 
   return {
-    mode,
+    mode: query.mode,
     direction: rawDirection as svc.ReportChartWindowDirection,
     anchorBucket,
-    limitBuckets: parsePositiveInteger(req.query.limit_buckets),
-    seriesLimit: parsePositiveInteger(req.query.series_limit),
+    limitBuckets: query.limit_buckets,
+    seriesLimit: query.series_limit,
   };
 }
 
@@ -186,7 +185,10 @@ export function asReportRequestError(error: unknown): unknown {
   return new AppError(message, status, typeof code === 'string' ? code : undefined);
 }
 
-async function enforceReportScope(req: Request): Promise<ReportScope> {
+async function enforceReportScope(
+  req: Request,
+  query: Pick<ReportPeriodQuery, 'group_id' | 'subgroup_id' | 'team_id'>,
+): Promise<ReportScope> {
   try {
     return await enforceSharedReportScope(
       {
@@ -195,9 +197,9 @@ async function enforceReportScope(req: Request): Promise<ReportScope> {
         role: req.user!.role,
       },
       {
-        groupId: readReportScopeId(req.query.group_id),
-        subgroupId: readReportScopeId(req.query.subgroup_id),
-        teamId: readReportScopeId(req.query.team_id),
+        groupId: query.group_id,
+        subgroupId: query.subgroup_id,
+        teamId: query.team_id,
       },
     );
   } catch (error) {
@@ -208,11 +210,11 @@ async function enforceReportScope(req: Request): Promise<ReportScope> {
 /** GET /api/reports/summary */
 export async function getSummary(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const year = req.query.year ? parseInt(req.query.year as string) : undefined;
-  const dateRange = parseReportDateRange(req);
+  const query = reportSummaryQuerySchema.parse(req.query);
+  const { month, year } = query;
+  const dateRange = parseReportDateRange(query);
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { meta: { month: month || new Date().getMonth() + 1, year: year || new Date().getFullYear() }, overview: { total_learners: 0, active_learners: 0, completion_rate: 0, total_enrollments: 0, completed_enrollments: 0, incomplete_enrollments: 0 } });
   }
@@ -223,15 +225,15 @@ export async function getSummary(req: Request, res: Response) {
 /** GET /api/reports/chart */
 export async function getChart(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const year = parseInt(req.query.year as string) || new Date().getFullYear();
-  const metric = (req.query.metric as string) || 'total_enrollments';
-  const groupByOrg = req.query.group_by_org === 'true';
-  const grouped = req.query.grouped !== 'false'; // default true
-  const dateRange = parseReportDateRange(req);
-  const granularity = parseChartGranularity(req.query.granularity);
-  const windowOptions = parseChartWindowOptions(req);
+  const query = reportChartQuerySchema.parse(req.query);
+  const { year, metric } = query;
+  const groupByOrg = query.group_by_org;
+  const grouped = query.grouped; // default true
+  const dateRange = parseReportDateRange(query);
+  const granularity = query.granularity;
+  const windowOptions = parseChartWindowOptions(query);
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { data: [] });
   }
@@ -242,13 +244,12 @@ export async function getChart(req: Request, res: Response) {
 /** GET /api/reports/top-courses */
 export async function getTopCourses(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 1;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 10, 100);
-  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const year = req.query.year ? parseInt(req.query.year as string) : undefined;
-  const dateRange = parseReportDateRange(req);
+  const query = reportTopCoursesQuerySchema.parse(req.query);
+  const { page, month, year } = query;
+  const pageSize = query.page_size;
+  const dateRange = parseReportDateRange(query);
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { results: [], total: 0, total_pages: 0 });
   }
@@ -259,13 +260,12 @@ export async function getTopCourses(req: Request, res: Response) {
 /** GET /api/reports/course-completion-ranking */
 export async function getCourseCompletionRanking(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const page = Math.max(parseInt(req.query.page as string) || 1, 1);
-  const pageSize = Math.min(Math.max(parseInt(req.query.page_size as string) || 10, 1), 100);
-  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const year = req.query.year ? parseInt(req.query.year as string) : undefined;
-  const dateRange = parseReportDateRange(req);
+  const query = reportCourseRankingQuerySchema.parse(req.query);
+  const { page, month, year } = query;
+  const pageSize = query.page_size;
+  const dateRange = parseReportDateRange(query);
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { results: [], count: 0, total_pages: 0, current_page: page });
   }
@@ -281,18 +281,12 @@ export async function getCourseCompletionLearners(req: Request, res: Response) {
   const courseId = req.params.courseId;
   if (!courseId) return sendError(res, 'courseId is required', 400);
 
-  const page = Math.max(parseInt(req.query.page as string) || 1, 1);
-  const pageSize = Math.min(Math.max(parseInt(req.query.page_size as string) || 20, 1), 100);
-  const search = req.query.search as string | undefined;
-  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const year = req.query.year ? parseInt(req.query.year as string) : undefined;
-  const dateRange = parseReportDateRange(req);
-  const rawStatus = req.query.status as string | undefined;
-  const status = VALID_COURSE_COMPLETION_STATUSES.has(rawStatus || '')
-    ? rawStatus as svc.ReportCourseCompletionStatus
-    : 'all';
+  const query = reportCourseLearnersQuerySchema.parse(req.query);
+  const { page, search, month, year, status } = query;
+  const pageSize = query.page_size;
+  const dateRange = parseReportDateRange(query);
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { results: [], count: 0, total_pages: 0, current_page: page });
   }
@@ -300,6 +294,19 @@ export async function getCourseCompletionLearners(req: Request, res: Response) {
     tenantId, courseId, page, pageSize, search, month, year, scope.groupId, scope.subgroupId, scope.teamId, status, dateRange,
   );
   sendSuccess(res, result);
+}
+
+/**
+ * The period of an Excel export: the date range, else the month (1-12) of
+ * the year; the year defaults to the range's, else this year, never before 2000.
+ */
+function exportPeriod(query: ReportExportQuery) {
+  const now = new Date();
+  const dateRange = parseReportDateRange(query);
+  const year = Math.max(query.year || dateRange?.startDate.getFullYear() || now.getFullYear(), 2000);
+  const rawMonth = query.month;
+  const month = dateRange ? undefined : rawMonth && rawMonth >= 1 && rawMonth <= 12 ? rawMonth : undefined;
+  return { dateRange, year, month };
 }
 
 /** GET /api/reports/course-completion-ranking/:courseId/export.xlsx */
@@ -315,13 +322,10 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
   const course = await findReportCourse(tenantId, courseId);
   if (!course) return sendError(res, 'Không tìm thấy khóa học', 404);
 
-  const now = new Date();
-  const dateRange = parseReportDateRange(req);
-  const year = Math.max(parseInt(req.query.year as string) || dateRange?.startDate.getFullYear() || now.getFullYear(), 2000);
-  const rawMonth = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const month = dateRange ? undefined : rawMonth && rawMonth >= 1 && rawMonth <= 12 ? rawMonth : undefined;
-  const locale = normalizeReportExcelLocale(req.query.locale);
-  const scope = await enforceReportScope(req);
+  const query = reportExportQuerySchema.parse(req.query);
+  const { dateRange, year, month } = exportPeriod(query);
+  const locale = normalizeReportExcelLocale(query.locale);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
   }
@@ -350,7 +354,7 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
         subgroupId: scope.subgroupId,
         teamId: scope.teamId,
       },
-      labels: await getExportLabels(req, tenantId, locale),
+      labels: await getExportLabels(query, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
       signal: clientGone,
@@ -374,20 +378,18 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
 /** GET /api/reports/learners */
 export async function getLearners(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 1;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 20, 100);
-  const search = req.query.search as string | undefined;
-  const month = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const year = req.query.year ? parseInt(req.query.year as string) : undefined;
-  const dateRange = parseReportDateRange(req);
+  const query = reportLearnersQuerySchema.parse(req.query);
+  const { page, search, month, year } = query;
+  const pageSize = query.page_size;
+  const dateRange = parseReportDateRange(query);
   // The dashboard always sends one ('all' for no filter); a missing or empty
   // status used to filter on the text 'undefined' and list nobody.
-  if (getQueryString(req.query.status) === undefined) {
+  if (!query.status.present) {
     return sendError(res, 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.', 400);
   }
-  const status = req.query.status as 'all' | 'not_started' | 'learning' | 'completed';
+  const status = query.status.value;
 
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
     return sendSuccess(res, { results: [], count: 0, total_pages: 0 });
   }
@@ -404,13 +406,10 @@ export async function exportExcel(req: Request, res: Response) {
   }
 
   const tenantId = req.user!.tenantId!;
-  const now = new Date();
-  const dateRange = parseReportDateRange(req);
-  const year = Math.max(parseInt(req.query.year as string) || dateRange?.startDate.getFullYear() || now.getFullYear(), 2000);
-  const rawMonth = req.query.month ? parseInt(req.query.month as string) : undefined;
-  const month = dateRange ? undefined : rawMonth && rawMonth >= 1 && rawMonth <= 12 ? rawMonth : undefined;
-  const locale = normalizeReportExcelLocale(req.query.locale);
-  const scope = await enforceReportScope(req);
+  const query = reportExportQuerySchema.parse(req.query);
+  const { dateRange, year, month } = exportPeriod(query);
+  const locale = normalizeReportExcelLocale(query.locale);
+  const scope = await enforceReportScope(req, query);
 
   if (scope.allowedGroupIds?.length === 0) {
     return sendError(res, 'Không có dữ liệu trong phạm vi báo cáo hiện tại', 403);
@@ -437,7 +436,7 @@ export async function exportExcel(req: Request, res: Response) {
         subgroupId: scope.subgroupId,
         teamId: scope.teamId,
       },
-      labels: await getExportLabels(req, tenantId, locale),
+      labels: await getExportLabels(query, tenantId, locale),
       exporterName: req.user!.username || 'Admin',
       locale,
       signal: clientGone,
@@ -461,26 +460,18 @@ export async function exportExcel(req: Request, res: Response) {
 /** GET /api/reports/learner-detail */
 export async function getLearnerDetail(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const username = req.query.username as string;
+  const query = reportLearnerDetailQuerySchema.parse(req.query);
+  const username = query.username;
   if (!username) return sendError(res, 'username is required', 400);
 
-  const page = Math.max(parseInt(req.query.page as string) || 1, 1);
-  const search = (req.query.search as string) || '';
-  const pageSize = Math.min(Math.max(parseInt(req.query.page_size as string) || 10, 1), 100);
-  const rawStatus = req.query.status as string | undefined;
-  const status = VALID_COURSE_COMPLETION_STATUSES.has(rawStatus || '')
-    ? rawStatus as svc.ReportCourseCompletionStatus
-    : 'all';
-
-  const rawDataScope = req.query.data_scope as string | undefined;
-  const dataScope: svc.LearnerDetailDataScope | undefined = rawDataScope === 'report_filter' || rawDataScope === 'learner_history'
-    ? rawDataScope
-    : undefined;
-  const dateRange = dataScope === 'report_filter' ? parseReportDateRange(req) : undefined;
+  const { page, search, status } = query;
+  const pageSize = query.page_size;
+  const dataScope: svc.LearnerDetailDataScope | undefined = query.data_scope;
+  const dateRange = dataScope === 'report_filter' ? parseReportDateRange(query) : undefined;
   if (dataScope === 'report_filter' && !dateRange) {
     return sendError(res, 'date_from và date_to là bắt buộc khi lọc theo bộ lọc báo cáo', 400);
   }
-  const scope = await enforceReportScope(req);
+  const scope = await enforceReportScope(req, query);
   // learner_plus: only learners of their own groups (an out-of-scope learner looks unknown).
   if (scope.allowedGroupIds?.length === 0 || !await canReportOnLearner(reportActor(req), username)) {
     return sendSuccess(res, { username, groups: [], results: [], total_count: 0, total_pages: 0, current_page: page });
@@ -505,7 +496,7 @@ export async function getLearnerDetail(req: Request, res: Response) {
 /** GET /api/reports/user-badges */
 export async function getUserBadges(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const username = req.query.username as string;
+  const { username } = reportUserBadgesQuerySchema.parse(req.query);
   if (!username) return sendError(res, 'username is required', 400);
 
   if (!await canReportOnLearner(reportActor(req), username)) {
@@ -518,17 +509,18 @@ export async function getUserBadges(req: Request, res: Response) {
 /** GET /api/reports/user-study-time */
 export async function getUserStudyTime(req: Request, res: Response) {
   const tenantId = req.user!.tenantId!;
-  const username = req.query.username as string;
+  const query = reportUserStudyTimeQuerySchema.parse(req.query);
+  const username = query.username;
   if (!username) return sendError(res, 'username is required', 400);
 
-  const granularity = req.query.granularity as string | undefined;
+  const granularity = query.granularity;
   if (granularity && !VALID_STUDY_GRANULARITIES.has(granularity)) {
     return sendError(res, 'granularity must be day, month, or year', 400);
   }
 
   const options = {
-    from: req.query.from as string | undefined,
-    to: req.query.to as string | undefined,
+    from: query.from,
+    to: query.to,
     granularity: granularity as StudyTimeGranularity | undefined,
   };
   // An out-of-scope learner answers like an unknown one (no entries).
