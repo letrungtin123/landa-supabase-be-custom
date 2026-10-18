@@ -19,6 +19,7 @@ import { toLearnerBlockRow } from './learner-block-row.logic.js';
 import { LEARNER_BLOCK_SERIALIZATION_VERSION } from './learner-answer-key.logic.js';
 import { gradeBlockAnswer } from './learner-grading.logic.js';
 import { createLearnerCoursesRepository } from './learner-courses.repository.js';
+import { createLearnerLibraryRepository } from './learner-library.repository.js';
 import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   buildLearnerCourseStructure,
@@ -33,6 +34,7 @@ import {
 import { isUuid } from '../../utils/uuid.js';
 
 const coursesRepository = createLearnerCoursesRepository({ query });
+const libraryRepository = createLearnerLibraryRepository({ query });
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -416,50 +418,13 @@ async function getMyLibraryCategoriesFromDb(
   tenantId: string,
   role: string,
 ) {
-  const learner = isLearnerRole(role);
-  const sql = learner
-    ? `SELECT dc.id::text AS id,
-              dc.name,
-              dc.slug,
-              dc.sort_order,
-              COUNT(DISTINCT d.id) FILTER (WHERE d.is_visible = true)::int AS count
-       FROM document_categories dc
-       LEFT JOIN documents d
-         ON d.category_id = dc.id
-        AND d.tenant_id = $1::uuid
-       WHERE dc.tenant_id = $1::uuid
-         AND (
-           COALESCE(dc.is_public, false) = true
-           OR EXISTS (
-             SELECT 1
-             FROM team_doc_categories tdc
-             JOIN team_members tm ON tm.team_id = tdc.team_id
-             WHERE tdc.category_id = dc.id
-               AND tm.user_id = $2::uuid
-           )
-         )
-       GROUP BY dc.id
-       ORDER BY dc.sort_order, dc.name`
-    : `SELECT dc.id::text AS id,
-              dc.name,
-              dc.slug,
-              dc.sort_order,
-              COUNT(d.id)::int AS count
-       FROM document_categories dc
-       LEFT JOIN documents d
-         ON d.category_id = dc.id
-        AND d.tenant_id = $1::uuid
-       WHERE dc.tenant_id = $1::uuid
-       GROUP BY dc.id
-       ORDER BY dc.sort_order, dc.name`;
-
-  const result = await query<any>(sql, learner ? [tenantId, userId] : [tenantId]);
+  const result = await libraryRepository.selectCategories(tenantId, isLearnerRole(role) ? userId : undefined);
   return {
-    categories: result.rows.map((r: any) => ({
+    categories: result.rows.map(r => ({
       id: r.id,
       name: r.name,
       slug: r.slug || '',
-      count: parseInt(r.count) || 0,
+      count: parseInt(String(r.count)) || 0,
     })),
     total: result.rowCount || 0,
   };
@@ -508,84 +473,20 @@ async function getMyLibraryDocumentsFromDb(
 ) {
   const { page = 1, page_size = 20, category, extension, search, ordering } = params;
   const offset = (page - 1) * page_size;
-  const sqlParams: unknown[] = [tenantId];
-  const conditions: string[] = ['d.tenant_id = $1::uuid'];
+  const filter = { tenantId, learnerUserId: isLearnerRole(role) ? userId : undefined, category, extension, search };
 
-  if (isLearnerRole(role)) {
-    sqlParams.push(userId);
-    conditions.push(`d.is_visible = true AND d.category_id IS NOT NULL AND (
-      COALESCE(dc.is_public, false) = true
-      OR EXISTS (
-        SELECT 1
-        FROM team_doc_categories tdc
-        JOIN team_members tm ON tm.team_id = tdc.team_id
-        WHERE tm.user_id = $${sqlParams.length}::uuid
-          AND tdc.category_id = d.category_id
-      )
-    )`);
-  }
-
-  if (category) {
-    sqlParams.push(category);
-    conditions.push(`(dc.slug = $${sqlParams.length} OR dc.id::text = $${sqlParams.length})`);
-  }
-  if (extension) {
-    sqlParams.push(extension);
-    conditions.push(`d.extension = $${sqlParams.length}`);
-  }
-  if (search) {
-    sqlParams.push(`%${search}%`);
-    conditions.push(`unaccent(d.title) ILIKE unaccent($${sqlParams.length})`);
-  }
-
-  const where = conditions.join(' AND ');
-  let orderBy = 'd.created_at DESC';
-  if (ordering === 'title') orderBy = 'd.title ASC';
-  else if (ordering === '-title') orderBy = 'd.title DESC';
-  else if (ordering === 'created_at') orderBy = 'd.created_at ASC';
-  else if (ordering === 'file_size') orderBy = 'd.file_size DESC';
-
-  const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM documents d
-     LEFT JOIN document_categories dc ON dc.id = d.category_id
-     WHERE ${where}`,
-    sqlParams,
-  );
-  const total = parseInt(countResult.rows[0]?.count || '0', 10);
-
-  sqlParams.push(page_size, offset);
-  const result = await query<any>(
-    `SELECT d.id,
-            d.title,
-            d.extension,
-            d.file_size,
-            d.file_url,
-            d.category_id,
-            d.created_at,
-            d.is_visible,
-            COALESCE(dc.is_public, false) AS is_public,
-            dc.name AS category_name,
-            dc.slug AS category_slug,
-            u.full_name AS uploaded_by_name
-     FROM documents d
-     LEFT JOIN document_categories dc ON dc.id = d.category_id
-     LEFT JOIN users u ON u.id = d.uploaded_by
-     WHERE ${where}
-     ORDER BY ${orderBy}
-     LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
-    sqlParams,
-  );
+  const total = await libraryRepository.countDocuments(filter);
+  const rows = await libraryRepository.selectDocuments(filter, { ordering, limit: page_size, offset });
 
   return {
     count: total,
     next: page * page_size < total ? `page=${page + 1}` : null,
     previous: page > 1 ? `page=${page - 1}` : null,
-    results: result.rows.map((r: any) => ({
+    results: rows.map(r => ({
       id: r.id,
       title: r.title,
       extension: r.extension || '',
-      file_size: parseInt(r.file_size) || 0,
+      file_size: parseInt(r.file_size as string) || 0,
       category_id: r.category_id || null,
       category_name: r.category_name || '',
       category_slug: r.category_slug || '',
