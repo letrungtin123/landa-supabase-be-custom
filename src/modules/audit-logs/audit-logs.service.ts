@@ -3,7 +3,7 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import { env } from '../../config/env.js';
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { RFC_UUID_PATTERN, isRfcUuid } from '../../utils/uuid.js';

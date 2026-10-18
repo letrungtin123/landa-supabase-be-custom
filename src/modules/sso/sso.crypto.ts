@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { env } from '../../config/env.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 const ALGORITHM = 'aes-256-gcm';
 

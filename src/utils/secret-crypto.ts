@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { env } from '../config/env.js';
-import { AppError } from '../middleware/error-handler.js';
+import { AppError } from './errors.js';
 
 interface EncryptedSecret {
   ciphertext: string;

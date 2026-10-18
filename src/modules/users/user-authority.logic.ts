@@ -19,7 +19,7 @@
 // an action, it can never widen which accounts or roles the action reaches.
 // ═══════════════════════════════════════════════════════════════
 
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { UserRole } from '../../types/index.js';
 
 export const USER_ROLES: readonly UserRole[] = ['learner', 'learner_plus', 'staff', 'superuser', 'superadmin'];

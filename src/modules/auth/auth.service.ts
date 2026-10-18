@@ -10,7 +10,7 @@ import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
 import { env } from '../../config/env.js';
 import { compareAgainstDummyPassword, comparePassword } from '../../utils/password.js';
 import { signAccessToken, parseExpiresIn } from '../../utils/jwt.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { AuthLoginError } from './auth-login-error.logic.js';
 import { looksLikeEmailIdentifier, normalizeEmail } from '../../utils/email.js';
 import type { PermissionsMap } from '../../types/index.js';

@@ -1,7 +1,7 @@
 import { query } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { blacklistUser } from '../../middleware/authenticate.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
 
 export type DemoIframeSessionMode = 'normal' | 'demo_iframe';

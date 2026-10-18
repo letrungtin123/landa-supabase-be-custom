@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import { extractStoragePath } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 const NEWS_CONTENT_MAX_BYTES = 500_000;
 const STORAGE_PROXY_PREFIX = '/api/storage/';

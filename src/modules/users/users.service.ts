@@ -6,7 +6,7 @@
 import { query, withDatabaseTransaction } from '../../config/database.js';
 import { invalidateUserBadgeCaches } from '../../config/cache-invalidation.js';
 import { hashPassword } from '../../utils/password.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { normalizeEmail } from '../../utils/email.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { blacklistUser } from '../../middleware/authenticate.js';

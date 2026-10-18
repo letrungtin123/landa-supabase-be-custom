@@ -4,7 +4,7 @@ import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFileByUrl, buildStoragePath } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
 
 type TenantBadgeStatusUpdate = {

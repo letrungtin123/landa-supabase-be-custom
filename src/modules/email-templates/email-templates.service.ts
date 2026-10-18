@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { bumpCacheVersion, getCacheJson, getCacheVersion, setCacheJson } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 export const EMAIL_TEMPLATE_KEYS = [
   'course_notification',

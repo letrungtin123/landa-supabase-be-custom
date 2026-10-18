@@ -5,7 +5,7 @@
 import { query } from '../../config/database.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { CreateModuleInput, UpdateModuleInput } from './modules.validator.js';
 
 /**

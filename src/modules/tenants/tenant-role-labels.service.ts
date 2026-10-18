@@ -2,7 +2,7 @@ import { getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import type { UserRole } from '../../types/index.js';
 
 export type RoleLabelMap = Partial<Record<UserRole, string>>;

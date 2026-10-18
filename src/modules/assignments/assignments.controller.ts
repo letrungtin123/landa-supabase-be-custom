@@ -1,7 +1,7 @@
 ﻿import type { Request, Response, NextFunction } from 'express';
 import { pipeline } from 'node:stream/promises';
 import { removeTempUploadFiles } from '../../utils/temp-upload-files.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import type { AuditChange } from '../audit-logs/audit-event.contract.js';
 import { sendError, sendSuccess } from '../../utils/response.js';

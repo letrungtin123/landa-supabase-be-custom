@@ -7,7 +7,7 @@
 // password was given.
 // ═══════════════════════════════════════════════════════════════
 
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 
 /** [HTTP status, Vietnamese, English] — the response picks by X-UI-Locale. */
 export const AUTH_LOGIN_ERRORS = {

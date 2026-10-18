@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import { afterCommit, getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { parseExpiresIn } from '../../utils/jwt.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import {

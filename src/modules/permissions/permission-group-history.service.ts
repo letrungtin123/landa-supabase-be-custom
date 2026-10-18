@@ -7,7 +7,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { env } from '../../config/env.js';
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { normalizeVietnameseSearchText } from './permission-group-history.search.js';
 
 export const PERMISSION_GROUP_HISTORY_ACTIONS = [

@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { createCourseAccessRepository } from './course-access.repository.js';
 
 // query() joins the caller's current transaction (withDatabaseTransaction) when there is one.

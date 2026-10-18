@@ -1,7 +1,7 @@
 import { getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
 import {
   criteriaRequiresCourses,

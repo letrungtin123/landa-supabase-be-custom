@@ -5,7 +5,7 @@
 
 import { getClient, query } from '../../config/database.js';
 import { invalidateTenantLibraryCaches } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 

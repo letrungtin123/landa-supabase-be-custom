@@ -1,5 +1,5 @@
 import { query } from '../../config/database.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { encryptSecret } from '../../utils/secret-crypto.js';
 import type { UpdateTenantSmtpInput } from './tenant-smtp.validator.js';
 

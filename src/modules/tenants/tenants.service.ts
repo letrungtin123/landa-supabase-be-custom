@@ -14,7 +14,7 @@ import {
   invalidateTenantModuleCaches,
   invalidateUserMembershipCaches,
 } from '../../config/cache-invalidation.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import type { CreateTenantInput, UpdateTenantInput } from './tenants.validator.js';
 import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai-chatbot/gemini.service.js';

@@ -10,7 +10,7 @@ import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache
 import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFile, buildFileName } from '../../config/storage.js';
-import { AppError } from '../../middleware/error-handler.js';
+import { AppError } from '../../utils/errors.js';
 import { SINGLE_IMAGE_KEYS, IMAGE_SIZE_HINTS, MAX_CAROUSEL } from './branding.validator.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
 
