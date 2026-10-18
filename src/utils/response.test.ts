@@ -24,64 +24,65 @@ function capture(): { res: Response; out: { status?: number; body?: Body } } {
   return { res, out };
 }
 
-const ERROR_CASES: Array<{ name: string; send: (res: Response) => void; status: number; legacy: Body; code: string }> = [
-  {
-    name: 'default status 400',
-    send: res => sendError(res, 'Dữ liệu không hợp lệ'),
-    status: 400,
-    legacy: { success: false, message: 'Dữ liệu không hợp lệ' },
-    code: 'BAD_REQUEST',
-  },
-  {
-    name: '401',
-    send: res => sendError(res, 'Token không được cung cấp', 401),
-    status: 401,
-    legacy: { success: false, message: 'Token không được cung cấp' },
-    code: 'UNAUTHORIZED',
-  },
-  {
-    name: '403',
-    send: res => sendError(res, 'Không có quyền truy cập', 403),
-    status: 403,
-    legacy: { success: false, message: 'Không có quyền truy cập' },
-    code: 'FORBIDDEN',
-  },
-  {
-    name: '404',
-    send: res => sendError(res, 'Tenant không tồn tại', 404),
-    status: 404,
-    legacy: { success: false, message: 'Tenant không tồn tại' },
-    code: 'NOT_FOUND',
-  },
-  {
-    name: '413',
-    send: res => sendError(res, 'File quá lớn', 413),
-    status: 413,
-    legacy: { success: false, message: 'File quá lớn' },
-    code: 'PAYLOAD_TOO_LARGE',
-  },
-  {
-    name: '500',
-    send: res => sendError(res, 'Lỗi kiểm tra quyền', 500),
-    status: 500,
-    legacy: { success: false, message: 'Lỗi kiểm tra quyền' },
-    code: 'INTERNAL_ERROR',
-  },
-  {
-    name: 'with an error code (4th argument)',
-    send: res => sendError(res, 'Tính năng chưa được bật cho doanh nghiệp này', 403, 'MODULE_DISABLED'),
-    status: 403,
-    legacy: { success: false, message: 'Tính năng chưa được bật cho doanh nghiệp này', error: 'MODULE_DISABLED' },
-    code: 'MODULE_DISABLED',
-  },
-  {
-    name: 'with an empty error code',
-    send: res => sendError(res, 'Chưa xác thực', 401, ''),
-    status: 401,
-    legacy: { success: false, message: 'Chưa xác thực' },
-    code: 'UNAUTHORIZED',
-  },
-];
+const ERROR_CASES: Array<{ name: string; send: (res: Response) => void; status: number; legacy: Body; code: string }> =
+  [
+    {
+      name: 'default status 400',
+      send: res => sendError(res, 'Dữ liệu không hợp lệ'),
+      status: 400,
+      legacy: { success: false, message: 'Dữ liệu không hợp lệ' },
+      code: 'BAD_REQUEST',
+    },
+    {
+      name: '401',
+      send: res => sendError(res, 'Token không được cung cấp', 401),
+      status: 401,
+      legacy: { success: false, message: 'Token không được cung cấp' },
+      code: 'UNAUTHORIZED',
+    },
+    {
+      name: '403',
+      send: res => sendError(res, 'Không có quyền truy cập', 403),
+      status: 403,
+      legacy: { success: false, message: 'Không có quyền truy cập' },
+      code: 'FORBIDDEN',
+    },
+    {
+      name: '404',
+      send: res => sendError(res, 'Tenant không tồn tại', 404),
+      status: 404,
+      legacy: { success: false, message: 'Tenant không tồn tại' },
+      code: 'NOT_FOUND',
+    },
+    {
+      name: '413',
+      send: res => sendError(res, 'File quá lớn', 413),
+      status: 413,
+      legacy: { success: false, message: 'File quá lớn' },
+      code: 'PAYLOAD_TOO_LARGE',
+    },
+    {
+      name: '500',
+      send: res => sendError(res, 'Lỗi kiểm tra quyền', 500),
+      status: 500,
+      legacy: { success: false, message: 'Lỗi kiểm tra quyền' },
+      code: 'INTERNAL_ERROR',
+    },
+    {
+      name: 'with an error code (4th argument)',
+      send: res => sendError(res, 'Tính năng chưa được bật cho doanh nghiệp này', 403, 'MODULE_DISABLED'),
+      status: 403,
+      legacy: { success: false, message: 'Tính năng chưa được bật cho doanh nghiệp này', error: 'MODULE_DISABLED' },
+      code: 'MODULE_DISABLED',
+    },
+    {
+      name: 'with an empty error code',
+      send: res => sendError(res, 'Chưa xác thực', 401, ''),
+      status: 401,
+      legacy: { success: false, message: 'Chưa xác thực' },
+      code: 'UNAUTHORIZED',
+    },
+  ];
 
 for (const item of ERROR_CASES) {
   test(`sendError: ${item.name}`, () => {

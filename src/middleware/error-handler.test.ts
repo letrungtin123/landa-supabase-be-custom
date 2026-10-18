@@ -140,7 +140,11 @@ const EXPECTED_CASES: Case[] = [
     name: 'quota trigger: data limit reached',
     error: () => errorOf('raw trigger text', { code: TENANT_DATA_LIMIT_REACHED_SQLSTATE }),
     status: 409,
-    legacy: () => ({ success: false, code: TENANT_DATA_LIMIT_REACHED_CODE, message: TENANT_DATA_LIMIT_REACHED_MESSAGE }),
+    legacy: () => ({
+      success: false,
+      code: TENANT_DATA_LIMIT_REACHED_CODE,
+      message: TENANT_DATA_LIMIT_REACHED_MESSAGE,
+    }),
   },
   {
     name: 'quota trigger: reconciling',
@@ -167,7 +171,11 @@ const UNEXPECTED_CASES: Case[] = [
     name: 'database error with a SQLSTATE',
     error: () => errorOf('duplicate key value violates unique constraint', { code: '23505' }),
     status: 500,
-    legacy: error => ({ success: false, message: 'duplicate key value violates unique constraint', stack: stackOf(error) }),
+    legacy: error => ({
+      success: false,
+      message: 'duplicate key value violates unique constraint',
+      stack: stackOf(error),
+    }),
     added: 'INTERNAL_ERROR',
   },
   {
@@ -264,7 +272,10 @@ for (const item of UNEXPECTED_CASES) {
     const error = item.error();
     const out = inProduction(() => respond(error));
     assert.equal(out.status, 500);
-    assert.deepEqual(out.body, expected({ ...item, legacy: () => ({ success: false, message: PRODUCTION_MESSAGE }) }, error));
+    assert.deepEqual(
+      out.body,
+      expected({ ...item, legacy: () => ({ success: false, message: PRODUCTION_MESSAGE }) }, error),
+    );
     assert.doesNotMatch(JSON.stringify(out.body), /boom|duplicate|23505|JSON|stack|Khoảng/);
     assert.equal(logged.length, 1);
   });
@@ -297,10 +308,18 @@ const REQUEST_BODY_CASES: Array<{
   {
     type: 'entity.too.large',
     status: 413,
-    body: { success: false, code: 'PAYLOAD_TOO_LARGE', message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.' },
+    body: {
+      success: false,
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.',
+    },
     before: {
       status: 413,
-      body: { success: false, code: 'PAYLOAD_TOO_LARGE', message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.' },
+      body: {
+        success: false,
+        code: 'PAYLOAD_TOO_LARGE',
+        message: 'Dữ liệu gửi lên quá lớn. Vui lòng gửi ít nội dung hơn.',
+      },
     },
   },
   {

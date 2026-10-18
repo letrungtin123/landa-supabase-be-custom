@@ -66,7 +66,12 @@ function rawPost(
 }
 
 function postJson(port: number, path: string, body: string): Promise<{ status: number; text: string }> {
-  return rawPost(port, path, { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(body)) }, body);
+  return rawPost(
+    port,
+    path,
+    { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(body)) },
+    body,
+  );
 }
 
 test('a malformed JSON body is a 400 INVALID_JSON with a fixed message, and the body is never logged', async t => {
