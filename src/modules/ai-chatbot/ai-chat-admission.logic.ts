@@ -3,8 +3,9 @@
 //
 // Per tenant and in total. A turn that does not fit is refused at once with
 // 429 AI_BUSY (no queue: a waiting browser holds a connection and the
-// provider is usually the reason it is busy). The limits are per API
-// process; with several processes the totals add up.
+// provider is usually the reason it is busy). This in-process gate serves a
+// single API process; with several, ai-chat-admission.service.ts shares the
+// limits through Redis.
 // ═══════════════════════════════════════════════════════════════
 
 export const AI_BUSY_CODE = 'AI_BUSY';
