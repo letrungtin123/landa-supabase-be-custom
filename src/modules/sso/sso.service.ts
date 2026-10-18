@@ -18,10 +18,8 @@ import {
   isEmailExplicitlyUnverified,
 } from './sso-account-link.logic.js';
 
-const PUBLIC_CACHE_TTL_MS = 60_000;
 /** Each outbound provider call (token, userinfo) is aborted after this long. */
 export const SSO_PROVIDER_TIMEOUT_MS = 15_000;
-const publicConfigCache = new Map<string, { expires: number; data: PublicSsoResponse }>();
 
 interface PublicSsoResponse {
   tenant_id: string | null;
@@ -148,10 +146,6 @@ function toPublicProvider(row: SsoConfigRow): PublicSsoProvider | null {
   };
 }
 
-export function clearSsoPublicCache(): void {
-  publicConfigCache.clear();
-}
-
 export async function listConfigs(tenantId: string) {
   const result = await query<SsoConfigRow>(
     `SELECT id, tenant_id, provider, is_enabled, client_id, client_secret_enc,
@@ -238,7 +232,6 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
     ],
   );
 
-  clearSsoPublicCache();
   await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
   return {
     ...compactConfig(result.rows[0]),
@@ -249,7 +242,6 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
 
 export async function deleteConfig(tenantId: string, provider: SsoProvider): Promise<void> {
   await query('DELETE FROM tenant_sso_configs WHERE tenant_id = $1 AND provider = $2', [tenantId, provider]);
-  clearSsoPublicCache();
   await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
 }
 
