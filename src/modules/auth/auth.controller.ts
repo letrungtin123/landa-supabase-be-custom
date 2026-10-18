@@ -217,7 +217,7 @@ export async function generateOTTController(req: Request, res: Response, next: N
       return;
     }
 
-    const token = authService.generateOTT(req.user.id);
+    const token = await authService.generateOTT(req.user.id);
     sendSuccess(res, { ott: token, expires_in: 30 });
   } catch (err) {
     next(err);

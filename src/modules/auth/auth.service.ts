@@ -17,6 +17,8 @@ import type { PermissionsMap } from '../../types/index.js';
 import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 import { recordUserSessionRevocation, syncUserAccessRevocationCache } from './auth-revocation.service.js';
+import { createOneTimeTokenStore } from './auth-one-time-token.store.js';
+import { processRolePlan } from '../../config/process-role.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
 import {
   isActiveDemoIframeAccount,
@@ -788,29 +790,23 @@ export async function cleanupExpiredTokens(): Promise<number> {
 }
 
 // ── One-Time Token (OTT) — Cross-app SSO ──
-// In-memory store: token → { userId, expiresAt }
+// Store: token → { userId, expiresAt }; in memory with one API process, in
+// Redis with several (auth-one-time-token.store.ts).
 // Dùng để chuyển auth giữa FE 5173 ↔ Admin Dashboard
 // Token tồn tại 30 giây, dùng 1 lần rồi xóa.
 
 const OTT_TTL_MS = 30_000; // 30 giây
-const ottStore = new Map<string, { userId: string; expiresAt: number }>();
+const ottStore = createOneTimeTokenStore({ ttlMs: OTT_TTL_MS, shared: processRolePlan.severalApiInstances });
 
 // Cleanup expired OTTs mỗi phút
-setInterval(() => {
-  const now = Date.now();
-  for (const [token, data] of ottStore) {
-    if (now > data.expiresAt) ottStore.delete(token);
-  }
-}, 60_000);
+setInterval(() => ottStore.sweep(), 60_000);
 
 /**
  * Tạo One-Time Token cho user — dùng để cross-app SSO.
  * User phải đã authenticated (có userId từ JWT).
  */
-export function generateOTT(userId: string): string {
-  const token = uuidv4();
-  ottStore.set(token, { userId, expiresAt: Date.now() + OTT_TTL_MS });
-  return token;
+export async function generateOTT(userId: string): Promise<string> {
+  return ottStore.issue(userId);
 }
 
 /**
@@ -818,11 +814,9 @@ export function generateOTT(userId: string): string {
  * Token bị xóa ngay sau khi dùng (one-time).
  */
 export async function exchangeOTT(token: string) {
-  const entry = ottStore.get(token);
-  if (!entry) throw new AppError('Token không hợp lệ hoặc đã hết hạn', 401);
-
   // Xóa ngay — one-time use
-  ottStore.delete(token);
+  const entry = await ottStore.take(token);
+  if (!entry) throw new AppError('Token không hợp lệ hoặc đã hết hạn', 401);
 
   // Check hết hạn
   if (Date.now() > entry.expiresAt) {
