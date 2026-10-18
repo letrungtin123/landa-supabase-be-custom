@@ -22,6 +22,7 @@ import {
   isReportsBusyError,
 } from './report-admission.logic.js';
 import { tryAcquireReportExportSlot } from './report-admission.service.js';
+import { refreshReportSummaryOnce, type ReportSummaryRefreshOutcome } from './report-summary-refresh.service.js';
 import {
   buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
@@ -546,10 +547,15 @@ export const REPORT_SUMMARY_REFRESH_FAILED_ERROR = [
   'The report could not be refreshed. Please try again later.',
 ] as const;
 
-/** POST /api/reports/refresh — Manually refresh materialized view */
+/**
+ * POST /api/reports/refresh — Manually refresh materialized view. One rebuild
+ * at a time per process; a call within a minute of a successful rebuild
+ * answers success with `skipped_recent: true` and rebuilds nothing.
+ */
 export async function refreshSummary(req: Request, res: Response) {
+  let outcome: ReportSummaryRefreshOutcome;
   try {
-    await svc.refreshReportSummary();
+    outcome = await refreshReportSummaryOnce();
   } catch (error) {
     // Success only when the summary was refreshed. The log has the error kind, never its text.
     console.error(`[Reports] ${JSON.stringify({
@@ -557,6 +563,11 @@ export async function refreshSummary(req: Request, res: Response) {
     })}`);
     const [status, vi, en] = REPORT_SUMMARY_REFRESH_FAILED_ERROR;
     throw new AppError(requestUiLocale(req) === 'en' ? en : vi, status, REPORT_SUMMARY_REFRESH_FAILED_CODE);
+  }
+  if (outcome.skippedRecent) {
+    // Nothing was rebuilt, so nothing is audited.
+    sendSuccess(res, { message: 'Report summary refreshed', skipped_recent: true });
+    return;
   }
   await runAuditedTransaction(
     () => Promise.resolve(),
