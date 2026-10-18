@@ -6,6 +6,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { sendError } from '../utils/response.js';
 import { query } from '../config/database.js';
+import { clusterBus } from '../config/cluster-bus.js';
 import type { UserRole, PermissionAction } from '../types/index.js';
 import { isTenantModuleSwitchedOff } from './tenant-module-state.js';
 
@@ -52,9 +53,12 @@ export function authorize(...allowedRoles: UserRole[]) {
  * - staff/learner: kiểm tra permission_group_modules (UNION tất cả groups)
  */
 // ── Permission Cache — tránh query ma trận quyền mỗi request ──
+// Per process; invalidations reach the other processes through the cluster
+// bus (values live only a few seconds while the bus is down).
 const permCache = new Map<string, { allowed: boolean; expires: number }>();
 const PERM_CACHE_TTL = 5 * 60_000; // 5 phút
 const ALLOWED_PERMISSION_ACTIONS = ['can_view', 'can_add', 'can_edit', 'can_delete'] as const;
+const PERMISSIONS_EVENT = 'permissions';
 
 export interface PermissionSubject {
   id: string;
@@ -62,12 +66,22 @@ export interface PermissionSubject {
   role: UserRole;
 }
 
-/** Xóa permission cache (gọi khi update quyền) */
-export function invalidatePermissionCache(userId?: string) {
+function forgetPermissions(userId?: string): void {
   if (!userId) { permCache.clear(); return; }
   for (const key of permCache.keys()) {
     if (key.startsWith(userId + ':')) permCache.delete(key);
   }
+}
+
+clusterBus.on(PERMISSIONS_EVENT, (payload) => {
+  forgetPermissions(typeof payload.user_id === 'string' ? payload.user_id : undefined);
+});
+clusterBus.onReset(() => permCache.clear());
+
+/** Xóa permission cache (gọi khi update quyền), in every process. */
+export function invalidatePermissionCache(userId?: string) {
+  forgetPermissions(userId);
+  void clusterBus.publish(PERMISSIONS_EVENT, userId ? { user_id: userId } : {});
 }
 
 export type PermissionDecision = 'allowed' | 'denied' | 'module_disabled';
@@ -133,7 +147,7 @@ async function matrixAllows(
     [subject.id, moduleCode, subject.tenantId],
   );
   const allowed = result.rows[0]?.allowed === true;
-  permCache.set(cacheKey, { allowed, expires: Date.now() + PERM_CACHE_TTL });
+  permCache.set(cacheKey, { allowed, expires: Date.now() + clusterBus.cacheTtlMs(PERM_CACHE_TTL) });
   return allowed;
 }
 

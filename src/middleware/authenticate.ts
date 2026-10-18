@@ -9,6 +9,7 @@ import { sendError } from '../utils/response.js';
 import type { AuthUser } from '../types/express.js';
 import { isAccessTokenRevoked } from '../modules/auth/auth-revocation.service.js';
 import { isRuntimeTenantAllowed } from '../config/runtime-tenant-fence.js';
+import { clusterBus } from '../config/cluster-bus.js';
 
 // ── In-memory blacklist: users cần force re-auth (role đã thay đổi) ──
 // Key = userId, Value = timestamp khi blacklist
@@ -18,12 +19,31 @@ type SessionMode = 'normal' | 'demo_iframe';
 type BlacklistScope = SessionMode | 'all';
 type BlacklistEntry = Partial<Record<BlacklistScope, number>>;
 const userBlacklist = new Map<string, BlacklistEntry>();
+const BLACKLIST_SCOPES: readonly BlacklistScope[] = ['all', 'normal', 'demo_iframe'];
+// Every process keeps the list: an entry made in one process reaches the
+// others through the cluster bus with its original instant. The sessions it
+// cuts also have their refresh tokens revoked in the database, so a process
+// that missed the message (bus down) refuses them by the access-token expiry.
+const BLACKLIST_EVENT = 'auth.blacklist';
 
-/** Thêm user vào blacklist — gọi khi admin thay đổi role */
-export function blacklistUser(userId: string, scope: BlacklistScope = 'all'): void {
+function recordBlacklist(userId: string, scope: BlacklistScope, at: number): void {
   const entry = userBlacklist.get(userId) ?? {};
-  entry[scope] = Date.now();
+  entry[scope] = Math.max(entry[scope] ?? 0, at);
   userBlacklist.set(userId, entry);
+}
+
+clusterBus.on(BLACKLIST_EVENT, (payload) => {
+  const { user_id: userId, scope, at } = payload;
+  if (typeof userId !== 'string' || !BLACKLIST_SCOPES.includes(scope as BlacklistScope)
+    || typeof at !== 'number' || !Number.isFinite(at)) return;
+  recordBlacklist(userId, scope as BlacklistScope, at);
+});
+
+/** Thêm user vào blacklist — gọi khi admin thay đổi role (every process). */
+export function blacklistUser(userId: string, scope: BlacklistScope = 'all'): void {
+  const at = Date.now();
+  recordBlacklist(userId, scope, at);
+  void clusterBus.publish(BLACKLIST_EVENT, { user_id: userId, scope, at });
 }
 
 /** Cleanup expired entries (chạy lazy, không cần interval riêng) */

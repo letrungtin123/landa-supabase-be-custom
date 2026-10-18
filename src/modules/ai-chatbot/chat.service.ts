@@ -24,6 +24,7 @@ import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { getRedisClient } from '../../config/redis.js';
+import { clusterBus } from '../../config/cluster-bus.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 import {
@@ -300,7 +301,11 @@ const STORE_CACHE_TTL = 10 * 60_000; // 10 minutes
 const ACTIVE_KB_RESTORE_STATES = new Set(['queued', 'restoring', 'uploading']);
 const RESTORE_REQUIRED_STORE_STATUSES = new Set(['key_changed', 'permission_denied', 'not_found']);
 
-export function invalidateGeminiStoreNameCache(kbId?: string): void {
+// KB restores and engine transitions run in the background process: their
+// invalidations reach the API processes through the cluster bus.
+const STORE_NAME_EVENT = 'kb.store-name';
+
+function forgetGeminiStoreNames(kbId?: string): void {
   if (kbId) {
     for (const key of storeNameCache.keys()) {
       if (key.startsWith(`${kbId}:`)) storeNameCache.delete(key);
@@ -310,11 +315,21 @@ export function invalidateGeminiStoreNameCache(kbId?: string): void {
   storeNameCache.clear();
 }
 
+clusterBus.on(STORE_NAME_EVENT, (payload) => {
+  forgetGeminiStoreNames(typeof payload.kb_id === 'string' ? payload.kb_id : undefined);
+});
+clusterBus.onReset(() => storeNameCache.clear());
+
+export function invalidateGeminiStoreNameCache(kbId?: string): void {
+  forgetGeminiStoreNames(kbId);
+  void clusterBus.publish(STORE_NAME_EVENT, kbId ? { kb_id: kbId } : {});
+}
+
 async function getCachedStoreName(kbId: string, tenantId: string): Promise<string | null> {
   const currentFingerprint = await getOptionalGeminiApiKeyFingerprint(tenantId);
   const cacheKey = `${kbId}:${currentFingerprint ?? 'no-key'}`;
   const cached = storeNameCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < STORE_CACHE_TTL) return cached.name;
+  if (cached && Date.now() - cached.ts < clusterBus.cacheTtlMs(STORE_CACHE_TTL)) return cached.name;
 
   const result = await query<{
     restore_state: string | null;

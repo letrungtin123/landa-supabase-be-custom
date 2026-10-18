@@ -3,6 +3,7 @@ import { query } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { getRedisClient, isRedisConfigured, markRedisUnhealthy, redisConnectionEpoch, withRedisDeadline } from '../../config/redis.js';
 import { parseExpiresIn } from '../../utils/jwt.js';
+import { clusterBus } from '../../config/cluster-bus.js';
 
 const REVOCATION_KEY_PREFIX = 'auth:revoked:';
 /** Clock-skew margin on top of the access-token lifetime when copying recent revocations. */
@@ -50,9 +51,22 @@ function markRevocationMirrorStale(): void {
   mirrorGeneration += 1;
 }
 
+// ── Several processes ──
+// Each process copies the revocations it records. Another process may fail
+// that copy (its Redis breaker open), so every recorded revocation is also
+// announced on the cluster bus and every process copies it from the
+// database; a process whose own copy fails stops trusting Redis. While this
+// process's bus listener is down it could miss an announcement, so the copy
+// is not trusted then, and is resynced once the listener is back.
+const REVOCATION_EVENT = 'auth.revocation';
+clusterBus.onReset(() => markRevocationMirrorStale());
+clusterBus.on(REVOCATION_EVENT, async (payload) => {
+  if (typeof payload.user_id === 'string') await copyDatabaseRevocationToRedis(payload.user_id);
+});
+
 /** Whether isAccessTokenRevoked may currently answer from Redis (diagnostics and tests). */
 export function isAccessRevocationMirrorTrusted(): boolean {
-  return trustedEpoch !== null && trustedEpoch === redisConnectionEpoch();
+  return trustedEpoch !== null && trustedEpoch === redisConnectionEpoch() && clusterBus.isHealthy();
 }
 
 function revocationValue(row: { reason: string; revoked_at: Date }): string {
@@ -192,6 +206,11 @@ export async function recordUserSessionRevocation(userId: string, reason: Sessio
  * (not a value from the request) keeps the cache equal to what committed.
  */
 export async function syncUserAccessRevocationCache(userId: string): Promise<void> {
+  await copyDatabaseRevocationToRedis(userId);
+  await clusterBus.publish(REVOCATION_EVENT, { user_id: userId });
+}
+
+async function copyDatabaseRevocationToRedis(userId: string): Promise<void> {
   await copyRevocationToRedis(userId, async () => {
     const result = await query<{ reason: string; revoked_at: Date; expires_at: Date }>(
       `SELECT reason, revoked_at, expires_at
@@ -237,7 +256,7 @@ export async function isAccessTokenRevoked(userId: string, issuedAtSeconds: numb
       if (!Number.isFinite(revokedAtMs)) return true;
       return isRevokedForIssuedAt({ full: false, revokedAtMs }, issuedAtSeconds);
     }
-  } else if (client) {
+  } else if (client && clusterBus.isHealthy()) {
     // Redis is back (or new to this process): copy the recent revocations in
     // the background; this request uses the database.
     void resyncAccessRevocationMirror();
@@ -260,6 +279,8 @@ export async function isAccessTokenRevoked(userId: string, issuedAtSeconds: numb
 /** Cache a durable database revocation after the transaction commits. */
 export async function cacheUserAccessRevocation(userId: string, expiresAt: Date): Promise<void> {
   await copyRevocationToRedis(userId, async () => ({ value: FULL_REVOCATION_VALUE, ttlSeconds: revocationTtlSeconds(expiresAt) }));
+  // The other processes copy the committed row (permanent deletion -> full revocation).
+  await clusterBus.publish(REVOCATION_EVENT, { user_id: userId });
 }
 
 /** Bounded retention cleanup; never scan/delete an unbounded production table. */

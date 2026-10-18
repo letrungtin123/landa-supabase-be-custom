@@ -12,10 +12,24 @@ import type { Request, Response, NextFunction } from 'express';
 import { sendError } from '../utils/response.js';
 import { query } from '../config/database.js';
 import { isRuntimeTenantAllowed, runtimeTenantSql } from '../config/runtime-tenant-fence.js';
+import { clusterBus } from '../config/cluster-bus.js';
 
 // ── Tenant Status Cache — tránh query DB mỗi request ──
+// Per process; a change made in another process arrives through the cluster
+// bus (values live only a few seconds while the bus is down).
 const tenantCache = new Map<string, { active: boolean; expires: number }>();
 const CACHE_TTL = 60_000; // 60s
+const TENANT_STATUS_EVENT = 'tenant.status';
+
+function forgetTenantStatus(tenantId?: string): void {
+  if (tenantId) tenantCache.delete(tenantId);
+  else tenantCache.clear();
+}
+
+clusterBus.on(TENANT_STATUS_EVENT, (payload) => {
+  forgetTenantStatus(typeof payload.tenant_id === 'string' ? payload.tenant_id : undefined);
+});
+clusterBus.onReset(() => tenantCache.clear());
 
 async function getTenantStatus(tenantId: string): Promise<boolean | null> {
   const cached = tenantCache.get(tenantId);
@@ -30,14 +44,14 @@ async function getTenantStatus(tenantId: string): Promise<boolean | null> {
     return null; // tenant không tồn tại
   }
 
-  tenantCache.set(tenantId, { active: result.rows[0].is_active, expires: Date.now() + CACHE_TTL });
+  tenantCache.set(tenantId, { active: result.rows[0].is_active, expires: Date.now() + clusterBus.cacheTtlMs(CACHE_TTL) });
   return result.rows[0].is_active;
 }
 
-/** Xóa cache khi tenant bị update (gọi từ tenants controller) */
+/** Xóa cache khi tenant bị update (gọi từ tenants controller), in every process. */
 export function invalidateTenantCache(tenantId?: string) {
-  if (tenantId) tenantCache.delete(tenantId);
-  else tenantCache.clear();
+  forgetTenantStatus(tenantId);
+  void clusterBus.publish(TENANT_STATUS_EVENT, tenantId ? { tenant_id: tenantId } : {});
 }
 
 /**
