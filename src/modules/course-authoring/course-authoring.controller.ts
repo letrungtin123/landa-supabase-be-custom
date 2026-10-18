@@ -46,7 +46,7 @@ import {
   mapCoursePublishGovernanceError,
 } from './course-publish-governance.repository.js';
 import { ensureCoursePublishGovernanceSchema } from './course-publish-governance-schema.repository.js';
-import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isUuid } from '../../utils/uuid.js';
 
 export { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
 
