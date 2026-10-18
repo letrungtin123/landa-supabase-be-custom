@@ -892,7 +892,7 @@
   },
   "src/modules/reports/reports.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 7
+      "count": 5
     }
   },
   "src/modules/sso/sso.routes.ts": {
