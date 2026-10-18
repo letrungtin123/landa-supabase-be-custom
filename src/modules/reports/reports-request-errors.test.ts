@@ -90,7 +90,7 @@ test('a date range or chart window the checks refuse is a 400 with a plain messa
   for (const [handler, query, message] of cases) {
     const res = await respond(handler, fakeRequest(query));
     assert.equal(res.statusCode, 400, JSON.stringify(query));
-    assert.deepEqual(res.body, { success: false, message }, JSON.stringify(query));
+    assert.deepEqual(res.body, { success: false, message, code: 'BAD_REQUEST' }, JSON.stringify(query));
   }
 });
 

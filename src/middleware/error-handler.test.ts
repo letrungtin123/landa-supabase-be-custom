@@ -14,7 +14,8 @@ import { AppError, errorHandler } from './error-handler.js';
 
 // Characterization of the global error handler: for every kind of error, the
 // status and the JSON body the client receives. `legacy` is the body as it
-// was before error bodies got a mandatory code.
+// was before error bodies got a mandatory code; `added` is the code the body
+// now carries on top of it, for a body that had none. Nothing else changed.
 
 type Body = Record<string, unknown>;
 
@@ -23,6 +24,8 @@ interface Case {
   error: () => unknown;
   status: number;
   legacy: (error: unknown) => Body;
+  /** The code a body without one now gets (from its status). */
+  added?: string;
 }
 
 class DomainRefusal extends AppError {
@@ -61,66 +64,77 @@ const EXPECTED_CASES: Case[] = [
     error: () => new AppError('Dữ liệu không hợp lệ'),
     status: 400,
     legacy: () => ({ success: false, message: 'Dữ liệu không hợp lệ' }),
+    added: 'BAD_REQUEST',
   },
   {
     name: 'AppError without a code, 401',
     error: () => new AppError('Chưa xác thực', 401),
     status: 401,
     legacy: () => ({ success: false, message: 'Chưa xác thực' }),
+    added: 'UNAUTHORIZED',
   },
   {
     name: 'AppError without a code, 403',
     error: () => new AppError('Không có quyền truy cập', 403),
     status: 403,
     legacy: () => ({ success: false, message: 'Không có quyền truy cập' }),
+    added: 'FORBIDDEN',
   },
   {
     name: 'AppError without a code, 404',
     error: () => new AppError('Khóa học không tồn tại', 404),
     status: 404,
     legacy: () => ({ success: false, message: 'Khóa học không tồn tại' }),
+    added: 'NOT_FOUND',
   },
   {
     name: 'AppError without a code, 409',
     error: () => new AppError('Email đã tồn tại', 409),
     status: 409,
     legacy: () => ({ success: false, message: 'Email đã tồn tại' }),
+    added: 'CONFLICT',
   },
   {
     name: 'AppError without a code, 422',
     error: () => new AppError('Không xử lý được nội dung', 422),
     status: 422,
     legacy: () => ({ success: false, message: 'Không xử lý được nội dung' }),
+    added: 'UNPROCESSABLE_ENTITY',
   },
   {
     name: 'AppError without a code, 429',
     error: () => new AppError('Quá nhiều yêu cầu', 429),
     status: 429,
     legacy: () => ({ success: false, message: 'Quá nhiều yêu cầu' }),
+    added: 'TOO_MANY_REQUESTS',
   },
   {
     name: 'AppError without a code, 500',
     error: () => new AppError('Không tạo được tệp', 500),
     status: 500,
     legacy: () => ({ success: false, message: 'Không tạo được tệp' }),
+    added: 'INTERNAL_ERROR',
   },
   {
     name: 'AppError without a code, 503',
     error: () => new AppError('Dịch vụ tạm thời không sẵn sàng', 503),
     status: 503,
     legacy: () => ({ success: false, message: 'Dịch vụ tạm thời không sẵn sàng' }),
+    added: 'SERVICE_UNAVAILABLE',
   },
   {
     name: 'AppError without a code, 504',
     error: () => new AppError('Hết thời gian chờ', 504),
     status: 504,
     legacy: () => ({ success: false, message: 'Hết thời gian chờ' }),
+    added: 'GATEWAY_TIMEOUT',
   },
   {
     name: 'AppError with an empty code',
     error: () => new AppError('Không tìm thấy', 404, ''),
     status: 404,
     legacy: () => ({ success: false, message: 'Không tìm thấy' }),
+    added: 'NOT_FOUND',
   },
   {
     name: 'quota trigger: data limit reached',
@@ -157,30 +171,35 @@ const UNEXPECTED_CASES: Case[] = [
     error: () => new Error('boom'),
     status: 500,
     legacy: error => ({ success: false, message: 'boom', stack: stackOf(error) }),
+    added: 'INTERNAL_ERROR',
   },
   {
     name: 'database error with a SQLSTATE',
     error: () => errorOf('duplicate key value violates unique constraint', { code: '23505' }),
     status: 500,
     legacy: error => ({ success: false, message: 'duplicate key value violates unique constraint', stack: stackOf(error) }),
+    added: 'INTERNAL_ERROR',
   },
   {
     name: 'malformed JSON body (body-parser 400, answered 500 as before)',
     error: () => errorOf('Unexpected token } in JSON', { type: 'entity.parse.failed', status: 400 }),
     status: 500,
     legacy: error => ({ success: false, message: 'Unexpected token } in JSON', stack: stackOf(error) }),
+    added: 'INTERNAL_ERROR',
   },
   {
     name: 'thrown plain object',
     error: () => ({ status: 400, message: 'Khoảng ngày không hợp lệ' }),
     status: 500,
     legacy: () => ({ success: false, message: 'Khoảng ngày không hợp lệ' }),
+    added: 'INTERNAL_ERROR',
   },
   {
     name: 'thrown string',
     error: () => 'boom',
     status: 500,
     legacy: () => ({ success: false }),
+    added: 'INTERNAL_ERROR',
   },
 ];
 
@@ -224,7 +243,13 @@ function quietConsole(t: TestContext): unknown[][] {
 }
 
 function expected(item: Case, error: unknown): Body {
-  return item.legacy(error);
+  const legacy = item.legacy(error);
+  if (typeof legacy.code === 'string') {
+    assert.equal(item.added, undefined, 'a body that had a code keeps it');
+    return legacy;
+  }
+  assert.ok(item.added, 'a body without a code gets one');
+  return { ...legacy, code: item.added };
 }
 
 for (const item of EXPECTED_CASES) {
