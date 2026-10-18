@@ -11,7 +11,7 @@ import { env } from './env.js';
 import fs from 'fs/promises';
 import { createReadStream, createWriteStream } from 'fs';
 import path from 'path';
-import { Readable } from 'stream';
+import { Readable, Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES } from './upload-limits.js';
 import {
@@ -659,30 +659,59 @@ export function buildStoragePath(
 /**
  * Download a file from Supabase Storage to a local temp path.
  * Used by RabbitMQ workers to get files for Gemini upload.
+ *
+ * The body is streamed to the file (openStorageObjectStream(), the same
+ * authenticated download the SDK made), so a 50 MB document is never held
+ * whole in the heap. Storage must start answering within
+ * STORAGE_PROXY_HEADERS_TIMEOUT_MS, and the body is abandoned when no byte
+ * arrives for STORAGE_DOWNLOAD_IDLE_TIMEOUT_MS or `signal` aborts; the
+ * partial temp file is removed on every failure.
  * @returns Absolute path to the temp file.
  */
 export async function downloadToTempFile(
   storagePath: string,
   tempDir: string,
+  options: { signal?: AbortSignal; idleTimeoutMs?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<string> {
-  await ensureBucket();
-
   // Ensure temp dir exists
   await fs.mkdir(tempDir, { recursive: true });
 
-  const { data, error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .download(storagePath);
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) forwardAbort();
+  else options.signal?.addEventListener('abort', forwardAbort, { once: true });
 
-  if (error || !data) {
-    throw new Error(`[Storage] Download failed (${storagePath}): ${error?.message || 'No data'}`);
+  const idleTimeoutMs = options.idleTimeoutMs ?? env.STORAGE_DOWNLOAD_IDLE_TIMEOUT_MS;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let tempPath: string | null = null;
+  try {
+    const opened = await openStorageObjectStream(storagePath, { signal: controller.signal, fetchImpl: options.fetchImpl });
+    const fileName = storagePath.split('/').pop() || `tmp_${Date.now()}`;
+    const target = path.resolve(tempDir, `${Date.now()}_${fileName}`);
+    idleTimer = setTimeout(() => {
+      controller.abort(new Error(`[Storage] Download stalled (${storagePath}): no data for ${idleTimeoutMs} ms`));
+    }, idleTimeoutMs);
+    const timer = idleTimer;
+    const idleWatch = new Transform({
+      transform(chunk, _encoding, callback) {
+        timer.refresh();
+        callback(null, chunk);
+      },
+    });
+    const file = createWriteStream(target, { flags: 'wx' });
+    // Only a file this call created is removed (never one of the same name it could not create).
+    file.once('open', () => { tempPath = target; });
+    await pipeline(opened.body, idleWatch, file, { signal: controller.signal });
+    return target;
+  } catch (error) {
+    if (tempPath) await fs.unlink(tempPath).catch(() => undefined);
+    // An abort surfaces as a generic AbortError: report its reason (stall or caller) instead.
+    const reason: unknown = controller.signal.aborted ? controller.signal.reason : undefined;
+    throw reason instanceof Error ? reason : error;
+  } finally {
+    clearTimeout(idleTimer);
+    options.signal?.removeEventListener('abort', forwardAbort);
   }
-
-  const buffer = Buffer.from(await data.arrayBuffer());
-  const fileName = storagePath.split('/').pop() || `tmp_${Date.now()}`;
-  const tempPath = path.resolve(tempDir, `${Date.now()}_${fileName}`);
-  await fs.writeFile(tempPath, buffer);
-  return tempPath;
 }
 
 /**

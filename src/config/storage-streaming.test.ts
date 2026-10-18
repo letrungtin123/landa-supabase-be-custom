@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -164,6 +164,93 @@ test('opening a Storage object gives up when Storage does not answer, or when th
     setTimeout(() => caller.abort(new Error('client left')), 50);
     await assert.rejects(openStorageObjectStream('t/hang.pdf', { signal: caller.signal, headersTimeoutMs: 10_000 }));
   } finally {
+    await storage.close();
+  }
+});
+
+// P3: worker downloads (KB documents for Gemini) are streamed to the temp
+// file instead of being read whole into the heap first.
+
+function tempDirectory(): { dir: string; files: () => string[]; cleanup: () => void } {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'landa-storage-download-test-'));
+  return { dir, files: () => readdirSync(dir), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test('a worker download is streamed to a temp file with the same request and bytes', async (t) => {
+  const content = Buffer.from(Array.from({ length: 3 * 1024 * 1024 + 17 }, (_v, i) => (i * 7) % 256));
+  const storage = await fakeStorage((req, res) => {
+    if (req.method !== 'GET' || !(req.url ?? '').includes('/storage/v1/object/')) return false;
+    res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': content.length });
+    // Several chunks, as a real body arrives.
+    for (let offset = 0; offset < content.length; offset += 256 * 1024) res.write(content.subarray(offset, offset + 256 * 1024));
+    res.end();
+    return true;
+  });
+  routeStorageTo(t, storage.origin);
+  const temp = tempDirectory();
+  try {
+    const { downloadToTempFile } = await import('./storage.js');
+    const file = await downloadToTempFile('tenant-1/kb-documents/1700000000000_guide.pdf', temp.dir);
+    assert.equal(path.dirname(file), path.resolve(temp.dir));
+    assert.match(path.basename(file), /^\d+_1700000000000_guide\.pdf$/);
+    assert.ok(readFileSync(file).equals(content), 'the file arrives byte for byte');
+    const request = storage.received.find((item) => item.url === '/storage/v1/object/landa-storage/tenant-1/kb-documents/1700000000000_guide.pdf')!;
+    assert.equal(request.method, 'GET');
+    assert.ok(request.headers.authorization, 'authenticated with the service key');
+    // The former download (SDK, whole body in memory) asked for the same object and got the same bytes.
+    const { downloadFileBuffer } = await import('./storage.js');
+    const before = storage.received.length;
+    const viaSdk = await downloadFileBuffer('tenant-1/kb-documents/1700000000000_guide.pdf');
+    assert.equal(storage.received[before].url, request.url);
+    assert.ok(viaSdk.buffer.equals(readFileSync(file)));
+  } finally {
+    temp.cleanup();
+    await storage.close();
+  }
+});
+
+test('a refused worker download keeps its error message and leaves no temp file', async (t) => {
+  const storage = await fakeStorage((req, res) => {
+    if (req.method !== 'GET' || !(req.url ?? '').includes('/storage/v1/object/')) return false;
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ statusCode: '404', error: 'not_found', message: 'Object not found' }));
+    return true;
+  });
+  routeStorageTo(t, storage.origin);
+  const temp = tempDirectory();
+  try {
+    const { downloadToTempFile } = await import('./storage.js');
+    await assert.rejects(downloadToTempFile('tenant-1/kb-documents/missing.pdf', temp.dir),
+      /\[Storage\] Download failed \(tenant-1\/kb-documents\/missing\.pdf\): Object not found/);
+    assert.deepEqual(temp.files(), []);
+  } finally {
+    temp.cleanup();
+    await storage.close();
+  }
+});
+
+test('a worker download that stalls or is aborted mid-body removes its partial file', async (t) => {
+  const storage = await fakeStorage((req, res) => {
+    if (req.method !== 'GET' || !(req.url ?? '').includes('/storage/v1/object/')) return false;
+    res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': 1_000_000 });
+    res.write(Buffer.alloc(64 * 1024, 1)); // then nothing more
+    return true;
+  });
+  routeStorageTo(t, storage.origin);
+  const temp = tempDirectory();
+  try {
+    const { downloadToTempFile } = await import('./storage.js');
+    await assert.rejects(downloadToTempFile('tenant-1/kb-documents/stall.pdf', temp.dir, { idleTimeoutMs: 150 }),
+      /\[Storage\] Download stalled \(tenant-1\/kb-documents\/stall\.pdf\): no data for 150 ms/);
+    assert.deepEqual(temp.files(), []);
+
+    const caller = new AbortController();
+    setTimeout(() => caller.abort(new Error('worker stopping')), 100);
+    await assert.rejects(downloadToTempFile('tenant-1/kb-documents/stall.pdf', temp.dir, { signal: caller.signal, idleTimeoutMs: 10_000 }),
+      /worker stopping/);
+    assert.deepEqual(temp.files(), []);
+  } finally {
+    temp.cleanup();
     await storage.close();
   }
 });
