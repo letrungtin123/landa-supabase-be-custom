@@ -125,6 +125,10 @@ test('a cursor that is not ours is still refused with 400', async t => {
     encode({ created_at: '2026-10-04T08:00:00.000000Z', id: 'a0000000-0000-4000-000000000004' }),
     encode({ created_at: 'yesterday', id: 'a0000000-0000-4000-8000-000000000004' }),
     encode({ created_at: '2026-10-04T08:00:00.000000Z', id: 42 }),
+    // Date.parse accepts these, PostgreSQL does not: they must not reach the query (would be a 500).
+    encode({ created_at: '1', id: 'a0000000-0000-4000-8000-000000000004' }),
+    encode({ created_at: 'Oct 4 2026', id: 'a0000000-0000-4000-8000-000000000004' }),
+    encode({ created_at: '2026-10-04', id: 'a0000000-0000-4000-8000-000000000004' }),
   ];
   for (const cursor of refused) {
     await assert.rejects(

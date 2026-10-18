@@ -39,6 +39,7 @@ import {
   beginCoursePublishCandidate,
   finishCoursePublishCandidate,
 } from './course-publish-governance.repository.js';
+import { isIsoTimestamp } from '../../utils/client-error.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 export {
@@ -1559,8 +1560,7 @@ function decodeAssetCursor(cursor?: string | null): { created_at: string; id: st
     const parsed = JSON.parse(decodeBase64Url(value));
     if (
       !parsed ||
-      typeof parsed.created_at !== 'string' ||
-      Number.isNaN(Date.parse(parsed.created_at)) ||
+      !isIsoTimestamp(parsed.created_at) ||
       !isUuid(parsed.id)
     ) {
       throw new AppError('invalid cursor payload', 400);
