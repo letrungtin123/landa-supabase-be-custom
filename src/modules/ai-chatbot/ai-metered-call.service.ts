@@ -13,7 +13,7 @@ import {
   releaseTenantAiTokenReservation,
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
-import { swallowAndLog } from '../../utils/best-effort.js';
+import { logSwallowedError, swallowAndLog } from '../../utils/best-effort.js';
 
 export interface MeteredAiCall {
   tenantId: string;
@@ -99,7 +99,11 @@ export async function withMeteredAiCall<T>(
       await deps.finalize({
         reservationId: grant.id, tenantId: call.tenantId, usage: normalizeAiUsage(error.usage),
         source: { service: 'backend_direct', usage_source: 'provider' }, metadata: { feature: call.feature, failed_after_billing: true },
-      }).catch(() => deps.release(grant.id, call.tenantId).catch(swallowAndLog('ai_tokens.reservation_release')));
+      }).catch((finalizeError: unknown) => {
+        // The billed usage was not recorded: release the reservation as before, but say so.
+        logSwallowedError('ai_tokens.billed_usage_finalize', finalizeError);
+        return deps.release(grant.id, call.tenantId).catch(swallowAndLog('ai_tokens.reservation_release'));
+      });
       throw error.cause;
     }
     await deps.release(grant.id, call.tenantId).catch(swallowAndLog('ai_tokens.reservation_release'));

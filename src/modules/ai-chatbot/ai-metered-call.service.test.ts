@@ -93,3 +93,19 @@ test('a call that failed after billing settles the provider usage, then rethrows
   assert.deepEqual(finalize.usage, billed);
   assert.equal(finalize.metadata.failed_after_billing, true);
 });
+
+test('when the billed usage cannot be recorded, the reservation is released and the failure is logged by kind only', async (t) => {
+  const { BilledAiCallError } = await import('./ai-metered-call.service.js');
+  const finalizeFailure = Object.assign(new Error(`ledger insert failed for tenant ${TENANT}`), { code: '40P01' });
+  const { deps, calls } = harness();
+  deps.finalize = async input => { calls.push({ kind: 'finalize', input }); throw finalizeFailure; };
+  const warnings: string[] = [];
+  t.mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+  const original = new Error('empty transcript');
+  await assert.rejects(withMeteredAiCall(call, async () => { throw new BilledAiCallError({ inputTokens: 10, outputTokens: 0, embeddingTokens: 0, totalTokens: 10 }, original); }, deps),
+    (error: unknown) => error === original);
+  // The billing decision is unchanged: settle first, release only when that fails.
+  assert.deepEqual(calls.map(c => c.kind), ['reserve', 'finalize', 'release']);
+  assert.deepEqual(warnings, ['[BestEffort] {"event":"best_effort_failed","tag":"ai_tokens.billed_usage_finalize","error_kind":"Error:40P01"}']);
+  assert.ok(warnings.every(line => !line.includes(TENANT) && !line.includes('ledger')), 'no data in the log');
+});
