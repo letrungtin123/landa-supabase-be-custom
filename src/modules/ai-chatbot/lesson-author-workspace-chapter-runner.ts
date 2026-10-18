@@ -88,7 +88,7 @@ export async function runWorkspaceChapter(execution: WorkspaceChapterExecution, 
     rejectAbort=()=>reject(controller.signal.reason);controller.signal.addEventListener('abort',rejectAbort,{once:true});
     if(controller.signal.aborted)rejectAbort();
   });
-  void interrupted.catch(()=>undefined);
+  void interrupted.catch(()=>undefined); // marks the rejection handled; wait() races it
   const wait=<T>(promise:Promise<T>)=>Promise.race([promise,interrupted]);
   const cancelDeadline=clock.timeout(()=>abort('WORKSPACE_CHAPTER_WORKFLOW_TIMEOUT'),Math.max(0,end-started));
   const cancelHeartbeat=clock.interval(()=>{

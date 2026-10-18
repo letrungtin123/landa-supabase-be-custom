@@ -3,6 +3,7 @@ import * as svc from './help-docs.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, fixMulterFilename, deleteFile } from '../../config/storage.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 async function deleteStoragePaths(paths: string[]): Promise<void> {
   await Promise.allSettled(paths.map((path) => deleteFile(path)));
@@ -197,7 +198,7 @@ export async function uploadImageController(req: Request, res: Response, next: N
         () => createTransactionalAuditEntry(req, 'CREATE', 'help_doc', { code: 'help_doc.image.uploaded', context: { file_name: originalName, file_size_bytes: file.size } }, path, originalName),
       );
     } catch (error) {
-      await deleteFile(path).catch(() => undefined);
+      await deleteFile(path).catch(swallowAndLog('help_docs.storage_cleanup'));
       throw error;
     }
     sendSuccess(res, { url: path, filename: originalName, size: file.size });

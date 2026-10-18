@@ -165,6 +165,7 @@ import { assertChatCourseAccess } from './chat-course-scope.service.js';
 import { withLaunchBriefIdentity, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
 import { hasAiIdCoursePermission } from './lesson-author-ai-id-access.service.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -1664,7 +1665,7 @@ function parseRetryDelay(err: any): number | null {
       const seconds = parseFloat(match[1]);
       if (seconds > 0 && seconds < 120) return Math.ceil(seconds * 1000);
     }
-  } catch {}
+  } catch { /* a message without a retry hint: the default backoff applies */ }
   return null;
 }
 
@@ -6920,7 +6921,7 @@ async function loadLessonAuthorBlueprintForDraft(
     );
   } catch {
     const reason = 'Tài liệu nguồn của bản thiết kế đã thay đổi, bị xóa, hoặc chưa sẵn sàng. Vui lòng tạo lại bản thiết kế khóa học.';
-    await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason).catch(() => undefined);
+    await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason).catch(swallowAndLog('lesson_author.blueprint_supersede'));
     throw new AppError(reason, 409);
   }
 
@@ -7653,6 +7654,7 @@ export async function applyLessonAuthorJob(
     if (status === 'succeeded' && existingJob) {
       const createdBlockIds = existingJob.created_block_ids ?? [];
       const updatedBlockIds = existingJob.updated_block_ids ?? [];
+      // Optional field of a replayed result: null when it cannot be read.
       const blueprintChapterIndex = await getBlueprintChapterIndexForJob(existingJob).catch(() => null);
       return {
         job_id: jobId,

@@ -46,7 +46,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
       source_size_bytes: file?.size ?? null,
       duration_ms: Date.now() - startedAt,
     });
-    if (file?.path) await fs.unlink(file.path).catch(() => undefined);
+    if (file?.path) await fs.unlink(file.path).catch(() => undefined); // a leftover is removed by the transcription worker's stale-file sweep
     sendError(res, 'conversationId hoặc idempotency_key không hợp lệ', 400);
     return;
   }
@@ -98,7 +98,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
     });
     sendError(res, errorMessage(error, 'Không thể nhận video để tạo bản chép lời.'), errorStatus(error), errorCode(error));
   } finally {
-    if (file.path) await fs.unlink(file.path).catch(() => undefined);
+    if (file.path) await fs.unlink(file.path).catch(() => undefined); // a leftover is removed by the transcription worker's stale-file sweep
   }
 }
 

@@ -306,7 +306,7 @@ async function fetchProviderJson<T>(url: string, init: RequestInit): Promise<{ o
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      await response.body?.cancel().catch(() => undefined); // releases an unread body; nothing to recover
       return { ok: false };
     }
     return { ok: true, body: await response.json() as T };

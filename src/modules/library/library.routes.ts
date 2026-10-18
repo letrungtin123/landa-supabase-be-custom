@@ -19,6 +19,7 @@ import {
   deleteDocumentController, bulkDocumentActionController,
   uploadDocumentController,
 } from './library.controller.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const router = Router();
 const libraryUploadTempDir = path.join(process.cwd(), 'tmp', 'library-documents');
@@ -71,7 +72,7 @@ function uploadedFilesFromRequest(req: Request): Express.Multer.File[] {
 
 async function cleanupMulterTempFiles(req: Request): Promise<void> {
   const files = uploadedFilesFromRequest(req);
-  await Promise.all(files.map((file) => file.path ? fs.promises.unlink(file.path).catch(() => {}) : Promise.resolve()));
+  await Promise.all(files.map((file) => file.path ? fs.promises.unlink(file.path).catch(swallowAndLog('library.temp_upload_cleanup', { ignoreMissingFile: true })) : Promise.resolve()));
 }
 
 function uploadLibraryDocuments(req: Request, res: Response, next: NextFunction): void {

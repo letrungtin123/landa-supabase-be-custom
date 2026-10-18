@@ -21,6 +21,7 @@ import {
   type CourseMarkdownBlock,
   type CourseMarkdownCourse,
 } from './course-markdown-exporter.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 interface CourseMentor {
   id: string;
@@ -397,7 +398,7 @@ async function updateCourseFromDb(
     await client.query('COMMIT');
     return updated;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -554,7 +555,7 @@ export async function updateCourseMentor(
     }
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -750,10 +751,10 @@ export async function uploadCourseMentorSectionLogo(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     // The storage write happened before the transaction. If either the data
     // write or atomic audit insert fails, compensate by removing this new file.
-    await deleteFile(storagePath).catch(() => undefined);
+    await deleteFile(storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     throw error;
   } finally {
     client.release();
@@ -762,7 +763,7 @@ export async function uploadCourseMentorSectionLogo(
   if (oldPath && oldPath !== storagePath) {
     const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
     if (ownership.kind === 'course-owned') {
-      await deleteFile(ownership.storagePath).catch(() => {});
+      await deleteFile(ownership.storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     } else if (ownership.kind === 'unknown') {
       console.warn('[CourseMentorLogo] storage_reference_retained', {
         event: 'course_mentor_logo.storage_reference_retained',
@@ -814,7 +815,7 @@ export async function deleteCourseMentorSectionLogo(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -823,7 +824,7 @@ export async function deleteCourseMentorSectionLogo(
   if (oldPath) {
     const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
     if (ownership.kind === 'course-owned') {
-      await deleteFile(ownership.storagePath).catch(() => {});
+      await deleteFile(ownership.storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     } else if (ownership.kind === 'unknown') {
       console.warn('[CourseMentorLogo] storage_reference_retained', {
         event: 'course_mentor_logo.storage_reference_retained',

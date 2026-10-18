@@ -345,7 +345,7 @@ bootstrap().then(async () => {
   stopHeartbeatTimer();
   stopFoldTimer();
   await releaseWorkerLock();
-  await endSessionPool().catch(() => undefined);
+  await endSessionPool().catch(() => undefined); // fatal shutdown: the process exits next
   await pool.end();
   process.exit(1);
 });

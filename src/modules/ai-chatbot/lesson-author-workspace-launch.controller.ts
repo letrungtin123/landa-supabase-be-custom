@@ -32,7 +32,7 @@ export function createWorkspaceLaunchHandlers(deps:{
       let root:string|null=null,workspaceId:string|null=null;
       const failure=(status:number,external:string,internal=external)=>{
         try{deps.report({event:'workspace_launch_failed',action,request_id:requestId,correlation_id:root,workspace_id:workspaceId,
-          failure_stage:`workspace_${action}`,internal_failure_code:internal,external_failure_code:external,http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{}
+          failure_stage:`workspace_${action}`,internal_failure_code:internal,external_failure_code:external,http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{/* telemetry never changes the response */}
         // QLT-6: a launch brief problem is the author's to fix, so it says exactly what to change.
         const brief=isLaunchBriefErrorCode(external)?LAUNCH_BRIEF_ERROR_MESSAGES[external]:null;
         res.status(status).json({success:false,code:external,request_id:requestId,message:brief?brief[locale==='en'?1:0]:locale==='en'
@@ -86,7 +86,7 @@ export function createWorkspaceLaunchHandlers(deps:{
         root=result?.correlation_id??null;workspaceId=result?.workspace_id??null;
         const status=action==='create'&&!result?.replayed?202:200;
         try{deps.report({event:'workspace_launch_completed',action,request_id:requestId,correlation_id:root,workspace_id:workspaceId,
-          http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{}
+          http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{/* telemetry never changes the response */}
         // This is a display capability only. Every Save/Reset still checks fresh
         // actor authority and all revision/source fences in its transaction.
         res.status(status).json({success:true,data:result?{...result,can_edit:deps.editEnabled?.()===true}:null});

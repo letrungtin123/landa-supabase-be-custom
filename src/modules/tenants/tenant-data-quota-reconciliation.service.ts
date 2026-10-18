@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
 import { TENANT_STORAGE_BUCKETS } from '../../config/storage.js';
 import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const MAX_BIGINT = 9223372036854775807n;
 const MINIMUM_SLICE_LEASE_GUARD_MS = 30_000;
@@ -278,7 +279,7 @@ async function writeStoragePage(
     if (leaseUpdate.rowCount !== 1) throw new ReconciliationClaimLostError(tenantId);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -341,7 +342,7 @@ async function finishReconciliation(
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -409,7 +410,7 @@ export async function reconcileTenantDataQuota(
     return 'yielded';
   } catch (error) {
     if (ownsClaim) {
-      await failClaim(tenantId, claimToken, error, options).catch(() => undefined);
+      await failClaim(tenantId, claimToken, error, options).catch(swallowAndLog('tenant_quota.claim_release'));
     }
     throw error;
   }

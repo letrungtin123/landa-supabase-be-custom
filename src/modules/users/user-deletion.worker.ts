@@ -6,6 +6,7 @@ import {
   runUserDeletionJob,
 } from './user-deletion.service.js';
 import { stopOnShutdown } from '../../config/process-lifecycle.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 function getJobId(data: Record<string, unknown>): string {
   const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
@@ -21,7 +22,7 @@ export async function startUserDeletionWorker(): Promise<void> {
       try {
         await runUserDeletionJob(jobId);
       } catch (error) {
-        await markUserDeletionJobRetryable(jobId, error).catch(() => undefined);
+        await markUserDeletionJobRetryable(jobId, error).catch(swallowAndLog('user_deletion.retry_mark'));
         throw error;
       }
     },

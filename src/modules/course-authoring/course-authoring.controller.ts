@@ -47,6 +47,7 @@ import {
 } from './course-publish-governance.repository.js';
 import { ensureCoursePublishGovernanceSchema } from './course-publish-governance-schema.repository.js';
 import { isUuid } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
 
@@ -134,7 +135,7 @@ function isSafeCourseAssetPath(src: unknown): src is string {
 
 async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
   if (!file.path) return;
-  await fs.unlink(file.path).catch(() => {});
+  await fs.unlink(file.path).catch(() => {}); // a leftover is removed by cleanupStaleCourseAssetTempFiles
 }
 
 function sanitizeProblemMedia(raw: any) {
@@ -1051,7 +1052,7 @@ export async function uploadAsset(req: Request, res: Response) {
     sendSuccess(res, asset, undefined, 201);
   } catch (err) {
     if (storageUploaded && storagePath) {
-      await deleteFile(storagePath).catch(() => undefined);
+      await deleteFile(storagePath).catch(swallowAndLog('course_assets.storage_cleanup'));
     }
     console.error('[CourseAssets] storage upload failed', {
       course_id: courseId,

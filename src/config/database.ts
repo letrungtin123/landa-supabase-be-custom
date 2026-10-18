@@ -151,7 +151,7 @@ export async function withDatabaseTransaction<T>(
     await client.query('COMMIT');
     committedWork = afterCommitWork.get(client) ?? [];
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     afterCommitWork.delete(client);

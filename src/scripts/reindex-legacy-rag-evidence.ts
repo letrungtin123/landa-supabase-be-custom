@@ -133,6 +133,6 @@ main()
   .then(() => pool.end())
   .catch(async error => {
     console.error('[RagEvidenceReindex] Failed:', error instanceof Error ? error.message : String(error));
-    await pool.end().catch(() => undefined);
+    await pool.end().catch(() => undefined); // exiting: closing the pool is best effort
     process.exitCode = 1;
   });

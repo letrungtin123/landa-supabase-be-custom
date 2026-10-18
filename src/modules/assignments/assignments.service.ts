@@ -40,6 +40,7 @@ import {
 import { scheduleCourseProgressRecalculation } from '../learner/progress-recalculation-job.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
 import { learnerCourseAccessCondition } from '../courses/course-access.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const MAX_ASSIGNMENT_FILES = 5;
 const MAX_ASSIGNMENT_FILE_SIZE_BYTES = 25 * 1024 * 1024;
@@ -328,7 +329,7 @@ async function uploadAssignmentFiles(
     }
     return uploaded;
   } catch (err) {
-    await Promise.all(uploaded.map(file => deleteFile(file.storage_path).catch(() => undefined)));
+    await Promise.all(uploaded.map(file => deleteFile(file.storage_path).catch(swallowAndLog('assignments.storage_cleanup'))));
     throw err;
   }
 }
@@ -580,9 +581,9 @@ export async function createAssignment(
     await client.query('COMMIT');
     createdAssignment = assignment;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     if (uploadedAttachment) {
-      await deleteFile(uploadedAttachment.storage_path).catch(() => undefined);
+      await deleteFile(uploadedAttachment.storage_path).catch(swallowAndLog('assignments.storage_cleanup'));
     }
     if ((err as { code?: string }).code === '23505') {
       throw new AppError('Mỗi khóa học chỉ được có 1 bài tập', 409);
@@ -707,13 +708,13 @@ export async function updateAssignment(
     }
     await client.query('COMMIT');
     if (oldAttachmentPath) {
-      await deleteFile(oldAttachmentPath).catch(() => undefined);
+      await deleteFile(oldAttachmentPath).catch(swallowAndLog('assignments.storage_cleanup'));
     }
     return normalizeAssignmentRow(updated);
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     if (uploadedAttachment) {
-      await deleteFile(uploadedAttachment.storage_path).catch(() => undefined);
+      await deleteFile(uploadedAttachment.storage_path).catch(swallowAndLog('assignments.storage_cleanup'));
     }
     throw err;
   } finally {
@@ -741,7 +742,7 @@ export async function deleteAssignment(
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(current)));
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -1294,7 +1295,7 @@ export async function submitAssignment(
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
-    await Promise.all(uploadedFiles.map(file => deleteFile(file.storage_path).catch(() => undefined)));
+    await Promise.all(uploadedFiles.map(file => deleteFile(file.storage_path).catch(swallowAndLog('assignments.storage_cleanup'))));
     throw err;
   } finally {
     client.release();
@@ -1302,7 +1303,7 @@ export async function submitAssignment(
 
   // The submission can complete the course: badges are evaluated again.
   await invalidateUserBadgeCaches([user.id]);
-  await Promise.all(oldStoragePaths.map(path => deleteFile(path).catch(() => undefined)));
+  await Promise.all(oldStoragePaths.map(path => deleteFile(path).catch(swallowAndLog('assignments.storage_cleanup'))));
   return getLearnerAssignment(assignmentId, user);
 }
 
@@ -1530,7 +1531,7 @@ export async function feedbackSubmission(
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
-    await Promise.all(uploadedFiles.map(file => deleteFile(file.storage_path).catch(() => undefined)));
+    await Promise.all(uploadedFiles.map(file => deleteFile(file.storage_path).catch(swallowAndLog('assignments.storage_cleanup'))));
     throw err;
   } finally {
     client.release();

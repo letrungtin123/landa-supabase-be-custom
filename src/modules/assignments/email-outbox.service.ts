@@ -18,6 +18,7 @@ import {
   type EmailTemplateKey,
   type TemplateTokenMap,
 } from '../email-templates/email-templates.service.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 type DeadlineMode = 'none' | 'absolute' | 'relative_to_enrollment';
 type SubmissionUnlockMode = 'after_content_complete' | 'anytime';
@@ -1746,7 +1747,7 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
     await client.query('COMMIT');
     return insertResult.rowCount || 0;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     const message = err instanceof Error ? err.message : String(err);
     await query(
       `UPDATE notification_email_jobs
@@ -1757,7 +1758,7 @@ async function processCourseNotificationEmailFanoutJob(jobId: string, batchSize:
            updated_at = now()
        WHERE id = $1::uuid`,
       [jobId, message.slice(0, 2000)],
-    ).catch(() => undefined);
+    ).catch(swallowAndLog('email_outbox.job_failed_mark'));
     throw err;
   } finally {
     client.release();
@@ -2368,6 +2369,7 @@ async function withEmailOutboxRetentionLock(fn: () => Promise<void>): Promise<bo
     try {
       await fn();
     } finally {
+      // Fails only with a broken connection, whose session (and so the lock) ends with it.
       await client.query('SELECT pg_advisory_unlock(hashtext($1)::bigint)', [EMAIL_OUTBOX_RETENTION_LOCK_KEY])
         .catch(() => undefined);
     }

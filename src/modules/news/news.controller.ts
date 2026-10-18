@@ -19,6 +19,7 @@ import {
   updateNewsSchema,
   uploadNewsImageSchema,
 } from './news.validator.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 function requireTenantId(req: Request, res: Response): string | null {
   const tenantId = req.user?.tenantId || null;
@@ -160,7 +161,7 @@ export async function uploadImage(req: Request, res: Response, next: NextFunctio
     );
     sendSuccess(res, { storage_path: asset.storage_path, filename: originalName, size: req.file.size }, 'Tải ảnh thành công', 201);
   } catch (error) {
-    if (uploadedPath) await deleteFile(uploadedPath).catch(() => undefined);
+    if (uploadedPath) await deleteFile(uploadedPath).catch(swallowAndLog('news.storage_cleanup'));
     next(error);
   }
 }
@@ -201,7 +202,7 @@ export async function importImage(req: Request, res: Response, next: NextFunctio
       size: downloaded.buffer.byteLength,
     }, 'Đã nhập ảnh vào Bảng tin', 201);
   } catch (error) {
-    if (uploadedPath) await deleteFile(uploadedPath).catch(() => undefined);
+    if (uploadedPath) await deleteFile(uploadedPath).catch(swallowAndLog('news.storage_cleanup'));
     next(error);
   }
 }

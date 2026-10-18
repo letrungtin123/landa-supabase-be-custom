@@ -150,7 +150,7 @@ async function main(): Promise<void> {
 
     console.log(`[tenant-data-quota:integration] Passed (${ledgerReady ? 'delta ledger' : 'direct trigger'}): DB quota rejects over-limit writes and accepts a write after capacity is released${ledgerReady ? '; unfolded deltas count, the fold keeps the total, learner writes continue while reconciling' : ''}.`);
   } finally {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     client.release();
     await pool.end();
   }

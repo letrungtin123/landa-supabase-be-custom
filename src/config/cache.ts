@@ -143,6 +143,7 @@ function cachedReadsAllowed(client: NonNullable<ReturnType<typeof getRedisClient
   // A clock that moved backwards (NTP) never blocks the replay.
   if (!replayInFlight && (now < lastReplayAt || now - lastReplayAt >= REPLAY_MIN_INTERVAL_MS)) {
     lastReplayAt = now;
+    // A failed replay keeps the entries pending; the next cached read retries it (at most once a second).
     replayInFlight = (async () => {
       const entries = [...pendingInvalidations];
       for (let index = 0; index < entries.length; index += REPLAY_BATCH_SIZE) {

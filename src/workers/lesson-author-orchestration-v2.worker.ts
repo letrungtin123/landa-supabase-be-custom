@@ -108,7 +108,7 @@ bootstrap().then(async () => {
 }).catch(async error => {
   console.error('[LessonAuthorOrchestrationV2] Fatal error:', error);
   requestShutdown('FATAL');
-  await consumer?.stop().catch(() => undefined);
+  await consumer?.stop().catch(() => undefined); // fatal shutdown: the process exits next
   await closeRabbitMQ();
   await pool.end();
   process.exit(1);

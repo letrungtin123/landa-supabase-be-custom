@@ -273,7 +273,7 @@ export async function updateDocCategory(
     await invalidateTenantLibraryCaches(tenantId);
     return { ...updated, removed_assignments: removedAssignments };
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -372,7 +372,7 @@ export async function createDocument(tenantId: string, input: {
     if (auditEntry) await appendAuditLog(client, auditEntry(document));
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -461,7 +461,7 @@ async function updateDocumentFromDb(
     await client.query('COMMIT');
     return updated;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -565,7 +565,7 @@ async function bulkDocumentActionFromDb(
     await client.query('COMMIT');
     return result;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();

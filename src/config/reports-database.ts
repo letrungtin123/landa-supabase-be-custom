@@ -17,6 +17,7 @@ import pg from 'pg';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from './env.js';
 import { attachClientErrorLogger, pool as mainPool, pooledDatabaseUrl } from './database.js';
+import { swallowAndLog } from '../utils/best-effort.js';
 
 const { Pool } = pg;
 
@@ -117,7 +118,7 @@ export async function withReportsSnapshot<T>(
   const cancelRunningStatement = () => {
     if (backendPid === null || cancelling) return;
     // The main pool always has room for this one-row call; the reports pool may be full.
-    cancelling = mainPool.query('SELECT pg_cancel_backend($1)', [backendPid]).catch(() => undefined);
+    cancelling = mainPool.query('SELECT pg_cancel_backend($1)', [backendPid]).catch(swallowAndLog('reports_db.cancel_statement'));
   };
   options.signal?.addEventListener('abort', cancelRunningStatement, { once: true });
   let brokenConnection: Error | undefined;

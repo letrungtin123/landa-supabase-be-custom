@@ -37,6 +37,7 @@ import { AppError } from '../../middleware/error-handler.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { stopOnShutdown } from '../../config/process-lifecycle.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 let drainInFlight = false;
 
@@ -119,13 +120,13 @@ async function uploadDocumentToGemini(job: KbOperationJob): Promise<void> {
       const linked = await linkDocumentGemini(doc.id, storeId, geminiPath);
       if (!linked) await deleteFromStore([geminiPath], aiClient);
     } catch (error) {
-      await deleteFromStore([geminiPath], aiClient).catch(() => undefined);
+      await deleteFromStore([geminiPath], aiClient).catch(swallowAndLog('gemini.remote_cleanup'));
       throw error;
     }
     await assertLease(job);
     await updateDocumentStatus(doc.id, 'learned');
   } finally {
-    if (tempPath) await fs.unlink(tempPath).catch(() => undefined);
+    if (tempPath) await fs.unlink(tempPath).catch(swallowAndLog('kb.temp_file_cleanup', { ignoreMissingFile: true }));
   }
 }
 
@@ -193,7 +194,7 @@ async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
     }
     await updateDocumentStatus(doc.id, 'learned');
   } catch (error) {
-    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(() => undefined);
+    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(swallowAndLog('ai_tokens.reservation_release'));
     throw error;
   }
 }
@@ -313,7 +314,7 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
       const message = job.operation === 'document_delete'
         ? `Không thể hoàn tất việc xoá tài liệu: ${errorMessage(error)}`
         : errorMessage(error);
-      await updateDocumentStatus(job.document_id, 'error', message).catch(() => undefined);
+      await updateDocumentStatus(job.document_id, 'error', message).catch(swallowAndLog('kb.document_status'));
     }
     const code = kbOperationErrorCode(error);
     console.error(`[KbOperationWorker] ${job.operation} ${job.id} failed${code ? ` (code=${code})` : ''}`

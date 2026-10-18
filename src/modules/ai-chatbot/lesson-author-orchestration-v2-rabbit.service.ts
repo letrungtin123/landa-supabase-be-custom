@@ -189,7 +189,7 @@ export async function startOrchestrationV2RabbitConsumer(
     active.add(operation);
   }, { noAck: false });
   consumerTag = consume.consumerTag;
-  if (!accepting) await cancelConsumer().catch(() => undefined);
+  if (!accepting) await cancelConsumer().catch(() => undefined); // best effort while stopping; closing the channel ends the consumer too
 
   return {
     inFlight: () => active.size,
@@ -197,7 +197,7 @@ export async function startOrchestrationV2RabbitConsumer(
       if (stopPromise) return stopPromise;
       accepting = false;
       stopPromise = (async () => {
-        await cancelConsumer().catch(() => undefined);
+        await cancelConsumer().catch(() => undefined); // best effort while stopping; closing the channel ends the consumer too
         await Promise.allSettled([...active]);
       })();
       return stopPromise;

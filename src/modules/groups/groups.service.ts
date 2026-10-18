@@ -697,7 +697,7 @@ export async function addTeamMembers(
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -848,7 +848,7 @@ export async function assignTeamDocCategories(
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();

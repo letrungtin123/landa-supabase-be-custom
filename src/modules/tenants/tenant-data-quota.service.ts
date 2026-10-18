@@ -17,6 +17,7 @@ import {
   TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
 } from './tenant-data-quota.constants.js';
 import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export {
   TENANT_DATA_LIMIT_REACHED_CODE,
@@ -229,7 +230,7 @@ export async function reserveStorageUpload(storagePath: string, requestedSize: n
     await client.query('COMMIT');
     return { id: reservationId, tenantId, storagePath, previousSizeBytes, requestedSizeBytes };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -325,7 +326,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -393,7 +394,7 @@ export async function releaseStorageUploadReservation(reservation: StorageUpload
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -447,14 +448,14 @@ export async function reserveStorageDeletes(storagePaths: readonly string[]): Pr
         }
         await client.query('COMMIT');
       } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined);
+        await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
         throw error;
       } finally {
         client.release();
       }
     }
   } catch (error) {
-    await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+    await flagStorageDeletesForReconciliation(reservations).catch(swallowAndLog('storage.reconciliation_flag'));
     throw error;
   }
   return reservations;
@@ -533,7 +534,7 @@ export async function recordStorageDelete(
       }
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
       throw error;
     } finally {
       client.release();

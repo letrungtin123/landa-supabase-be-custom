@@ -26,6 +26,7 @@ import {
   getOptionalGeminiApiKeyFingerprint,
 } from './gemini.service.js';
 import type { AiEngine } from './ai-engine.types.js';
+import { logSwallowedError } from '../../utils/best-effort.js';
 
 const KB_RESTORE_LOCK_TTL_SECONDS = 6 * 60 * 60;
 const ACTIVE_RESTORE_STATES = new Set(['queued', 'restoring', 'uploading']);
@@ -574,7 +575,7 @@ export async function deleteDocument(docId: string, kbId: string, tenantId: stri
 
   // 4. Cleanup storage (non-critical)
   if (doc.file_path) {
-    try { await deleteFile(doc.file_path); } catch { /* ignore */ }
+    try { await deleteFile(doc.file_path); } catch (error) { logSwallowedError('kb.storage_cleanup', error); }
   }
 
   if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
@@ -625,7 +626,7 @@ export async function bulkDeleteDocuments(
   // 5. Cleanup storage files (non-critical)
   for (const f of filePaths.rows) {
     if (f.file_path) {
-      try { await deleteFile(f.file_path); } catch { /* ignore */ }
+      try { await deleteFile(f.file_path); } catch (error) { logSwallowedError('kb.storage_cleanup', error); }
     }
   }
 
@@ -795,7 +796,7 @@ export async function recordRestoreDocumentFinished(
     await client.query('COMMIT');
     await invalidateTenantAiCaches(tenantId);
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
     throw err;
   } finally {
     client.release();
@@ -1058,7 +1059,7 @@ async function restoreKnowledgebaseTracked(
 
     await client.query('COMMIT');
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
     throw err;
   } finally {
     client.release();
@@ -1318,7 +1319,7 @@ export async function linkDocumentGemini(
     await client.query('COMMIT');
     return true;
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+    try { await client.query('ROLLBACK'); } catch { /* fails only on a broken connection, which pg-pool discards */ }
     throw err;
   } finally {
     client.release();
@@ -1428,7 +1429,7 @@ async function stageKbSource(
 
 export async function discardStagedKbSource(staged: Pick<StagedKbSource, 'storagePath'> | null | undefined): Promise<void> {
   if (!staged?.storagePath) return;
-  try { await deleteFile(staged.storagePath); } catch { /* reconciliation is the fail-safe */ }
+  try { await deleteFile(staged.storagePath); } catch (error) { logSwallowedError('kb.storage_cleanup', error); /* reconciliation is the fail-safe */ }
 }
 
 /**

@@ -218,7 +218,7 @@ class ReportExportSpool extends Writable {
 
   async dispose(): Promise<void> {
     if (!this.destroyed) this.destroy();
-    await this.handle.close().catch(() => undefined);
+    await this.handle.close().catch(() => undefined); // the unlink below reports a leftover spool file
     await fs.unlink(this.filePath).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') console.warn(JSON.stringify({ event: 'report_export_spool_cleanup_failed', code: error.code ?? null }));
     });

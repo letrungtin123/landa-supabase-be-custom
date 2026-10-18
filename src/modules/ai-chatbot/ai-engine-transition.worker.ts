@@ -29,6 +29,7 @@ import {
 } from './ai-token-quota.service.js';
 import { indexRagDocument } from './ai-rag-client.service.js';
 import { stopOnShutdown } from '../../config/process-lifecycle.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 interface AiEngineTransitionJob {
   id: string;
@@ -331,7 +332,7 @@ async function indexDocumentToRag(job: AiEngineTransitionJob, doc: TransitionDoc
       metadata: { transition: true, engine: 'self_built_rag', chunk_count: result.chunk_count },
     });
   } catch (error) {
-    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(() => undefined);
+    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(swallowAndLog('ai_tokens.reservation_release'));
     throw error;
   }
 }
@@ -422,7 +423,7 @@ async function uploadDocumentToGemini(job: AiEngineTransitionJob, doc: Transitio
       const linked = await linkDocumentGemini(doc.id, storeId, geminiPath);
       if (!linked) await deleteFromStore([geminiPath], aiClient);
     } catch (error) {
-      await deleteFromStore([geminiPath], aiClient).catch(() => undefined);
+      await deleteFromStore([geminiPath], aiClient).catch(swallowAndLog('gemini.remote_cleanup'));
       throw error;
     }
     await finalizeTenantAiTokens({
@@ -434,10 +435,10 @@ async function uploadDocumentToGemini(job: AiEngineTransitionJob, doc: Transitio
       metadata: { transition: true, engine: 'gemini_file_search' },
     });
   } catch (error) {
-    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(() => undefined);
+    await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(swallowAndLog('ai_tokens.reservation_release'));
     throw error;
   } finally {
-    if (tempPath) await fs.unlink(tempPath).catch(() => undefined);
+    if (tempPath) await fs.unlink(tempPath).catch(swallowAndLog('kb.temp_file_cleanup', { ignoreMissingFile: true }));
   }
 }
 

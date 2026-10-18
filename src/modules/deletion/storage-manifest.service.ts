@@ -1,6 +1,7 @@
 import { query } from '../../config/database.js';
 import { deleteFiles, extractStoragePath, STORAGE_BUCKET } from '../../config/storage.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export type DeletionJobKind = 'course' | 'user';
 
@@ -325,7 +326,7 @@ export async function deleteStorageManifest(jobKind: DeletionJobKind, jobId: str
       await markStorageItemsSucceeded(items.map((item) => item.id));
       deleted += items.length;
     } catch (error) {
-      await releaseStorageItems(items.map((item) => item.id), error).catch(() => undefined);
+      await releaseStorageItems(items.map((item) => item.id), error).catch(swallowAndLog('storage_manifest.release'));
       throw error;
     }
   }

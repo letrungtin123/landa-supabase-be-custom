@@ -13,6 +13,7 @@ import {
 } from './lesson-author-session-access.logic.js';
 import { readStoredLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const ACTIVE_WORKSPACE_STATUSES = ['queued', 'designing', 'drafting'];
 const DELETE_LEASE_SECONDS = 15 * 60;
@@ -315,7 +316,7 @@ export async function runLessonAuthorSessionDeletion(jobId: string): Promise<voi
   if (!job) return;
   const heartbeat = setInterval(() => { void query(`UPDATE lesson_author_session_deletion_jobs
     SET lease_expires_at=clock_timestamp()+($2::int*interval '1 second'),updated_at=clock_timestamp()
-    WHERE id=$1::uuid AND status='running' AND is_terminal=false`, [job.id, DELETE_LEASE_SECONDS]).catch(() => undefined); }, 60_000);
+    WHERE id=$1::uuid AND status='running' AND is_terminal=false`, [job.id, DELETE_LEASE_SECONDS]).catch(swallowAndLog('lesson_author.session_deletion_heartbeat')); }, 60_000);
   heartbeat.unref();
   try {
     const stats = await withDatabaseTransaction(async tx => {

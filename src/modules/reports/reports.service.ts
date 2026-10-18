@@ -14,6 +14,7 @@ import { runReportAggregate } from './report-admission.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
 import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
 import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
+import { logSwallowedError } from '../../utils/best-effort.js';
 
 // ── Types ──
 
@@ -2636,7 +2637,8 @@ export async function getUserStudyTime(
 export async function refreshReportSummary(): Promise<void> {
   try {
     await reportsQuery('SELECT refresh_report_summary()', []);
-  } catch {
-    // Function may not exist yet
+  } catch (error) {
+    // Function may not exist yet (still recorded: the endpoint reports success either way)
+    logSwallowedError('reports.summary_refresh', error);
   }
 }

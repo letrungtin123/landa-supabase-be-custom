@@ -22,6 +22,7 @@ import {
   resolveTenantStoragePath,
 } from '../../config/storage.js';
 import { LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 function formatUploadSizeMb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
@@ -34,7 +35,7 @@ function getErrorMessage(err: unknown, req: Request): string {
 
 async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
   if (!file.path) return;
-  await fs.unlink(file.path).catch(() => {});
+  await fs.unlink(file.path).catch(swallowAndLog('library.temp_upload_cleanup', { ignoreMissingFile: true }));
 }
 // ── Document Categories ──
 
@@ -324,7 +325,7 @@ export async function uploadDocumentController(req: Request, res: Response, next
         docs.push(doc);
       } catch (err) {
         if (storageUploaded && storagePath) {
-          await deleteFile(storagePath).catch(() => {});
+          await deleteFile(storagePath).catch(swallowAndLog('library.storage_cleanup'));
         }
         errors.push(`${originalName}: ${getErrorMessage(err, req)}`);
       } finally {

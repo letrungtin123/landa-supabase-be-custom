@@ -95,7 +95,7 @@ export async function logDatabaseConnectionHeadroom(
   } catch (error) {
     log('warn', { event: 'db_connection_headroom_unchecked', process: processName, reason: error instanceof Error ? error.message.slice(0, 200) : 'error' });
   } finally {
-    await client?.end().catch(() => undefined);
+    await client?.end().catch(() => undefined); // start-up probe connection: closing it is best effort
   }
   if (isDatabasePoolerEnabled()) await logPooledGuardrails(processName, log);
 }

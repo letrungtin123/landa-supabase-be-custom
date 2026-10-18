@@ -321,7 +321,7 @@ async function loadDatabaseParity(ledgerInstalled: boolean): Promise<DatabasePar
     await client.query('COMMIT');
     return result.rows;
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -609,5 +609,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end().catch(() => undefined);
+    await pool.end().catch(() => undefined); // exiting: closing the pool is best effort
   });
