@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { env } from './env.js';
 import { getRedisClient, isRedisConfigured, withRedisDeadline } from './redis.js';
+import { clusterBus } from './cluster-bus.js';
 
 const CACHE_SCHEMA_VERSION = 'v1';
 const DEFAULT_JITTER_RATIO = 0.1;
@@ -64,6 +65,52 @@ function ttlWithJitter(ttlSeconds: number): number {
   const spread = Math.max(1, Math.floor(base * DEFAULT_JITTER_RATIO));
   return base + Math.floor(Math.random() * spread);
 }
+
+// ── Several processes ──
+// A bump that missed Redis here (this process's breaker is open, e.g. after
+// an event-loop stall) is relayed to the other processes, which bump the same
+// version key; otherwise they would keep serving the old cached value. A
+// process that cannot bump either remembers it and pauses its own cached
+// reads, as above. Relays are batched so an outage sends few messages.
+const RELAY_EVENT = 'cache.bump';
+const RELAY_FLUSH_MS = 200;
+const RELAY_MESSAGE_MAX_CHARS = 6_000;
+const RELAY_RECEIVE_MAX_ENTRIES = 1_000;
+let relayQueue: (readonly unknown[])[] = [];
+let relayTimer: NodeJS.Timeout | null = null;
+
+function flushInvalidationRelay(): void {
+  relayTimer = null;
+  const batch = relayQueue;
+  relayQueue = [];
+  let chunk: (readonly unknown[])[] = [];
+  let chars = 0;
+  for (const segments of batch) {
+    const size = JSON.stringify(segments).length + 1;
+    if (chunk.length > 0 && chars + size > RELAY_MESSAGE_MAX_CHARS) {
+      void clusterBus.publish(RELAY_EVENT, { segments: chunk }, { immediate: true });
+      chunk = [];
+      chars = 0;
+    }
+    chunk.push(segments);
+    chars += size;
+  }
+  if (chunk.length > 0) void clusterBus.publish(RELAY_EVENT, { segments: chunk }, { immediate: true });
+}
+
+function relayInvalidation(segments: readonly unknown[]): void {
+  if (!clusterBus.enabled || !isRedisConfigured()) return;
+  relayQueue.push(segments);
+  if (relayTimer) return;
+  relayTimer = setTimeout(flushInvalidationRelay, RELAY_FLUSH_MS);
+  relayTimer.unref();
+}
+
+clusterBus.on(RELAY_EVENT, async (payload) => {
+  if (!Array.isArray(payload.segments)) return;
+  const list = (payload.segments as unknown[]).filter((segments): segments is unknown[] => Array.isArray(segments));
+  await Promise.all(list.slice(0, RELAY_RECEIVE_MAX_ENTRIES).map((segments) => bumpVersion(segments, false)));
+});
 
 function rememberPendingInvalidation(segments: readonly unknown[]): void {
   if (!isRedisConfigured() || invalidationsDropped) return;
@@ -186,9 +233,15 @@ export async function getCacheVersion(...segments: readonly unknown[]): Promise<
 }
 
 export async function bumpCacheVersion(...segments: readonly unknown[]): Promise<void> {
+  await bumpVersion(segments, true);
+}
+
+/** `relay`: tell the other processes when the bump missed Redis (never for a relayed bump). */
+async function bumpVersion(segments: readonly unknown[], relay: boolean): Promise<void> {
   const client = getRedisClient();
   if (!client) {
     rememberPendingInvalidation(segments);
+    if (relay) relayInvalidation(segments);
     return;
   }
 
@@ -197,6 +250,7 @@ export async function bumpCacheVersion(...segments: readonly unknown[]): Promise
   } catch {
     // Replayed once Redis answers again (a replayed bump is only an extra miss).
     rememberPendingInvalidation(segments);
+    if (relay) relayInvalidation(segments);
   }
 }
 

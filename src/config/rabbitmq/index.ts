@@ -6,7 +6,7 @@ import { env } from '../env.js';
 
 export { connectRabbitMQ, assertQueue, closeRabbitMQ, getChannel, createRabbitChannel } from './connection.js';
 export { publish } from './publisher.js';
-export { consume } from './consumer.js';
+export { consume, cancelConsumers } from './consumer.js';
 
 /** Queue name constants */
 const queue = (name: string) => `${env.RABBITMQ_QUEUE_PREFIX}${name}`;

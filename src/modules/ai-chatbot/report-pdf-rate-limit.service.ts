@@ -4,6 +4,7 @@
 // limiter fails open (logged) and the export capacity limits and the
 // renderer's bounded queue still protect the host.
 import { env } from '../../config/env.js';
+import { cacheKey } from '../../config/cache.js';
 import { getRedisClient } from '../../config/redis.js';
 import { ReportDeadlineError, withReportDeadline } from './report-deadline.logic.js';
 import { buildReportPdfRateLimitKeys } from './report-pdf-export.logic.js';
@@ -17,15 +18,18 @@ export interface ReportPdfRateLimitCounter {
   incrementPair(userKey: string, tenantKey: string, ttlSeconds: number): Promise<[number, number] | null>;
 }
 
+// Plain INCR + EXPIRE under the backend key prefix: the production Redis ACL
+// refuses MULTI and keys outside `landa-backend:*` (the limiter then failed
+// open). The keys carry their window, so a counter whose EXPIRE was lost (a
+// crash in between) is never counted again.
 const redisCounter: ReportPdfRateLimitCounter = {
   async incrementPair(userKey, tenantKey, ttlSeconds) {
     const client = getRedisClient();
     if (!client) return null;
-    const replies = await client.multi()
-      .incr(userKey).expire(userKey, ttlSeconds)
-      .incr(tenantKey).expire(tenantKey, ttlSeconds)
-      .exec();
-    return [Number(replies[0]), Number(replies[2])];
+    const keys = [cacheKey('report-pdf-rate-limit', userKey), cacheKey('report-pdf-rate-limit', tenantKey)];
+    const [userCount, tenantCount] = await Promise.all(keys.map((key) => client.incr(key)));
+    await Promise.all(keys.map((key) => client.expire(key, ttlSeconds)));
+    return [Number(userCount), Number(tenantCount)];
   },
 };
 

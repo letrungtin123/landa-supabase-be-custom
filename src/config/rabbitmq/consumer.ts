@@ -13,6 +13,8 @@
 // When the republish itself is not confirmed, the message is requeued
 // after a short wait instead of at once, so a refusing broker is not hit in
 // a tight loop. The wait ends early when the process starts shutting down.
+// At shutdown cancelConsumers() also stops new deliveries; a message whose
+// wait ended is still republished and acknowledged on its open channel.
 // ═══════════════════════════════════════════════════════════════
 
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
@@ -21,6 +23,9 @@ import { env } from '../env.js';
 import { onShutdownStart } from '../process-lifecycle.js';
 
 const MAX_RETRIES = 3;
+
+/** Consumers started by this process, so a shutdown can stop new deliveries. */
+const activeConsumers: Array<{ queue: string; channel: ConfirmChannel; consumerTag: string }> = [];
 
 type ConsumeCallback = (data: Record<string, any>) => Promise<void>;
 type FailCallback = (queue: string, rawMessage: string) => Promise<void>;
@@ -151,7 +156,7 @@ export async function consume(
   const prefetch = Math.max(1, options.prefetch ?? 1);
   await channel.prefetch(prefetch);
 
-  await channel.consume(queue, createMessageHandler({
+  const { consumerTag } = await channel.consume(queue, createMessageHandler({
     channel,
     queue,
     callback,
@@ -159,5 +164,22 @@ export async function consume(
     retryBackoff: options.retryBackoff === true,
   }));
 
+  activeConsumers.push({ queue, channel, consumerTag });
   console.log(`[RabbitMQ] Consumer started on queue: ${queue} prefetch=${prefetch}${options.retryBackoff ? ' retry_backoff=on' : ''}`);
+}
+
+/**
+ * Shutdown: RabbitMQ stops delivering new messages to this process. A
+ * message being handled finishes, or is delivered again once the connection
+ * closes unacknowledged (the handlers are idempotent).
+ */
+export async function cancelConsumers(): Promise<void> {
+  const current = activeConsumers.splice(0);
+  await Promise.all(current.map(async ({ queue, channel, consumerTag }) => {
+    try {
+      await channel.cancel(consumerTag);
+    } catch (error) {
+      console.warn(`[RabbitMQ] Could not cancel the consumer on ${queue}:`, error instanceof Error ? error.message : String(error));
+    }
+  }));
 }

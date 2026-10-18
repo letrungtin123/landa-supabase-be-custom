@@ -165,6 +165,15 @@ export const env = {
   RUNTIME_TENANT_ALLOWLIST: optionalCsv('RUNTIME_TENANT_ALLOWLIST'),
   RUNTIME_TENANT_DENYLIST: optionalCsv('RUNTIME_TENANT_DENYLIST'),
   RUNTIME_GLOBAL_MAINTENANCE_ENABLED: optionalBoolean('RUNTIME_GLOBAL_MAINTENANCE_ENABLED', true),
+  // What this process of dist/index.js runs (config/process-role.ts):
+  // 'all' = HTTP and the background work in one process (the default, as
+  // before); 'api' = HTTP only (PM2 cluster instances); 'background' = queue
+  // consumers, pollers, sweepers and maintenance only (one process).
+  LANDA_PROCESS_ROLE: optionalOneOf('LANDA_PROCESS_ROLE', 'all', ['all', 'api', 'background'] as const),
+  // Number of 'api' processes PM2 runs (ecosystem.config.cjs passes the same
+  // value it uses for `instances`). Above 1, request limits and short-lived
+  // request state are shared through Redis.
+  LANDA_API_INSTANCES: optionalBoundedInt('LANDA_API_INSTANCES', 1, 1, 64),
   // Existing direct deployments retain the default. Behind Nginx, bind to
   // 127.0.0.1 so the API cannot bypass the gateway on a LAN/public interface.
   BIND_HOST: optionalString('BIND_HOST', '0.0.0.0'),

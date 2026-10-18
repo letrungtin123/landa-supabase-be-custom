@@ -47,7 +47,7 @@ test('a one-time-link sign-in is audited as a LOGIN', async (t) => {
   await installFakeDb(t, audits);
   const authService = await import('./auth.service.js');
   const { exchangeOTTController } = await import('./auth.controller.js');
-  const ott = authService.generateOTT(STAFF);
+  const ott = await authService.generateOTT(STAFF);
   const { res, out } = response();
   const req = { body: { ott }, headers: {}, ip: '203.0.113.5', socket: {}, get: () => undefined } as unknown as Request;
   await exchangeOTTController(req, res, (err?: unknown) => { throw err; });

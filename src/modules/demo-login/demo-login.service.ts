@@ -475,7 +475,7 @@ export async function claimPublicDemoLoginAccount(domain: string, accountId: str
   const claimed = result.rows[0];
   if (!claimed) throw new AppError('Tài khoản demo không còn khả dụng', 409);
 
-  const ott = generateOTT(claimed.user_id);
+  const ott = await generateOTT(claimed.user_id);
   await bumpCacheVersion(...cacheVersions.publicDomain(domain, 'demo-login'));
   return {
     redirect_url: buildLearnerTargetUrl(tenant, domain, ott),

@@ -6,7 +6,9 @@
 import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
-import { AI_BUSY_CODE, AI_BUSY_ERROR, AI_BUSY_RETRY_AFTER_SECONDS, createConcurrencyGate } from './ai-chat-admission.logic.js';
+import { AI_BUSY_CODE, AI_BUSY_ERROR, AI_BUSY_RETRY_AFTER_SECONDS } from './ai-chat-admission.logic.js';
+import { countActiveSlots, createChatAnswerGate } from './ai-chat-admission.service.js';
+import { processRolePlan } from '../../config/process-role.js';
 import { recordAiChatAdmissionRefused, registerAiChatAdmissionGauge } from '../metrics/metrics.service.js';
 import { CHAT_ANSWER_STOPPED_BY_CLIENT } from './chat-provider-turn.logic.js';
 import { env } from '../../config/env.js';
@@ -41,11 +43,13 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const reportPdfLocks = new Set<string>();
 const reportPdfLastExportAt = new Map<string, number>();
 const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
-// Chat answers streamed at once by this process (H10): per tenant and in total.
-const chatAnswerGate = createConcurrencyGate({
+// Chat answers streamed at once (H10): per tenant and in total, for the whole
+// cluster when several API processes run (ai-chat-admission.service.ts).
+// The metrics gauge reports the answers this process streams.
+const chatAnswerGate = countActiveSlots(createChatAnswerGate(processRolePlan, {
   perKey: env.AI_CHAT_TENANT_CONCURRENCY,
   total: env.AI_CHAT_GLOBAL_CONCURRENCY,
-});
+}));
 registerAiChatAdmissionGauge(() => chatAnswerGate.active());
 
 /** Body `locale` first (validated in sendMessage), then the dashboard's X-UI-Locale header. */
@@ -681,7 +685,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
 
   // Admission before the stream opens, so a busy answer is a plain 429.
-  const releaseChatSlot = chatAnswerGate.tryAcquire(tenantId);
+  const releaseChatSlot = await chatAnswerGate.tryAcquire(tenantId);
   if (!releaseChatSlot) {
     recordAiChatAdmissionRefused();
     const [status, vi, en] = AI_BUSY_ERROR;
@@ -691,6 +695,8 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
   // Also freed when the response closes, whatever path ends the turn.
   res.once('close', releaseChatSlot);
+  // The client may have left while a shared admission waited for Redis.
+  if (res.destroyed) { releaseChatSlot(); return; }
 
   // Set SSE headers
   res.writeHead(200, {
