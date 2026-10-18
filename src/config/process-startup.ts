@@ -17,7 +17,8 @@
 //   access revocation check     x     x
 //   lesson-author workers      loop  accept loop
 //   sweepers, maintenance       x           x
-//   HTTP listen                 x     x
+//   HTTP listen (+ event-loop   x     x
+//   sampler of /internal/metrics)
 //   PM2 ready                   x     x     x
 //   Storage bucket              x     x
 //   startup cleanups            x           x
