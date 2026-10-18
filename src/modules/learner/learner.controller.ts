@@ -8,12 +8,18 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import { requestUiLocaleOf } from '../../utils/client-error.js';
 import { COMPLETE_BLOCKS_LIMIT_ERROR, MAX_COMPLETE_BLOCK_IDS } from './learner-completion.logic.js';
+import {
+  learnerBatchProgressQuerySchema,
+  learnerCoursesQuerySchema,
+  learnerLibraryDocumentsQuerySchema,
+  learnerNotificationsQuerySchema,
+} from './learner.validator.js';
 
 function demoProgressState() {
   return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
 }
 
-function maskEnrollmentProgress(rows: any[]) {
+function maskEnrollmentProgress<T extends object>(rows: T[]) {
   return rows.map((row) => ({
     ...row,
     progress: 0,
@@ -40,15 +46,16 @@ export async function listCourses(req: Request, res: Response, next: NextFunctio
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
+    const query = learnerCoursesQuerySchema.parse(req.query);
     const result = await learnerService.getMyVisibleCourses(
       req.user.id,
       tenantId,
       req.user.role,
       {
-        search: req.query.search as string | undefined,
-        category_id: req.query.category_id as string | undefined,
-        page: req.query.page ? parseInt(req.query.page as string) : undefined,
-        page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
+        search: query.search,
+        category_id: query.category_id,
+        page: query.page,
+        page_size: query.page_size,
       },
     );
 
@@ -126,17 +133,18 @@ export async function getLibraryDocuments(req: Request, res: Response, next: Nex
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
+    const query = learnerLibraryDocumentsQuerySchema.parse(req.query);
     const result = await learnerService.getMyLibraryDocuments(
       req.user.id,
       tenantId,
       req.user.role,
       {
-        page: req.query.page ? parseInt(req.query.page as string) : undefined,
-        page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
-        category: req.query.category as string | undefined,
-        extension: req.query.extension as string | undefined,
-        search: req.query.search as string | undefined,
-        ordering: req.query.ordering as string | undefined,
+        page: query.page,
+        page_size: query.page_size,
+        category: query.category,
+        extension: query.extension,
+        search: query.search,
+        ordering: query.ordering,
       },
     );
     sendSuccess(res, result);
@@ -266,7 +274,7 @@ export async function getBatchProgress(req: Request, res: Response, next: NextFu
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
-    const raw = req.query.courseIds as string | undefined;
+    const raw = learnerBatchProgressQuerySchema.parse(req.query).courseIds;
     if (!raw) { sendError(res, 'Thiếu courseIds', 400); return; }
 
     const courseIds = raw.split(',').map(id => id.trim()).filter(Boolean);
@@ -387,9 +395,10 @@ export async function listNotifications(req: Request, res: Response, next: NextF
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
     // { data, total, unread_count }: the unread count comes from the same query.
+    const query = learnerNotificationsQuerySchema.parse(req.query);
     const result = await learnerService.getMyNotifications(req.user.id, tenantId, {
-      page: req.query.page ? parseInt(req.query.page as string) : undefined,
-      page_size: req.query.page_size ? parseInt(req.query.page_size as string) : undefined,
+      page: query.page,
+      page_size: query.page_size,
     });
 
     sendSuccess(res, result);

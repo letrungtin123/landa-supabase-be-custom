@@ -801,11 +801,6 @@
       "count": 1
     }
   },
-  "src/modules/learner/learner.controller.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/learner/learner.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 31

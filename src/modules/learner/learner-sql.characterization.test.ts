@@ -305,6 +305,15 @@ add('section mark no id', () => call(H.markSectionModalShown, { body: {} }));
 add('section mark bad id', () => call(H.markSectionModalShown, { body: { section_id: 'not-a-uuid' } }));
 add('popup course bad id', () => call(H.getCourseModalConfig, { params: { courseId: '  ' } }));
 
+// Query strings read by the learner query schemas: odd and repeated values.
+add('batch progress repeated', () => call(H.getBatchProgress, { query: { courseIds: ['c1', 'c2'] } }));
+add('notifications odd pages', () => call(H.listNotifications, { query: { page: 'abc', page_size: ['3', '4'] } }));
+add('notifications zero pages', () => call(H.listNotifications, { query: { page: '0', page_size: '' } }));
+add('library documents odd query', () =>
+  call(H.getLibraryDocuments, { query: { page: 'x', page_size: '-5', category: ['a', 'b'], search: ['x'], ordering: ['title'] } }),
+);
+add('courses repeated category', () => call(H.listCourses, { role: 'staff', query: { category_id: ['c1', 'c2'], page: '2.7' } }));
+
 // ── Runner ──
 
 function digest(outcome: unknown): string {
