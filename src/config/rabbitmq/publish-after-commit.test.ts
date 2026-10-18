@@ -136,3 +136,35 @@ test('deleting an assignment announces the recalculation after COMMIT and after 
   assertPublishedAfterCommit(h.log);
   assert.ok(h.log.indexOf('pool:INSERT INTO') > h.log.indexOf('release'), 'the job row is written on a pool connection after release');
 });
+
+test('a block deletion requested inside an audited transaction (AI ID apply) is published after that transaction', async (t) => {
+  const log: string[] = [];
+  const db = await import('../database.js');
+  let connections = 0;
+  const respond = (text: string) => {
+    if (text.includes('FOR UPDATE OF b')) return { rows: [{ id: 'block-1', course_id: 'course-1', block_type: 'vertical' }], rowCount: 1 };
+    if (text.includes('INSERT INTO course_deletion_jobs')) return { rows: [{ id: JOB }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  };
+  t.mock.method(db.pool, 'query', async (text: string) => { log.push(`pool:${verb(text)}`); return respond(text); });
+  t.mock.method(db.pool, 'connect', async () => {
+    const name = connections === 0 ? 'outer' : 'job';
+    connections += 1;
+    return {
+      query: async (text: string) => { log.push(`${name}:${verb(text)}`); return respond(text); },
+      release: () => { log.push(`${name}:release`); },
+    };
+  });
+  t.mock.method(console, 'error', (...args: unknown[]) => {
+    if (/publish/i.test(args.map(String).join(' '))) log.push('publish-attempt');
+  });
+  const { requestBlockDeletion } = await import('../../modules/course-deletion/course-deletion.service.js');
+
+  await db.withDatabaseTransaction(async () => {
+    await requestBlockDeletion('block-1', TENANT, 'a0000000-0000-4000-8000-000000000002');
+    log.push('apply continues');
+  });
+  assert.ok(log.indexOf('job:COMMIT') < log.indexOf('apply continues'), 'the deletion job commits on its own connection');
+  assert.ok(log.indexOf('publish-attempt') > log.indexOf('outer:COMMIT'), `published after the outer COMMIT: ${log.join(', ')}`);
+  assert.ok(log.indexOf('publish-attempt') > log.indexOf('outer:release'));
+});

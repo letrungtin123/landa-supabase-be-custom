@@ -710,7 +710,11 @@ export async function requestBlockDeletion(
     invalidateCourseReadCaches(courseId, tenantId),
     invalidateBlockReadCachesInBatches(blockIds),
   ]);
-  await publishDeleteJob(jobId);
+  // The job committed on its own connection above. AI ID applies a delete
+  // proposal inside its audited transaction (applyLessonAuthorJob): the
+  // wake-up waits for that transaction instead of holding it open; if it
+  // rolls back, the committed job is still picked up by the sweeper.
+  await afterCommit(() => publishDeleteJob(jobId));
   return { jobId, courseId };
 }
 
