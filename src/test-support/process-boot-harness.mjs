@@ -12,6 +12,9 @@
 // - every TCP connection attempt is recorded (a real one is refused: the
 //   test points every service URL at a closed loopback port).
 //
+// Also preloaded by src/config/import-side-effects.test.ts in observe mode
+// (BOOT_HARNESS_MODE=observe: recording only, real pg and amqplib).
+//
 // What it saw is written as JSON to BOOT_HARNESS_OUT when the process exits.
 // Recording stops when the "shutdown" message arrives, so the steps of the
 // graceful shutdown are not counted as startup work.
@@ -89,98 +92,105 @@ net.Server.prototype.listen = function recordedListen(...args) {
   return realListen.apply(this, args);
 };
 
-// ── pg: no socket; no rows, except that schema checks pass ──
-const pg = require('pg');
-const SCHEMA_CHECK = /to_regclass|pg_indexes|information_schema|pg_catalog|pg_class|pg_proc|pg_trigger|pg_constraint/i;
-/** A startup schema check (catalog query) answers one row with every `AS name` column true. */
-function fakeResult(text) {
-  if (!SCHEMA_CHECK.test(text)) return { command: 'SELECT', rowCount: 0, rows: [], fields: [] };
-  const row = Object.fromEntries([...text.matchAll(/\bAS\s+"?(\w+)"?/gi)].map(match => [match[1], true]));
-  return { command: 'SELECT', rowCount: 1, rows: [row], fields: [] };
-}
-pg.Client.prototype.connect = function fakeConnect(callback) {
-  this._connected = true;
-  this._queryable = true;
-  this._ending = false;
-  if (callback) {
-    process.nextTick(() => callback(null, this));
-    return undefined;
-  }
-  return Promise.resolve();
-};
-pg.Client.prototype.isConnected = function fakeIsConnected() {
-  return this._connected === true && !this._ending;
-};
-pg.Client.prototype.query = function fakeQuery(config, values, callback) {
-  const text = typeof config === 'string' ? config : (config?.text ?? '');
-  const done = typeof values === 'function' ? values : (callback ?? config?.callback);
-  if (recording) {
-    seen.queries += 1;
-    const listen = /^\s*LISTEN\s+("?[\w.-]+"?)/i.exec(text);
-    if (listen) seen.listenChannels.add(listen[1].replaceAll('"', ''));
-  }
-  const result = fakeResult(text);
-  if (typeof done === 'function') {
-    process.nextTick(() => done(null, result));
-    return undefined;
-  }
-  return Promise.resolve(result);
-};
-pg.Client.prototype.end = function fakeEnd(callback) {
-  this._ending = true;
-  this._queryable = false;
-  process.nextTick(() => this.emit('end'));
-  if (callback) {
-    process.nextTick(callback);
-    return undefined;
-  }
-  return Promise.resolve();
-};
+// BOOT_HARNESS_MODE=observe: no fakes, only the recording (a real pg or
+// amqplib connection attempt then shows up in `connections`).
+if (process.env.BOOT_HARNESS_MODE !== 'observe') installFakeServices();
 
-// ── amqplib: an in-memory broker ──
-const { EventEmitter } = require('node:events');
-const amqp = require('amqplib');
-let consumerCount = 0;
-function fakeChannel() {
-  const channel = new EventEmitter();
-  Object.assign(channel, {
-    assertQueue: async queue => {
-      if (recording) seen.assertedQueues.push(queue);
-      return { queue, messageCount: 0, consumerCount: 0 };
-    },
-    checkQueue: async queue => ({ queue, messageCount: 0, consumerCount: 0 }),
-    prefetch: async () => undefined,
-    consume: async queue => {
-      if (recording) seen.consumedQueues.push(queue);
-      consumerCount += 1;
-      return { consumerTag: `harness-${consumerCount}` };
-    },
-    cancel: async () => undefined,
-    ack: () => undefined,
-    nack: () => undefined,
-    reject: () => undefined,
-    sendToQueue: (_queue, _content, _options, callback) => {
-      if (typeof callback === 'function') process.nextTick(() => callback(null));
-      return true;
-    },
-    publish: (_exchange, _key, _content, _options, callback) => {
-      if (typeof callback === 'function') process.nextTick(() => callback(null));
-      return true;
-    },
-    waitForConfirms: async () => undefined,
-    close: async () => undefined,
-  });
-  return channel;
+function installFakeServices() {
+  // ── pg: no socket; no rows, except that schema checks pass ──
+  const pg = require('pg');
+  const SCHEMA_CHECK =
+    /to_regclass|pg_indexes|information_schema|pg_catalog|pg_class|pg_proc|pg_trigger|pg_constraint/i;
+  /** A startup schema check (catalog query) answers one row with every `AS name` column true. */
+  function fakeResult(text) {
+    if (!SCHEMA_CHECK.test(text)) return { command: 'SELECT', rowCount: 0, rows: [], fields: [] };
+    const row = Object.fromEntries([...text.matchAll(/\bAS\s+"?(\w+)"?/gi)].map(match => [match[1], true]));
+    return { command: 'SELECT', rowCount: 1, rows: [row], fields: [] };
+  }
+  pg.Client.prototype.connect = function fakeConnect(callback) {
+    this._connected = true;
+    this._queryable = true;
+    this._ending = false;
+    if (callback) {
+      process.nextTick(() => callback(null, this));
+      return undefined;
+    }
+    return Promise.resolve();
+  };
+  pg.Client.prototype.isConnected = function fakeIsConnected() {
+    return this._connected === true && !this._ending;
+  };
+  pg.Client.prototype.query = function fakeQuery(config, values, callback) {
+    const text = typeof config === 'string' ? config : (config?.text ?? '');
+    const done = typeof values === 'function' ? values : (callback ?? config?.callback);
+    if (recording) {
+      seen.queries += 1;
+      const listen = /^\s*LISTEN\s+("?[\w.-]+"?)/i.exec(text);
+      if (listen) seen.listenChannels.add(listen[1].replaceAll('"', ''));
+    }
+    const result = fakeResult(text);
+    if (typeof done === 'function') {
+      process.nextTick(() => done(null, result));
+      return undefined;
+    }
+    return Promise.resolve(result);
+  };
+  pg.Client.prototype.end = function fakeEnd(callback) {
+    this._ending = true;
+    this._queryable = false;
+    process.nextTick(() => this.emit('end'));
+    if (callback) {
+      process.nextTick(callback);
+      return undefined;
+    }
+    return Promise.resolve();
+  };
+
+  // ── amqplib: an in-memory broker ──
+  const { EventEmitter } = require('node:events');
+  const amqp = require('amqplib');
+  let consumerCount = 0;
+  function fakeChannel() {
+    const channel = new EventEmitter();
+    Object.assign(channel, {
+      assertQueue: async queue => {
+        if (recording) seen.assertedQueues.push(queue);
+        return { queue, messageCount: 0, consumerCount: 0 };
+      },
+      checkQueue: async queue => ({ queue, messageCount: 0, consumerCount: 0 }),
+      prefetch: async () => undefined,
+      consume: async queue => {
+        if (recording) seen.consumedQueues.push(queue);
+        consumerCount += 1;
+        return { consumerTag: `harness-${consumerCount}` };
+      },
+      cancel: async () => undefined,
+      ack: () => undefined,
+      nack: () => undefined,
+      reject: () => undefined,
+      sendToQueue: (_queue, _content, _options, callback) => {
+        if (typeof callback === 'function') process.nextTick(() => callback(null));
+        return true;
+      },
+      publish: (_exchange, _key, _content, _options, callback) => {
+        if (typeof callback === 'function') process.nextTick(() => callback(null));
+        return true;
+      },
+      waitForConfirms: async () => undefined,
+      close: async () => undefined,
+    });
+    return channel;
+  }
+  amqp.connect = async function fakeAmqpConnect() {
+    const connection = new EventEmitter();
+    Object.assign(connection, {
+      createChannel: async () => fakeChannel(),
+      createConfirmChannel: async () => fakeChannel(),
+      close: async () => undefined,
+    });
+    return connection;
+  };
 }
-amqp.connect = async function fakeAmqpConnect() {
-  const connection = new EventEmitter();
-  Object.assign(connection, {
-    createChannel: async () => fakeChannel(),
-    createConfirmChannel: async () => fakeChannel(),
-    close: async () => undefined,
-  });
-  return connection;
-};
 
 // ── stop recording at shutdown; write what was seen at exit ──
 process.on('message', message => {
