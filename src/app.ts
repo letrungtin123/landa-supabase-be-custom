@@ -34,7 +34,6 @@ import reportsRoutes from './modules/reports/reports.routes.js';
 import courseAuthoringRoutes from './modules/course-authoring/course-authoring.routes.js';
 import notificationsRoutes from './modules/notifications/notifications.routes.js';
 import assignmentsRoutes from './modules/assignments/assignments.routes.js';
-import { startEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
 import emailTemplatesRoutes from './modules/email-templates/email-templates.routes.js';
 import learnerRoutes from './modules/learner/learner.routes.js';
 import storageRoutes from './modules/storage/storage.routes.js';
@@ -66,13 +65,8 @@ if (env.TRUSTED_PROXY_CIDRS.length > 0) {
   console.warn(`[Server] Trust proxy enabled by legacy hop count: ${env.TRUST_PROXY_HOPS}. Configure TRUSTED_PROXY_CIDRS for production.`);
 }
 
-if (!env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
-  console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
-} else if (processRolePlan.runsBackgroundWork) {
-  startEmailOutboxWorker({ keepAlive: false, source: 'inline' });
-} else {
-  console.log('[EmailOutbox] Inline worker runs in the background process (LANDA_PROCESS_ROLE=api here).');
-}
+// The inline email outbox worker is started by the process startup
+// (config/process-startup.ts), not by importing this file.
 
 // ── Graceful shutdown ──
 // While the process drains, answers on kept-alive connections tell the client

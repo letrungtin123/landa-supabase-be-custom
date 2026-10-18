@@ -12,6 +12,8 @@ import { shutdownStepsFor, startProcess, type ProcessStarters } from './process-
 
 function recordingStarters(calls: string[], overrides: Partial<ProcessStarters> = {}): ProcessStarters {
   return {
+    inMemorySweepers: () => { calls.push('sweepers'); },
+    inlineEmailOutbox: ({ run }) => { calls.push(run ? 'inline-email:run' : 'inline-email:log'); },
     rabbitmq: async ({ consumers }) => { calls.push(consumers ? 'rabbitmq+consumers' : 'rabbitmq'); },
     redis: async () => { calls.push('redis'); },
     clusterBus: async () => { calls.push('cluster-bus'); },
@@ -31,16 +33,16 @@ test('all (the default): one process starts everything, in the previous order', 
   const calls: string[] = [];
   await startProcess(planProcessRole('all', 1), recordingStarters(calls));
   assert.deepEqual(calls, [
-    'rabbitmq+consumers', 'redis', 'auth-revocation', 'lesson-author:loop', 'background-timers',
+    'sweepers', 'inline-email:run', 'rabbitmq+consumers', 'redis', 'auth-revocation', 'lesson-author:loop', 'background-timers',
     'temp-dirs', 'listen', 'ready', 'storage-bucket', 'startup-cleanups',
   ]);
 });
 
-test('api: HTTP and publishing only; no consumer, poller, sweeper or startup cleanup', async () => {
+test('api: HTTP and publishing only; no consumer, poller, background sweeper or startup cleanup', async () => {
   const calls: string[] = [];
   await startProcess(planProcessRole('api', 4), recordingStarters(calls));
   assert.deepEqual(calls, [
-    'rabbitmq', 'redis', 'cluster-bus', 'auth-revocation', 'lesson-author:accept',
+    'sweepers', 'inline-email:log', 'rabbitmq', 'redis', 'cluster-bus', 'auth-revocation', 'lesson-author:accept',
     'temp-dirs', 'listen', 'ready', 'storage-bucket',
   ]);
 });
@@ -49,7 +51,7 @@ test('background: consumers, loops, timers and the one-off cleanups; never liste
   const calls: string[] = [];
   await startProcess(planProcessRole('background', 4), recordingStarters(calls));
   assert.deepEqual(calls, [
-    'rabbitmq+consumers', 'redis', 'cluster-bus', 'lesson-author:loop', 'background-timers',
+    'sweepers', 'inline-email:run', 'rabbitmq+consumers', 'redis', 'cluster-bus', 'lesson-author:loop', 'background-timers',
     'temp-dirs', 'ready', 'startup-cleanups',
   ]);
 });
@@ -70,7 +72,8 @@ test('a failed first RabbitMQ connection stops the startup in every role (the st
     await assert.rejects(startProcess(planProcessRole(role, role === 'all' ? 1 : 2), recordingStarters(calls, {
       rabbitmq: async () => { throw new Error('ECONNREFUSED'); },
     })), /ECONNREFUSED/);
-    assert.deepEqual(calls, [], `${role}: nothing else started`);
+    // The sweepers and the inline email outbox start first (they used to start on import).
+    assert.deepEqual(calls, ['sweepers', role === 'api' ? 'inline-email:log' : 'inline-email:run'], `${role}: nothing else started`);
   }
 });
 
