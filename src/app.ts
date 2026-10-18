@@ -13,7 +13,8 @@ import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.j
 import { apiLimiter } from './middleware/auth-rate-limit.js';
 import { SharedRateLimitStore } from './middleware/rate-limit-store.js';
 import { processRolePlan } from './config/process-role.js';
-import { useJsonBodyParsers } from './middleware/body-limits.js';
+import { useFormBodyParser, useJsonBodyParsers } from './middleware/body-limits.js';
+import { configureTrustProxy } from './config/trust-proxy.js';
 import { mountMetrics } from './modules/metrics/metrics.routes.js';
 
 // Routes
@@ -54,17 +55,8 @@ const app = express();
 // and the per-route-group request counters (modules/metrics). Each HTTP
 // process reports its own numbers; the background process serves no HTTP.
 if (processRolePlan.servesHttp) mountMetrics(app);
-if (env.TRUSTED_PROXY_CIDRS.length > 0) {
-  // A CIDR allowlist is safe even if the backend port is reachable directly:
-  // forwarded addresses are considered only when every proxy hop belongs to
-  // this explicitly trusted set. Do not replace this with `true` or a broad
-  // hop count in production.
-  app.set('trust proxy', env.TRUSTED_PROXY_CIDRS);
-  console.log(`[Server] Trust proxy enabled with ${env.TRUSTED_PROXY_CIDRS.length} exact trusted CIDR(s)`);
-} else if (env.TRUST_PROXY_HOPS > 0) {
-  app.set('trust proxy', env.TRUST_PROXY_HOPS);
-  console.warn(`[Server] Trust proxy enabled by legacy hop count: ${env.TRUST_PROXY_HOPS}. Configure TRUSTED_PROXY_CIDRS for production.`);
-}
+// TRUSTED_PROXY_CIDRS (exact allowlist) or the legacy TRUST_PROXY_HOPS (config/trust-proxy.ts).
+configureTrustProxy(app, env);
 
 if (!env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
   console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
@@ -105,7 +97,7 @@ app.use(cors({
 
 // Small JSON limits on sign-in and learner routes, 10 MB elsewhere (middleware/body-limits.ts).
 useJsonBodyParsers(app);
-app.use(express.urlencoded({ extended: true }));
+useFormBodyParser(app);
 
 // ── Rate Limiting — brute-force protection ──
 // Sign-in, refresh, password change, one-time links and profile updates have
