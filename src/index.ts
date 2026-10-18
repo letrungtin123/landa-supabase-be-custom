@@ -43,6 +43,7 @@ import fs from 'fs/promises';
 import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
 import { logSwallowedError } from './utils/best-effort.js';
 import { startProcessHeartbeat } from './modules/metrics/heartbeat.service.js';
+import { startEventLoopDelayMonitor } from './modules/metrics/metrics.service.js';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
 const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
@@ -318,6 +319,8 @@ async function startLessonAuthorRuntimes(loop: boolean): Promise<void> {
 }
 
 function listen(): Promise<void> {
+  // The event-loop delay of GET /internal/metrics (app.ts mounts it in this role).
+  if (env.METRICS_ENABLED) startEventLoopDelayMonitor();
   return new Promise((resolve) => {
     const server = app.listen(env.PORT, env.BIND_HOST, function onListen() {
       console.log(`[Server] LANDA Backend listening on ${env.BIND_HOST}:${env.PORT}`);
