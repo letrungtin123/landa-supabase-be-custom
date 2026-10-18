@@ -77,7 +77,7 @@ export async function listTenants(queryParams: Record<string, unknown>) {
             COALESCE(quota.state, 'initializing') AS data_quota_state,
             quota.last_verified_at AS data_quota_last_verified_at,
             COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
-            ai_settings.monthly_token_limit::text AS ai_monthly_token_limit,
+            NULL::text AS ai_monthly_token_limit, -- retired token limit (AI limits are points); kept for older dashboards
             COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
             COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
             COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,
@@ -125,7 +125,7 @@ export async function getTenantById(id: string) {
             COALESCE(quota.state, 'initializing') AS data_quota_state,
             quota.last_verified_at AS data_quota_last_verified_at,
             COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
-            ai_settings.monthly_token_limit::text AS ai_monthly_token_limit,
+            NULL::text AS ai_monthly_token_limit, -- retired token limit (AI limits are points); kept for older dashboards
             COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
             COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
             COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,

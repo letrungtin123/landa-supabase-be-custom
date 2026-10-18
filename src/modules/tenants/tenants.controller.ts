@@ -309,7 +309,7 @@ export async function getAiSettingsController(req: Request, res: Response, next:
   } catch (err) { next(err); }
 }
 
-/** PUT /api/tenants/:id/ai-settings — update AI engine/key/token limit (superadmin only) */
+/** PUT /api/tenants/:id/ai-settings — update AI engine/key (superadmin only). The retired monthly_token_limit is accepted and ignored. */
 export async function updateAiSettingsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = updateTenantAiSettingsSchema.safeParse(req.body);
@@ -318,7 +318,6 @@ export async function updateAiSettingsController(req: Request, res: Response, ne
     const settings = await runAuditedTransaction(
       () => updateTenantAiSettings(req.params.id, {
         activeEngine: parsed.data.active_engine,
-        monthlyTokenLimit: parsed.data.monthly_token_limit,
         googleAiStudioApiKey: parsed.data.google_ai_studio_api_key,
         clearGoogleAiStudioApiKey: parsed.data.clear_google_ai_studio_api_key,
         chatModel: parsed.data.chat_model,

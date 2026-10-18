@@ -57,7 +57,7 @@ const IDM_RUNTIME_HASH = 'baa996b58f9d0e552d265f4a30ec14f989d587b098b76b33528257
 
 function readers(overrides: Partial<TenantAiRuntimeSettings> = {}): OrchestrationV2RuntimeAuthorityReaders {
   return {
-    settings: async tenantId => ({ tenantId, monthlyTokenLimit: null, tokenTimezone: 'Asia/Ho_Chi_Minh',
+    settings: async tenantId => ({ tenantId, tokenTimezone: 'Asia/Ho_Chi_Minh',
       chatModel: 'gemini-chat', activeTransitionJobId: null, hasGoogleAiStudioKey: true, apiKeyFingerprint: null,
       ...settings, lessonAuthorModel: 'gemini-3.5-flash', ...overrides }),
     allowedComponentTypes: async () => new Set(ALL_TYPES),

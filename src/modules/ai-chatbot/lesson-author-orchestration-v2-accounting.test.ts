@@ -8,7 +8,7 @@ import type { OrchestrationV2TaskLease } from './lesson-author-orchestration-v2-
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
 const settings = {
   tenantId: uuid(4), activeEngine: 'self_built_rag' as const, provider: 'google_ai_studio' as const,
-  monthlyTokenLimit: null, tokenTimezone: 'Asia/Saigon', chatModel: 'chat', lessonAuthorModel: 'model',
+  tokenTimezone: 'Asia/Saigon', chatModel: 'chat', lessonAuthorModel: 'model',
   embeddingModel: 'gemini-embedding-001', embeddingDimensions: 768, transitionState: 'idle' as const,
   activeTransitionJobId: null, hasGoogleAiStudioKey: true, apiKeyFingerprint: 'fingerprint',
 };

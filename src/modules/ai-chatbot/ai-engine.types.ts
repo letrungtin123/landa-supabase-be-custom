@@ -27,7 +27,6 @@ export interface TenantAiRuntimeSettings {
   tenantId: string;
   activeEngine: AiEngine;
   provider: AiProvider;
-  monthlyTokenLimit: string | null;
   tokenTimezone: string;
   chatModel: string;
   lessonAuthorModel: string;

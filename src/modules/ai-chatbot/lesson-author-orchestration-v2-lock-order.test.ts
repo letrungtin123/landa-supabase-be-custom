@@ -196,15 +196,15 @@ function recordingDatabase(route: Route = baseRoute) {
 function accountingFor(ambient: (sql: string) => Promise<void>) {
   const settings = {
     tenantId: TENANT, activeEngine: 'self_built_rag' as const, provider: 'google_ai_studio' as const,
-    monthlyTokenLimit: null, tokenTimezone: 'Asia/Saigon', chatModel: 'chat', lessonAuthorModel: 'model',
+    tokenTimezone: 'Asia/Saigon', chatModel: 'chat', lessonAuthorModel: 'model',
     embeddingModel: 'gemini-embedding-001', embeddingDimensions: 768, transitionState: 'idle' as const,
     activeTransitionJobId: null, hasGoogleAiStudioKey: true, apiKeyFingerprint: 'fingerprint',
   };
   return createOrchestrationV2QuotaAccounting({
     settings: async () => settings,
     reserve: async input => {
-      await ambient(`SELECT usage.total_tokens::text FROM ai_token_monthly_usage usage
-        JOIN tenant_ai_settings settings ON settings.tenant_id=usage.tenant_id FOR UPDATE OF usage, settings`);
+      await ambient(`SELECT usage.period_start::text FROM ai_token_monthly_usage usage
+        WHERE usage.tenant_id=$1 AND usage.period_start=$2::date FOR UPDATE OF usage`);
       await ambient('INSERT INTO ai_token_reservations (tenant_id) VALUES ($1) RETURNING id');
       await ambient('UPDATE ai_token_monthly_usage SET reserved_tokens=reserved_tokens+$3');
       const total = input.maximumTokens ?? 0;
