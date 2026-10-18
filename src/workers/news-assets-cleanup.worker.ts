@@ -7,6 +7,7 @@ import {
   releaseClaimedNewsAsset,
 } from '../modules/news/news.service.js';
 import { swallowAndLog } from '../utils/best-effort.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 const POLL_INTERVAL_MS = 60_000;
 const FAILURE_RETRY_MS = 15_000;
@@ -46,6 +47,7 @@ async function runCycle(): Promise<number> {
 }
 
 async function bootstrap(): Promise<void> {
+  startProcessHeartbeat({ role: 'news-assets-cleanup-worker' });
   void logDatabaseConnectionHeadroom('news-assets-cleanup-worker', ownDirectConnectionMax({ readsReports: false }));
   while (!stopping) {
     try {

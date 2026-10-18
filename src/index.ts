@@ -3,7 +3,9 @@ import app from './app.js';
 import { env } from './config/env.js';
 import { createGracefulShutdown } from './config/graceful-shutdown.js';
 import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js';
-import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
+import { cleanupExpiredTokens, startOneTimeTokenSweeper } from './modules/auth/auth.service.js';
+import { startBlacklistSweeper } from './middleware/authenticate.js';
+import { startChatCacheSweepers } from './modules/ai-chatbot/chat.service.js';
 import { ensureBucket } from './config/storage.js';
 import { endSessionPool, getSessionClient, pool, query } from './config/database.js';
 import { endReportsPool } from './config/reports-database.js';
@@ -27,7 +29,7 @@ import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-engine-tr
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
 import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/lesson-author-session-deletion.worker.js';
-import { startEmailOutboxRabbitConsumer, stopEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
+import { startEmailOutboxRabbitConsumer, startEmailOutboxWorker, stopEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
 import { workspaceCommitHub } from './modules/ai-chatbot/lesson-author-workspace-stream.service.js';
 import { sourceDocumentHub } from './modules/ai-chatbot/lesson-author-source-stream.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
@@ -40,6 +42,8 @@ import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
 import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
 import { logSwallowedError } from './utils/best-effort.js';
+import { startProcessHeartbeat } from './modules/metrics/heartbeat.service.js';
+import { startEventLoopDelayMonitor } from './modules/metrics/metrics.service.js';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
 const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
@@ -224,7 +228,7 @@ async function runStartupCleanups(): Promise<void> {
 function startBackgroundTimers(): void {
   // Expired AI token/point reservations are returned in the background (never in the AI call path).
   stopOnShutdown(startAiTokenReservationSweeper());
-  // (The inline email outbox worker, when enabled, is started by app.ts in this role.)
+  // (The inline email outbox worker, when enabled, is started by startInlineEmailOutbox in this role.)
 
   if (processRolePlan.sharesStateAcrossProcesses) {
     stopOnShutdown(setInterval(() => {
@@ -274,6 +278,24 @@ function startBackgroundTimers(): void {
   }, 24 * 60 * 60 * 1000));
 }
 
+/** Per-process in-memory cache sweepers: every role (they used to start on import). */
+function startInMemorySweepers(): void {
+  stopOnShutdown(startBlacklistSweeper());
+  stopOnShutdown(startOneTimeTokenSweeper());
+  for (const timer of startChatCacheSweepers()) stopOnShutdown(timer);
+}
+
+/** `run: false` (API process): only the log line saying where the inline worker runs. */
+function startInlineEmailOutbox(run: boolean): void {
+  if (!env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
+    console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
+  } else if (run) {
+    startEmailOutboxWorker({ keepAlive: false, source: 'inline' });
+  } else {
+    console.log('[EmailOutbox] Inline worker runs in the background process (LANDA_PROCESS_ROLE=api here).');
+  }
+}
+
 async function prepareAuthRevocation(): Promise<void> {
   if (env.isProduction && env.AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION && !getRedisClient()) {
     throw new Error('Redis is required in production for constant-time durable access-token revocation. Configure REDIS_URL or explicitly set AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION=false after accepting the database fallback load.');
@@ -297,6 +319,8 @@ async function startLessonAuthorRuntimes(loop: boolean): Promise<void> {
 }
 
 function listen(): Promise<void> {
+  // The event-loop delay of GET /internal/metrics (app.ts mounts it in this role).
+  if (env.METRICS_ENABLED) startEventLoopDelayMonitor();
   return new Promise((resolve) => {
     const server = app.listen(env.PORT, env.BIND_HOST, function onListen() {
       console.log(`[Server] LANDA Backend listening on ${env.BIND_HOST}:${env.PORT}`);
@@ -323,6 +347,9 @@ async function bootstrap() {
   // Once per process, in the background: a warning when its pools may not fit under max_connections.
   void logDatabaseConnectionHeadroom(`${processRolePlan.role}:${process.pid}`, ownDirectConnectionMax({ readsReports: processRolePlan.servesHttp }));
   await startProcess(processRolePlan, {
+    inMemorySweepers: startInMemorySweepers,
+    inlineEmailOutbox: ({ run }) => startInlineEmailOutbox(run),
+    heartbeat: () => { stopOnShutdown(startProcessHeartbeat({ role: processRolePlan.role })); },
     // MUST succeed — the process exits otherwise.
     rabbitmq: ({ consumers }) => initRabbitMQ(consumers),
     redis: connectRedis,

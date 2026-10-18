@@ -62,8 +62,17 @@ function cleanupBlacklist(): void {
   }
 }
 
-// Cleanup mỗi 5 phút
-setInterval(cleanupBlacklist, 5 * 60 * 1000);
+let blacklistSweeper: NodeJS.Timeout | null = null;
+
+/**
+ * Cleanup mỗi 5 phút. Started once per process by the process startup
+ * (config/process-startup.ts, every role) or a worker entry point, never at
+ * import. Returns the running timer (the same one when already started).
+ */
+export function startBlacklistSweeper(): NodeJS.Timeout {
+  blacklistSweeper ??= setInterval(cleanupBlacklist, 5 * 60 * 1000);
+  return blacklistSweeper;
+}
 
 function normalizeSessionMode(value: unknown): SessionMode {
   return value === 'demo_iframe' ? 'demo_iframe' : 'normal';

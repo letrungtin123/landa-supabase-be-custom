@@ -12,7 +12,7 @@
 import { Router, type Express, type NextFunction, type Request, type Response } from 'express';
 import { env } from '../../config/env.js';
 import { decideMetricsAccess, type RequestMetrics } from './metrics.logic.js';
-import { collectMetricsText, requestMetrics, startEventLoopDelayMonitor } from './metrics.service.js';
+import { collectMetricsText, requestMetrics } from './metrics.service.js';
 
 export const METRICS_PATH = '/internal/metrics';
 
@@ -55,10 +55,13 @@ export function createRequestMetricsMiddleware(metrics: RequestMetrics) {
   };
 }
 
-/** Mounted first in app.ts so every request is counted. */
+/**
+ * Mounted first in app.ts so every request is counted. The event-loop delay
+ * sampler is started by the process startup (index.ts, before listening),
+ * not on import.
+ */
 export function mountMetrics(app: Express): void {
   if (!env.METRICS_ENABLED) return;
-  startEventLoopDelayMonitor();
   app.use(createRequestMetricsMiddleware(requestMetrics));
   app.use(createMetricsRouter({ enabled: true, token: env.METRICS_TOKEN, collect: collectMetricsText }));
 }

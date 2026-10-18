@@ -8,6 +8,7 @@ import {
   isCourseOutlineTransferSchemaReady,
   processNextCourseOutlineTransferJob,
 } from '../modules/course-authoring/course-outline-transfer.service.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 let stopping = false;
 let wake: (() => void) | null = null;
@@ -32,6 +33,7 @@ async function run(): Promise<void> {
   }
 
   console.log(`[CourseOutlineTransferWorker] Started. environment=${env.NODE_ENV}`);
+  startProcessHeartbeat({ role: 'course-outline-transfer-worker' });
   void logDatabaseConnectionHeadroom('course-outline-transfer-worker', ownDirectConnectionMax({ readsReports: false }));
   while (!stopping) {
     if (!await isCourseOutlineTransferSchemaReady()) {

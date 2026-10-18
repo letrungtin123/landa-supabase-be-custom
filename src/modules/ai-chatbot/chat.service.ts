@@ -234,13 +234,13 @@ export function isChatTarget(value: string): value is ChatTarget {
 
 // ── In-memory rate limiter (per-user) ──
 const rateLimitMap = new Map<string, number>();
-// Cleanup every 5 minutes to prevent memory leak
-setInterval(() => {
+// Cleanup every 5 minutes to prevent memory leak (startChatCacheSweepers)
+function sweepRateLimitMap(): void {
   const now = Date.now();
   for (const [key, ts] of rateLimitMap) {
     if (now - ts > 60_000) rateLimitMap.delete(key);
   }
-}, 5 * 60_000);
+}
 
 function checkRateLimit(userId: string): void {
   const lastSent = rateLimitMap.get(userId);
@@ -371,13 +371,20 @@ const courseOutlineCache = new Map<string, CourseOutlineCache>();
 const COURSE_CACHE_TTL = 5 * 60_000; // 5 minutes
 const MAX_LESSON_CONTENT_CHARS = 6000; // truncate lesson content
 
-// Cleanup course cache every 10 minutes
-setInterval(() => {
+// Cleanup course cache every 10 minutes (startChatCacheSweepers)
+function sweepCourseOutlineCache(): void {
   const now = Date.now();
   for (const [key, val] of courseOutlineCache) {
     if (now - val.ts > COURSE_CACHE_TTL * 2) courseOutlineCache.delete(key);
   }
-}, 10 * 60_000);
+}
+
+let chatCacheSweepers: NodeJS.Timeout[] | null = null;
+/** Started once per process by the process startup (every role) or a worker entry point, never at import. */
+export function startChatCacheSweepers(): NodeJS.Timeout[] {
+  chatCacheSweepers ??= [setInterval(sweepRateLimitMap, 5 * 60_000), setInterval(sweepCourseOutlineCache, 10 * 60_000)];
+  return chatCacheSweepers;
+}
 
 /** Strip HTML tags → plain text, collapse whitespace */
 function stripHtml(html: string): string {

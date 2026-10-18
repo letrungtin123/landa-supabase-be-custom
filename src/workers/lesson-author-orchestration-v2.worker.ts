@@ -24,6 +24,10 @@ import {
   orchestrationV2RuntimeReporter,
 } from '../modules/ai-chatbot/lesson-author-orchestration-v2-runtime.service.js';
 import { verifyOrchestrationV2Schema } from '../modules/ai-chatbot/lesson-author-orchestration-v2-schema.repository.js';
+// Last, so the module evaluation order stays as before (the imports above already load both).
+import { startBlacklistSweeper } from '../middleware/authenticate.js';
+import { startChatCacheSweepers } from '../modules/ai-chatbot/chat.service.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 const shutdown = new AbortController();
 let consumer: OrchestrationV2RabbitConsumer | null = null;
@@ -52,12 +56,17 @@ async function waitForShutdown(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  // This worker uses the chat module's in-memory caches: their sweepers run
+  // here as they did when importing the modules started them (disabled too).
+  startBlacklistSweeper();
+  startChatCacheSweepers();
   assertOrchestrationV2ProductionProcessFence({ node_env: env.NODE_ENV });
   const config = readOrchestrationV2RuntimeConfig();
   if (!config.enabled || config.role === 'disabled') {
     console.log('[LessonAuthorOrchestrationV2] Disabled; no queue or database runtime was started.');
     return;
   }
+  startProcessHeartbeat({ role: `lesson-author-orchestration-v2-${config.role}` });
   void logDatabaseConnectionHeadroom(`lesson-author-orchestration-v2-${config.role}`, ownDirectConnectionMax({ readsReports: false }));
   const schema = await verifyOrchestrationV2Schema({ query });
   orchestrationV2RuntimeReporter({ event: 'schema_verified', ...schema, role: config.role });

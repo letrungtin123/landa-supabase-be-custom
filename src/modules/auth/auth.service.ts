@@ -930,8 +930,17 @@ export async function cleanupExpiredTokens(): Promise<number> {
 const OTT_TTL_MS = 30_000; // 30 giây
 const ottStore = createOneTimeTokenStore({ ttlMs: OTT_TTL_MS, shared: processRolePlan.severalApiInstances });
 
-// Cleanup expired OTTs mỗi phút
-setInterval(() => ottStore.sweep(), 60_000);
+let ottSweeper: NodeJS.Timeout | null = null;
+
+/**
+ * Cleanup expired OTTs mỗi phút. Started once per process by the process
+ * startup (config/process-startup.ts, every role), never at import. Returns
+ * the running timer (the same one when already started).
+ */
+export function startOneTimeTokenSweeper(): NodeJS.Timeout {
+  ottSweeper ??= setInterval(() => ottStore.sweep(), 60_000);
+  return ottSweeper;
+}
 
 /**
  * Tạo One-Time Token cho user — dùng để cross-app SSO.

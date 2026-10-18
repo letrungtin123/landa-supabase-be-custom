@@ -7,6 +7,9 @@
 // the process (config/rabbitmq/connection.ts, unchanged).
 //
 //   step                       all   api   background
+//   in-memory cache sweepers    x     x     x
+//   inline email outbox        run   log   run
+//   heartbeat log (60 s)        x           x
 //   RabbitMQ + queues           x     x     x
 //   RabbitMQ consumers          x           x
 //   Redis                       x     x     x
@@ -14,7 +17,8 @@
 //   access revocation check     x     x
 //   lesson-author workers      loop  accept loop
 //   sweepers, maintenance       x           x
-//   HTTP listen                 x     x
+//   HTTP listen (+ event-loop   x     x
+//   sampler of /internal/metrics)
 //   PM2 ready                   x     x     x
 //   Storage bucket              x     x
 //   startup cleanups            x           x
@@ -24,6 +28,15 @@ import type { ShutdownStep } from './graceful-shutdown.js';
 import type { ProcessRolePlan } from './process-role.js';
 
 export interface ProcessStarters {
+  /** Sweepers of the per-process in-memory caches (sign-out blacklist, one-time sign-in tokens, chat). */
+  inMemorySweepers(): void;
+  /**
+   * The inline email outbox worker (when enabled): `run: false` (API process)
+   * only says where it runs. First, as when it started on importing app.ts.
+   */
+  inlineEmailOutbox(options: { run: boolean }): void;
+  /** The [Heartbeat] log line every 60 s (modules/metrics/heartbeat.service.ts); an API process serves /internal/metrics instead. */
+  heartbeat(): void;
   /** Connects and asserts the queues; with `consumers` it also starts them. Exits when the first connection fails. */
   rabbitmq(options: { consumers: boolean }): Promise<void>;
   redis(): Promise<void>;
@@ -32,7 +45,7 @@ export interface ProcessStarters {
   authRevocation(): Promise<void>;
   /** Durable Blueprint, workspace and chapter checkpoint runtimes: `loop: false` only accepts work. */
   lessonAuthor(options: { loop: boolean }): Promise<void>;
-  /** Sweepers and maintenance timers (AI token reservations, retention, temp residue, inline email outbox). */
+  /** Sweepers and maintenance timers (AI token reservations, retention, temp residue). */
   backgroundTimers(): void;
   tempDirectories(): Promise<void>;
   /** Resolves once the HTTP server listens. */
@@ -44,6 +57,9 @@ export interface ProcessStarters {
 }
 
 export async function startProcess(plan: ProcessRolePlan, starters: ProcessStarters): Promise<void> {
+  starters.inMemorySweepers();
+  starters.inlineEmailOutbox({ run: plan.runsBackgroundWork });
+  if (plan.runsBackgroundWork) starters.heartbeat();
   await starters.rabbitmq({ consumers: plan.runsBackgroundWork });
   await starters.redis();
   if (plan.sharesStateAcrossProcesses) await starters.clusterBus();
