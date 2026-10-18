@@ -99,7 +99,7 @@ function flushInvalidationRelay(): void {
 }
 
 function relayInvalidation(segments: readonly unknown[]): void {
-  if (!clusterBus.enabled) return;
+  if (!clusterBus.enabled || !isRedisConfigured()) return;
   relayQueue.push(segments);
   if (relayTimer) return;
   relayTimer = setTimeout(flushInvalidationRelay, RELAY_FLUSH_MS);
