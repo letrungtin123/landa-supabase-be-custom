@@ -48,9 +48,17 @@ let recording = true;
 function callerFile() {
   const lines = (new Error().stack ?? '').split('\n').slice(2);
   for (const line of lines) {
-    const match = /\(?((?:file:\/\/\/)?[A-Za-z]:[\\/][^:)]+|\/[^:)]+):\d+:\d+\)?\s*$/.exec(line.trim());
+    // file:///D:/a.ts, file:///home/a.ts, D:\a.ts or /home/a.ts, then :line:column.
+    const match = /(file:\/\/\/[A-Za-z]:\/[^:)]+|file:\/\/\/[^:)]+|[A-Za-z]:[\\/][^:)]+|\/[^:)]+):\d+:\d+\)?\s*$/.exec(
+      line.trim(),
+    );
     if (!match) continue;
-    const file = match[1].startsWith('file://') ? fileURLToPath(match[1]) : match[1];
+    let file = match[1];
+    try {
+      if (file.startsWith('file://')) file = fileURLToPath(file);
+    } catch {
+      continue;
+    }
     if (file === fileURLToPath(import.meta.url)) continue;
     if (file.includes(`${path.sep}node_modules${path.sep}`) || file.includes('/node_modules/')) return null;
     const relative = path.relative(srcRoot, file);
