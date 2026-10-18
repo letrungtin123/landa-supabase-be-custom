@@ -7,6 +7,9 @@
 //   deterministic key, and job ids are deterministic, so status/download keep
 //   working after a restart or on another instance. Without storage the
 //   artifact stays in memory for the job TTL (previous behavior).
+// - With several API processes the running job's status (and a PDF kept only
+//   in memory) is also written to Redis (report-pdf-job-directory.service.ts),
+//   so polls and the download work on any process.
 // - One audit row per delivered PDF; per-user/tenant start rate limit, charged
 //   only after the per-process/per-tenant capacity of in-progress exports.
 // ═══════════════════════════════════════════════════════════════
@@ -34,10 +37,14 @@ import { consumeReportPdfExportAllowance, type ReportPdfRateLimitDecision } from
 import { appendReportPdfExportAudit, loadStoredReportChatNarrative, type StoredReportChatNarrative } from './report-pdf.repository.js';
 import { composeReportPdfDocument, paginateReportPdfDocument, REPORT_PDF_TEMPLATE_VERSION, type ReportPdfAiNarrativeWriter } from './report-pdf.service.js';
 import { buildReportPdfFileName, type ReportPdfTenantBranding } from './report-pdf-view-model.js';
+import { defaultReportPdfJobDirectory, type ReportPdfJobDirectory, type SharedReportPdfJob } from './report-pdf-job-directory.service.js';
 
 const ACTIVE_JOB_MAX_AGE_MS = 20 * 60 * 1000;
 const TERMINAL_JOB_TTL_MS = 15 * 60 * 1000;
 const MAX_ARTIFACT_BYTES = 15 * 1024 * 1024;
+/** A running job's shared status lives this long unless its process renews it. */
+const SHARED_ACTIVE_JOB_TTL_MS = 60 * 1000;
+const SHARED_ACTIVE_JOB_RENEW_MS = 15 * 1000;
 
 /**
  * Only in-progress exports (jobs and synchronous exports) count against the
@@ -102,6 +109,8 @@ export interface ReportPdfExportDeps {
   rateLimit: (actor: ReportPdfExportActor) => Promise<ReportPdfRateLimitDecision>;
   log: (event: Record<string, unknown>) => void;
   limits?: Partial<ReportPdfExportLimits>;
+  /** Jobs seen by the other API processes (null or absent: this process only). */
+  jobDirectory?: () => ReportPdfJobDirectory | null;
 }
 
 const log = (event: Record<string, unknown>) => console.info(`[ReportPdf] ${JSON.stringify(event)}`);
@@ -121,6 +130,7 @@ export const defaultReportPdfExportDeps: ReportPdfExportDeps = {
   // The limiter only logs when it fails open (Redis missing, failing or slow): a warning.
   rateLimit: (actor) => consumeReportPdfExportAllowance(actor, { log: warn }),
   log,
+  jobDirectory: defaultReportPdfJobDirectory,
 };
 
 type Job = ReportPdfExportStatus & ReportPdfReference & {
@@ -130,6 +140,8 @@ type Job = ReportPdfExportStatus & ReportPdfReference & {
   artifact: Buffer | null;
   updatedAtMs: number;
   expiresAtMs: number | null;
+  /** Writes of the shared status, one after the other (the last one wins). */
+  sharing?: Promise<void>;
 };
 
 export function getReportPdfExportError(error: unknown): ReportPdfExportError {
@@ -344,16 +356,95 @@ export class ReportPdfExportService {
     return job;
   }
 
+  private directory(): ReportPdfJobDirectory | null {
+    return this.deps.jobDirectory?.() ?? null;
+  }
+
+  private logShareFailure(event: string, tenantId: string, error: unknown): void {
+    this.deps.log({ event, tenant_id: tenantId, reason: error instanceof Error ? error.message : 'unknown' });
+  }
+
+  /** Writes the job's current status (and a PDF kept only in memory) for the other API processes. */
+  private async writeShared(job: Job): Promise<void> {
+    const directory = this.directory();
+    if (!directory) return;
+    const terminal = isReportPdfExportTerminal(job.phase);
+    let artifactShared = false;
+    if (job.phase === 'ready' && job.artifact && !job.storageKey) {
+      try {
+        await directory.saveArtifact(job.id, job.artifact, TERMINAL_JOB_TTL_MS);
+        artifactShared = true;
+      } catch (error) {
+        this.logShareFailure('report_pdf_artifact_share_failed', job.tenantId, error);
+      }
+    }
+    const shared: SharedReportPdfJob = {
+      id: job.id, phase: job.phase, locale: job.locale, fileName: job.fileName, expiresAt: job.expiresAt,
+      errorCode: job.errorCode, updatedAt: job.updatedAt, userId: job.userId, tenantId: job.tenantId,
+      conversationId: job.conversationId, assistantMessageId: job.assistantMessageId, storageKey: job.storageKey, artifactShared,
+    };
+    try {
+      await directory.save(shared, terminal ? TERMINAL_JOB_TTL_MS : SHARED_ACTIVE_JOB_TTL_MS);
+    } catch (error) {
+      // The other processes then cannot see the job (as after a restart).
+      this.logShareFailure('report_pdf_job_share_failed', job.tenantId, error);
+    }
+  }
+
+  private share(job: Job): Promise<void> {
+    if (!this.directory()) return Promise.resolve();
+    job.sharing = (job.sharing ?? Promise.resolve()).then(() => this.writeShared(job));
+    return job.sharing;
+  }
+
+  /** A job another API process runs or ran, when it belongs to this actor and report. */
+  private async sharedJob(actor: ReportPdfExportActor, reference: ReportPdfReference, jobId: string): Promise<SharedReportPdfJob | null> {
+    const directory = this.directory();
+    if (!directory) return null;
+    let job: SharedReportPdfJob | null;
+    try {
+      job = await directory.load(jobId);
+    } catch (error) {
+      this.logShareFailure('report_pdf_job_lookup_failed', actor.tenantId, error);
+      return null;
+    }
+    if (!job || job.userId !== actor.userId || job.tenantId !== actor.tenantId
+      || job.conversationId !== reference.conversationId || job.assistantMessageId !== reference.assistantMessageId) return null;
+    return job;
+  }
+
+  private async sharedArtifact(job: SharedReportPdfJob): Promise<Buffer | null> {
+    const directory = this.directory();
+    if (!directory || !job.artifactShared) return null;
+    try {
+      return await directory.loadArtifact(job.id);
+    } catch (error) {
+      this.logShareFailure('report_pdf_artifact_lookup_failed', job.tenantId, error);
+      return null;
+    }
+  }
+
+  private static sharedStatus(job: SharedReportPdfJob): ReportPdfExportStatus {
+    return { id: job.id, phase: job.phase, locale: job.locale, fileName: job.fileName, expiresAt: job.expiresAt, errorCode: job.errorCode, updatedAt: job.updatedAt };
+  }
+
   private jobLocale(actor: ReportPdfExportActor, reference: ReportPdfReference, jobId: string): ReportPdfLocale | null {
     return resolveReportPdfJobLocale(jobId, { tenantId: actor.tenantId, userId: actor.userId, ...reference, templateVersion: REPORT_PDF_TEMPLATE_VERSION });
   }
 
   private async run(job: Job, actor: ReportPdfExportActor): Promise<void> {
     const requestId = randomUUID();
+    // While it runs, its shared status is renewed; a crashed process's job disappears.
+    const renew = this.directory() ? setInterval(() => { void this.share(job); }, SHARED_ACTIVE_JOB_RENEW_MS) : null;
+    renew?.unref();
     try {
       const artifact = await this.buildArtifact({
         actor, reference: job, locale: job.locale, requestId,
-        onPhase: (phase) => { if (!isReportPdfExportTerminal(job.phase)) ReportPdfExportService.touch(job, { phase }); },
+        onPhase: (phase) => {
+          if (isReportPdfExportTerminal(job.phase)) return;
+          ReportPdfExportService.touch(job, { phase });
+          void this.share(job);
+        },
       });
       ReportPdfExportService.finish(job, { phase: 'ready', fileName: artifact.fileName, storageKey: artifact.storageKey, artifact: artifact.storageKey ? null : artifact.pdf, errorCode: null });
     } catch (error) {
@@ -361,6 +452,8 @@ export class ReportPdfExportService {
       ReportPdfExportService.finish(job, { phase: 'failed', artifact: null, errorCode: normalized.code });
       if (normalized.statusCode >= 500) this.deps.log({ event: 'report_pdf_export_failed', request_id: requestId, tenant_id: actor.tenantId, code: normalized.code });
     }
+    if (renew) clearInterval(renew);
+    await this.share(job);
     this.evictFinished();
   }
 
@@ -376,6 +469,9 @@ export class ReportPdfExportService {
     const id = buildReportPdfJobId({ ...actor, ...reference, locale: input.locale, templateVersion: REPORT_PDF_TEMPLATE_VERSION });
     const existing = this.jobs.get(id);
     if (existing && existing.phase !== 'failed') return ReportPdfExportService.toStatus(existing);
+    // Started (or finished) by another API process: never render it twice.
+    const elsewhere = await this.sharedJob(actor, reference, id);
+    if (elsewhere && elsewhere.phase !== 'failed') return ReportPdfExportService.sharedStatus(elsewhere);
     this.assertCapacity(actor.tenantId);
     await this.enforceRateLimit(actor);
     // The same job may have been started, or the capacity taken, while the limiter answered.
@@ -389,6 +485,7 @@ export class ReportPdfExportService {
       expiresAtMs: null, storageKey: null, artifact: null,
     };
     this.jobs.set(id, job);
+    void this.share(job);
     void this.run(job, actor);
     return ReportPdfExportService.toStatus(job);
   }
@@ -398,6 +495,9 @@ export class ReportPdfExportService {
     await this.assertPermission(actor);
     const job = this.ownedJob(actor, reference, input.jobId);
     if (job) return ReportPdfExportService.toStatus(job);
+    // Running or finished in another API process.
+    const elsewhere = await this.sharedJob(actor, reference, input.jobId);
+    if (elsewhere) return ReportPdfExportService.sharedStatus(elsewhere);
     // Stateless recovery (restart / other instance): the deterministic job id names the locale.
     const locale = this.jobLocale(actor, reference, input.jobId);
     const store = this.deps.store();
@@ -415,23 +515,28 @@ export class ReportPdfExportService {
     await this.assertPermission(actor);
     const job = this.ownedJob(actor, reference, input.jobId);
     if (job && job.phase !== 'ready') throw new ReportPdfExportError('Report PDF not ready', 409, 'REPORT_PDF_NOT_READY');
-    const locale = job?.locale ?? this.jobLocale(actor, reference, input.jobId);
+    // Rendered by another API process: its status, and its PDF when it is not in Storage.
+    const elsewhere = job ? null : await this.sharedJob(actor, reference, input.jobId);
+    if (elsewhere && elsewhere.phase !== 'ready') throw new ReportPdfExportError('Report PDF not ready', 409, 'REPORT_PDF_NOT_READY');
+    const locale = job?.locale ?? elsewhere?.locale ?? this.jobLocale(actor, reference, input.jobId);
     if (!locale) throw new ReportPdfExportError('Report PDF job not found', 404, 'REPORT_PDF_JOB_NOT_FOUND');
     // Access is rechecked immediately before serving the artifact.
     const stored = await this.loadAuthorizedSnapshot(actor, reference);
-    let pdf = job?.artifact ?? null;
+    let pdf = job?.artifact ?? (elsewhere ? await this.sharedArtifact(elsewhere) : null);
     const store = this.deps.store();
     if (!pdf && store) {
       // The job's own key first: the labels may have changed since it rendered.
-      const key = job?.storageKey ?? this.storageKey(actor, reference, stored.snapshotHash, locale, await this.deps.loadLabels(actor.tenantId));
+      const key = job?.storageKey ?? elsewhere?.storageKey
+        ?? this.storageKey(actor, reference, stored.snapshotHash, locale, await this.deps.loadLabels(actor.tenantId));
       if (await store.exists(key)) pdf = await store.get(key);
     }
     if (!pdf) {
-      throw job
+      throw job || elsewhere
         ? new ReportPdfExportError('Report PDF not ready', 409, 'REPORT_PDF_NOT_READY')
         : new ReportPdfExportError('Report PDF job not found', 404, 'REPORT_PDF_JOB_NOT_FOUND');
     }
-    const fileName = job?.fileName ?? this.fileNameFor(locale, stored.snapshot, (await this.deps.loadBranding(actor.tenantId)).name);
+    const fileName = job?.fileName ?? elsewhere?.fileName
+      ?? this.fileNameFor(locale, stored.snapshot, (await this.deps.loadBranding(actor.tenantId)).name);
     await this.auditDelivery(actor, reference, fileName, pdf.byteLength, input.audit);
     return { pdf, fileName };
   }
