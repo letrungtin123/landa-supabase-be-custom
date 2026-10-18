@@ -18,6 +18,7 @@ import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 import { recordUserSessionRevocation, syncUserAccessRevocationCache } from './auth-revocation.service.js';
 import { createOneTimeTokenStore } from './auth-one-time-token.store.js';
+import { createRefreshHandoffStore } from './auth-refresh-handoff.store.js';
 import { processRolePlan } from '../../config/process-role.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
 import {
@@ -325,19 +326,25 @@ export async function login(username: string, password: string, clientApp?: 'adm
   };
 }
 
-/**
- * Refresh token — rotate: cấp token mới, revoke token cũ.
- *
- * The transaction holds the token row lock only for the rotation itself
- * (checks, reuse detection with its grace period, revoke + insert); the
- * permissions, modules and labels of the answer are read after COMMIT.
- */
-export async function refresh(refreshToken: string, selectedTenantId?: string) {
-  const outcome = await withDatabaseTransaction(async () => {
-  const tokenHash = hashToken(refreshToken);
+/** A rotated token used again within the grace period (the response is unchanged). */
+class RefreshTokenReusedWithinGraceError extends AppError {
+  constructor() {
+    super('Refresh token đã được sử dụng', 401);
+  }
+}
 
-  // Lock the token row for the whole rotation. A frontend mutex cannot protect
-  // duplicate requests from separate browser tabs or devices.
+export const AUTH_REFRESH_CONTEXT_UNAVAILABLE_CODE = 'AUTH_REFRESH_CONTEXT_UNAVAILABLE';
+/** Waits before the retries of the session context read after a committed rotation. */
+const REFRESH_CONTEXT_RETRY_DELAYS_MS: readonly number[] = [100, 300];
+
+// Successors whose answer never left the server (auth-refresh-handoff.store.ts).
+const refreshHandoffs = createRefreshHandoffStore({
+  ttlMs: RACE_CONDITION_GRACE_MS,
+  shared: processRolePlan.severalApiInstances,
+});
+
+/** Locks a refresh token row (with its user, tenant and session revocation) for the rotation. */
+async function lockRefreshTokenRow(tokenHash: string) {
   const result = await query(
     `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at, rt.revoked_at,
             rt.session_id,
@@ -355,12 +362,23 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
      FOR UPDATE OF rt`,
     [tokenHash],
   );
+  return result.rowCount === 0 ? null : result.rows[0];
+}
 
-  if (result.rowCount === 0) {
+/**
+ * The rotation transaction of refresh(): token lock, every check, reuse
+ * detection with its grace period, revoke + insert. `successorHash` (from a
+ * refresh handoff) lets a retry within the grace period rotate the successor
+ * that the committed rotation of this token never delivered.
+ */
+async function rotateRefreshToken(tokenHash: string, successorHash?: string) {
+  // Lock the token row for the whole rotation. A frontend mutex cannot protect
+  // duplicate requests from separate browser tabs or devices.
+  let row = await lockRefreshTokenRow(tokenHash);
+
+  if (!row) {
     throw new AppError('Refresh token không hợp lệ', 401);
   }
-
-  const row = result.rows[0];
 
   // ── Kiểm tra token đã bị revoke — Grace period cho race condition ──
   if (row.revoked) {
@@ -403,7 +421,14 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
 
     // Token bị reuse TRONG grace period → race condition từ FE
     // Chỉ reject request này, KHÔNG revoke tokens khác
-    throw new AppError('Refresh token đã được sử dụng', 401);
+    // Except with a handoff: this token's rotation committed but its answer
+    // never left the server, so the successor nobody holds is rotated now
+    // (same user, still valid; the row lock on this token orders the retries).
+    const successor = successorHash ? await lockRefreshTokenRow(successorHash) : null;
+    if (!successor || successor.revoked || successor.user_id !== row.user_id) {
+      throw new RefreshTokenReusedWithinGraceError();
+    }
+    row = successor;
   }
 
   // Kiểm tra hết hạn
@@ -470,7 +495,53 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
     newAccessToken,
     newRefreshToken,
   };
-  });
+}
+
+/** The session context after a committed rotation, tried again shortly when a read fails. */
+async function resolveSessionContextAfterRotation(
+  userId: string,
+  role: string,
+  tenantId: string | null,
+  selectedTenantId?: string | null,
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await resolveSessionContext(userId, role, tenantId, selectedTenantId);
+    } catch (error) {
+      if (attempt >= REFRESH_CONTEXT_RETRY_DELAYS_MS.length) throw error;
+      await new Promise((resolve) => setTimeout(resolve, REFRESH_CONTEXT_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
+/**
+ * Refresh token — rotate: cấp token mới, revoke token cũ.
+ *
+ * The transaction holds the token row lock only for the rotation itself
+ * (checks, reuse detection with its grace period, revoke + insert); the
+ * permissions, modules and labels of the answer are read after COMMIT.
+ * When that read still fails after its retries, the answer is a 503 (both
+ * frontends retry it with the same token) and a refresh handoff lets that
+ * retry, within the grace period, rotate the successor it never received.
+ */
+export async function refresh(refreshToken: string, selectedTenantId?: string) {
+  const tokenHash = hashToken(refreshToken);
+  let outcome: Awaited<ReturnType<typeof rotateRefreshToken>>;
+  try {
+    outcome = await withDatabaseTransaction(() => rotateRefreshToken(tokenHash));
+  } catch (error) {
+    if (!(error instanceof RefreshTokenReusedWithinGraceError)) throw error;
+    // No transaction is open here (the handoff may live in Redis).
+    const successorHash = await refreshHandoffs.take(tokenHash);
+    if (!successorHash) throw error;
+    try {
+      outcome = await withDatabaseTransaction(() => rotateRefreshToken(tokenHash, successorHash));
+    } catch (retryError) {
+      // A database failure keeps the handoff for the next retry; a refusal ends it.
+      if (!(retryError instanceof AppError)) await refreshHandoffs.offer(tokenHash, successorHash);
+      throw retryError;
+    }
+  }
 
   if (!outcome.ok) {
     throw outcome.error;
@@ -479,9 +550,26 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
   // The rotation is committed: the token row lock (and the quota lock of the
   // refresh_tokens insert) is released before the session context is read.
   const { row, sessionMode, newAccessToken, newRefreshToken } = outcome;
+  let sessionContext: Awaited<ReturnType<typeof resolveSessionContext>>;
+  try {
+    sessionContext = await resolveSessionContextAfterRotation(row.user_id, row.role, row.tenant_id, selectedTenantId);
+  } catch (error) {
+    await refreshHandoffs.offer(tokenHash, hashToken(newRefreshToken));
+    console.warn(JSON.stringify({
+      event: 'auth_refresh_context_unavailable',
+      user_id: row.user_id,
+      attempts: REFRESH_CONTEXT_RETRY_DELAYS_MS.length + 1,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+    throw new AppError(
+      'Chưa tải được phiên đăng nhập, vui lòng thử lại sau giây lát',
+      503,
+      AUTH_REFRESH_CONTEXT_UNAVAILABLE_CODE,
+    );
+  }
   const {
     permissions, managedTenants, tenantModules, roleLabels, groupLabels, memberGroups,
-  } = await resolveSessionContext(row.user_id, row.role, row.tenant_id, selectedTenantId);
+  } = sessionContext;
 
   return {
     access_token: newAccessToken,
