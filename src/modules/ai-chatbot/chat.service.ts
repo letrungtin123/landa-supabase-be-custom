@@ -25,6 +25,7 @@ import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js'
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { getRedisClient } from '../../config/redis.js';
 import { clusterBus } from '../../config/cluster-bus.js';
+import { chatStreamLocks, type DistributedStreamLock } from './chat-stream-lock.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 import {
@@ -215,9 +216,6 @@ const BLUEPRINT_MAX_GENERATION_ATTEMPTS = 2;
 const LESSON_AUTHOR_MAX_GENERATION_ATTEMPTS = 2;
 const BLUEPRINT_RETRY_PROMPT_TOKEN_BUDGET = 128;
 const MAX_STORED_LESSON_AUTHOR_PROMPT_CHARS = 12_000;
-// A maximum-size structured Blueprint can take several minutes. Keep the
-// conversation lock through the backend and provider request windows.
-const DISTRIBUTED_STREAM_LOCK_TTL_MS = 10 * 60_000;
 const LESSON_AUTHOR_APPLY_IN_PROGRESS_CODE = 'LESSON_AUTHOR_APPLY_IN_PROGRESS';
 
 // ── UUID validation ──
@@ -256,43 +254,14 @@ function markRateLimit(userId: string): void {
 // ── In-memory concurrency lock (per-conversation) ──
 const streamLocks = new Set<string>();
 
-interface DistributedStreamLock {
-  release: () => Promise<void>;
-}
-
 /**
  * Prevents duplicate provider calls when the same conversation lands on more
- * than one backend process. Redis is an optimization: the local lock remains
- * the safe fallback when Redis is unavailable.
+ * than one backend process (chat-stream-lock.ts: plain Redis commands under
+ * the backend key prefix, renewed while held). Redis is an optimization: the
+ * local lock remains the safe fallback when Redis is unavailable.
  */
-async function acquireDistributedStreamLock(conversationId: string, requireDistributedFence = false): Promise<DistributedStreamLock | null> {
-  const redis = getRedisClient();
-  if (!redis && requireDistributedFence) throw new AppError('Dịch vụ khóa tác vụ chưa sẵn sàng.', 503, 'GENERATION_LOCK_UNAVAILABLE');
-  if (!redis) return { release: async () => {} };
-
-  const key = `landa:ai-chat:stream:${conversationId}`;
-  const token = randomUUID();
-  try {
-    const acquired = await redis.set(key, token, { NX: true, PX: DISTRIBUTED_STREAM_LOCK_TTL_MS });
-    if (acquired !== 'OK') return null;
-  } catch {
-    if (requireDistributedFence) throw new AppError('Dịch vụ khóa tác vụ chưa sẵn sàng.', 503, 'GENERATION_LOCK_UNAVAILABLE');
-    // Redis must never turn an otherwise healthy chat request into an outage.
-    return { release: async () => {} };
-  }
-
-  return {
-    release: async () => {
-      try {
-        await redis.eval(
-          'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0',
-          { keys: [key], arguments: [token] },
-        );
-      } catch {
-        // A TTL bounds stale locks if Redis cannot be reached during cleanup.
-      }
-    },
-  };
+function acquireDistributedStreamLock(conversationId: string, requireDistributedFence = false): Promise<DistributedStreamLock | null> {
+  return chatStreamLocks.acquire(conversationId, requireDistributedFence);
 }
 
 // ── Store name cache (per-kb, rarely changes) ──
