@@ -16,7 +16,6 @@ import { clusterBus } from './config/cluster-bus.js';
 import { COURSE_ASSET_TEMP_MAX_AGE_MS, cleanupStaleCourseAssetTempFiles } from './modules/course-authoring/course-asset-temp.js';
 import { cleanupStaleReportExportSpools } from './modules/reports/report-export-flow.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
-import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
 import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesson-author-transcription.worker.js';
@@ -159,6 +158,7 @@ async function initRabbitMQ(consumers: boolean): Promise<void> {
     await connectRabbitMQ(env.RABBITMQ_URL);
     // Assert queues (creates if not exists)
     await assertQueue(QUEUES.GEMINI_UPLOAD);
+    // Still declared so existing brokers keep it; no code publishes to or consumes this queue.
     await assertQueue(QUEUES.GEMINI_DELETE);
     await assertQueue(QUEUES.GEMINI_RESTORE);
     await assertQueue(QUEUES.COURSE_DELETE);
@@ -174,7 +174,6 @@ async function initRabbitMQ(consumers: boolean): Promise<void> {
 
     // Start consumers (workers)
     await startUploadWorker();
-    await startDeleteWorker();
     await startRestoreWorker();
     await startKbOperationWorker();
     await startLessonAuthorTranscriptionWorker();
