@@ -146,5 +146,7 @@ export async function startUploadWorker(): Promise<void> {
         }
       } catch { /* ignore */ }
     },
+    // No database backoff behind this queue: retries wait instead of firing at once.
+    { retryBackoff: true },
   );
 }

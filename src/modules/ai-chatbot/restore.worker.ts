@@ -81,7 +81,9 @@ export async function startRestoreWorker(): Promise<void> {
         console.error('[RestoreWorker] Failed to parse failed restore job:', err?.message || String(err));
       }
     },
-    { prefetch: 1 },
+    // A failed restore is retried after a wait, not at once (the DB recovery
+    // poller only re-dispatches jobs idle for minutes).
+    { prefetch: 1, retryBackoff: true },
   );
   void redispatchRecoverableKnowledgebaseRestores().catch((error) => {
     console.error('[RestoreWorker] Initial restore recovery failed:', error);
