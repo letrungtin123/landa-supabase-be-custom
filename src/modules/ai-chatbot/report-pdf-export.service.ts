@@ -577,13 +577,3 @@ export function getReportPdfExportService(): ReportPdfExportService {
   sharedService ??= createReportPdfExportService();
   return sharedService;
 }
-
-// Backward-compatible function exports: chat.controller.ts still imports them
-// (its old PDF handlers are no longer routed; see ai-chatbot.routes.ts).
-export const startReportPdfExportJob = (input: ReportPdfExportActor & ReportPdfReference) => getReportPdfExportService().start({ ...input, locale: 'vi' });
-export const getReportPdfExportJob = (input: ReportPdfExportActor & ReportPdfReference & { jobId: string }) => getReportPdfExportService().get(input);
-export const downloadReportPdfExportJob = (input: ReportPdfExportActor & ReportPdfReference & { jobId: string }) => getReportPdfExportService().download({ ...input, audit: { requestId: randomUUID() } });
-export const buildReportPdfArtifact = async (input: { actor: ReportPdfExportActor } & ReportPdfReference) => {
-  const result = await getReportPdfExportService().exportNow({ ...input.actor, conversationId: input.conversationId, assistantMessageId: input.assistantMessageId, locale: 'vi', audit: { requestId: randomUUID() } });
-  return { pdf: result.pdf, fileName: result.fileName, locale: 'vi' as const };
-};
