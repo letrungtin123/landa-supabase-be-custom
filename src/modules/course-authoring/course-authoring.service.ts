@@ -39,7 +39,7 @@ import {
   beginCoursePublishCandidate,
   finishCoursePublishCandidate,
 } from './course-publish-governance.repository.js';
-import { UUID_PATTERN } from '../../utils/uuid.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 export {
   getLessonAuthorSortableItems,
@@ -1561,10 +1561,7 @@ function decodeAssetCursor(cursor?: string | null): { created_at: string; id: st
       !parsed ||
       typeof parsed.created_at !== 'string' ||
       Number.isNaN(Date.parse(parsed.created_at)) ||
-      typeof parsed.id !== 'string' ||
-      // Not UUID_PATTERN: four groups only (8-4-4-12), so no real asset id matches and
-      // every cursor is refused. Kept as is; switching to isUuid changes behaviour.
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id)
+      !isUuid(parsed.id)
     ) {
       throw new AppError('invalid cursor payload', 400);
     }
