@@ -2,536 +2,62 @@
 // Env Config — Validate tất cả biến môi trường bắt buộc
 // CRASH ngay nếu thiếu biến — KHÔNG fallback
 // ═══════════════════════════════════════════════════════════════
+//
+// The settings are read in env/*.ts, one file per domain; this file joins
+// them into the one `env` object the code imports.
+//
+// Keep the imports in this order: it is the order the files run in (an ES
+// module runs its imports first, in order). env/load.ts loads the .env file
+// before any setting is read; then each domain file reads and checks its
+// settings, and the first invalid one stops the start. The required settings
+// keep the order they always had, so with several missing the first one in
+// this list is reported: NODE_ENV, PORT (core) → DATABASE_URL (database) →
+// JWT_*, BCRYPT_SALT_ROUNDS (auth) → CORS_ORIGIN (origins) → SUPABASE_URL,
+// SUPABASE_SERVICE_KEY (storage) → RABBITMQ_URL (messaging).
+// env.split.test.ts pins this (and every default and error message).
 
-import { config as dotenvConfig } from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { isUuid } from '../utils/uuid.js';
-
-// Xác định thư mục gốc project (chứa .env files)
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, '..', '..');
-
-// Load env file theo NODE_ENV — KHÔNG fallback, KHÔNG cross-load
-const isProd = process.env.NODE_ENV === 'production';
-const envFile = isProd ? '.env.production' : '.env';
-const envPath = path.resolve(rootDir, envFile);
-const result = dotenvConfig({ path: envPath });
-
-if (result.error) {
-  console.error(`[Env] KHÔNG tìm thấy ${envFile} tại ${envPath}`);
-  process.exit(1);
-}
-console.log(`[Env] Loaded ${envFile}`);
-
-// Local-only overrides make `npm run dev` usable without editing or copying
-// production secrets. The file is gitignored and is never loaded by PM2.
-if (!isProd) {
-  const localEnvPath = path.resolve(rootDir, '.env.development.local');
-  const localResult = dotenvConfig({ path: localEnvPath, override: true });
-  if (!localResult.error) console.log('[Env] Loaded .env.development.local overrides');
-}
-
-/**
- * Đọc biến môi trường bắt buộc — throw nếu thiếu hoặc rỗng.
- */
-function required(key: string): string {
-  const value = process.env[key];
-  if (!value || value.trim() === '') {
-    throw new Error(`[ENV] Thiếu biến môi trường bắt buộc: ${key}`);
-  }
-  return value.trim();
-}
-
-/**
- * Đọc biến môi trường kiểu số — throw nếu không hợp lệ.
- */
-function requiredInt(key: string): number {
-  const raw = required(key);
-  const num = parseInt(raw, 10);
-  if (isNaN(num)) {
-    throw new Error(`[ENV] ${key} phải là số nguyên, nhận: "${raw}"`);
-  }
-  return num;
-}
-
-function optionalInt(key: string, fallback: number): number {
-  const raw = process.env[key]?.trim();
-  if (!raw) return fallback;
-  const num = parseInt(raw, 10);
-  if (isNaN(num)) {
-    throw new Error(`[ENV] ${key} must be an integer, received: "${raw}"`);
-  }
-  return num;
-}
-
-function optionalNonNegativeInt(key: string, fallback: number): number {
-  const num = optionalInt(key, fallback);
-  if (num < 0) {
-    throw new Error(`[ENV] ${key} must be a non-negative integer, received: "${num}"`);
-  }
-  return num;
-}
-
-function optionalPositiveInt(key: string, fallback: number): number {
-  const num = optionalInt(key, fallback);
-  if (num <= 0) {
-    throw new Error(`[ENV] ${key} must be a positive integer, received: "${num}"`);
-  }
-  return num;
-}
-
-function optionalBoundedInt(key: string, fallback: number, minimum: number, maximum: number): number {
-  const num = optionalInt(key, fallback);
-  if (num < minimum || num > maximum) {
-    throw new Error(`[ENV] ${key} must be between ${minimum} and ${maximum}, received: "${num}"`);
-  }
-  return num;
-}
-
-/** A renamed variable: the new name wins; the old name is still honoured when only it is set. */
-function optionalBoundedIntWithLegacyName(
-  key: string,
-  legacyKey: string,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-): number {
-  if (!process.env[key]?.trim() && process.env[legacyKey]?.trim()) {
-    console.warn(`[Env] ${legacyKey} is deprecated; it is read as ${key}. Rename it.`);
-    return optionalBoundedInt(legacyKey, fallback, minimum, maximum);
-  }
-  return optionalBoundedInt(key, fallback, minimum, maximum);
-}
-
-function optionalBoolean(key: string, fallback: boolean): boolean {
-  const raw = process.env[key]?.trim().toLowerCase();
-  if (!raw) return fallback;
-  if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
-  if (['0', 'false', 'no', 'off'].includes(raw)) return false;
-  throw new Error(`[ENV] ${key} must be a boolean, received: "${raw}"`);
-}
-
-function optionalCsv(key: string): string[] {
-  const raw = process.env[key]?.trim();
-  if (!raw) return [];
-  return raw.split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-function optionalUuidCsv(key: string): string[] {
-  const values = optionalCsv(key).map((item) => item.toLowerCase());
-  const invalid = values.find((item) => !isUuid(item));
-  if (invalid !== undefined) {
-    throw new Error(`[ENV] ${key} must be a comma-separated list of UUIDs, received: "${invalid}"`);
-  }
-  return [...new Set(values)];
-}
-
-function optionalString(key: string, fallback: string): string {
-  return process.env[key]?.trim() || fallback;
-}
-
-/** Optional `scheme://host[:port]` (http/https, no path, query, fragment or credentials). */
-function optionalOrigin(key: string): string {
-  const raw = process.env[key]?.trim();
-  if (!raw) return '';
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`[ENV] ${key} must be an origin such as https://host:8443`);
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password
-    || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== '/')) {
-    throw new Error(`[ENV] ${key} must be an origin such as https://host:8443 (no path, query or credentials)`);
-  }
-  return parsed.origin;
-}
-
-function optionalOneOf<const T extends readonly string[]>(key: string, fallback: T[number], allowed: T): T[number] {
-  const value = optionalString(key, fallback);
-  if (!allowed.includes(value as T[number])) {
-    throw new Error(`[ENV] ${key} must be one of ${allowed.join(', ')}, received: "${value}"`);
-  }
-  return value as T[number];
-}
+import './env/load.js';
+import { coreEnv } from './env/core.js';
+import { databaseEnv } from './env/database.js';
+import { authEnv } from './env/auth.js';
+import { originsEnv } from './env/origins.js';
+import { storageEnv } from './env/storage.js';
+import { messagingEnv } from './env/messaging.js';
+import { metricsEnv } from './env/metrics.js';
+import { emailEnv } from './env/email.js';
+import { aiEnv } from './env/ai.js';
+import { aiIdEnv } from './env/ai-id.js';
+import { workersEnv } from './env/workers.js';
+import { reportsEnv } from './env/reports.js';
+import { optionalBoolean } from './env/helpers.js';
 
 export const env = {
-  NODE_ENV: required('NODE_ENV'),
-  PORT: requiredInt('PORT'),
-  // Runtime fencing allows a localhost working tree and the always-on DEMO
-  // snapshot to share one Supabase project without competing for another
-  // runtime's tenant jobs. Empty lists preserve historical behaviour.
-  RUNTIME_LANE: optionalString('RUNTIME_LANE', 'default'),
-  RUNTIME_TENANT_ALLOWLIST: optionalCsv('RUNTIME_TENANT_ALLOWLIST'),
-  RUNTIME_TENANT_DENYLIST: optionalCsv('RUNTIME_TENANT_DENYLIST'),
-  RUNTIME_GLOBAL_MAINTENANCE_ENABLED: optionalBoolean('RUNTIME_GLOBAL_MAINTENANCE_ENABLED', true),
-  // What this process of dist/index.js runs (config/process-role.ts):
-  // 'all' = HTTP and the background work in one process (the default, as
-  // before); 'api' = HTTP only (PM2 cluster instances); 'background' = queue
-  // consumers, pollers, sweepers and maintenance only (one process).
-  LANDA_PROCESS_ROLE: optionalOneOf('LANDA_PROCESS_ROLE', 'all', ['all', 'api', 'background'] as const),
-  // Number of 'api' processes PM2 runs (ecosystem.config.cjs passes the same
-  // value it uses for `instances`). Above 1, request limits and short-lived
-  // request state are shared through Redis.
-  LANDA_API_INSTANCES: optionalBoundedInt('LANDA_API_INSTANCES', 1, 1, 64),
-  // Existing direct deployments retain the default. Behind Nginx, bind to
-  // 127.0.0.1 so the API cannot bypass the gateway on a LAN/public interface.
-  BIND_HOST: optionalString('BIND_HOST', '0.0.0.0'),
-  TRUST_PROXY_HOPS: optionalNonNegativeInt('TRUST_PROXY_HOPS', 0),
-  // Exact proxy CIDR allowlist. When configured it takes precedence over the
-  // legacy hop count so a direct caller cannot spoof X-Forwarded-For.
-  // Entries: IPs/CIDRs or the keywords loopback, linklocal, uniquelocal.
-  // Production: loopback + the Cloudflare ranges (+ the gateway's own address).
-  TRUSTED_PROXY_CIDRS: optionalCsv('TRUSTED_PROXY_CIDRS'),
+  ...coreEnv,
+  ...databaseEnv,
+  ...authEnv,
+  ...originsEnv,
+  ...storageEnv,
+  ...messagingEnv,
+  ...metricsEnv,
+  ...emailEnv,
+  ...aiEnv,
+  ...aiIdEnv,
 
-  // Auth rate limits, per 15-minute window. Counters are shared through Redis
-  // when it is available.
-  // Refused sign-ins (4xx) per client address, SSO code exchanges included.
-  // Successful sign-ins are not counted, so a whole office behind one NAT can
-  // sign in. The old name AUTH_LOGIN_IP_MAX_ATTEMPTS (it counted every
-  // attempt) is still read as this cap when the new name is not set.
-  AUTH_LOGIN_IP_MAX_FAILURES: optionalBoundedIntWithLegacyName(
-    'AUTH_LOGIN_IP_MAX_FAILURES', 'AUTH_LOGIN_IP_MAX_ATTEMPTS', 300, 1, 100_000,
-  ),
-  // Failed sign-ins per typed account (successful sign-ins are not counted).
-  AUTH_LOGIN_ACCOUNT_MAX_FAILURES: optionalBoundedInt('AUTH_LOGIN_ACCOUNT_MAX_FAILURES', 10, 1, 1_000),
-  // Session refreshes per refresh token (each token is valid for one use).
-  AUTH_REFRESH_TOKEN_MAX_ATTEMPTS: optionalBoundedInt('AUTH_REFRESH_TOKEN_MAX_ATTEMPTS', 10, 1, 1_000),
-  // Refused session refreshes (4xx) per client address: a flood of invented
-  // tokens is stopped while valid refreshes of many users behind one NAT pass.
-  AUTH_REFRESH_IP_MAX_FAILURES: optionalBoundedInt('AUTH_REFRESH_IP_MAX_FAILURES', 2_000, 1, 100_000),
-  AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS: optionalBoundedInt('AUTH_PASSWORD_CHANGE_MAX_ATTEMPTS', 10, 1, 1_000),
-  // One-time sign-in links (create + use) and profile updates, per user or IP.
-  AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS: optionalBoundedInt('AUTH_ACCOUNT_ACTION_MAX_ATTEMPTS', 30, 1, 10_000),
-
-  // Database
-  DATABASE_URL: required('DATABASE_URL'),
-  // Optional (unset = everything on DATABASE_URL): a transaction-mode pooler
-  // (Supavisor/PgBouncer) for the ordinary main and reports pools only. LISTEN
-  // connections and session advisory locks always use DATABASE_URL.
-  DATABASE_POOLER_URL: optionalString('DATABASE_POOLER_URL', ''),
-  // Connections of this process's pool. Every PM2 app has its own pool:
-  // keep (sum of all pools) below the server's max_connections.
-  DB_POOL_MAX: optionalBoundedInt('DB_POOL_MAX', 20, 1, 200),
-  // A pooled connection left idle this long is closed (main and reports
-  // pools), so a burst does not keep its connections afterwards.
-  DB_POOL_IDLE_TIMEOUT_MS: optionalBoundedInt('DB_POOL_IDLE_TIMEOUT_MS', 10_000, 1_000, 600_000),
-  // Connections to leave free when a process checks at start whether its
-  // pools fit under max_connections (a warning only, never a failure).
-  DB_CONNECTION_RESERVE: optionalBoundedInt('DB_CONNECTION_RESERVE', 10, 0, 1_000),
-  // PostgreSQL ends a session that stays idle inside an open transaction this
-  // long (a leaked client or a stuck await holding locks). 0 turns it off.
-  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: optionalBoundedInt('DB_IDLE_IN_TRANSACTION_TIMEOUT_MS', 60_000, 0, 3_600_000),
-  // Optional lock wait limit for every statement. Unset (0) by default: it
-  // would turn ordinary lock waits into errors. Code that needs one sets
-  // SET LOCAL lock_timeout itself.
-  DB_LOCK_TIMEOUT_MS: optionalBoundedInt('DB_LOCK_TIMEOUT_MS', 0, 0, 600_000),
-  // Admin reports, report chat and Excel exports use their own small pool of
-  // this size (per process), so their aggregates never take the main pool.
-  REPORTS_DB_POOL_MAX: optionalBoundedInt('REPORTS_DB_POOL_MAX', 4, 1, 50),
-  // Report aggregates (a report page read that misses the cache, one report
-  // chat turn) running at once on this process, per tenant and in total. Past
-  // a limit a request waits up to REPORTS_ADMISSION_WAIT_MS for a slot, then
-  // gets 429 REPORTS_BUSY (0 = refuse at once).
-  REPORTS_TENANT_CONCURRENCY: optionalBoundedInt('REPORTS_TENANT_CONCURRENCY', 2, 1, 64),
-  REPORTS_GLOBAL_CONCURRENCY: optionalBoundedInt('REPORTS_GLOBAL_CONCURRENCY', 8, 1, 512),
-  REPORTS_ADMISSION_WAIT_MS: optionalBoundedInt('REPORTS_ADMISSION_WAIT_MS', 2_000, 0, 30_000),
-  // Excel exports in progress at once on this process, per user, per tenant
-  // and in total; one more is refused at once with 429. Each export holds one
-  // reports-pool connection for its whole read-only snapshot.
-  REPORTS_EXPORT_USER_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_USER_CONCURRENCY', 1, 1, 8),
-  REPORTS_EXPORT_TENANT_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_TENANT_CONCURRENCY', 2, 1, 32),
-  REPORTS_EXPORT_GLOBAL_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_GLOBAL_CONCURRENCY', 2, 1, 64),
-  // statement_timeout inside an export's snapshot transaction only; every
-  // other report statement keeps the pool's 30 s.
-  REPORTS_EXPORT_STATEMENT_TIMEOUT_MS: optionalBoundedInt('REPORTS_EXPORT_STATEMENT_TIMEOUT_MS', 120_000, 30_000, 900_000),
-
-  // JWT
-  JWT_SECRET: required('JWT_SECRET'),
-  JWT_ACCESS_EXPIRES_IN: required('JWT_ACCESS_EXPIRES_IN'),
-  JWT_REFRESH_EXPIRES_IN: required('JWT_REFRESH_EXPIRES_IN'),
-
-  // Bcrypt
-  BCRYPT_SALT_ROUNDS: requiredInt('BCRYPT_SALT_ROUNDS'),
-
-  // CORS
-  CORS_ORIGIN: required('CORS_ORIGIN'),
-
-  // Supabase Storage
-  SUPABASE_URL: required('SUPABASE_URL'),
-  SUPABASE_SERVICE_KEY: required('SUPABASE_SERVICE_KEY'),
-  // Storage proxy (/api/storage): how long it waits for Storage to start
-  // answering. A long video body is never cut by it.
-  STORAGE_PROXY_HEADERS_TIMEOUT_MS: optionalBoundedInt('STORAGE_PROXY_HEADERS_TIMEOUT_MS', 15_000, 1_000, 120_000),
-  // Worker downloads to a temp file (KB documents for Gemini): the body is
-  // abandoned when no byte arrives for this long (not a total deadline).
-  STORAGE_DOWNLOAD_IDLE_TIMEOUT_MS: optionalBoundedInt('STORAGE_DOWNLOAD_IDLE_TIMEOUT_MS', 60_000, 5_000, 600_000),
-
-  // RabbitMQ (mandatory — crash if missing)
-  RABBITMQ_URL: required('RABBITMQ_URL'),
-  RABBITMQ_QUEUE_PREFIX: optionalString('RABBITMQ_QUEUE_PREFIX', ''),
-  // A failed message of a consumer with retry backoff waits about this long
-  // before its next attempt, doubling per attempt (3 retries), capped at the
-  // max. Also the wait before a message is requeued when its retry could not
-  // be published. 0 = no wait (the former behavior).
-  RABBITMQ_RETRY_BASE_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_BASE_DELAY_MS', 2_000, 0, 60_000),
-  RABBITMQ_RETRY_MAX_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_MAX_DELAY_MS', 15_000, 0, 120_000),
-
-  // GET /internal/metrics (Prometheus text): answered only to callers on this
-  // host (loopback, no proxy forwarding header). With METRICS_TOKEN set,
-  // `Authorization: Bearer <token>` is required too. false = off (404).
-  METRICS_ENABLED: optionalBoolean('METRICS_ENABLED', true),
-  METRICS_TOKEN: process.env.METRICS_TOKEN?.trim() || '',
-  // Set by PM2 (the instance number of the app); the `instance` label of
-  // every metric (the pid when unset).
-  NODE_APP_INSTANCE: process.env.NODE_APP_INSTANCE?.trim() || '',
-
-  // Redis (optional; DB fallback is used if unavailable)
-  REDIS_URL: process.env.REDIS_URL?.trim() || '',
-  REDIS_DATABASE: optionalNonNegativeInt('REDIS_DATABASE', 0),
-  REDIS_CONNECT_TIMEOUT_MS: optionalInt('REDIS_CONNECT_TIMEOUT_MS', 2_000),
-  AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION: optionalBoolean('AUTH_REVOCATION_REQUIRE_REDIS_IN_PRODUCTION', true),
-
-  // SSO config encryption (optional until SSO secrets are configured)
-  SSO_CONFIG_ENCRYPTION_KEY: process.env.SSO_CONFIG_ENCRYPTION_KEY?.trim() || '',
-
-  // Demo iframe public origin override (optional; use tenant.domain_learner when empty)
-  DEMO_IFRAME_PUBLIC_ORIGIN: process.env.DEMO_IFRAME_PUBLIC_ORIGIN?.trim() || '',
-
-  // SMTP config encryption (optional until tenant SMTP is configured)
-  SMTP_CONFIG_ENCRYPTION_KEY: process.env.SMTP_CONFIG_ENCRYPTION_KEY?.trim() || '',
-  SMTP_TLS_REJECT_UNAUTHORIZED: optionalBoolean('SMTP_TLS_REJECT_UNAUTHORIZED', true),
-
-  // AI provider secrets + self-built RAG service
-  AI_SECRET_ENCRYPTION_KEY: process.env.AI_SECRET_ENCRYPTION_KEY?.trim() || '',
-  AI_RAG_SERVICE_URL: process.env.AI_RAG_SERVICE_URL?.trim() || '',
-  AI_RAG_SERVICE_TOKEN: process.env.AI_RAG_SERVICE_TOKEN?.trim() || '',
-  AI_RAG_SERVICE_HMAC_KEY_ID: process.env.AI_RAG_SERVICE_HMAC_KEY_ID?.trim() || '',
-  AI_RAG_SERVICE_HMAC_SECRET: process.env.AI_RAG_SERVICE_HMAC_SECRET?.trim() || '',
-  AI_RAG_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_REQUEST_TIMEOUT_MS', 600_000, 1_000, 900_000),
+  // AI ID default-off rollout gates. They are defined here, not in
+  // env/ai-id.ts, because tests of src/modules/ai-chatbot read the text of
+  // this file to check that each gate stays off by default. They are read
+  // after every env/*.ts file.
   // Read-only durable-job API. Does not enable enqueue or start any worker.
   LESSON_AUTHOR_GENERATION_STATUS_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_STATUS_ENABLED', false),
   // Reads only; does not enable workspace admission, generation, editing or Apply.
   LESSON_AUTHOR_WORKSPACE_READ_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_READ_ENABLED', false),
-  // Authenticated metadata-only server push. It is separately gated from all
-  // generation/edit/Apply behavior and requires the manual SQL notification
-  // trigger to have been installed before production enablement.
-  LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED', false),
-  // Re-authenticate long-lived metadata streams periodically without forcing
-  // every open modal to reconnect twice per minute at production scale.
-  LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS: optionalBoundedInt(
-    'LESSON_AUTHOR_WORKSPACE_STREAM_AUTH_LEASE_MS', 300_000, 60_000, 900_000,
-  ),
   // Save/Reset only. Requires reads too; never enables admission, workers or Apply.
   LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false),
-  LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED', false),
-  // Draft-only course Apply. Requires READ, EDIT and EXECUTION plus the
-  // installed workspace execution schema; this flag is intentionally separate
-  // so a worker rollout can never publish course blocks by accident.
-  LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED', false),
-  // CP5 candidate/approval APIs and application-side publish handshake. The
-  // reviewed SQL fence remains authoritative for every enrolled course.
-  COURSE_PUBLISH_GOVERNANCE_ENABLED: optionalBoolean('COURSE_PUBLISH_GOVERNANCE_ENABLED', false),
   // Enables durable self-built-RAG Blueprint admission and its bounded worker.
   LESSON_AUTHOR_GENERATION_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_ENABLED', false),
-  LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED: optionalBoolean('LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED', false),
-  // Server-owned workspace launch switch. It admits durable V2 work in the API
-  // transaction only when workspace execution is also enabled. Execution stays
-  // isolated in a dedicated process with exactly one dispatcher/worker role.
-  LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED: optionalBoolean(
-    'LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED', false,
-  ),
-  LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY: optionalBoundedInt(
-    'LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY', 16, 1, 1_024,
-  ),
-  LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: optionalBoundedInt(
-    'LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY', 4, 1, 128,
-  ),
-  LESSON_AUTHOR_ORCHESTRATION_V2_ENABLED: optionalBoolean('LESSON_AUTHOR_ORCHESTRATION_V2_ENABLED', false),
-  LESSON_AUTHOR_ORCHESTRATION_V2_ROLE: optionalOneOf(
-    'LESSON_AUTHOR_ORCHESTRATION_V2_ROLE', 'disabled', ['disabled', 'dispatcher', 'worker'] as const,
-  ),
-  LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT', 1, 1, 4_096),
-  LESSON_AUTHOR_ORCHESTRATION_V2_LANE_INDEX: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_LANE_INDEX', 0, 0, 4_095),
-  LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_LEASE_SECONDS', 30, 5, 300),
-  LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_MAX_ATTEMPTS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_OUTBOX_MAX_ATTEMPTS', 8, 1, 100),
-  LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS', 1_000, 1, 3_600_000),
-  LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS', 60_000, 1, 86_400_000),
-  LESSON_AUTHOR_ORCHESTRATION_V2_PUBLISHED_RECOVERY_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_PUBLISHED_RECOVERY_SECONDS', 120, 5, 3_600),
-  LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE', 25, 1, 500),
-  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_BATCH_SIZE', 25, 1, 500),
-  LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_POLL_INTERVAL_MS', 1_000, 100, 300_000),
-  LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY', 64, 1, 4_096),
-  LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_PROVIDER_CONCURRENCY', 8, 1, 4_096),
-  LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS: optionalBoundedInt(
-    'LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS', 45_000, 5_000, 120_000,
-  ),
-  LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS', 30, 5, 45),
-  LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE', 25, 1, 500),
-  // AI ID IDM pipeline (spec §5.4). Admission-only switch: new V2 runs of allow-listed tenants
-  // (empty list = every tenant) record the IDM runtime hash; running runs are never re-routed.
-  LESSON_AUTHOR_IDM_PIPELINE_ENABLED: optionalBoolean('LESSON_AUTHOR_IDM_PIPELINE_ENABLED', false),
-  LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST: optionalUuidCsv('LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST'),
-  LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS: optionalBoundedInt(
-    'LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS', 120_000, 30_000, 300_000,
-  ),
-  AI_RAG_INDEX_REQUEST_TIMEOUT_MS: optionalBoundedInt('AI_RAG_INDEX_REQUEST_TIMEOUT_MS', 900_000, 10_000, 3_600_000),
-  // Idle keep-alive of reused sockets to the AI service. It must stay below the server side
-  // (uvicorn AI_RAG_KEEP_ALIVE_TIMEOUT_SECONDS=75, nginx keepalive_timeout 75 s) so a socket is
-  // never reused just as the server closes it (ECONNRESET).
-  AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS: optionalBoundedInt('AI_RAG_HTTP_KEEP_ALIVE_IDLE_MS', 30_000, 1_000, 60_000),
-  // SEP-1: the AI service downloads KB sources through a short-lived signed URL instead of a
-  // storage service key. TTL covers the AI's index-slot wait plus the download.
-  AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS: optionalBoundedInt('AI_RAG_STORAGE_SIGNED_URL_TTL_SECONDS', 600, 60, 3_600),
-  // Origin the AI server reaches storage on when SUPABASE_URL is local to this host (empty = keep it).
-  AI_RAG_STORAGE_SIGNED_URL_ORIGIN: optionalOrigin('AI_RAG_STORAGE_SIGNED_URL_ORIGIN'),
-  AI_TOKEN_RESERVATION_SECONDS: optionalBoundedInt('AI_TOKEN_RESERVATION_SECONDS', 600, 60, 3_600),
-  AI_CHAT_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_CHAT_TOKEN_RESERVE_ESTIMATE', 16_000, 500, 1_000_000),
-  // Chat answers this API process streams at once, per tenant and in total.
-  // A turn over either limit is refused at once with 429 AI_BUSY.
-  AI_CHAT_TENANT_CONCURRENCY: optionalBoundedInt('AI_CHAT_TENANT_CONCURRENCY', 8, 1, 1_024),
-  AI_CHAT_GLOBAL_CONCURRENCY: optionalBoundedInt('AI_CHAT_GLOBAL_CONCURRENCY', 48, 1, 4_096),
-  // A chat answer from the provider (retries included) stops after this long.
-  AI_CHAT_ANSWER_DEADLINE_MS: optionalBoundedInt('AI_CHAT_ANSWER_DEADLINE_MS', 180_000, 10_000, 900_000),
-  // A source-backed Blueprint may use the provider's full 65,536-token
-  // response window and has one validation retry available.
-  AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE', 250_000, 1_000, 2_000_000),
-  AI_INDEX_TOKEN_RESERVE_ESTIMATE: optionalBoundedInt('AI_INDEX_TOKEN_RESERVE_ESTIMATE', 20_000, 500, 2_000_000),
-  AI_ENGINE_TRANSITION_WORKER_ENABLED: optionalBoolean('AI_ENGINE_TRANSITION_WORKER_ENABLED', true),
-  AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS', 15_000, 1_000, 300_000),
-  AI_ENGINE_TRANSITION_WORKER_BATCH_SIZE: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_BATCH_SIZE', 20, 1, 500),
-  AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS', 300, 60, 3_600),
-  AI_ENGINE_TRANSITION_WORKER_MAX_ATTEMPTS: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_MAX_ATTEMPTS', 30, 1, 100),
-  AI_ENGINE_TRANSITION_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
-  AI_ENGINE_TRANSITION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('AI_ENGINE_TRANSITION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
-  EMAIL_OUTBOX_WORKER_ENABLED: optionalBoolean('EMAIL_OUTBOX_WORKER_ENABLED', true),
-  EMAIL_OUTBOX_INLINE_WORKER_ENABLED: optionalBoolean('EMAIL_OUTBOX_INLINE_WORKER_ENABLED', true),
-  EMAIL_OUTBOX_INTERVAL_MS: optionalInt('EMAIL_OUTBOX_INTERVAL_MS', 15_000),
-  EMAIL_OUTBOX_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_BATCH_SIZE', 25),
-  EMAIL_OUTBOX_CLAIM_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_CLAIM_BATCH_SIZE', 25),
-  EMAIL_OUTBOX_CONCURRENCY: optionalInt('EMAIL_OUTBOX_CONCURRENCY', 3),
-  EMAIL_OUTBOX_TENANT_CONCURRENCY: optionalInt('EMAIL_OUTBOX_TENANT_CONCURRENCY', 2),
-  EMAIL_OUTBOX_TICK_BUDGET_MS: optionalInt('EMAIL_OUTBOX_TICK_BUDGET_MS', 45_000),
-  EMAIL_OUTBOX_SESSION_MAX_MESSAGES: optionalInt('EMAIL_OUTBOX_SESSION_MAX_MESSAGES', 20),
-  EMAIL_OUTBOX_SENT_RETENTION_DAYS: optionalInt('EMAIL_OUTBOX_SENT_RETENTION_DAYS', 30),
-  EMAIL_OUTBOX_RETENTION_BATCH_SIZE: optionalInt('EMAIL_OUTBOX_RETENTION_BATCH_SIZE', 1000),
-  EMAIL_OUTBOX_WAKE_DEBOUNCE_MS: optionalInt('EMAIL_OUTBOX_WAKE_DEBOUNCE_MS', 500),
-  EMAIL_OUTBOX_RABBIT_PREFETCH: optionalInt('EMAIL_OUTBOX_RABBIT_PREFETCH', 50),
-  EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD: optionalInt('EMAIL_OUTBOX_TENANT_FAILURE_THRESHOLD', 3),
-  EMAIL_OUTBOX_TENANT_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_COOLDOWN_MS', 300_000),
-  EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS: optionalInt('EMAIL_OUTBOX_TENANT_MAX_COOLDOWN_MS', 1_800_000),
 
-  // Durable user/course deletion workers. Polling is mandatory delivery recovery
-  // when a RabbitMQ publish succeeds only partially or a worker crashes. Jobs
-  // are due-based; do not reduce the retry delays to a hot polling loop.
-  DELETION_REQUEUE_INTERVAL_MS: optionalPositiveInt('DELETION_REQUEUE_INTERVAL_MS', 30_000),
-  DELETION_MAX_ATTEMPTS: optionalPositiveInt('DELETION_MAX_ATTEMPTS', 12),
-  DELETION_RETRY_BASE_MS: optionalPositiveInt('DELETION_RETRY_BASE_MS', 30_000),
-  DELETION_RETRY_MAX_MS: optionalPositiveInt('DELETION_RETRY_MAX_MS', 3_600_000),
-  DELETION_JOB_RETENTION_DAYS: optionalPositiveInt('DELETION_JOB_RETENTION_DAYS', 30),
-
-  // Course progress recalculation worker
-  COURSE_PROGRESS_RECALC_WORKER_ENABLED: optionalBoolean('COURSE_PROGRESS_RECALC_WORKER_ENABLED', true),
-  COURSE_PROGRESS_RECALC_BATCH_SIZE: optionalInt('COURSE_PROGRESS_RECALC_BATCH_SIZE', 1000),
-  COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK: optionalInt('COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK', 5),
-  COURSE_PROGRESS_RECALC_RABBIT_PREFETCH: optionalInt('COURSE_PROGRESS_RECALC_RABBIT_PREFETCH', 1),
-  COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS: optionalNonNegativeInt('COURSE_PROGRESS_RECALC_POLL_INTERVAL_MS', 60000),
-
-  // Tenant data quota reconciliation is deliberately a dedicated PM2 worker.
-  // It must never run inside every HTTP API replica on startup.
-  TENANT_DATA_QUOTA_WORKER_ENABLED: optionalBoolean('TENANT_DATA_QUOTA_WORKER_ENABLED', false),
-  TENANT_DATA_QUOTA_WORKER_HEARTBEAT_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_HEARTBEAT_INTERVAL_MS', 30_000, 5_000, 60_000),
-  TENANT_DATA_QUOTA_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_POLL_INTERVAL_MS', 15_000, 1_000, 300_000),
-  TENANT_DATA_QUOTA_WORKER_STANDBY_RETRY_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_STANDBY_RETRY_MS', 30_000, 1_000, 300_000),
-  TENANT_DATA_QUOTA_WORKER_PAGE_SIZE: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_PAGE_SIZE', 500, 1, 1_000),
-  TENANT_DATA_QUOTA_WORKER_MAX_TENANTS_PER_CYCLE: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_TENANTS_PER_CYCLE', 1, 1, 10),
-  TENANT_DATA_QUOTA_WORKER_MAX_PAGES_PER_CLAIM: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_PAGES_PER_CLAIM', 100, 1, 10_000),
-  // At least 90 seconds leaves room for a bounded Storage read, ledger write,
-  // and a 30-second lease guard before a resumable slice yields.
-  TENANT_DATA_QUOTA_WORKER_LEASE_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_LEASE_SECONDS', 120, 90, 900),
-  TENANT_DATA_QUOTA_WORKER_MAX_SLICE_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_MAX_SLICE_MS', 60_000, 5_000, 870_000),
-  TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_DATABASE_SNAPSHOT_TIMEOUT_MS', 600_000, 30_000, 600_000),
-  TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
-  TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('TENANT_DATA_QUOTA_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
-  // Folding of the lock-free database deltas (SQL 20261018_1100) by the quota
-  // worker leader. Inactive until that SQL exists. Unfolded deltas are always
-  // counted by the limit check; the interval only bounds how long they wait.
-  TENANT_DATA_QUOTA_FOLD_INTERVAL_MS: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_INTERVAL_MS', 2_000, 500, 60_000),
-  TENANT_DATA_QUOTA_FOLD_BATCH_SIZE: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_BATCH_SIZE', 5_000, 100, 100_000),
-  TENANT_DATA_QUOTA_FOLD_MAX_BATCHES_PER_TICK: optionalBoundedInt('TENANT_DATA_QUOTA_FOLD_MAX_BATCHES_PER_TICK', 20, 1, 1_000),
-
-  // Durable Knowledge Base operations. Every API replica may run this worker:
-  // PostgreSQL SKIP LOCKED + lease tokens make claims safe across replicas.
-  KB_OPERATION_WORKER_ENABLED: optionalBoolean('KB_OPERATION_WORKER_ENABLED', true),
-  KB_OPERATION_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('KB_OPERATION_WORKER_POLL_INTERVAL_MS', 10_000, 1_000, 300_000),
-  KB_OPERATION_WORKER_BATCH_SIZE: optionalBoundedInt('KB_OPERATION_WORKER_BATCH_SIZE', 24, 1, 500),
-  KB_OPERATION_WORKER_CONCURRENCY: optionalBoundedInt('KB_OPERATION_WORKER_CONCURRENCY', 4, 1, 32),
-  KB_OPERATION_WORKER_LEASE_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_LEASE_SECONDS', 300, 60, 3_600),
-  KB_OPERATION_WORKER_MAX_ATTEMPTS: optionalBoundedInt('KB_OPERATION_WORKER_MAX_ATTEMPTS', 12, 1, 100),
-  KB_OPERATION_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
-  KB_OPERATION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
-  KB_RESTORE_RECOVERY_POLL_INTERVAL_MS: optionalBoundedInt('KB_RESTORE_RECOVERY_POLL_INTERVAL_MS', 30_000, 5_000, 300_000),
-  // Uploaded FAQ workbooks are parsed in a worker thread (never on the event
-  // loop): its deadline, its heap limit, and how many run at once per process.
-  KB_FAQ_SHEET_READ_TIMEOUT_MS: optionalBoundedInt('KB_FAQ_SHEET_READ_TIMEOUT_MS', 60_000, 1_000, 600_000),
-  KB_FAQ_SHEET_READ_MAX_MEMORY_MB: optionalBoundedInt('KB_FAQ_SHEET_READ_MAX_MEMORY_MB', 1_024, 64, 8_192),
-  KB_FAQ_SHEET_READ_CONCURRENCY: optionalBoundedInt('KB_FAQ_SHEET_READ_CONCURRENCY', 2, 1, 16),
-
-  // Lesson-author video transcription. The upload route streams to a private
-  // bucket; these limits are enforced before expensive media processing.
-  LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB: optionalBoundedInt('LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB', 500, 10, 2_048),
-  LESSON_AUTHOR_VIDEO_MAX_DURATION_SECONDS: optionalBoundedInt('LESSON_AUTHOR_VIDEO_MAX_DURATION_SECONDS', 10_800, 30, 21_600),
-  LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPT_MAX_CHARS', 2_000_000, 1_000, 5_000_000),
-  LESSON_AUTHOR_TRANSCRIPT_RETENTION_HOURS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPT_RETENTION_HOURS', 168, 1, 720),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED: optionalBoolean('LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED', true),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS', 10_000, 1_000, 300_000),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE', 2, 1, 8),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_CONCURRENCY: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_CONCURRENCY', 1, 1, 4),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_LEASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_LEASE_SECONDS', 1_800, 120, 7_200),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_MAX_ATTEMPTS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_MAX_ATTEMPTS', 3, 1, 12),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_RETRY_BASE_SECONDS', 60, 5, 3_600),
-  LESSON_AUTHOR_TRANSCRIPTION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('LESSON_AUTHOR_TRANSCRIPTION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
-  LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR: optionalString('LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR', './tmp/lesson-author-transcription'),
-  FFMPEG_PATH: optionalString('FFMPEG_PATH', 'ffmpeg'),
-  FFPROBE_PATH: optionalString('FFPROBE_PATH', 'ffprobe'),
-  GEMINI_TRANSCRIPTION_MODEL: optionalString('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-transcribe'),
-
-  // Course outline transfer is a dedicated, resumable worker. It is separate
-  // from HTTP so a large media copy never monopolises API request capacity.
-  COURSE_OUTLINE_TRANSFER_WORKER_ENABLED: optionalBoolean('COURSE_OUTLINE_TRANSFER_WORKER_ENABLED', false),
-  COURSE_OUTLINE_TRANSFER_WORKER_POLL_INTERVAL_MS: optionalBoundedInt('COURSE_OUTLINE_TRANSFER_WORKER_POLL_INTERVAL_MS', 10_000, 1_000, 300_000),
-
-  // Report PDF export: HTML/CSS rendered to PDF by a locally installed
-  // Chromium-based browser (no browser download). PATH wins over CHANNEL.
-  REPORT_PDF_BROWSER_PATH: optionalString('REPORT_PDF_BROWSER_PATH', ''),
-  REPORT_PDF_BROWSER_CHANNEL: optionalOneOf('REPORT_PDF_BROWSER_CHANNEL', 'msedge', ['msedge', 'chrome', 'chromium'] as const),
-  REPORT_PDF_RENDER_CONCURRENCY: optionalBoundedInt('REPORT_PDF_RENDER_CONCURRENCY', 2, 1, 8),
-  REPORT_PDF_RENDER_QUEUE_LIMIT: optionalBoundedInt('REPORT_PDF_RENDER_QUEUE_LIMIT', 20, 0, 200),
-  REPORT_PDF_RENDER_TIMEOUT_MS: optionalBoundedInt('REPORT_PDF_RENDER_TIMEOUT_MS', 30_000, 5_000, 120_000),
-  REPORT_PDF_BROWSER_IDLE_CLOSE_MS: optionalBoundedInt('REPORT_PDF_BROWSER_IDLE_CLOSE_MS', 600_000, 0, 86_400_000),
-  REPORT_PDF_STORAGE_ENABLED: optionalBoolean('REPORT_PDF_STORAGE_ENABLED', false),
-  REPORT_PDF_AI_NARRATIVE_ENABLED: optionalBoolean('REPORT_PDF_AI_NARRATIVE_ENABLED', false),
-  REPORT_PDF_AI_NARRATIVE_TIMEOUT_MS: optionalBoundedInt('REPORT_PDF_AI_NARRATIVE_TIMEOUT_MS', 20_000, 3_000, 60_000),
-  REPORT_PDF_RATE_LIMIT_WINDOW_SECONDS: optionalBoundedInt('REPORT_PDF_RATE_LIMIT_WINDOW_SECONDS', 600, 60, 86_400),
-  REPORT_PDF_USER_EXPORTS_PER_WINDOW: optionalBoundedInt('REPORT_PDF_USER_EXPORTS_PER_WINDOW', 10, 1, 1_000),
-  REPORT_PDF_TENANT_EXPORTS_PER_WINDOW: optionalBoundedInt('REPORT_PDF_TENANT_EXPORTS_PER_WINDOW', 60, 1, 10_000),
-  // Exports of one tenant that may be in progress at once on an API process.
-  REPORT_PDF_TENANT_ACTIVE_JOBS: optionalBoundedInt('REPORT_PDF_TENANT_ACTIVE_JOBS', 5, 1, 50),
-  // Chat report Gemini calls: past the deadline the router continues with the
-  // deterministic parser only and the narrative uses its rule-based fallback.
-  REPORT_CHAT_ROUTER_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_ROUTER_TIMEOUT_MS', 8_000, 1_000, 30_000),
-  REPORT_CHAT_NARRATIVE_TIMEOUT_MS: optionalBoundedInt('REPORT_CHAT_NARRATIVE_TIMEOUT_MS', 15_000, 1_000, 60_000),
-  /** Model for the AI Report calls (router, chat and PDF narratives). Empty = the tenant chat model. */
-  REPORT_AI_MODEL: optionalString('REPORT_AI_MODEL', 'gemini-3.8-flash'),
-
-  // Gemini temp directory (optional — default ./tmp/gemini)
-  GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
-  GEMINI_LESSON_AUTHOR_MODEL: process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
-  GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
-  // Creating a KB's Gemini File Search store gives up after this long (no
-  // database transaction or connection is held while it runs).
-  GEMINI_STORE_CREATE_TIMEOUT_MS: optionalBoundedInt('GEMINI_STORE_CREATE_TIMEOUT_MS', 60_000, 5_000, 600_000),
+  ...workersEnv,
+  ...reportsEnv,
 
   /** Kiểm tra môi trường production */
   get isProduction(): boolean {
