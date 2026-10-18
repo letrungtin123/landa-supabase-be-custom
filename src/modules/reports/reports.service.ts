@@ -7,7 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { cacheJson, cacheKey, stableHash } from '../../config/cache.js';
-import { query } from '../../config/database.js';
+import { reportsQuery } from '../../config/reports-database.js';
 import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
 
@@ -803,7 +803,7 @@ async function getReportSummaryForRange(options: {
     scopeParamStart: 4,
   });
 
-  const result = await query<{
+  const result = await reportsQuery<{
     total_learners: string;
     active_learners: string;
     total_enrollments: string;
@@ -1107,7 +1107,7 @@ async function chartSimpleByRange(
     params.splice(5, scope.params.length, ...cohort.params);
   }
 
-  const result = await query<{ bucket: string; bucket_label: string; value: string }>(sql, params);
+  const result = await reportsQuery<{ bucket: string; bucket_label: string; value: string }>(sql, params);
   return result.rows.map(row => ({
     month: row.bucket,
     month_label: row.bucket_label,
@@ -1186,7 +1186,7 @@ async function chartGroupedEnrollmentsByRange(
   params.push(limit);
   const limitParam = `$${params.length}`;
   const labelSql = getBucketLabelSql('sr.bucket_start');
-  const result = await query<{ bucket: string; bucket_label: string; series_name: string; value: string }>(
+  const result = await reportsQuery<{ bucket: string; bucket_label: string; series_name: string; value: string }>(
     `WITH ${getBucketCteSql()},
      entity_names AS (${entitySql}),
      aggregated AS (
@@ -1299,7 +1299,7 @@ async function chartGroupedByOrg(
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
   const gFilter = groupId ? 'AND og.id = $2' : '';
   const gParams = groupId ? [tenantId, groupId] : [tenantId];
-  const orgs = await query<{ id: string; name: string }>(
+  const orgs = await reportsQuery<{ id: string; name: string }>(
     `SELECT id, name FROM org_groups WHERE tenant_id = $1 ${gFilter} ORDER BY name`,
     gParams,
   );
@@ -1333,7 +1333,7 @@ async function chartGroupedBySubGroup(
   tenantId: string, year: number, metric: string, maxMonth: number,
   groupId: string,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const sgs = await query<{ id: string; name: string }>(
+  const sgs = await reportsQuery<{ id: string; name: string }>(
     `SELECT id, name FROM sub_groups WHERE org_group_id = $1 ORDER BY name`,
     [groupId],
   );
@@ -1366,7 +1366,7 @@ async function chartGroupedByTeam(
   tenantId: string, year: number, metric: string, maxMonth: number,
   subgroupId: string,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const teams = await query<{ id: string; name: string }>(
+  const teams = await reportsQuery<{ id: string; name: string }>(
     `SELECT id, name FROM teams WHERE sub_group_id = $1 ORDER BY name`,
     [subgroupId],
   );
@@ -1409,7 +1409,7 @@ async function batchMetricByMonth(
       const ugf = buildUserGroupFilter(groupId, subgroupId);
       let idx = 2;
       const conds = ugf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT gs.m,
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
@@ -1426,7 +1426,7 @@ async function batchMetricByMonth(
     }
     case 'active_learners': {
       const activeScope = buildLearnerScopeExists('u.id', groupId, subgroupId, undefined, 4);
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `WITH ${buildActiveLearnerEventsCte({
           tenantParam: '$1',
           rangeStartParam: '$2',
@@ -1462,7 +1462,7 @@ async function batchMetricByMonth(
         subgroupId,
         scopeParamStart: 4,
       });
-      const r = await query<{ m: number; completion_rate: string }>(
+      const r = await reportsQuery<{ m: number; completion_rate: string }>(
         `WITH ${cohort.sql},
           ${roster.sql},
           roster_size AS (
@@ -1491,7 +1491,7 @@ async function batchMetricByMonth(
       const egf = buildGroupFilter(groupId, subgroupId);
       let idx = 2;
       const conds = egf.conditions.map(c => c.replace('$PARAM', `$${idx++}`));
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COUNT(DISTINCT e.id) AS cnt
          FROM enrollments e ${egf.joins}
@@ -1521,7 +1521,7 @@ async function batchMetricByMonthTeam(
 
   switch (metric) {
     case 'total_learners': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT gs.m,
                 COUNT(DISTINCT u.id) AS cnt
          FROM generate_series(1, 12) AS gs(m)
@@ -1537,7 +1537,7 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'active_learners': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `WITH ${buildActiveLearnerEventsCte({
           tenantParam: '$1',
           rangeStartParam: '$2',
@@ -1572,7 +1572,7 @@ async function batchMetricByMonthTeam(
         teamId,
         scopeParamStart: 4,
       });
-      const r = await query<{ m: number; completion_rate: string }>(
+      const r = await reportsQuery<{ m: number; completion_rate: string }>(
         `WITH ${cohort.sql},
           ${roster.sql},
           roster_size AS (
@@ -1598,7 +1598,7 @@ async function batchMetricByMonthTeam(
       break;
     }
     case 'total_enrollments': {
-      const r = await query<{ m: number; cnt: string }>(
+      const r = await reportsQuery<{ m: number; cnt: string }>(
         `SELECT EXTRACT(MONTH FROM e.enrolled_at)::INT AS m,
                 COUNT(e.id) AS cnt
          FROM enrollments e
@@ -1656,7 +1656,7 @@ export async function getReportCoursePerformance(
       scopeParamStart: 4,
     });
     const limitParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql},
         aggregated AS (
           SELECT
@@ -1721,7 +1721,7 @@ export async function getReportCourseCount(
       teamId,
       scopeParamStart: 4,
     });
-    const result = await query<{ course_count: string }>(
+    const result = await reportsQuery<{ course_count: string }>(
       `WITH ${cohort.sql}
        SELECT COUNT(DISTINCT re.course_id)::bigint AS course_count
        FROM report_enrollments re`,
@@ -1768,7 +1768,7 @@ export async function findReportCoursePerformanceByName(
       scopeParamStart: 4,
     });
     const courseNameParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql},
         aggregated AS (
           SELECT
@@ -1845,7 +1845,7 @@ export async function getReportCoursePerformanceById(
       scopeParamStart: 4,
     });
     const courseIdParam = 4 + cohort.params.length;
-    const result = await query<ReportCoursePerformance>(
+    const result = await reportsQuery<ReportCoursePerformance>(
       `WITH ${cohort.sql}
        SELECT
          re.course_id,
@@ -1892,7 +1892,7 @@ export async function getReportCompletionStatusDistribution(
       teamId,
       scopeParamStart: 4,
     });
-    const result = await query<{
+    const result = await reportsQuery<{
       not_started: string;
       in_progress: string;
       completed: string;
@@ -1948,7 +1948,7 @@ export async function getReportCourseCompletionRanking(
     scopeParamStart: 4,
   });
   const limitParam = 4 + cohort.params.length;
-  const result = await query<ReportCourseCompletionRanking & { full_count: string }>(
+  const result = await reportsQuery<ReportCourseCompletionRanking & { full_count: string }>(
     `WITH ${cohort.sql},
       aggregated AS (
         SELECT
@@ -2021,7 +2021,7 @@ export async function getReportCourseCompletionLearners(
   const safeStatus = ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
   if (safeStatus !== 'all') filters.push(`CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END = '${safeStatus}'`);
   params.push(safePageSize, (safePage - 1) * safePageSize);
-  const result = await query<ReportCourseCompletionLearner & { full_count: string }>(
+  const result = await reportsQuery<ReportCourseCompletionLearner & { full_count: string }>(
     `WITH ${cohort.sql}
      SELECT
        re.user_id,
@@ -2093,7 +2093,7 @@ export async function getReportTopCourses(
 
   // Single query: count + data using window function
   params.push(pageSize, offset);
-  const result = await query<ReportTopCourse & { full_count: string }>(
+  const result = await reportsQuery<ReportTopCourse & { full_count: string }>(
     `SELECT e.course_id, c.display_name AS name,
             COUNT(DISTINCT e.id) AS enrollments,
             COUNT(*) OVER() AS full_count
@@ -2167,7 +2167,7 @@ export async function getReportLearners(
   const statusFilter = safeStatus === 'all' ? '' : `WHERE learner_status.status = '${safeStatus}'`;
   params.push(safePageSize, (safePage - 1) * safePageSize);
 
-  const result = await query<ReportLearner & { full_count: string }>(
+  const result = await reportsQuery<ReportLearner & { full_count: string }>(
     `WITH ${cohort.sql},
       ${roster.sql},
       learner_status AS (
@@ -2315,7 +2315,7 @@ async function getEnrollmentScopedLearnerDetailRows(options: {
   const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   params.push(safePageSize, offset);
 
-  const result = await query<LearnerDetailResult & { full_count: string }>(
+  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
     `WITH ${sourceCte},
       course_rows AS (
         SELECT
@@ -2380,7 +2380,7 @@ export async function getLearnerDetail(
   const userScope = dataScope
     ? buildLearnerScopeExists('u.id', groupId, subgroupId, teamId, 3)
     : { sql: '', params: [] as string[] };
-  const userResult = await query<{ id: string }>(
+  const userResult = await reportsQuery<{ id: string }>(
     `SELECT u.id
      FROM users u
      WHERE u.username = $1
@@ -2397,7 +2397,7 @@ export async function getLearnerDetail(
   const userId = userResult.rows[0].id;
 
   // Groups
-  const groupsResult = await query<{ group_name: string; subgroup_name: string }>(
+  const groupsResult = await reportsQuery<{ group_name: string; subgroup_name: string }>(
     `SELECT DISTINCT og.name AS group_name, sg.name AS subgroup_name
      FROM team_members tm
      JOIN teams t ON t.id = tm.team_id
@@ -2460,7 +2460,7 @@ export async function getLearnerDetail(
   }
 
   params.push(safePageSize, offset);
-  const result = await query<LearnerDetailResult & { full_count: string }>(
+  const result = await reportsQuery<LearnerDetailResult & { full_count: string }>(
     `WITH
       ${buildVisibleCourseUsersCte({
         tenantParam: '$1',
@@ -2560,7 +2560,7 @@ export async function getUserBadges(
   username: string,
   tenantId: string,
 ): Promise<{ username: string; badges: UserBadgeRow[] }> {
-  const result = await query<UserBadgeRow>(
+  const result = await reportsQuery<UserBadgeRow>(
     `SELECT ub.badge_id, ub.earned_at, NULLIF(BTRIM(tbs.name_override), '') AS name_override
      FROM user_badges ub
      JOIN users u ON u.id = ub.user_id
@@ -2602,7 +2602,7 @@ export async function getUserStudyTime(
   tenantId: string,
   options: UserStudyTimeOptions = {},
 ): Promise<UserStudyTimeResponse> {
-  const userResult = await query<{ id: string }>(
+  const userResult = await reportsQuery<{ id: string }>(
     `SELECT id FROM users WHERE username = $1 AND tenant_id = $2 LIMIT 1`,
     [username, tenantId],
   );
@@ -2624,7 +2624,7 @@ export async function getUserStudyTime(
 
 export async function refreshReportSummary(): Promise<void> {
   try {
-    await query('SELECT refresh_report_summary()', []);
+    await reportsQuery('SELECT refresh_report_summary()', []);
   } catch {
     // Function may not exist yet
   }

@@ -207,6 +207,9 @@ export const env = {
   // would turn ordinary lock waits into errors. Code that needs one sets
   // SET LOCAL lock_timeout itself.
   DB_LOCK_TIMEOUT_MS: optionalBoundedInt('DB_LOCK_TIMEOUT_MS', 0, 0, 600_000),
+  // Admin reports, report chat and Excel exports use their own small pool of
+  // this size (per process), so their aggregates never take the main pool.
+  REPORTS_DB_POOL_MAX: optionalBoundedInt('REPORTS_DB_POOL_MAX', 4, 1, 50),
 
   // JWT
   JWT_SECRET: required('JWT_SECRET'),

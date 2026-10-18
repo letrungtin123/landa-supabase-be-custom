@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import type { Writable } from 'node:stream';
-import { query } from '../../config/database.js';
+import { reportsQuery } from '../../config/reports-database.js';
 import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, getReportSummary, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
 type ExportScope = {
@@ -525,7 +525,7 @@ class SplitWorksheetWriter {
 async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: ReportExcelLocale): Promise<ScopeNames> {
   const all = getReportExcelCopy(locale).all;
   if (scope.teamId) {
-    const result = await query<ScopeNames>(
+    const result = await reportsQuery<ScopeNames>(
       `SELECT og.name AS "groupName", sg.name AS "subgroupName", t.name AS "teamName"
        FROM teams t
        JOIN sub_groups sg ON sg.id = t.sub_group_id
@@ -538,7 +538,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: R
   }
 
   if (scope.subgroupId) {
-    const result = await query<Pick<ScopeNames, 'groupName' | 'subgroupName'>>(
+    const result = await reportsQuery<Pick<ScopeNames, 'groupName' | 'subgroupName'>>(
       `SELECT og.name AS "groupName", sg.name AS "subgroupName"
        FROM sub_groups sg
        JOIN org_groups og ON og.id = sg.org_group_id
@@ -551,7 +551,7 @@ async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: R
   }
 
   if (scope.groupId) {
-    const result = await query<Pick<ScopeNames, 'groupName'>>(
+    const result = await reportsQuery<Pick<ScopeNames, 'groupName'>>(
       `SELECT name AS "groupName"
        FROM org_groups
        WHERE id = $1 AND tenant_id = $2
@@ -726,7 +726,7 @@ async function fetchHierarchyTrendRows(options: ReportExcelExportOptions): Promi
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4,
   });
-  const result = await query<HierarchyTrendRow>(
+  const result = await reportsQuery<HierarchyTrendRow>(
     `WITH ${buildActiveLearnerEventsCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3' })},
       ${cohort.sql},
       enrollment_metrics AS (
@@ -825,7 +825,7 @@ async function fetchTeamBreakdownRows(options: ReportExcelExportOptions): Promis
   const params: unknown[] = [options.tenantId, startDate, endDate];
   const scopeFilter = appendScopeFilter(params, options.scope);
   const cohort = buildReportEnrollmentCte({ tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3', scopeParamStart: 4 });
-  const result = await query<TeamBreakdownRow>(
+  const result = await reportsQuery<TeamBreakdownRow>(
     `WITH ${cohort.sql},
       scoped_teams AS (
         SELECT t.id AS team_id, t.name AS team_name, sg.name AS subgroup_name, og.name AS group_name
@@ -912,7 +912,7 @@ async function fetchCourseRankingRows(options: ReportExcelExportOptions): Promis
     tenantParam: '$1', rangeStartParam: '$2', rangeEndParam: '$3',
     groupId: options.scope.groupId, subgroupId: options.scope.subgroupId, teamId: options.scope.teamId, scopeParamStart: 4,
   });
-  const result = await query<CourseRankingExportRow>(
+  const result = await reportsQuery<CourseRankingExportRow>(
     `WITH ${cohort.sql}
      SELECT
        re.course_id,
@@ -993,7 +993,7 @@ async function fetchLearnerSummaryBatch(
       : options.scope.groupId
         ? 'AND og.id = $4'
         : '';
-  const result = await query<LearnerSummaryRow>(
+  const result = await reportsQuery<LearnerSummaryRow>(
     `WITH ${cohort.sql},
       ${roster.sql},
       selected_users AS (
@@ -1105,7 +1105,7 @@ async function fetchCourseLearnerBatch(
       : options.scope.groupId
         ? 'AND og.id = $4'
         : '';
-  const result = await query<CourseLearnerRow>(
+  const result = await reportsQuery<CourseLearnerRow>(
     `WITH ${cohort.sql},
       selected_enrollments AS (
         SELECT re.*
@@ -1238,7 +1238,7 @@ async function fetchSingleCourseLearnerBatch(
         : '';
   const displayNameSql = "COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username)";
   const sortNameSql = `unaccent(LOWER(${displayNameSql}))`;
-  const result = await query<SortedCourseLearnerRow>(
+  const result = await reportsQuery<SortedCourseLearnerRow>(
     `WITH ${cohort.sql},
       selected_enrollments AS (
         SELECT

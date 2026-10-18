@@ -6,6 +6,7 @@ import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js'
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
 import { getClient, pool, query } from './config/database.js';
+import { endReportsPool } from './config/reports-database.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
@@ -300,7 +301,7 @@ stopOnShutdown(setInterval(async function cleanupAuditLogs() {
 }, 24 * 60 * 60 * 1000));
 
 // Graceful shutdown (see config/graceful-shutdown.ts): stop intake, drain
-// in-flight requests (bounded), then close RabbitMQ, Redis and the pool.
+// in-flight requests (bounded), then close RabbitMQ, Redis and the pools.
 const gracefulShutdown = createGracefulShutdown({
   getServer: () => httpServer,
   lifecycle: processLifecycle,
@@ -316,6 +317,7 @@ const gracefulShutdown = createGracefulShutdown({
     { name: 'report PDF renderer', run: shutdownReportPdfRenderer },
     { name: 'RabbitMQ', run: closeRabbitMQ },
     { name: 'Redis', run: closeRedis },
+    { name: 'reports database pool', run: endReportsPool },
     { name: 'database pool', run: () => pool.end() },
   ],
   exit: (code) => process.exit(code),
