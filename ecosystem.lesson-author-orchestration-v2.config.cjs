@@ -19,8 +19,15 @@ const shared = {
   merge_logs: true,
 };
 
+// Database pool per process (part of the connection budget in
+// ecosystem.config.cjs): the dispatcher claims and publishes one batch at a
+// time; the worker runs up to GLOBAL_CONCURRENCY short transactions at once
+// and never holds a connection during a provider call.
+const POOL_MAX = { dispatcher: '3', worker: '5' };
+
 const role = value => ({
   NODE_ENV: 'production',
+  DB_POOL_MAX: POOL_MAX[value],
   LESSON_AUTHOR_ORCHESTRATION_V2_ENABLED: 'true',
   LESSON_AUTHOR_ORCHESTRATION_V2_ROLE: value,
   LESSON_AUTHOR_ORCHESTRATION_V2_LANE_COUNT: '1',
