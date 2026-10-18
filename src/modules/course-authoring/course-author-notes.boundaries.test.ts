@@ -8,6 +8,8 @@ import test from 'node:test';
 // Checkouts may use CRLF (core.autocrlf); compare normalized source.
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const learner = read('../learner/learner.service.ts');
+const learnerRepository = read('../learner/learner-courses.repository.ts');
+const learnerGrading = read('../learner/learner-grading.logic.ts');
 const learnerRow = read('../learner/learner-block-row.logic.ts');
 const learnerTree = read('../learner/learner-course-blocks.logic.ts');
 const controller = read('./course-authoring.controller.ts');
@@ -19,16 +21,17 @@ const chat = read('../ai-chatbot/chat.service.ts');
 
 test('learner tree and block detail serialize every row through the stripping boundary', async () => {
   assert.match(learnerRow, /export function toLearnerBlockRow\(input: any\) \{\n  const row = input && typeof input === 'object' \? withoutAuthorOnlyBlockMetadata\(input\) : input;/);
-  // Block detail.
-  assert.equal((learner.match(/\$\{metaCol\} AS metadata/g) ?? []).length, 1, 'block detail');
-  assert.match(learner, /return toLearnerBlockRow\(result\.rows\[0\]\);/);
+  // Block detail (its statement lives in the learner courses repository).
+  assert.equal((learnerRepository.match(/\$\{metaCol\} AS metadata/g) ?? []).length, 1, 'block detail');
+  assert.match(learner, /const row = await coursesRepository\.selectBlockDetail\(blockId\);[\s\S]{0,120}return toLearnerBlockRow\(row\);/);
   // Course tree: one shared published copy per course version, built from
   // every row of the published tree query through the same boundary.
-  assert.match(learner, /return buildLearnerCourseStructure\(result\.rows\);/);
+  assert.match(learner, /return buildLearnerCourseStructure\(await coursesRepository\.selectPublishedBlockTree\(courseId\)\);/);
   assert.match(learnerTree, /const blocks = rows\.map\(\(row\) => toLearnerBlockRow\(row\)/);
   // The shared tree and grading read published metadata; grading never returns it.
-  assert.equal((learner.match(/b\.published_metadata AS metadata/g) ?? []).length, 2, 'shared tree and grading');
+  assert.equal((learnerRepository.match(/b\.published_metadata AS metadata/g) ?? []).length, 2, 'shared tree and grading');
   assert.doesNotMatch(learner, /return \{[^}]*metadata: block\.metadata/);
+  assert.doesNotMatch(learnerGrading, /return \{[^}]*metadata: block\.metadata/);
 
   const { COURSE_AUTHOR_NOTES_KEY } = await import('./course-author-notes.logic.js');
   const { buildLearnerCourseStructure } = await import('../learner/learner-course-blocks.logic.js');

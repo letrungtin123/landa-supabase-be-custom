@@ -15,10 +15,10 @@ import { AppError } from '../../middleware/error-handler.js';
 import { isLearnerRole } from '../../types/index.js';
 import { recalculateEnrollmentProgress } from './progress-calculation.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
-import { learnerCourseAccessCondition, publicCourseCategoryCondition } from '../courses/course-access.js';
 import { toLearnerBlockRow } from './learner-block-row.logic.js';
 import { LEARNER_BLOCK_SERIALIZATION_VERSION } from './learner-answer-key.logic.js';
-import { gradeBlockAnswer, type GradedBlock } from './learner-grading.logic.js';
+import { gradeBlockAnswer } from './learner-grading.logic.js';
+import { createLearnerCoursesRepository } from './learner-courses.repository.js';
 import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   buildLearnerCourseStructure,
@@ -32,6 +32,8 @@ import {
 } from '../badges/badge-evaluation.service.js';
 import { isUuid } from '../../utils/uuid.js';
 
+const coursesRepository = createLearnerCoursesRepository({ query });
+
 async function assertLearnerCourseAccess(
   courseId: string,
   userId: string,
@@ -41,21 +43,12 @@ async function assertLearnerCourseAccess(
 ): Promise<void> {
   if (!tenantId) throw new AppError('Thiếu tenant', 400);
 
-  const params: unknown[] = [courseId, tenantId];
-  const conditions = ['c.id = $1', 'c.tenant_id = $2', 'c.deleted_at IS NULL'];
-  if (isLearnerRole(role)) {
-    params.push(userId);
-    conditions.push(learnerCourseAccessCondition('c', `$${params.length}`));
-  }
-
-  const result = await query<{ id: string }>(
-    `SELECT c.id
-     FROM courses c
-     WHERE ${conditions.join(' AND ')}
-     LIMIT 1`,
-    params,
-  );
-  if (result.rowCount === 0) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
+  const accessible = await coursesRepository.courseAccessible({
+    courseId,
+    tenantId,
+    learnerUserId: isLearnerRole(role) ? userId : undefined,
+  });
+  if (!accessible) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
 }
 
 /**
@@ -80,13 +73,7 @@ export async function assertCourseSection(courseId: string, sectionId: unknown):
   if (!isUuid(sectionId)) {
     throw new AppError('Không tìm thấy phần học này', 404);
   }
-  const result = await query(
-    `SELECT 1 FROM course_blocks
-     WHERE id = $1::uuid AND course_id = $2 AND deleted_at IS NULL
-     LIMIT 1`,
-    [sectionId, courseId],
-  );
-  if (result.rowCount === 0) throw new AppError('Không tìm thấy phần học này', 404);
+  if (!(await coursesRepository.sectionOfCourse(sectionId, courseId))) throw new AppError('Không tìm thấy phần học này', 404);
   return sectionId;
 }
 
@@ -123,90 +110,33 @@ async function getMyVisibleCoursesFromDb(
 ) {
   const { search, category_id, page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
-  const sqlParams: unknown[] = [tenantId];
-  let where = 'WHERE c.tenant_id = $1 AND c.deleted_at IS NULL';
+  const learnerUserId = isLearnerRole(role) ? userId : undefined;
 
-  // learner: chỉ thấy courses assign qua team → category → course
-  // Path: team_members → team_course_categories → course_category_courses
-  // Fallback: team_courses (direct assignment, backward compat)
-  if (isLearnerRole(role)) {
-    sqlParams.push(userId);
-    where += ` AND ${learnerCourseAccessCondition('c', `$${sqlParams.length}`)}`;
-  }
+  const rows = await coursesRepository.selectVisibleCourses({
+    tenantId, learnerUserId, categoryId: category_id, search, limit: page_size, offset,
+  });
 
-  // Filter theo category_id
-  if (category_id) {
-    sqlParams.push(category_id);
-    where += ` AND c.id IN (SELECT course_id FROM course_category_courses WHERE category_id = $${sqlParams.length})`;
-  }
-
-  if (search) {
-    sqlParams.push(`%${search}%`);
-    where += ` AND (unaccent(c.display_name) ILIKE unaccent($${sqlParams.length}) OR unaccent(c.org) ILIKE unaccent($${sqlParams.length}))`;
-  }
-
-  sqlParams.push(page_size, offset);
-  const result = await query<any>(
-    `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
-            COUNT(*) OVER() AS full_count
-     FROM courses c
-     ${where}
-     ORDER BY c.created_at DESC
-     LIMIT $${sqlParams.length - 1} OFFSET $${sqlParams.length}`,
-    sqlParams,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
-  const courseIds = result.rows.map((r: any) => r.id);
+  const total = parseInt(rows[0]?.full_count ?? '0');
+  const courseIds = rows.map(r => r.id);
 
   // Fetch categories for returned courses
-  let categoriesByCourse: Record<string, { id: string; name: string }[]> = {};
+  const categoriesByCourse: Record<string, { id: string; name: string }[]> = {};
   if (courseIds.length > 0) {
-    const catResult = await query<any>(
-      `SELECT ccc.course_id, cc.id, cc.name
-       FROM course_category_courses ccc
-       JOIN course_categories cc ON cc.id = ccc.category_id
-       WHERE ccc.course_id = ANY($1)
-       ORDER BY cc.name`,
-      [courseIds],
-    );
-    for (const row of catResult.rows) {
+    for (const row of await coursesRepository.selectCategoriesOfCourses(courseIds)) {
       if (!categoriesByCourse[row.course_id]) categoriesByCourse[row.course_id] = [];
       categoriesByCourse[row.course_id].push({ id: row.id, name: row.name });
     }
   }
 
   // Fetch categories visible to this user for the FE filter dropdown.
-  const allCatsResult = await query<any>(
-    isLearnerRole(role)
-      ? `SELECT DISTINCT cc.id, cc.name
-         FROM course_categories cc
-         WHERE cc.tenant_id = $1
-           AND (
-             COALESCE(cc.is_public, false) = true
-             OR EXISTS (
-               SELECT 1
-               FROM team_course_categories tcc
-               JOIN team_members tm ON tm.team_id = tcc.team_id
-               WHERE tcc.category_id = cc.id
-                 AND tm.user_id = $2
-             )
-           )
-         ORDER BY cc.name`
-      : `SELECT DISTINCT cc.id, cc.name
-         FROM course_categories cc
-         WHERE cc.tenant_id = $1
-         ORDER BY cc.name`,
-    isLearnerRole(role) ? [tenantId, userId] : [tenantId],
-  );
+  const categories = await coursesRepository.selectFilterCategories(tenantId, learnerUserId);
 
   return {
-    data: result.rows.map((r: any) => {
-      const { full_count, ...rest } = r;
+    data: rows.map(r => {
+      const { full_count: _fullCount, ...rest } = r;
       return { ...rest, categories: categoriesByCourse[r.id] || [] };
     }),
-    categories: allCatsResult.rows,
+    categories,
     total,
     page,
     page_size,
@@ -242,27 +172,9 @@ async function getCourseDetailFromDb(
   tenantId: string,
   role: string,
 ) {
-  const result = await query<any>(
-    `SELECT c.id, c.display_name, c.org, c.image_url, c.start_date, c.end_date,
-            c.visible_to_staff_only, ${publicCourseCategoryCondition('c.id', 'c.tenant_id')} AS is_public, c.created_at,
-            mentor.id AS mentor_id,
-            mentor.full_name AS mentor_full_name,
-            mentor.email AS mentor_email,
-            mentor.phone AS mentor_phone,
-            mentor.avatar_url AS mentor_avatar,
-            mentor.bio AS mentor_bio,
-            mentor.role AS mentor_role,
-            cms.description AS mentor_section_description,
-            cms.logo_light_path AS mentor_section_logo_light,
-            cms.logo_dark_path AS mentor_section_logo_dark
-     FROM courses c
-     LEFT JOIN users mentor ON mentor.id = c.mentor_id
-     LEFT JOIN course_mentor_sections cms ON cms.course_id = c.id AND cms.tenant_id = c.tenant_id
-     WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
+  const row = await coursesRepository.selectCourseDetail(courseId, tenantId);
 
-  if (result.rowCount === 0) throw new AppError('Khóa học không tồn tại', 404);
+  if (!row) throw new AppError('Khóa học không tồn tại', 404);
 
   if (isLearnerRole(role)) {
     await assertLearnerCourseAccess(courseId, userId, tenantId, role);
@@ -280,7 +192,7 @@ async function getCourseDetailFromDb(
     mentor_section_logo_light,
     mentor_section_logo_dark,
     ...coursePayload
-  } = result.rows[0];
+  } = row;
 
   const mentorSection = mentor_section_description || mentor_section_logo_light || mentor_section_logo_dark
     ? {
@@ -365,49 +277,11 @@ async function getCourseBlocksLearnerStateFromDb(
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
   if (isDemoIframe) return { completed_block_ids: [] };
 
-  // The learner's active enrollment (at most one per user and course).
-  const result = await query<{ block_id: string }>(
-    `WITH enrollment AS (
-       SELECT id FROM enrollments WHERE course_id = $1 AND user_id = $2 AND is_active = true LIMIT 1
-     )
-     SELECT bc.block_id
-     FROM enrollment e
-     JOIN block_completions bc ON bc.enrollment_id = e.id`,
-    [courseId, userId],
-  );
-  return { completed_block_ids: result.rows.map((row) => row.block_id) };
+  return { completed_block_ids: await coursesRepository.selectCompletedBlockIds(courseId, userId) };
 }
 
 async function getCourseBlocksStructureFromDb(courseId: string): Promise<LearnerCourseStructure> {
-  // FE Learner (5173) LUÔN chỉ hiển thị published data, bất kể role.
-  // Staff/admin muốn xem draft → dùng CMS route, KHÔNG dùng learner route.
-  // Learner route must read the immutable published snapshot only.  Falling
-  // back to metadata would leak a saved-but-unpublished diagram draft.
-  const result = await query<Record<string, unknown>>(
-    `WITH RECURSIVE active_tree AS (
-       SELECT b.id, b.parent_id, b.block_type, b.display_name,
-              b.published_data, b.published_metadata,
-              b.sort_order, b.is_published
-       FROM course_blocks b
-       WHERE b.course_id = $1
-         AND b.parent_id IS NULL
-         AND b.deleted_at IS NULL AND b.is_published = true
-       UNION ALL
-       SELECT child.id, child.parent_id, child.block_type, child.display_name,
-              child.published_data, child.published_metadata,
-              child.sort_order, child.is_published
-       FROM course_blocks child
-       JOIN active_tree parent ON parent.id = child.parent_id
-       WHERE child.deleted_at IS NULL AND child.is_published = true
-     )
-     SELECT b.id, b.parent_id, b.block_type, b.display_name,
-            b.published_data AS data, b.published_metadata AS metadata,
-            b.sort_order, b.is_published
-     FROM active_tree b
-     ORDER BY b.sort_order`,
-    [courseId],
-  );
-  return buildLearnerCourseStructure(result.rows);
+  return buildLearnerCourseStructure(await coursesRepository.selectPublishedBlockTree(courseId));
 }
 
 /**
@@ -440,34 +314,9 @@ export async function getBlockDetail(
 }
 
 async function getBlockDetailFromDb(blockId: string) {
-  // Learner route must never fall back to a block's draft columns.
-  const dataCol = 'b.published_data';
-  const metaCol = 'b.published_metadata';
-
-  const result = await query<any>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = $1
-       UNION ALL
-       SELECT parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id, b.course_id, b.parent_id, b.block_type, b.display_name,
-            ${dataCol} AS data, ${metaCol} AS metadata,
-            b.sort_order, b.is_published
-     FROM course_blocks b
-     JOIN courses c ON c.id = b.course_id
-     WHERE b.id = $1
-       AND b.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
-    [blockId],
-  );
-
-  if (result.rowCount === 0) throw new AppError('Block không tồn tại', 404);
-  return toLearnerBlockRow(result.rows[0]);
+  const row = await coursesRepository.selectBlockDetail(blockId);
+  if (!row) throw new AppError('Block không tồn tại', 404);
+  return toLearnerBlockRow(row);
 }
 
 /**
@@ -481,34 +330,8 @@ export async function submitBlockAnswer(
   tenantId: string | null | undefined,
   body: unknown,
 ) {
-  // Lấy block data — luôn dùng snapshot published, kể cả khi snapshot null.
-  // Không fallback sang draft vì learner không được thấy hay dùng nội dung chưa publish.
-  const blockResult = await query<GradedBlock & { course_id: string }>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = $1
-       UNION ALL
-       SELECT parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id, b.block_type,
-            b.published_data AS data,
-            b.published_metadata AS metadata,
-            b.course_id
-     FROM course_blocks b
-     JOIN courses c ON c.id = b.course_id
-     WHERE b.id = $1
-       AND b.is_published = true
-       AND b.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM ancestors WHERE deleted_at IS NOT NULL)`,
-    [blockId],
-  );
-
-  if (blockResult.rowCount === 0) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
-  const block = blockResult.rows[0];
+  const block = await coursesRepository.selectSubmittableBlock(blockId);
+  if (!block) throw new AppError('Block không tồn tại hoặc chưa được publish', 404);
   await assertLearnerCourseAccess(block.course_id, userId, tenantId, role);
 
   return gradeBlockAnswer(block, body);
@@ -546,27 +369,10 @@ export async function getCourseFiles(courseId: string, userId: string, role = 'l
 }
 
 async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
-  const lockedFilter = learnerView ? 'AND is_locked = false' : '';
-  const result = await query<any>(
-    `SELECT id, display_name, content_type, file_size, url, is_locked, is_reference, created_at
-     FROM course_assets
-     WHERE course_id = $1
-       -- The asset must belong to the course's own tenant (rows injected from
-       -- another tenant before the upload check existed stay hidden).
-       AND EXISTS (
-         SELECT 1 FROM courses c
-         WHERE c.id = course_assets.course_id
-           AND c.tenant_id = course_assets.tenant_id
-           AND c.deleted_at IS NULL
-       )
-       AND is_reference = true
-       ${lockedFilter}
-     ORDER BY created_at DESC`,
-    [courseId],
-  );
+  const result = await coursesRepository.selectCourseFiles(courseId, learnerView);
 
   return {
-    files: result.rows.map((r: any) => {
+    files: result.rows.map(r => {
       const ext = r.display_name?.split('.').pop()?.toLowerCase() || '';
       return {
         id: r.id,
@@ -574,7 +380,7 @@ async function getCourseFilesFromDb(courseId: string, learnerView: boolean) {
         url: r.url,
         extension: ext,
         content_type: r.content_type,
-        size: parseInt(r.file_size) || 0,
+        size: parseInt(r.file_size as string) || 0,
         date_added: r.created_at,
       };
     }),
