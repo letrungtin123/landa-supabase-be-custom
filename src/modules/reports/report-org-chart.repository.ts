@@ -19,7 +19,8 @@ export async function loadOrgChartEntities(
   parentId?: string,
 ): Promise<OrgChartEntity[]> {
   if (dimension === 'group') {
-    const gFilter = parentId ? 'AND og.id = $2' : '';
+    // org_groups has no alias here (an `og.id` filter failed with 42P01 -> 500).
+    const gFilter = parentId ? 'AND id = $2' : '';
     const gParams = parentId ? [tenantId, parentId] : [tenantId];
     const orgs = await reportsQuery<OrgChartEntity>(
       `SELECT id, name FROM org_groups WHERE tenant_id = $1 ${gFilter} ORDER BY name`,

@@ -127,6 +127,17 @@ for (const dimension of DIMENSIONS) {
   });
 }
 
+test('companies with one company selected (group_by_org + group_id): the unit list has no undefined alias', async (t) => {
+  const statements = installFixtureDb(t, FIXTURE);
+  const year = now.getFullYear() - 1;
+  const result = await svc.getReportChart(TENANT, year, 'total_enrollments', GROUP, undefined, undefined, true, true);
+  // It read `... FROM org_groups WHERE tenant_id = $1 AND og.id = $2`: PostgreSQL 42P01, a 500 for the page.
+  assert.equal(statements[0].text, 'SELECT id, name FROM org_groups WHERE tenant_id = $1 AND id = $2 ORDER BY name');
+  assert.deepEqual(statements[0].params, [TENANT, GROUP]);
+  assert.deepStrictEqual(result, { year, metric: 'total_enrollments', data: legacyGroupedChart(FIXTURE, 'total_enrollments', 12), is_grouped: true });
+  assert.equal(statements.length, 2);
+});
+
 test('an unknown metric reads the units only and charts zeros, as before', async (t) => {
   const statements = installFixtureDb(t, FIXTURE);
   const result = await svc.getReportChart(TENANT, now.getFullYear() - 1, 'not_a_metric', undefined, undefined, undefined, true, true);
