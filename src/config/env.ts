@@ -223,6 +223,9 @@ export const env = {
   REPORTS_EXPORT_USER_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_USER_CONCURRENCY', 1, 1, 8),
   REPORTS_EXPORT_TENANT_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_TENANT_CONCURRENCY', 2, 1, 32),
   REPORTS_EXPORT_GLOBAL_CONCURRENCY: optionalBoundedInt('REPORTS_EXPORT_GLOBAL_CONCURRENCY', 2, 1, 64),
+  // statement_timeout inside an export's snapshot transaction only; every
+  // other report statement keeps the pool's 30 s.
+  REPORTS_EXPORT_STATEMENT_TIMEOUT_MS: optionalBoundedInt('REPORTS_EXPORT_STATEMENT_TIMEOUT_MS', 120_000, 30_000, 900_000),
 
   // JWT
   JWT_SECRET: required('JWT_SECRET'),
