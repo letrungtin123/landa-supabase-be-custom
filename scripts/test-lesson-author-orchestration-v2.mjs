@@ -1,15 +1,10 @@
 import { spawn } from 'node:child_process';
-import { readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listOrchestrationV2TestFiles } from './lesson-author-orchestration-v2-test-files.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const testDirectory = path.join(root, 'src', 'modules', 'ai-chatbot');
-const tests = (await readdir(testDirectory))
-  .filter(name => (name.startsWith('lesson-author-orchestration-v2') || name.startsWith('lesson-author-idm'))
-    && name.endsWith('.test.ts'))
-  .sort()
-  .map(name => path.join(testDirectory, name));
+const tests = await listOrchestrationV2TestFiles(root);
 
 if (tests.length === 0) {
   throw new Error('ORCHESTRATION_V2_TEST_SUITE_EMPTY');
