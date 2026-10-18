@@ -19,6 +19,7 @@ import { createHash } from 'crypto';
 import type { Request, Response } from 'express';
 import rateLimit, { ipKeyGenerator, type RateLimitRequestHandler } from 'express-rate-limit';
 import { env } from '../config/env.js';
+import { processRolePlan } from '../config/process-role.js';
 import { authenticatedUserOrIpRateLimitKey } from './rate-limit-key.js';
 import { SharedRateLimitStore } from './rate-limit-store.js';
 
@@ -243,6 +244,8 @@ export const apiLimiter = limiter({
   skip: (req) => (req.baseUrl === '/api' && (req.path === '/auth' || req.path.startsWith('/auth/')))
     || hasOwnSignInBudget(req)
     || isPublicSsoConfigRead(req),
-  // High-volume limiter: keep today's per-process counters (no Redis round trip per API call).
-  sharedStore: false,
+  // High-volume limiter: per-process counters with one API process (no Redis
+  // round trip per API call); shared through Redis with several, so a user's
+  // budget does not grow with the number of processes.
+  sharedStore: processRolePlan.severalApiInstances,
 });

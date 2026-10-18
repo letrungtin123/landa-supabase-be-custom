@@ -11,6 +11,8 @@ import { isShuttingDown } from './config/process-lifecycle.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
+import { SharedRateLimitStore } from './middleware/rate-limit-store.js';
+import { processRolePlan } from './config/process-role.js';
 import { useJsonBodyParsers } from './middleware/body-limits.js';
 
 // Routes
@@ -60,10 +62,12 @@ if (env.TRUSTED_PROXY_CIDRS.length > 0) {
   console.warn(`[Server] Trust proxy enabled by legacy hop count: ${env.TRUST_PROXY_HOPS}. Configure TRUSTED_PROXY_CIDRS for production.`);
 }
 
-if (env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
+if (!env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED) {
+  console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
+} else if (processRolePlan.runsBackgroundWork) {
   startEmailOutboxWorker({ keepAlive: false, source: 'inline' });
 } else {
-  console.log('[EmailOutbox] Inline worker disabled; use the dedicated email worker process.');
+  console.log('[EmailOutbox] Inline worker runs in the background process (LANDA_PROCESS_ROLE=api here).');
 }
 
 // ── Graceful shutdown ──
@@ -102,9 +106,15 @@ app.use(express.urlencoded({ extended: true }));
 // ── Rate Limiting — brute-force protection ──
 // Sign-in, refresh, password change, one-time links and profile updates have
 // their own limits in modules/auth/auth.routes.ts (middleware/auth-rate-limit.ts).
+// With several API processes these counters are shared through Redis (a
+// per-process fallback when it is unavailable); with one, they stay in memory.
+const sharedLimiterStore = (prefix: string) => (processRolePlan.severalApiInstances
+  ? { store: new SharedRateLimitStore({ prefix }) }
+  : {});
 const demoLoginLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 120,
+  ...sharedLimiterStore('demo-login'),
   message: { success: false, message: 'Quá nhiều request demo login, vui lòng thử lại sau' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -153,6 +163,7 @@ const studySessionLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,  // 1 phút
   max: 30,                    // 30 requests/phút — FE gửi max 7 entries khi đóng tab
   keyGenerator: authenticatedUserOrIpRateLimitKey,
+  ...sharedLimiterStore('study-session'),
   message: { success: false, message: 'Quá nhiều request study session' },
   standardHeaders: true,
   legacyHeaders: false,
