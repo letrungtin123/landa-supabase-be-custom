@@ -4,14 +4,17 @@
 // Read on scrape only: event-loop delay (perf_hooks histogram, reset after
 // each scrape, so p50/p99/max cover the time since the previous scrape),
 // database pool, HTTP requests, AI chat admission and the Redis breaker.
+// Every sample carries an `instance` label (PM2 instance number, else pid).
 // ═══════════════════════════════════════════════════════════════
 
 import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
+import { env } from '../../config/env.js';
 import { pool } from '../../config/database.js';
 import { redisMetricsState } from '../../config/redis.js';
 import {
   createRequestMetrics,
   formatPrometheus,
+  metricsInstanceLabel,
   requestMetricFamilies,
   type MetricFamily,
   type RequestMetrics,
@@ -97,6 +100,9 @@ function redisFamilies(): MetricFamily[] {
   ];
 }
 
+/** The `instance` label of every sample of this process (metricsInstanceLabel). */
+export const METRICS_INSTANCE = metricsInstanceLabel(env.NODE_APP_INSTANCE, process.pid);
+
 export function collectMetricsText(): string {
   return formatPrometheus([
     ...eventLoopFamilies(),
@@ -104,5 +110,5 @@ export function collectMetricsText(): string {
     ...requestMetricFamilies(requestMetrics.snapshot()),
     ...aiChatFamilies(),
     ...redisFamilies(),
-  ]);
+  ], { instance: METRICS_INSTANCE });
 }

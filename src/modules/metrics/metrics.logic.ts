@@ -141,14 +141,25 @@ function formatValue(value: number): string {
   return String(value);
 }
 
-export function formatPrometheus(families: readonly MetricFamily[]): string {
+/**
+ * The `instance` label of this process: the PM2 instance number
+ * (NODE_APP_INSTANCE) when PM2 set one, else the pid. Several API processes
+ * behind one port answer scrapes in turn; the label keeps their numbers apart.
+ */
+export function metricsInstanceLabel(pm2Instance: string | undefined, pid: number): string {
+  return pm2Instance?.trim() || String(pid);
+}
+
+/** `constantLabels` come first on every sample (e.g. the process instance). */
+export function formatPrometheus(families: readonly MetricFamily[], constantLabels: Readonly<Record<string, string>> = {}): string {
   const lines: string[] = [];
   for (const family of families) {
     lines.push(`# HELP ${family.name} ${family.help}`);
     lines.push(`# TYPE ${family.name} ${family.type}`);
     for (const sample of family.samples) {
-      const labels = sample.labels && Object.keys(sample.labels).length > 0
-        ? `{${Object.entries(sample.labels).map(([key, value]) => `${key}="${escapeLabelValue(value)}"`).join(',')}}`
+      const merged = { ...constantLabels, ...sample.labels };
+      const labels = Object.keys(merged).length > 0
+        ? `{${Object.entries(merged).map(([key, value]) => `${key}="${escapeLabelValue(value)}"`).join(',')}}`
         : '';
       lines.push(`${family.name}${sample.suffix ?? ''}${labels} ${formatValue(sample.value)}`);
     }

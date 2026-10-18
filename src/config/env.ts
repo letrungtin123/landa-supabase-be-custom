@@ -269,6 +269,9 @@ export const env = {
   // `Authorization: Bearer <token>` is required too. false = off (404).
   METRICS_ENABLED: optionalBoolean('METRICS_ENABLED', true),
   METRICS_TOKEN: process.env.METRICS_TOKEN?.trim() || '',
+  // Set by PM2 (the instance number of the app); the `instance` label of
+  // every metric (the pid when unset).
+  NODE_APP_INSTANCE: process.env.NODE_APP_INSTANCE?.trim() || '',
 
   // Redis (optional; DB fallback is used if unavailable)
   REDIS_URL: process.env.REDIS_URL?.trim() || '',

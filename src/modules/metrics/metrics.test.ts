@@ -60,6 +60,21 @@ test('the Prometheus text has HELP, TYPE and escaped labels', () => {
   assert.equal(text, '# HELP x_total X.\n# TYPE x_total counter\nx_total{a="q\\"u\\\\o\\nte"} 2\n# HELP y Y.\n# TYPE y gauge\ny 0.5\n');
 });
 
+test('constant labels come first on every sample; the instance is the PM2 instance number, else the pid', () => {
+  const text = logic.formatPrometheus([
+    { name: 'x_total', help: 'X.', type: 'counter', samples: [{ labels: { a: 'b' }, value: 2 }] },
+    { name: 'h', help: 'H.', type: 'histogram', samples: [{ suffix: '_bucket', labels: { le: '+Inf' }, value: 1 }, { suffix: '_sum', value: 0.5 }] },
+    { name: 'y', help: 'Y.', type: 'gauge', samples: [{ value: 0.5 }] },
+  ], { instance: '1' });
+  assert.equal(text, '# HELP x_total X.\n# TYPE x_total counter\nx_total{instance="1",a="b"} 2\n'
+    + '# HELP h H.\n# TYPE h histogram\nh_bucket{instance="1",le="+Inf"} 1\nh_sum{instance="1"} 0.5\n'
+    + '# HELP y Y.\n# TYPE y gauge\ny{instance="1"} 0.5\n');
+  assert.equal(logic.metricsInstanceLabel('3', 4242), '3');
+  assert.equal(logic.metricsInstanceLabel('0', 4242), '0', 'PM2 instance 0 is a real instance number');
+  assert.equal(logic.metricsInstanceLabel('', 4242), '4242');
+  assert.equal(logic.metricsInstanceLabel(undefined, 4242), '4242');
+});
+
 test('access: loopback only, no proxied request, bearer token when configured', () => {
   const decide = (remoteAddress: string, headers: Record<string, string> = {}, token = '', enabled = true) =>
     logic.decideMetricsAccess({ enabled, token, remoteAddress, headers });
@@ -118,13 +133,18 @@ test('GET /internal/metrics answers a local scrape with every metric family', as
       'landa_ai_chat_answers_active', 'landa_ai_chat_admission_refused_total',
       'landa_redis_configured', 'landa_redis_ready', 'landa_redis_breaker_open',
     ]) assert.match(scrape.body, new RegExp(`^# TYPE ${name} `, 'm'), name);
-    assert.match(scrape.body, /^landa_http_requests_total\{group="learner",status_class="2xx"\} 1$/m);
-    assert.match(scrape.body, /^landa_http_request_duration_seconds_count\{group="learner"\} 1$/m);
-    assert.match(scrape.body, /^landa_http_request_duration_seconds_bucket\{group="learner",le="\+Inf"\} 1$/m);
-    assert.match(scrape.body, /^landa_ai_chat_answers_active 3$/m);
-    assert.match(scrape.body, /^landa_ai_chat_admission_refused_total 1$/m);
+    const instance = `instance="${service.METRICS_INSTANCE}"`;
+    assert.equal(service.METRICS_INSTANCE, logic.metricsInstanceLabel(process.env.NODE_APP_INSTANCE, process.pid));
+    assert.match(scrape.body, new RegExp(`^landa_http_requests_total\\{${instance},group="learner",status_class="2xx"\\} 1$`, 'm'));
+    assert.match(scrape.body, new RegExp(`^landa_http_request_duration_seconds_count\\{${instance},group="learner"\\} 1$`, 'm'));
+    assert.match(scrape.body, new RegExp(`^landa_http_request_duration_seconds_bucket\\{${instance},group="learner",le="\\+Inf"\\} 1$`, 'm'));
+    assert.match(scrape.body, new RegExp(`^landa_ai_chat_answers_active\\{${instance}\\} 3$`, 'm'));
+    assert.match(scrape.body, new RegExp(`^landa_ai_chat_admission_refused_total\\{${instance}\\} 1$`, 'm'));
     assert.doesNotMatch(scrape.body, /group="other"[^\n]*status_class/, 'the scrape itself is not counted');
-    assert.match(scrape.body, /^landa_redis_breaker_open 0$/m);
+    assert.match(scrape.body, new RegExp(`^landa_redis_breaker_open\\{${instance}\\} 0$`, 'm'));
+    const samples = scrape.body.split('\n').filter((line) => line !== '' && !line.startsWith('#'));
+    assert.ok(samples.length > 20);
+    for (const line of samples) assert.ok(line.includes(`{${instance}`), `every sample has the instance label: ${line}`);
 
     const proxied = await get(server.port, METRICS_PATH, { 'X-Forwarded-For': '203.0.113.9' });
     assert.equal(proxied.status, 404, 'a request forwarded by a gateway gets the ordinary 404');
