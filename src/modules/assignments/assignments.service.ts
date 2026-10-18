@@ -450,6 +450,7 @@ export async function createAssignment(
   const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId);
   const client = await getClient();
   let assignmentCreatedEmailJobQueued = false;
+  let createdAssignment: Record<string, unknown> = {};
   const deadline = normalizeDeadlineForWrite(input);
   const submissionUnlockMode = normalizeSubmissionUnlockMode(input.submission_unlock_mode);
 
@@ -576,22 +577,7 @@ export async function createAssignment(
 
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(assignment, course.display_name)));
     await client.query('COMMIT');
-
-    // Learners' unread counts include the new assignment notification.
-    if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
-
-    await scheduleCourseProgressRecalculation({
-      tenantId,
-      courseId,
-      reason: 'assignment_created',
-      assignmentId: assignment.id,
-    });
-
-    if (assignmentCreatedEmailJobQueued) {
-      wakeEmailOutboxWorker('assignment-created');
-    }
-
-    return normalizeAssignmentRow(assignment);
+    createdAssignment = assignment;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     if (uploadedAttachment) {
@@ -604,6 +590,25 @@ export async function createAssignment(
   } finally {
     client.release();
   }
+
+  // After the commit and with the connection back in the pool: a slow
+  // broker or cache never holds it, and a failure here can no longer roll
+  // back (or delete the attachment of) the committed assignment.
+  // Learners' unread counts include the new assignment notification.
+  if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
+
+  await scheduleCourseProgressRecalculation({
+    tenantId,
+    courseId,
+    reason: 'assignment_created',
+    assignmentId: String(createdAssignment.id),
+  });
+
+  if (assignmentCreatedEmailJobQueued) {
+    wakeEmailOutboxWorker('assignment-created');
+  }
+
+  return normalizeAssignmentRow(createdAssignment);
 }
 
 export async function updateAssignment(
@@ -734,26 +739,27 @@ export async function deleteAssignment(
     if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(current)));
     await client.query('COMMIT');
-
-    await scheduleCourseProgressRecalculation({
-      tenantId,
-      courseId: current.course_id,
-      reason: 'assignment_deleted',
-      assignmentId: current.id,
-    });
-
-    return {
-      id: current.id,
-      title: current.title,
-      course_id: current.course_id,
-      course_name: current.course_name,
-    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
     client.release();
   }
+
+  // After the commit and with the connection back in the pool.
+  await scheduleCourseProgressRecalculation({
+    tenantId,
+    courseId: current.course_id,
+    reason: 'assignment_deleted',
+    assignmentId: current.id,
+  });
+
+  return {
+    id: current.id,
+    title: current.title,
+    course_id: current.course_id,
+    course_name: current.course_name,
+  };
 }
 
 export async function reorderAssignments(

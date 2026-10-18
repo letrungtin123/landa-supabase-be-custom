@@ -92,8 +92,9 @@ async function runCommittedWork(work: () => Promise<void>): Promise<void> {
 /**
  * Runs `work` once the surrounding withDatabaseTransaction() has committed,
  * or right away when there is none (autocommit). Dropped on rollback. Meant
- * for cache invalidation, which must not run before other requests can see
- * the new data. Failures are logged, never thrown. Legacy getClient() + BEGIN
+ * for cache invalidation and queue wake-ups, which must not run before other
+ * requests (or workers) can see the new data, and must not keep the
+ * transaction open. Failures are logged, never thrown. Legacy getClient() + BEGIN
  * transactions are not tracked: their callers invalidate after their own
  * COMMIT.
  */

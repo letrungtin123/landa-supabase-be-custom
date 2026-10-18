@@ -1,4 +1,4 @@
-import { query } from '../../config/database.js';
+import { afterCommit, query } from '../../config/database.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { env } from '../../config/env.js';
 import { QUEUES, publish } from '../../config/rabbitmq/index.js';
@@ -100,11 +100,18 @@ export async function scheduleCourseProgressRecalculation(
     return;
   }
 
-  try {
-    await wakeCourseProgressRecalculationJob(jobId);
-  } catch (error) {
-    console.error('[course-progress-recalculation] Failed to publish job wake-up; poller will retry queued jobs', error);
-  }
+  // The job row joins the caller's transaction (bulk enrollment runs in an
+  // audited one); the wake-up is sent once it commits, so a worker never
+  // looks before the row is visible and a slow broker never holds the
+  // transaction. Without a transaction it is sent right away. A message
+  // lost after the commit is recovered by the queued-job poller.
+  await afterCommit(async () => {
+    try {
+      await wakeCourseProgressRecalculationJob(jobId);
+    } catch (error) {
+      console.error('[course-progress-recalculation] Failed to publish job wake-up; poller will retry queued jobs', error);
+    }
+  });
 }
 
 async function claimCourseProgressRecalculationJob(jobId: string): Promise<ProgressRecalculationJob | null> {
