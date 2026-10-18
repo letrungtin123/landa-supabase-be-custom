@@ -114,7 +114,10 @@ export async function withReportsSnapshot<T>(
   const client = await getReportsPool().connect();
   const snapshot: ReportsSnapshot = { client, open: true };
   let backendPid: number | null = null;
-  let cancelling: Promise<unknown> | null = null;
+  // Set by the abort listener. Declared with `as` so TypeScript does not narrow
+  // it to null in the catch/finally below: there it can be the running cancel,
+  // which must finish before the connection is released.
+  let cancelling = null as Promise<unknown> | null;
   const cancelRunningStatement = () => {
     if (backendPid === null || cancelling) return;
     // The main pool always has room for this one-row call; the reports pool may be full.

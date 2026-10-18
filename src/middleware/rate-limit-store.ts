@@ -129,7 +129,8 @@ export class SharedRateLimitStore implements Store {
         this.reportFallback(error instanceof Error ? error.message : 'error');
       }
     }
-    this.memory.decrement(key);
+    // In memory, no I/O: awaiting adds no wait, and a failure reaches the limiter.
+    await this.memory.decrement(key);
   }
 
   async resetKey(key: string): Promise<void> {
@@ -142,7 +143,7 @@ export class SharedRateLimitStore implements Store {
         this.reportFallback(error instanceof Error ? error.message : 'error');
       }
     }
-    this.memory.resetKey(key);
+    await this.memory.resetKey(key);
   }
 
   shutdown(): void {

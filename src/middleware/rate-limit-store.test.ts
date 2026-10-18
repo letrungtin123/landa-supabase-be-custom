@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Options } from 'express-rate-limit';
+import { MemoryStore, type Options } from 'express-rate-limit';
 import { SharedRateLimitStore, type RateLimitCounterClient } from './rate-limit-store.js';
 
 function fakeRedis(): RateLimitCounterClient & { values: Map<string, number>; ttl: Map<string, number> } {
@@ -73,4 +73,27 @@ test('falls back to per-process counters when Redis is missing, failing or slow'
   const slowStore = storeWith(slow, 20);
   assert.equal((await slowStore.increment('k')).totalHits, 1);
   slowStore.shutdown();
+});
+
+test('decrement and resetKey finish the per-process counter before they resolve, and pass its failure on', async (t) => {
+  // MemoryStore's methods are async. Unawaited, the store resolved before the
+  // counter changed and a failure became an unhandled rejection.
+  for (const method of ['decrement', 'resetKey'] as const) {
+    let finished = false;
+    const slow = t.mock.method(MemoryStore.prototype, method, async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      finished = true;
+    });
+    const store = storeWith(null);
+    await store[method]('k');
+    assert.equal(finished, true, `${method} waited for the per-process counter`);
+    store.shutdown();
+    slow.mock.restore();
+
+    const failing = t.mock.method(MemoryStore.prototype, method, async () => { throw new Error('memory store failed'); });
+    const failingStore = storeWith(null);
+    await assert.rejects(failingStore[method]('k'), /memory store failed/, `${method} passes the failure to the limiter`);
+    failingStore.shutdown();
+    failing.mock.restore();
+  }
 });

@@ -635,8 +635,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
 
   // A shutdown waits (bounded) for this answer to settle its metering.
+  // Intentionally not awaited: the promise resolves in the finally below, once
+  // the answer settled, and never rejects; the lifecycle only observes it.
   let answerSettled: () => void = () => {};
-  trackShutdownWork(new Promise<void>((resolve) => { answerSettled = resolve; }));
+  void trackShutdownWork(new Promise<void>((resolve) => { answerSettled = resolve; }));
   try {
   await chatService.sendMessageStream(
     conversationId,
