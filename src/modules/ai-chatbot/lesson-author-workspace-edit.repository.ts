@@ -6,6 +6,7 @@ import { WORKSPACE_AGGREGATE_EDIT, WORKSPACE_MEDIA_EDIT } from './lesson-author-
 import { prepareWorkspaceEdit, prepareWorkspaceReset, readWorkspaceContent, workspaceLocale, WorkspaceContractError,
   type WorkspaceNodeSnapshot, type WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
 import { isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 export type WorkspaceEditCode = 'WORKSPACE_EDIT_FORBIDDEN' | 'WORKSPACE_EDIT_NOT_FOUND'
   | 'WORKSPACE_EDIT_STATE_INVALID' | 'WORKSPACE_EDIT_CONTRACT_INVALID' | 'WORKSPACE_EDIT_VALIDATION_REQUIRED'
@@ -105,8 +106,7 @@ export function createWorkspaceEditRepository(deps: {
     try {
       return await deps.db.transaction(async tx => {
         if (!await deps.canEdit(tx, target)) fail('WORKSPACE_EDIT_FORBIDDEN');
-        const course = await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
-        if (course.rows.length !== 1) fail('WORKSPACE_EDIT_NOT_FOUND');
+        if (!await createCourseAccessRepository(tx).lockCourseOfTenant(target.courseId, target.tenantId)) fail('WORKSPACE_EDIT_NOT_FOUND');
         const deleting = await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs
           WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND conversation_id=$4
             AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,

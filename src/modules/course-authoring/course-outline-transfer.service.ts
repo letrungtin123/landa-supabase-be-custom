@@ -25,6 +25,7 @@ import {
   TENANT_DATA_QUOTA_RECONCILING_SQLSTATE,
 } from '../tenants/tenant-data-quota.constants.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 
 export type CourseOutlineTransferOperation = 'duplicate' | 'move';
 export type CourseOutlineTransferStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -960,11 +961,7 @@ export async function listTransferDestinationOptions(
     throw new AppError('Đường dẫn vị trí nhận nội dung không hợp lệ.', 400);
   }
 
-  const course = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL`,
-    [destinationCourseId, tenantId],
-  );
-  if (!course.rows[0]) throw new AppError('Khóa học nhận nội dung không còn hợp lệ.', 404);
+  await assertCourseBelongsToTenant(destinationCourseId, tenantId, 'Khóa học nhận nội dung không còn hợp lệ.');
 
   if (path.length === expectedTypes.length) {
     await assertDestinationPath(tenantId, destinationCourseId, sourceBlockType, path, path.at(-1) || destinationCourseId);

@@ -5,6 +5,7 @@ import { workspaceBudgetForNextItem, type WorkspaceBudgetManifest, type Workspac
 import type { WorkspaceReadOwner } from './lesson-author-workspace-read.repository.js';
 import type { WorkspaceWorkItemLease } from './lesson-author-workspace-work-item.repository.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 export interface WorkspaceAdmissionTarget extends WorkspaceReadOwner { workspaceId: string; }
 /** Server preparation only: budget is the output of buildWorkspaceBudgetManifest.
@@ -127,8 +128,7 @@ export function createWorkspaceAdmissionRepository(deps: {
     await tx.query("SET LOCAL lock_timeout = '3000ms'");
     const advisory = await tx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',[`course:${t.tenantId}:${t.courseId}`]);
     if (advisory.rows.length !== 1 || advisory.rows[0].acquired !== true) fail('WORKSPACE_ADMISSION_CONFLICT');
-    const course = await tx.query('SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE',[t.courseId,t.tenantId]);
-    if (course.rows.length !== 1) fail('WORKSPACE_ADMISSION_NOT_FOUND');
+    if (!await createCourseAccessRepository(tx).lockCourseOfTenant(t.courseId, t.tenantId)) fail('WORKSPACE_ADMISSION_NOT_FOUND');
     const ws = await tx.query(`SELECT w.id,w.status,w.blueprint_id,w.bot_id,w.kb_id,w.source_snapshot_hash,w.correlation_id,w.content_locale
       FROM lesson_author_workspaces w JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
         AND c.course_id=w.course_id AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'

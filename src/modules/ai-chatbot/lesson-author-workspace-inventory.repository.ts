@@ -11,6 +11,7 @@ import { WorkspaceComponentError } from './lesson-author-workspace-component.log
 import { WorkspaceEditError } from './lesson-author-workspace-edit.repository.js';
 import { buildWorkspaceInventory, WorkspacePublicationError, type WorkspacePublicationCode } from './lesson-author-workspace-inventory.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 export interface WorkspaceInventoryTarget extends WorkspaceReadOwner { workspaceId: string; blueprintId: string; operationId: string; }
 export interface WorkspaceInventoryDiagnostic {
@@ -67,8 +68,7 @@ export function createWorkspaceInventoryRepository(deps: {
         || typeof target.courseId !== 'string' || !target.courseId || target.courseId.length > 255) fail('WORKSPACE_PUBLICATION_INVALID');
       const receipt = await deps.db.transaction(async tx => {
         if (!await deps.canEdit(tx, target)) fail('WORKSPACE_PUBLICATION_FORBIDDEN');
-        const course = await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
-        if (course.rows.length !== 1) fail('WORKSPACE_PUBLICATION_FORBIDDEN');
+        if (!await createCourseAccessRepository(tx).lockCourseOfTenant(target.courseId, target.tenantId)) fail('WORKSPACE_PUBLICATION_FORBIDDEN');
         const params = [target.workspaceId, target.tenantId, target.courseId, target.conversationId, target.userId];
         const result = await tx.query(`SELECT w.id,w.status,w.blueprint_id,w.source_snapshot_hash,w.content_locale,w.correlation_id
           FROM lesson_author_workspaces w JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id

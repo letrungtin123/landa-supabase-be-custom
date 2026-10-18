@@ -40,6 +40,7 @@ import {
   finishCoursePublishCandidate,
 } from './course-publish-governance.repository.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 export {
   getLessonAuthorSortableItems,
   orderLessonAuthorComponents,
@@ -1436,11 +1437,7 @@ export async function getCourseAssets(
 ): Promise<CourseAssetsResponse> {
   const safePage = Math.max(0, page);
   const safePageSize = Math.max(1, Math.min(pageSize, 100));
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
   const conditions: string[] = ['ca.course_id = $1', 'ca.tenant_id = $2'];
   const params: any[] = [courseId, tenantId];
@@ -1621,11 +1618,7 @@ async function annotateAssetRowsWithOutlineReferences(courseId: string, rows: an
 /** 404 unless the course exists, is not deleted and belongs to the tenant. */
 export async function assertCourseInTenant(courseId: string, tenantId: string | null | undefined): Promise<void> {
   if (!tenantId) throw new AppError('Course not found', 404);
-  const result = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Course not found', 404);
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 }
 
 export async function createAssetRecord(

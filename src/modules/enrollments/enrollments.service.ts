@@ -6,6 +6,7 @@
 import { query } from '../../config/database.js';
 import { invalidateUserBadgeCaches, invalidateUserCourseProgressCache } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 import {
   assertUserNotActiveDemoIframeAccount,
   getActiveDemoIframeUserIds,
@@ -211,12 +212,8 @@ export async function enrollUser(
   await assertEnrollableLearner(userId, tenantId);
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể ghi danh learner demo iframe đang hoạt động');
 
-  // Guard: course must exist and not be soft-deleted
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+  // Guard: course must exist, not be soft-deleted and belong to the tenant
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
   // Check if already enrolled
   const existing = await query<{ id: string; is_active: boolean }>(
@@ -265,12 +262,8 @@ export async function bulkEnroll(
     throw new AppError('Không thể ghi danh learner demo iframe đang hoạt động', 403);
   }
 
-  // Guard: course must exist and not be soft-deleted
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+  // Guard: course must exist, not be soft-deleted and belong to the tenant
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
   const result = await query<{ inserted_count: number; reactivated_count: number }>(
     `WITH requested_users AS (

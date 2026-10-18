@@ -18,6 +18,7 @@ import type { GenerationJobSql, GenerationJobDatabase } from './lesson-author-ge
 import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import { assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 /** Injectable composition seam; production exports below retain their signatures.
  * Importing this module performs no config/connection/service initialization. */
@@ -86,8 +87,7 @@ async function lockWorkspace(tx:GenerationJobSql,t:WorkspaceAdmissionTarget){
   await tx.query("SET LOCAL lock_timeout = '3000ms'");
   const advisory=await tx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',[`course:${t.tenantId}:${t.courseId}`]);
   if(advisory.rows.length!==1||advisory.rows[0].acquired!==true)reject('WORKSPACE_RUNTIME_CONFLICT');
-  const course=await tx.query('SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE',[t.courseId,t.tenantId]);
-  if(course.rows.length!==1)reject('WORKSPACE_RUNTIME_FORBIDDEN');
+  if(!await createCourseAccessRepository(tx).lockCourseOfTenant(t.courseId,t.tenantId))reject('WORKSPACE_RUNTIME_FORBIDDEN');
   const ws=await tx.query(`SELECT w.id,w.status,w.correlation_id FROM lesson_author_workspaces w
     JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.course_id=w.course_id
       AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -232,8 +232,7 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
     const result=await withDatabaseTransaction(async tx=>{
       const a=adapters.createWorkspaceAuthority(user),target={tenantId,userId:user.id,conversationId:input.conversationId,courseId:input.courseId,workspaceId:input.operationId};
       // Consistent course→conversation→workspace lock order; no provider I/O.
-      const course=await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`,[input.courseId,tenantId]);
-      if(course.rows.length!==1)reject('WORKSPACE_RUNTIME_FORBIDDEN');
+      if(!await createCourseAccessRepository(tx).lockCourseOfTenant(input.courseId,tenantId))reject('WORKSPACE_RUNTIME_FORBIDDEN');
       if(!await a.canEdit(tx,target))reject('WORKSPACE_RUNTIME_FORBIDDEN');
       const deleting=await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs WHERE tenant_id=$1 AND course_id=$2
         AND requested_by=$3 AND conversation_id=$4 AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,

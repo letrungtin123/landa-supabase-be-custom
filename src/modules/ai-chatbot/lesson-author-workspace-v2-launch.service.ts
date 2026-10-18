@@ -10,6 +10,7 @@ import {
   assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
 } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 type Query = (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
 type ExistingWorkspace = {
@@ -124,9 +125,8 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         const authority = createWorkspaceAuthority(user);
         const target = { tenantId, userId: user.id, conversationId: input.conversationId,
           courseId: input.courseId, workspaceId: replay?.id ?? input.operationId };
-        const course = await tx.query('SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE',
-          [input.courseId, tenantId]);
-        if (course.rows.length !== 1 || !await authority.canEdit(tx, target)) fail('WORKSPACE_RUNTIME_FORBIDDEN', 403);
+        if (!await createCourseAccessRepository(tx).lockCourseOfTenant(input.courseId, tenantId)
+          || !await authority.canEdit(tx, target)) fail('WORKSPACE_RUNTIME_FORBIDDEN', 403);
         const deleting = await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs
           WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND conversation_id=$4
             AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
