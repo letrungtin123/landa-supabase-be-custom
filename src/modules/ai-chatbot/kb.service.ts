@@ -4,11 +4,10 @@
 
 import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
-import { cacheKey } from '../../config/cache.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { uploadFile, uploadFileFromPath, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../config/storage.js';
-import { extractLocalSourceContent, extractLocalSourceContentFromFile } from './kb-local-source-content.js';
+import { extractLocalSourceContentFromFile } from './kb-local-source-content.js';
 import { readFaqSheetSummary } from './kb-faq-sheet.service.js';
 import { signKbDocumentSourceUrl } from './kb-source-download-url.logic.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
@@ -17,8 +16,6 @@ import { AppError } from '../../middleware/error-handler.js';
 import { normalizeKbDocumentDisplayName,
   type CreateKbInput, type UpdateKbInput, type CreateArticleInput, type UpdateArticleInput } from './kb.validator.js';
 import * as XLSX from 'xlsx';
-import fs from 'fs/promises';
-import path from 'path';
 import { env } from '../../config/env.js';
 import { enqueueKbOperation, hasQueuedKnowledgebaseDeletion } from './kb-operation.service.js';
 import {
@@ -186,10 +183,6 @@ export async function deleteDocumentGeminiMappingsStrict(
   const aiClient = await getGeminiClient(tenantId);
   await deleteFromStore(mappings.rows.map(r => r.gemini_path), aiClient);
   return mappings.rows.length;
-}
-
-function kbRestoreLockKey(tenantId: string, kbId: string): string {
-  return cacheKey('ai-chatbot', 'kb-restore-lock', tenantId, kbId);
 }
 
 function isRedisPermissionError(err: unknown): boolean {
@@ -491,51 +484,6 @@ export async function updateKnowledgebase(id: string, tenantId: string, input: U
   return result.rows[0] || null;
 }
 
-export async function deleteKnowledgebase(id: string, tenantId: string): Promise<boolean> {
-  // Check if any bot references this KB
-  const botCheck = await query<{ cnt: number }>(
-    `SELECT COUNT(*)::int AS cnt FROM chatbots WHERE kb_id = $1 AND tenant_id = $2`,
-    [id, tenantId],
-  );
-  if (botCheck.rows[0]?.cnt > 0) {
-    throw new AppError(`Không thể xoá KB — đang có ${botCheck.rows[0].cnt} bot sử dụng`, 409);
-  }
-
-  const assignmentCheck = await query<{ cnt: number }>(
-    `SELECT COUNT(*)::int AS cnt FROM tenant_kb_assignments WHERE kb_id = $1 AND tenant_id = $2`,
-    [id, tenantId],
-  );
-  if ((assignmentCheck.rows[0]?.cnt ?? 0) > 0) {
-    throw new AppError('Khong the xoa KB dang duoc gan cho chuyen gia bai hoc', 409);
-  }
-
-  // Get all document file paths to cleanup storage
-  const docs = await query<{ file_path: string | null }>(
-    `SELECT file_path FROM kb_documents WHERE kb_id = $1 AND tenant_id = $2`,
-    [id, tenantId],
-  );
-
-  // 1. Delete from Gemini FIRST. If this fails, keep DB/storage intact so no
-  // File Search document is left without DB ownership.
-  await deleteKbGeminiRemoteResources(id, tenantId);
-
-  // 2. Delete KB from DB (CASCADE → kb_documents → kb_doc_gemini_mapping + kb_google_store)
-  const result = await query(
-    `DELETE FROM knowledgebases WHERE id = $1 AND tenant_id = $2`,
-    [id, tenantId],
-  );
-
-  // 3. Cleanup storage files (non-critical)
-  for (const doc of docs.rows) {
-    if (doc.file_path) {
-      try { await deleteFile(doc.file_path); } catch { /* ignore */ }
-    }
-  }
-
-  if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
-  return (result.rowCount || 0) > 0;
-}
-
 // ═══════════════════════════════════════
 // Document CRUD
 // ═══════════════════════════════════════
@@ -600,60 +548,6 @@ export async function getDocument(docId: string, tenantId: string): Promise<KbDo
     [docId, tenantId],
   );
   return result.rows[0] || null;
-}
-
-/**
- * Upload a document file: insert record → upload to storage → enqueue Gemini job.
- */
-export async function uploadDocument(
-  kbId: string,
-  tenantId: string,
-  userId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
-): Promise<KbDocument> {
-  await assertKnowledgebaseMutable(kbId, tenantId, 'upload tai lieu moi');
-  const ext = file.originalname.substring(file.originalname.lastIndexOf('.')).toLowerCase();
-
-  // 1. Insert document record (status=draft)
-  const sourceInfo = {
-    name: file.originalname,
-    size: file.size,
-    extension: ext,
-    mime_type: file.mimetype,
-  };
-  const localContent = extractLocalSourceContent(ext, file.buffer);
-
-  const insertResult = await query<KbDocument>(
-    `INSERT INTO kb_documents (tenant_id, kb_id, type, name, status, source_info, content, created_by)
-     VALUES ($1, $2, 'file', $3, 'draft', $4, $5, $6)
-     RETURNING *`,
-    [tenantId, kbId, file.originalname, JSON.stringify(sourceInfo), localContent, userId],
-  );
-  const doc = insertResult.rows[0];
-
-  // 2. Upload to Supabase Storage
-  const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const safeFileName = buildFileName(file.originalname);
-  const storagePath = buildStoragePath(tenantId, 'kb-files', safeFileName, dateFolder);
-
-  await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  // 3. Update document with file_path + status=learning
-  await query(
-    `UPDATE kb_documents SET file_path = $1, status = 'learning', updated_at = now() WHERE id = $2`,
-    [storagePath, doc.id],
-  );
-
-  // 4. Enqueue Gemini upload job
-  await publish(QUEUES.GEMINI_UPLOAD, {
-    documentId: doc.id,
-    kbId,
-    tenantId,
-    mode: 'file',
-  });
-
-  await invalidateTenantAiCaches(tenantId);
-  return { ...doc, file_path: storagePath, status: 'learning' };
 }
 
 /**
@@ -737,60 +631,6 @@ export async function bulkDeleteDocuments(
 
   if ((result.rowCount || 0) > 0) await invalidateTenantAiCaches(tenantId);
   return { deleted: result.rowCount || 0 };
-}
-
-/**
- * Retry failed documents — reset to 'learning' and re-enqueue Gemini upload.
- * Only retries documents with status = 'error' that still have file_path.
- */
-export async function retryDocuments(
-  docIds: string[],
-  kbId: string,
-  tenantId: string,
-): Promise<{ retried: number }> {
-  if (docIds.length === 0) return { retried: 0 };
-  await assertKnowledgebaseMutable(kbId, tenantId, 'retry tai lieu');
-
-  // 1. Find eligible docs (status=error, has file_path)
-  const eligible = await query<{ id: string; file_path: string }>(
-    `SELECT id, file_path FROM kb_documents
-     WHERE id = ANY($1) AND kb_id = $2 AND tenant_id = $3
-       AND status = 'error' AND file_path IS NOT NULL`,
-    [docIds, kbId, tenantId],
-  );
-
-  if (!eligible.rowCount || eligible.rowCount === 0) return { retried: 0 };
-
-  const eligibleIds = eligible.rows.map(r => r.id);
-
-  // 2. Delete old Gemini docs before clearing mappings.
-  await deleteDocumentGeminiMappingsStrict(eligibleIds, tenantId);
-
-  // 3. Clear old gemini mappings (if any partial uploads)
-  await query(
-    `DELETE FROM kb_doc_gemini_mapping WHERE document_id = ANY($1)`,
-    [eligibleIds],
-  );
-
-  // 4. Reset status to 'learning', clear error
-  await query(
-    `UPDATE kb_documents SET status = 'learning', error_reason = NULL, updated_at = now()
-     WHERE id = ANY($1)`,
-    [eligibleIds],
-  );
-
-  // 5. Enqueue each doc individually (worker processes 1 at a time via prefetch)
-  for (const doc of eligible.rows) {
-    await publish(QUEUES.GEMINI_UPLOAD, {
-      documentId: doc.id,
-      kbId,
-      tenantId,
-      mode: 'file',
-    });
-  }
-
-  await invalidateTenantAiCaches(tenantId);
-  return { retried: eligibleIds.length };
 }
 
 async function failKnowledgebaseRestoreJob(
@@ -1490,96 +1330,6 @@ export async function linkDocumentGemini(
 // ═══════════════════════════════════════
 
 /**
- * Validate & upload an FAQ xlsx file.
- * Checks template: Sheet 1 must have headers "Question" and "Answer".
- */
-export async function uploadFaqDocument(
-  kbId: string,
-  tenantId: string,
-  userId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
-): Promise<KbDocument> {
-  await assertKnowledgebaseMutable(kbId, tenantId, 'upload FAQ');
-  // 1. Parse xlsx
-  const workbook = XLSX.read(file.buffer, { type: 'buffer' });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new AppError('File xlsx không có sheet nào', 400);
-
-  const sheet = workbook.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet);
-
-  // 2. Validate headers
-  if (rows.length === 0) throw new AppError('File xlsx trống, không có dữ liệu', 400);
-
-  const firstRow = rows[0];
-  const headers = Object.keys(firstRow);
-  const hasQuestion = headers.some(h => h.trim().toLowerCase() === 'question');
-  const hasAnswer = headers.some(h => h.trim().toLowerCase() === 'answer');
-
-  if (!hasQuestion || !hasAnswer) {
-    throw new AppError(
-      `File không đúng template. Cần có 2 cột "Question" và "Answer". ` +
-      `Cột hiện tại: ${headers.join(', ')}. Vui lòng tải template mẫu.`,
-      400,
-    );
-  }
-
-  // 3. Validate rows — each must have both Q and A
-  const qKey = headers.find(h => h.trim().toLowerCase() === 'question')!;
-  const aKey = headers.find(h => h.trim().toLowerCase() === 'answer')!;
-  let emptyRows = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const q = String(rows[i][qKey] || '').trim();
-    const a = String(rows[i][aKey] || '').trim();
-    if (!q || !a) emptyRows++;
-  }
-  if (emptyRows > 0) {
-    console.warn(`[FAQ] ${emptyRows} rows có Question hoặc Answer trống, sẽ bị bỏ qua khi train`);
-  }
-
-  // 4. Insert document record
-  const sourceInfo = {
-    name: file.originalname,
-    size: file.size,
-    extension: '.xlsx',
-    mime_type: file.mimetype,
-    row_count: rows.length,
-    valid_rows: rows.length - emptyRows,
-  };
-
-  const insertResult = await query<KbDocument>(
-    `INSERT INTO kb_documents (tenant_id, kb_id, type, name, status, source_info, created_by)
-     VALUES ($1, $2, 'faq', $3, 'draft', $4, $5)
-     RETURNING *`,
-    [tenantId, kbId, file.originalname, JSON.stringify(sourceInfo), userId],
-  );
-  const doc = insertResult.rows[0];
-
-  // 5. Upload xlsx to Supabase Storage
-  const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const safeFileName = buildFileName(file.originalname);
-  const storagePath = buildStoragePath(tenantId, 'kb-faqs', safeFileName, dateFolder);
-  await uploadFile(storagePath, file.buffer, file.mimetype);
-
-  // 6. Update status + file_path
-  await query(
-    `UPDATE kb_documents SET file_path = $1, status = 'learning', updated_at = now() WHERE id = $2`,
-    [storagePath, doc.id],
-  );
-
-  // 7. Enqueue Gemini upload
-  await publish(QUEUES.GEMINI_UPLOAD, {
-    documentId: doc.id,
-    kbId,
-    tenantId,
-    mode: 'faq',
-  });
-
-  await invalidateTenantAiCaches(tenantId);
-  return { ...doc, file_path: storagePath, status: 'learning' };
-}
-
-/**
  * Generate FAQ template xlsx buffer (in-memory).
  */
 export function generateFaqTemplate(): Buffer {
@@ -1630,176 +1380,6 @@ function htmlToMarkdown(html: string): string {
   // Collapse whitespace
   md = md.replace(/\n{3,}/g, '\n\n').trim();
   return md;
-}
-
-/**
- * Create an article: convert HTML → .md → upload to Storage → enqueue Gemini.
- */
-export async function uploadArticle(
-  kbId: string,
-  tenantId: string,
-  userId: string,
-  input: CreateArticleInput,
-): Promise<KbDocument> {
-  await assertKnowledgebaseMutable(kbId, tenantId, 'tao bai viet');
-  const markdown = `# ${input.title}\n\n${htmlToMarkdown(input.content)}\n`;
-
-  // 1. Insert document record
-  const insertResult = await query<KbDocument>(
-    `INSERT INTO kb_documents (tenant_id, kb_id, type, name, status, content, source_info, created_by)
-     VALUES ($1, $2, 'article', $3, 'draft', $4, $5, $6)
-     RETURNING *`,
-    [
-      tenantId, kbId, input.title, input.content,
-      JSON.stringify({ title: input.title, content_length: input.content.length }),
-      userId,
-    ],
-  );
-  const doc = insertResult.rows[0];
-
-  // 2. Write .md to temp, upload to Storage
-  const tempDir = env.GEMINI_TEMP_DIR || path.join(process.cwd(), 'tmp');
-  await fs.mkdir(tempDir, { recursive: true });
-  const tempPath = path.join(tempDir, `article-${doc.id}.md`);
-  await fs.writeFile(tempPath, markdown, 'utf8');
-
-  try {
-    const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
-    const storagePath = buildStoragePath(tenantId, 'kb-articles', `${slug}-${doc.id.slice(0, 8)}.md`, dateFolder);
-    const buffer = await fs.readFile(tempPath);
-    await uploadFile(storagePath, buffer, 'text/markdown');
-
-    // 3. Update document
-    await query(
-      `UPDATE kb_documents SET file_path = $1, status = 'learning', updated_at = now() WHERE id = $2`,
-      [storagePath, doc.id],
-    );
-
-    // 4. Enqueue Gemini upload
-    await publish(QUEUES.GEMINI_UPLOAD, {
-      documentId: doc.id,
-      kbId,
-      tenantId,
-      mode: 'article',
-    });
-
-    await invalidateTenantAiCaches(tenantId);
-    return { ...doc, file_path: storagePath, status: 'learning' };
-  } finally {
-    try { await fs.unlink(tempPath); } catch { /* ignore */ }
-  }
-}
-
-/**
- * Update an article: update content, delete old Gemini mapping, re-upload.
- */
-export async function updateArticle(
-  docId: string,
-  kbId: string,
-  tenantId: string,
-  input: UpdateArticleInput,
-): Promise<KbDocument | null> {
-  // 1. Get existing
-  const existing = await getDocument(docId, tenantId);
-  if (!existing || existing.type !== 'article' || existing.kb_id !== kbId) return null;
-  await assertKnowledgebaseMutable(kbId, tenantId, 'sua bai viet');
-  if (existing.status === 'learning') throw new AppError('Không thể sửa bài viết đang được huấn luyện', 409);
-
-  // Optimistic locking: reject if another admin has modified this doc since it was loaded
-  if (input.expected_updated_at && existing.updated_at) {
-    const expected = new Date(input.expected_updated_at).getTime();
-    const actual = new Date(existing.updated_at).getTime();
-    if (expected !== actual) {
-      throw new AppError('Bài viết đã được người khác chỉnh sửa. Vui lòng tải lại trang và thử lại.', 409);
-    }
-  }
-
-  const title = input.title ?? existing.name;
-  const content = input.content ?? existing.content ?? '';
-  const markdown = `# ${title}\n\n${htmlToMarkdown(content)}\n`;
-
-  // 3. Write new .md
-  const tempDir = env.GEMINI_TEMP_DIR || path.join(process.cwd(), 'tmp');
-  await fs.mkdir(tempDir, { recursive: true });
-  const tempPath = path.join(tempDir, `article-${docId}.md`);
-  await fs.writeFile(tempPath, markdown, 'utf8');
-
-  let uploadedStoragePath: string | null = null;
-  let dbUpdated = false;
-
-  try {
-    const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50);
-    const storagePath = buildStoragePath(tenantId, 'kb-articles', `${slug}-${docId.slice(0, 8)}.md`, dateFolder);
-    const buffer = await fs.readFile(tempPath);
-
-    await uploadFile(storagePath, buffer, 'text/markdown');
-    uploadedStoragePath = storagePath;
-
-    // Delete old Gemini mapping before DB state changes. If Gemini cleanup
-    // fails, leave DB and old storage intact.
-    await deleteDocumentGeminiMappingsStrict([docId], tenantId);
-
-    const client = await getClient();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `DELETE FROM kb_doc_gemini_mapping WHERE document_id = $1`,
-        [docId],
-      );
-      await client.query(
-        `UPDATE kb_documents SET name = $1, content = $2, file_path = $3, status = 'learning',
-         source_info = $4, error_reason = NULL, updated_at = now()
-         WHERE id = $5 AND kb_id = $6 AND tenant_id = $7`,
-        [title, content, storagePath, JSON.stringify({ title, content_length: content.length }), docId, kbId, tenantId],
-      );
-      await client.query('COMMIT');
-      dbUpdated = true;
-    } catch (err) {
-      try { await client.query('ROLLBACK'); } catch { /* ignore */ }
-      try { await deleteFile(storagePath); } catch { /* ignore */ }
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
-
-    if (existing.file_path && existing.file_path !== storagePath) {
-      try { await deleteFile(existing.file_path); } catch { /* ignore */ }
-    }
-
-    try {
-      await publish(QUEUES.GEMINI_UPLOAD, {
-        documentId: docId,
-        kbId,
-        tenantId,
-        mode: 'article',
-      });
-    } catch (err) {
-      await query(
-        `UPDATE kb_documents
-         SET status = 'error',
-             error_reason = 'Khong the dua bai viet vao hang doi hoc lai',
-             updated_at = now()
-         WHERE id = $1 AND tenant_id = $2`,
-        [docId, tenantId],
-      );
-      await invalidateTenantAiCaches(tenantId);
-      throw err;
-    }
-
-    await invalidateTenantAiCaches(tenantId);
-    return { ...existing, name: title, content, file_path: storagePath, status: 'learning' };
-  } catch (err) {
-    if (!dbUpdated && uploadedStoragePath) {
-      try { await deleteFile(uploadedStoragePath); } catch { /* ignore */ }
-    }
-    throw err;
-  } finally {
-    try { await fs.unlink(tempPath); } catch { /* ignore */ }
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
