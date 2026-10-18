@@ -10,6 +10,8 @@ import { cacheJson, cacheKey, stableHash } from '../../config/cache.js';
 import { reportsQuery } from '../../config/reports-database.js';
 import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
+import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
+import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
 
 // ── Types ──
 
@@ -957,13 +959,13 @@ export async function getReportChart(
     return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
   }
   if (groupByOrg) {
-    return chartGroupedByOrg(tenantId, year, metric, maxMonth, groupId);
+    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'group', groupId);
   }
   if (subgroupId && grouped) {
-    return chartGroupedByTeam(tenantId, year, metric, maxMonth, subgroupId);
+    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'team', subgroupId);
   }
   if (groupId && grouped) {
-    return chartGroupedBySubGroup(tenantId, year, metric, maxMonth, groupId);
+    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'subgroup', groupId);
   }
 
   return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
@@ -1291,105 +1293,25 @@ async function chartSimple(
 }
 
 /**
- * Grouped by OrgGroup — 1 SQL query per OrgGroup (instead of N×12)
+ * Yearly chart split by org unit (company, branch or department under the
+ * parent): the unit list, then ONE grouped statement for every unit's
+ * months (report-org-chart.repository.ts) instead of one statement per unit.
  */
-async function chartGroupedByOrg(
+async function chartGroupedByOrgUnit(
   tenantId: string, year: number, metric: string, maxMonth: number,
-  groupId?: string,
+  dimension: OrgChartDimension, parentId?: string,
 ): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const gFilter = groupId ? 'AND og.id = $2' : '';
-  const gParams = groupId ? [tenantId, groupId] : [tenantId];
-  const orgs = await reportsQuery<{ id: string; name: string }>(
-    `SELECT id, name FROM org_groups WHERE tenant_id = $1 ${gFilter} ORDER BY name`,
-    gParams,
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  // 1 batch query per org (not 12!)
-  const orgMonthData = new Map<string, Map<number, number>>();
-  for (const og of orgs.rows) {
-    const mv = await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, og.id, undefined);
-    orgMonthData.set(og.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const og of orgs.rows) {
-      point[og.name] = m > maxMonth ? 0 : (orgMonthData.get(og.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
-}
-
-/**
- * Grouped by SubGroup — 1 SQL query per SubGroup (not 12!)
- */
-async function chartGroupedBySubGroup(
-  tenantId: string, year: number, metric: string, maxMonth: number,
-  groupId: string,
-): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const sgs = await reportsQuery<{ id: string; name: string }>(
-    `SELECT id, name FROM sub_groups WHERE org_group_id = $1 ORDER BY name`,
-    [groupId],
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  const sgMonthData = new Map<string, Map<number, number>>();
-  for (const sg of sgs.rows) {
-    const mv = await batchMetricByMonth(tenantId, metric, yearStart, yearEnd, year, undefined, sg.id);
-    sgMonthData.set(sg.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const sg of sgs.rows) {
-      point[sg.name] = m > maxMonth ? 0 : (sgMonthData.get(sg.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
-}
-
-/**
- * Grouped by Team — 1 SQL query per Team (not 12!)
- */
-async function chartGroupedByTeam(
-  tenantId: string, year: number, metric: string, maxMonth: number,
-  subgroupId: string,
-): Promise<{ year: number; metric: string; data: ReportChartPoint[]; is_grouped: boolean }> {
-  const teams = await reportsQuery<{ id: string; name: string }>(
-    `SELECT id, name FROM teams WHERE sub_group_id = $1 ORDER BY name`,
-    [subgroupId],
-  );
-
-  const yearStart = new Date(year, 0, 1);
-  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
-
-  const teamMonthData = new Map<string, Map<number, number>>();
-  for (const tm of teams.rows) {
-    const mv = await batchMetricByMonthTeam(tenantId, metric, yearStart, yearEnd, year, tm.id);
-    teamMonthData.set(tm.name, mv);
-  }
-
-  const data: ReportChartPoint[] = [];
-  for (let m = 1; m <= 12; m++) {
-    const point: ReportChartPoint = { month: `T${m}`, month_label: MONTH_LABELS[m] };
-    for (const tm of teams.rows) {
-      point[tm.name] = m > maxMonth ? 0 : (teamMonthData.get(tm.name)?.get(m) ?? 0);
-    }
-    data.push(point);
-  }
-
-  return { year, metric, data, is_grouped: true };
+  const entities = await loadOrgChartEntities(tenantId, dimension, parentId);
+  const values = await loadOrgChartMonthValues({
+    tenantId,
+    metric,
+    dimension,
+    entityIds: entities.map((entity) => entity.id),
+    year,
+    yearStart: new Date(year, 0, 1),
+    yearEnd: new Date(year, 11, 31, 23, 59, 59, 999),
+  });
+  return { year, metric, data: buildOrgUnitChartPoints(entities, values, maxMonth, MONTH_LABELS), is_grouped: true };
 }
 
 /**
