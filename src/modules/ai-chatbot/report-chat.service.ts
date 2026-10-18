@@ -7,6 +7,7 @@ import {
   type ReportScopeActor,
   type ReportScopeOptions,
 } from '../reports/report-access.service.js';
+import { runReportAggregate } from '../reports/report-admission.service.js';
 import * as reportsService from '../reports/reports.service.js';
 import {
   MAX_REPORT_RANGE_DAYS,
@@ -23,7 +24,8 @@ import {
 import { foldReportText, normalizeReportEntityName } from './report-text.logic.js';
 import { extractReportCourseReference, isReportCourseQuestion, type ReportCatalogCourse } from './report-course-mention.logic.js';
 import { resolveSnapshotChartGranularity, type ReportGranularity } from './report-time-expression.logic.js';
-import { findNearestReportEnrollmentDates, loadReportUnitBreakdownRows } from './report-chat.repository.js';
+import { findNearestReportEnrollmentDates } from './report-chat.repository.js';
+import { loadCachedReportUnitBreakdownRows } from './report-unit-breakdown-cache.service.js';
 import {
   buildReportUnitBreakdownSection,
   type ReportUnitBreakdown,
@@ -498,7 +500,10 @@ export async function buildReportChatSnapshot(input: {
   const chart = (metric: 'total_enrollments' | 'active_learners', range: reportsService.ReportDateRange, granularity: reportsService.ReportChartGranularity) => reportsService.getReportChart(
     input.tenantId, range.startDate.getFullYear(), metric, scope.groupId, scope.subgroupId, scope.teamId, false, false, range, granularity, { limitBuckets: 62 },
   );
-  const [summary, previousSummary, enrollmentChart, activeLearnerChart, previousEnrollmentChart, previousActiveLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseDetail, unitBreakdown] = await Promise.all([
+  // One report admission slot for the whole set: these aggregates are the
+  // cached ones of the Reports page (same keys), so a turn after a page view,
+  // or a second turn on the same filter, reads Redis instead of the database.
+  const [summary, previousSummary, enrollmentChart, activeLearnerChart, previousEnrollmentChart, previousActiveLearnerChart, coursePortfolio, completionStatus, scopeDisplay, courseDetail, unitBreakdown] = await runReportAggregate(input.tenantId, () => Promise.all([
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, normalized.dateRange),
     reportsService.getReportSummary(input.tenantId, undefined, undefined, scope.groupId, scope.subgroupId, scope.teamId, previousRange),
     chart('total_enrollments', normalized.dateRange, chartGranularity),
@@ -514,9 +519,9 @@ export async function buildReportChatSnapshot(input: {
       scope,
       range: normalized.dateRange,
       previousRange,
-      load: loadReportUnitBreakdownRows,
+      load: loadCachedReportUnitBreakdownRows,
     }),
-  ]);
+  ]));
   const availability = hasReportData(summary) ? 'available' : 'empty';
   // Only a full course list can leave courses out; one more cohort count then
   // lets the PDF say how many ("Còn N khóa học khác").
@@ -555,11 +560,11 @@ export async function buildReportChatSnapshot(input: {
   if (snapshot.availability.state !== 'empty') return snapshot;
   // Two LIMIT 1 index lookups, only for an empty period: lets the card offer
   // the nearest month that has data instead of a dead end.
-  const nearest = await findNearestReportEnrollmentDates({
+  const nearest = await runReportAggregate(input.tenantId, () => findNearestReportEnrollmentDates({
     tenantId: input.tenantId,
     scope,
     range: normalized.dateRange,
-  });
+  }));
   const nearestPeriod = resolveNearestReportDataPeriod({
     ...nearest,
     range: { date_from: normalized.dateRange.dateFrom, date_to: normalized.dateRange.dateTo },

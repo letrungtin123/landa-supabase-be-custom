@@ -19,6 +19,7 @@ import {
 } from './report-chat-turn.service.js';
 import { createReportSnapshot, generateReportNarrative, type ReportChatFilterInput, type ReportChatSnapshot } from './report-chat.service.js';
 import type { ReportSummary } from '../reports/reports.service.js';
+import { ReportsBusyError } from '../reports/report-admission.logic.js';
 import { COURSE_IDS, REPORT_COURSE_CATALOG, REPORT_REFERENCE_DATE, REPORT_TODAY, REPORT_UNIT_CATALOG, UNIT_IDS } from './report-chat.fixture.js';
 
 test.after(async () => {
@@ -151,6 +152,26 @@ test('ReportChatError is an AppError with a localized message, so chat error san
   assert.equal(error.code, 'REPORT_DATA_UNAVAILABLE');
   assert.equal(error.message, 'Report data is not available right now. Please try again later.');
   assert.equal(new ReportChatError('REPORT_DATA_UNAVAILABLE', 'vi').message, 'Chưa thể tải số liệu báo cáo lúc này. Vui lòng thử lại sau.');
+});
+
+test('a full report admission is a plain 429 "busy, try again", never "data unavailable"', async () => {
+  const h = harness({
+    modelArgs: { date_from: '2026-07-01', date_to: '2026-07-31', org_units: [{ name: 'Marketing', level: 'team' }] },
+    buildSnapshot: async () => { throw new ReportsBusyError(); },
+  });
+  for (const [locale, message] of [
+    ['en', 'Many people are viewing reports right now. Please try again in a few seconds.'],
+    ['vi', 'Báo cáo đang được nhiều người xem cùng lúc, vui lòng thử lại sau ít giây.'],
+  ] as const) {
+    await assert.rejects(run(h, turnInput('Báo cáo team Marketing tháng 7', { locale })), (error: unknown) => {
+      assert.ok(isReportChatError(error));
+      assert.equal(error.statusCode, 429);
+      assert.equal(error.code, 'REPORTS_BUSY');
+      assert.equal(error.message, message);
+      return true;
+    });
+  }
+  assert.deepEqual(h.saved, []);
 });
 
 test('a resolved question builds one snapshot with the resolved unit and period', async () => {

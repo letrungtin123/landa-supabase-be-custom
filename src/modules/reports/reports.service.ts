@@ -6,9 +6,11 @@
 //   - No N+1 subqueries
 // ═══════════════════════════════════════════════════════════════
 
-import { cacheJson, cacheKey, stableHash } from '../../config/cache.js';
+import { cacheJson, cacheKey, getCacheVersion, stableHash } from '../../config/cache.js';
+import { cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { reportsQuery } from '../../config/reports-database.js';
 import { getStudyTimeSeries, type StudyTimeGranularity, type StudyTimeSeriesResponse } from '../enrollments/enrollments.service.js';
+import { runReportAggregate } from './report-admission.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
 import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
 import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
@@ -302,6 +304,33 @@ function resolveChartWindow(
   };
 }
 
+/**
+ * What a date-range chart computes. Only enrollments outside a team scope are
+ * split into series; every other request is the plain series whatever its
+ * grouped / group_by_org / series_limit, so the report page and the report
+ * chat share one cache entry for the same numbers.
+ */
+type DateRangeChartShape =
+  | { kind: 'simple' }
+  | { kind: 'grouped'; dimension: GroupedEnrollmentDimension; parentId?: string; seriesLimit: number };
+
+function resolveDateRangeChartShape(options: {
+  metric: string;
+  groupId?: string;
+  subgroupId?: string;
+  teamId?: string;
+  groupByOrg: boolean;
+  grouped: boolean;
+  seriesLimit: number;
+}): DateRangeChartShape {
+  if (!options.teamId && options.metric === 'total_enrollments') {
+    if (options.groupByOrg) return { kind: 'grouped', dimension: 'group', parentId: options.groupId, seriesLimit: options.seriesLimit };
+    if (options.subgroupId && options.grouped) return { kind: 'grouped', dimension: 'team', parentId: options.subgroupId, seriesLimit: options.seriesLimit };
+    if (options.groupId && options.grouped) return { kind: 'grouped', dimension: 'subgroup', parentId: options.groupId, seriesLimit: options.seriesLimit };
+  }
+  return { kind: 'simple' };
+}
+
 function buildReportChartCacheKey(options: {
   tenantId: string;
   metric: string;
@@ -310,11 +339,9 @@ function buildReportChartCacheKey(options: {
   groupId?: string;
   subgroupId?: string;
   teamId?: string;
-  groupByOrg: boolean;
-  grouped: boolean;
-  seriesLimit: number;
+  shape: DateRangeChartShape;
 }): string {
-  return cacheKey('reports', 'chart', 'v9', options.tenantId, stableHash({
+  return cacheKey('reports', 'chart', 'v10', options.tenantId, stableHash({
     metric: options.metric,
     dateFrom: options.range.dateFrom,
     dateTo: options.range.dateTo,
@@ -322,9 +349,7 @@ function buildReportChartCacheKey(options: {
     groupId: options.groupId,
     subgroupId: options.subgroupId,
     teamId: options.teamId,
-    groupByOrg: options.groupByOrg,
-    grouped: options.grouped,
-    seriesLimit: options.seriesLimit,
+    shape: options.shape,
   }));
 }
 function buildReportSummaryCacheKey(options: {
@@ -380,9 +405,32 @@ function getRangeDayCount(range: ReportDateRange): number {
   return Math.max(1, Math.ceil((range.endDate.getTime() - range.startDate.getTime() + 1) / msPerDay));
 }
 
-function getSummaryCacheTtl(range: ReportDateRange): number {
+function getSummaryCacheTtl(range: Pick<ReportDateRange, 'dateTo'>): number {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
   return range.dateTo >= today ? 30 : 300;
+}
+
+/** Seconds a cached aggregate of a range lives: 30 while the range includes today, else 300. */
+export function getReportAggregateCacheTtl(range: Pick<ReportDateRange, 'dateTo'>): number {
+  return getSummaryCacheTtl(range);
+}
+
+/**
+ * Report list pages (learners, a course's learners, top courses, the yearly
+ * chart): 30 s while the period includes today, 60 s for a past period. Lists
+ * page and search, so they keep a shorter life than the summary figures.
+ */
+function getReportListCacheTtl(dateTo: string | null): number {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' });
+  return dateTo === null || dateTo >= today ? 30 : 60;
+}
+
+/**
+ * A report aggregate: from Redis when cached, else loaded in a slot of the
+ * tenant's report admission (runReportAggregate), so a cache hit never waits.
+ */
+function cachedReportAggregate<T>(tenantId: string, key: string, ttlSeconds: number, load: () => Promise<T>): Promise<T> {
+  return cacheJson(key, ttlSeconds, () => runReportAggregate(tenantId, load));
 }
 
 /** Effective chart granularity of a range (the rule of the Reports charts). */
@@ -752,7 +800,7 @@ export async function getReportSummary(
     usesDateRange: Boolean(dateRange),
   });
 
-  return cacheJson(summaryCacheKey, getSummaryCacheTtl(range), () => getReportSummaryForRange({
+  return cachedReportAggregate(tenantId, summaryCacheKey, getSummaryCacheTtl(range), () => getReportSummaryForRange({
     tenantId,
     range,
     targetMonth,
@@ -913,6 +961,7 @@ export async function getReportChart(
       ? resolveChartWindow(dateRange, granularity, windowOptions)
       : null;
     const queryRange = resolvedWindow?.range ?? dateRange;
+    const shape = resolveDateRangeChartShape({ metric, groupId, subgroupId, teamId, groupByOrg, grouped, seriesLimit });
     const chartCacheKey = buildReportChartCacheKey({
       tenantId,
       metric,
@@ -921,21 +970,17 @@ export async function getReportChart(
       groupId,
       subgroupId,
       teamId,
-      groupByOrg,
-      grouped,
-      seriesLimit,
+      shape,
     });
-    const result = await cacheJson(chartCacheKey, 90, () => chartByDateRange(
+    const result = await cachedReportAggregate(tenantId, chartCacheKey, 90, () => chartByDateRange(
       tenantId,
       metric,
       queryRange,
       granularity,
+      shape,
       groupId,
       subgroupId,
       teamId,
-      groupByOrg,
-      grouped,
-      seriesLimit,
     ));
     return {
       year: dateRange.startDate.getFullYear(),
@@ -954,21 +999,26 @@ export async function getReportChart(
   const maxMonth = year > now.getFullYear() ? 0
     : year === now.getFullYear() ? now.getMonth() + 1
     : 12;
+  const yearChartCacheKey = cacheKey('reports', 'chart-year', 'v1', tenantId, stableHash({
+    year, metric, groupId, subgroupId, teamId, groupByOrg, grouped, maxMonth,
+  }));
 
-  if (teamId) {
+  return cachedReportAggregate(tenantId, yearChartCacheKey, getReportListCacheTtl(`${year}-12-31`), async () => {
+    if (teamId) {
+      return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
+    }
+    if (groupByOrg) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'group', groupId);
+    }
+    if (subgroupId && grouped) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'team', subgroupId);
+    }
+    if (groupId && grouped) {
+      return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'subgroup', groupId);
+    }
+
     return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
-  }
-  if (groupByOrg) {
-    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'group', groupId);
-  }
-  if (subgroupId && grouped) {
-    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'team', subgroupId);
-  }
-  if (groupId && grouped) {
-    return chartGroupedByOrgUnit(tenantId, year, metric, maxMonth, 'subgroup', groupId);
-  }
-
-  return chartSimple(tenantId, year, metric, maxMonth, groupId, subgroupId, teamId);
+  });
 }
 
 async function chartByDateRange(
@@ -976,17 +1026,13 @@ async function chartByDateRange(
   metric: string,
   range: ReportDateRange,
   granularity: EffectiveChartGranularity,
+  shape: DateRangeChartShape,
   groupId?: string,
   subgroupId?: string,
   teamId?: string,
-  groupByOrg = false,
-  grouped = true,
-  seriesLimit = DEFAULT_GROUP_SERIES_LIMIT,
 ): Promise<{ data: ReportChartPoint[]; is_grouped: boolean; series_overflow?: boolean }> {
-  if (!teamId && metric === 'total_enrollments') {
-    if (groupByOrg) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'group', groupId, seriesLimit);
-    if (subgroupId && grouped) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'team', subgroupId, seriesLimit);
-    if (groupId && grouped) return chartGroupedEnrollmentsByRange(tenantId, range, granularity, 'subgroup', groupId, seriesLimit);
+  if (shape.kind === 'grouped') {
+    return chartGroupedEnrollmentsByRange(tenantId, range, granularity, shape.dimension, shape.parentId, shape.seriesLimit);
   }
 
   const data = await chartSimpleByRange(tenantId, metric, range, granularity, groupId, subgroupId, teamId);
@@ -1567,7 +1613,7 @@ export async function getReportCoursePerformance(
     pageSize: safePageSize,
   }));
 
-  return cacheJson(portfolioCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, portfolioCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1633,7 +1679,7 @@ export async function getReportCourseCount(
     teamId,
   }));
 
-  return cacheJson(countCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, countCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1679,7 +1725,7 @@ export async function findReportCoursePerformanceByName(
     courseName: normalizedName.toLocaleLowerCase('vi-VN'),
   }));
 
-  return cacheJson(matchingCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, matchingCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1756,7 +1802,7 @@ export async function getReportCoursePerformanceById(
     courseId: id,
   }));
 
-  return cacheJson(byIdCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, byIdCacheKey, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1804,7 +1850,7 @@ export async function getReportCompletionStatusDistribution(
     subgroupId,
     teamId,
   }));
-  return cacheJson(cacheKeyValue, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, cacheKeyValue, getSummaryCacheTtl(range), async () => {
     const cohort = buildReportEnrollmentCte({
       tenantParam: '$1',
       rangeStartParam: '$2',
@@ -1859,7 +1905,7 @@ export async function getReportCourseCompletionRanking(
     page: safePage,
     pageSize: safePageSize,
   }));
-  return cacheJson(rankingCacheKey, getSummaryCacheTtl(range), async () => {
+  return cachedReportAggregate(tenantId, rankingCacheKey, getSummaryCacheTtl(range), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -1923,6 +1969,22 @@ export async function getReportCourseCompletionLearners(
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const range = getReportRange(month, year, dateRange);
+  // Cached per tenant, course, period, org scope, page, search and status. The
+  // key carries the tenant's course cache version: a course change shows at once.
+  const coursesVersion = await getCacheVersion(...cacheVersions.tenantCourses(tenantId));
+  const learnersCacheKey = cacheKeys.tenantResource(tenantId, 'report-course-learners', coursesVersion, {
+    courseId,
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    page: safePage,
+    pageSize: safePageSize,
+    search: search?.trim() ?? '',
+    status,
+  });
+  return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -1980,6 +2042,7 @@ export async function getReportCourseCompletionLearners(
       status: row.status,
     })),
   };
+  });
 }
 export async function getReportTopCourses(
   tenantId: string,
@@ -1992,6 +2055,23 @@ export async function getReportTopCourses(
   teamId?: string,
   dateRange?: ReportDateRange,
 ): Promise<{ count: number; total_pages: number; current_page: number; results: ReportTopCourse[] }> {
+  // Cached per tenant, period, org scope and page; the key carries the tenant's
+  // course cache version (course names).
+  const periodEnd = dateRange?.dateTo
+    ?? (month && year ? getReportRange(month, year).dateTo : year ? `${year}-12-31` : null);
+  const coursesVersion = await getCacheVersion(...cacheVersions.tenantCourses(tenantId));
+  const topCoursesCacheKey = cacheKeys.tenantResource(tenantId, 'report-top-courses', coursesVersion, {
+    page,
+    pageSize,
+    month,
+    year,
+    dateFrom: dateRange?.dateFrom,
+    dateTo: dateRange?.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+  });
+  return cachedReportAggregate(tenantId, topCoursesCacheKey, getReportListCacheTtl(periodEnd), async () => {
   const offset = (page - 1) * pageSize;
   const conditions: string[] = ['e.tenant_id = $1', 'e.is_active = true'];
   const params: any[] = [tenantId];
@@ -2038,6 +2118,7 @@ export async function getReportTopCourses(
     current_page: page,
     results: result.rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
   };
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2060,6 +2141,19 @@ export async function getReportLearners(
   const safePage = Math.max(page, 1);
   const safePageSize = Math.min(Math.max(pageSize, 1), 100);
   const range = getReportRange(month, year, dateRange);
+  // Cached per tenant, period, org scope, page, search and status.
+  const learnersCacheKey = cacheKey('reports', 'learners', 'v1', tenantId, stableHash({
+    dateFrom: range.dateFrom,
+    dateTo: range.dateTo,
+    groupId,
+    subgroupId,
+    teamId,
+    page: safePage,
+    pageSize: safePageSize,
+    search: search?.trim() ?? '',
+    status: status ?? null,
+  }));
+  return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
   const cohort = buildReportEnrollmentCte({
     tenantParam: '$1',
     rangeStartParam: '$2',
@@ -2135,6 +2229,7 @@ export async function getReportLearners(
       status: row.status,
     })),
   };
+  });
 }
 // ═══════════════════════════════════════════════════════════════
 // Learner Detail

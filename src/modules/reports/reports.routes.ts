@@ -33,4 +33,7 @@ router.get('/groups/:groupId/subgroups/:subgroupId/teams', checkPermission('repo
 // Admin-only: manually refresh materialized view
 router.post('/refresh', checkPermission('report_summary', 'can_edit'), ctrl.refreshSummary);
 
+// A report aggregate that found no free slot answers 429 REPORTS_BUSY.
+router.use(ctrl.handleReportsBusyError);
+
 export default router;

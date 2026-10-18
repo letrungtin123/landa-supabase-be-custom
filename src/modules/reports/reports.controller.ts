@@ -2,11 +2,12 @@
 // Reports Controller — HTTP handlers for analytics
 // ═══════════════════════════════════════════════════════════════
 
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { query } from '../../config/database.js';
 import * as svc from './reports.service.js';
+import { REPORTS_BUSY_CODE, REPORTS_BUSY_ERROR, REPORTS_BUSY_RETRY_AFTER_SECONDS, isReportsBusyError } from './report-admission.logic.js';
 import {
   buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
@@ -32,6 +33,25 @@ async function getExportLabels(req: Request, tenantId: string, locale: ReportExc
     { group: req.query.group_label, subgroup: req.query.subgroup_label, team: req.query.team_label },
     locale,
   );
+}
+
+/** The dashboard sends its UI language on every request. */
+function requestUiLocale(req: Request): ReportExcelLocale {
+  return req.get('X-UI-Locale')?.trim().toLowerCase() === 'en' ? 'en' : 'vi';
+}
+
+/**
+ * Router error handler: a report aggregate that found no free slot in time
+ * (report-admission.logic.ts) answers 429 REPORTS_BUSY instead of a 500.
+ */
+export function handleReportsBusyError(err: unknown, req: Request, res: Response, next: NextFunction): void {
+  if (!isReportsBusyError(err) || res.headersSent) {
+    next(err);
+    return;
+  }
+  const [status, vi, en] = REPORTS_BUSY_ERROR;
+  res.setHeader('Retry-After', String(REPORTS_BUSY_RETRY_AFTER_SECONDS));
+  res.status(status).json({ success: false, code: REPORTS_BUSY_CODE, message: requestUiLocale(req) === 'en' ? en : vi });
 }
 
 const VALID_STUDY_GRANULARITIES = new Set(['day', 'month', 'year']);
