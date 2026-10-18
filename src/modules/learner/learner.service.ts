@@ -40,6 +40,17 @@ const libraryRepository = createLearnerLibraryRepository({ query });
 const progressRepository = createLearnerProgressRepository({ query });
 const notificationsRepository = createLearnerNotificationsRepository({ query });
 
+/**
+ * The learner whose rows a learner-role caller may see, or undefined for staff. The repositories
+ * choose the learner scope by this value, so a learner role without a user id is refused here
+ * instead of falling back to the staff scope.
+ */
+export function learnerScope(role: string, userId: string | null | undefined): string | undefined {
+  if (!isLearnerRole(role)) return undefined;
+  if (typeof userId !== 'string' || userId.trim() === '') throw new AppError('Chưa xác thực', 401);
+  return userId;
+}
+
 async function assertLearnerCourseAccess(
   courseId: string,
   userId: string,
@@ -52,7 +63,7 @@ async function assertLearnerCourseAccess(
   const accessible = await coursesRepository.courseAccessible({
     courseId,
     tenantId,
-    learnerUserId: isLearnerRole(role) ? userId : undefined,
+    learnerUserId: learnerScope(role, userId),
   });
   if (!accessible) throw new AppError(message, isLearnerRole(role) ? 403 : 404);
 }
@@ -116,7 +127,7 @@ async function getMyVisibleCoursesFromDb(
 ) {
   const { search, category_id, page = 1, page_size = 20 } = params;
   const offset = (page - 1) * page_size;
-  const learnerUserId = isLearnerRole(role) ? userId : undefined;
+  const learnerUserId = learnerScope(role, userId);
 
   const rows = await coursesRepository.selectVisibleCourses({
     tenantId, learnerUserId, categoryId: category_id, search, limit: page_size, offset,
@@ -422,7 +433,7 @@ async function getMyLibraryCategoriesFromDb(
   tenantId: string,
   role: string,
 ) {
-  const result = await libraryRepository.selectCategories(tenantId, isLearnerRole(role) ? userId : undefined);
+  const result = await libraryRepository.selectCategories(tenantId, learnerScope(role, userId));
   return {
     categories: result.rows.map(r => ({
       id: r.id,
@@ -477,7 +488,7 @@ async function getMyLibraryDocumentsFromDb(
 ) {
   const { page = 1, page_size = 20, category, extension, search, ordering } = params;
   const offset = (page - 1) * page_size;
-  const filter = { tenantId, learnerUserId: isLearnerRole(role) ? userId : undefined, category, extension, search };
+  const filter = { tenantId, learnerUserId: learnerScope(role, userId), category, extension, search };
 
   const total = await libraryRepository.countDocuments(filter);
   const rows = await libraryRepository.selectDocuments(filter, { ordering, limit: page_size, offset });
