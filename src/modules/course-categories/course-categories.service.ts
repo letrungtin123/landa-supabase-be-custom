@@ -242,7 +242,7 @@ export async function updateCourseCategory(
     await invalidateTenantCourseCaches(tenantId);
     return { ...updated, removed_assignments: removedAssignments };
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();

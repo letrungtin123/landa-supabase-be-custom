@@ -12,6 +12,7 @@ import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidat
 import { uploadFile, deleteFile, buildFileName } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { SINGLE_IMAGE_KEYS, IMAGE_SIZE_HINTS, MAX_CAROUSEL } from './branding.validator.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 // ── Types ──
 
@@ -174,8 +175,8 @@ export async function uploadBrandingImage(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    await deleteFile(storagePath).catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
+    await deleteFile(storagePath).catch(swallowAndLog('branding.asset_cleanup'));
     throw error;
   } finally {
     client.release();
@@ -233,7 +234,7 @@ export async function deleteBrandingImage(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();

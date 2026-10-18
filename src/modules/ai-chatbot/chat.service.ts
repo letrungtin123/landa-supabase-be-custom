@@ -12,7 +12,6 @@ import { resolveLessonAuthorDraftLocale } from './lesson-author-intent.logic.js'
 import { assessmentGapMessage, assertComponentInstancePlan, ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from './lesson-author-capabilities.logic.js';
 import { createHash, randomUUID } from 'crypto';
 import { query, withDatabaseTransaction } from '../../config/database.js';
-import { hasPermission } from '../../middleware/authorize.js';
 import { GenerationJobError, generationSnapshotHash, hasCompleteGenerationUsage, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
 import type { PreparedGenerationJob } from './lesson-author-generation-job.repository.js';
 import type { GenerationAdmissionStage } from './lesson-author-generation-admission.logic.js';
@@ -164,6 +163,9 @@ import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
 import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-notes.logic.js';
 import { assertChatCourseAccess } from './chat-course-scope.service.js';
 import { withLaunchBriefIdentity, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
+import { hasAiIdCoursePermission } from './lesson-author-ai-id-access.service.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -219,8 +221,7 @@ const MAX_STORED_LESSON_AUTHOR_PROMPT_CHARS = 12_000;
 const LESSON_AUTHOR_APPLY_IN_PROGRESS_CODE = 'LESSON_AUTHOR_APPLY_IN_PROGRESS';
 
 // ── UUID validation ──
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isValidUUID(s: string): boolean { return UUID_REGEX.test(s); }
+function isValidUUID(s: string): boolean { return UUID_PATTERN.test(s); }
 
 function isRetryableLessonAuthorApplyError(error: unknown): boolean {
   return error instanceof AppError && error.code === LESSON_AUTHOR_OUTLINE_BUSY_CODE;
@@ -894,21 +895,6 @@ async function resolveLessonAuthorPersonaForBot(
     throw new AppError('Chưa cấu hình nhân cách chuyên gia bài học trong Prompt hệ thống', 409);
   }
   return null;
-}
-
-export async function getActivePersonaAssignment(tenantId: string): Promise<PersonaAssignment | null> {
-  const version = await getCacheVersion(...cacheVersions.tenantAi(tenantId));
-  return cacheJson(
-    cacheKeys.aiTenantResource(tenantId, 'lesson-author-persona', version),
-    CACHE_TTL.aiConfig,
-    () => getActivePersonaAssignmentFromDb(tenantId),
-  );
-}
-
-async function getActivePersonaAssignmentFromDb(tenantId: string): Promise<PersonaAssignment | null> {
-  const activeBot = await getActiveBot(tenantId, LESSON_AUTHOR_TARGET);
-  if (!activeBot) return null;
-  return resolveLessonAuthorPersonaForBot(tenantId, activeBot.bot_id);
 }
 
 export async function getLessonAuthorSettings(tenantId: string): Promise<LessonAuthorSettings> {
@@ -1679,7 +1665,7 @@ function parseRetryDelay(err: any): number | null {
       const seconds = parseFloat(match[1]);
       if (seconds > 0 && seconds < 120) return Math.ceil(seconds * 1000);
     }
-  } catch {}
+  } catch { /* a message without a retry hint: the default backoff applies */ }
   return null;
 }
 
@@ -1772,7 +1758,8 @@ export async function withLessonAuthorConversationLock<T>(conversationId: string
   } finally { streamLocks.delete(conversationId); await lock?.release(); }
 }
 
-/** Fresh worker authorization: no JWT/role or provider secret is persisted in jobs. */
+/** Fresh worker authorization: no JWT/role or provider secret is persisted in jobs.
+ * Roles: AI_ID_AUTHOR_ROLES (lesson-author-ai-id-access.logic.ts), re-read from the database. */
 export async function assertDurableBlueprintActor(userId: string, tenantId: string): Promise<void> {
   const result = await query<{ role: UserRole }>(`SELECT u.role FROM users u
     JOIN tenants t ON t.id=$2 AND t.is_active=true
@@ -1780,7 +1767,7 @@ export async function assertDurableBlueprintActor(userId: string, tenantId: stri
       AND (u.role='superadmin' OR u.tenant_id=$2 OR (u.role='superuser' AND EXISTS
         (SELECT 1 FROM user_tenants ut WHERE ut.user_id=u.id AND ut.tenant_id=$2)))`, [userId, tenantId]);
   const role = result.rows[0]?.role;
-  if (!role || !await hasPermission({ id: userId, tenantId, role }, 'courses', 'can_edit')) {
+  if (!role || !await hasAiIdCoursePermission({ id: userId, tenantId, role })) {
     throw new AppError('Không có quyền tạo khóa học.', 403, 'GENERATION_FORBIDDEN');
   }
 }
@@ -3348,14 +3335,6 @@ function buildTargetLockedProposalInstruction(
   });
 
   return lines.join('\n');
-}
-
-async function getOutlineMentionContextForPrompt(
-  ctx: ConversationContext,
-  mentions: LessonAuthorOutlineMention[],
-): Promise<string> {
-  const rows = await getOutlineMentionContextRows(ctx, mentions);
-  return formatMentionContextRowsForPrompt(rows);
 }
 
 function buildCurrentTurnText(
@@ -5651,13 +5630,6 @@ function componentTypeLabel(type: string, locale: 'vi' | 'en' = 'vi'): string {
   return type;
 }
 
-function formatComponentTypeLabels(types: Iterable<string>, locale: 'vi' | 'en' = 'vi'): string {
-  const labels = Array.from(types)
-    .map(type => componentTypeLabel(type, locale))
-    .filter(Boolean);
-  return Array.from(new Set(labels)).join(', ');
-}
-
 function humanizeLessonAuthorPlanText(value: string, locale: 'vi' | 'en' = 'vi'): string {
   const raw = value.trim();
   if (!raw || /^(generated\s+lesson\s+plan|lesson\s+plan)$/i.test(raw)) {
@@ -5795,215 +5767,6 @@ function formatLessonAuthorBlueprintFailurePreview(err: any, locale: 'vi' | 'en'
       `Lý do: ${safeError}`,
       'Chưa có thay đổi nào được áp dụng vào cấu trúc bài học. Hãy kiểm tra tài liệu nguồn hoặc thử lại với mục tiêu khóa học cụ thể hơn.',
     ].filter(Boolean).join('\n\n');
-}
-
-const MAX_PLAN_PREVIEW_CHARS = 14000;
-const MAX_DETAILED_PLAN_UNITS = 18;
-
-function clipPreviewText(value: unknown, maxLength: number): string {
-  const raw = typeof value === 'string' ? value : String(value ?? '');
-  const text = raw.replace(/\s+/g, ' ').trim();
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-}
-
-function decodeXmlEntities(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
-}
-
-function previewPlainText(value: unknown, maxLength: number): string {
-  if (typeof value !== 'string') return '';
-  return clipPreviewText(stripHtml(decodeXmlEntities(value)), maxLength);
-}
-
-function parseJsonish(value: unknown): unknown {
-  if (typeof value !== 'string') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function getComponentPayload(component: LessonAuthorComponentProposal, key: string): unknown {
-  const metadata = asRecord(component.metadata);
-  if (key in metadata) return parseJsonish(metadata[key]);
-
-  const dataRecord = asRecord(component.data);
-  if (key in dataRecord) return parseJsonish(dataRecord[key]);
-  return null;
-}
-
-function xmlTagText(xml: string, tagName: string): string {
-  const match = xml.match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
-  return match ? previewPlainText(match[1], 500) : '';
-}
-
-function xmlAttribute(xml: string, tagName: string, attrName: string): string {
-  const match = xml.match(new RegExp(`<${tagName}\\b[^>]*\\s${attrName}="([^"]*)"`, 'i'));
-  return match ? decodeXmlEntities(match[1]).trim() : '';
-}
-
-function formatCorrectOptionsFromXml(xml: string, tagName: 'choice' | 'option'): string {
-  const matches = [...xml.matchAll(new RegExp(`<${tagName}\\b[^>]*correct="(true|false)"[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'gi'))];
-  if (matches.length === 0) return '';
-
-  const preview = matches.slice(0, 5).map((match, index) => {
-    const text = previewPlainText(match[2], 90);
-    const correct = match[1].toLowerCase() === 'true' ? 'đúng' : 'sai';
-    return `${index + 1}. ${text} (${correct})`;
-  });
-  if (matches.length > preview.length) preview.push(`... và ${matches.length - preview.length} lựa chọn khác`);
-  return preview.join('; ');
-}
-
-function problemTypeLabelFromXml(xml: string): string {
-  if (/<multiplechoiceresponse\b/i.test(xml)) return 'Trắc nghiệm 1 đáp án';
-  if (/<choiceresponse\b/i.test(xml)) return 'Trắc nghiệm nhiều đáp án';
-  if (/<optionresponse\b/i.test(xml)) return 'Danh sách thả xuống';
-  if (/<numericalresponse\b/i.test(xml)) return 'Điền số';
-  if (/<stringresponse\b/i.test(xml)) return 'Điền văn bản';
-  return 'Câu hỏi kiểm tra';
-}
-
-function formatProblemComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const xml = typeof component.data === 'string' ? component.data : '';
-  if (!xml) return ['Cấu hình câu hỏi đã được tạo trong component.'];
-
-  const lines = [`Dạng: ${problemTypeLabelFromXml(xml)}`];
-  const question = xmlTagText(xml, 'label');
-  if (question) lines.push(`Câu hỏi: ${clipPreviewText(question, 220)}`);
-
-  if (/<multiplechoiceresponse\b|<choiceresponse\b/i.test(xml)) {
-    const choices = formatCorrectOptionsFromXml(xml, 'choice');
-    if (choices) lines.push(`Lựa chọn: ${choices}`);
-  } else if (/<optionresponse\b/i.test(xml)) {
-    const options = formatCorrectOptionsFromXml(xml, 'option');
-    const correctAttr = xmlAttribute(xml, 'optioninput', 'correct');
-    if (options) lines.push(`Tuỳ chọn: ${options}`);
-    else if (correctAttr) lines.push(`Đáp án đúng: ${correctAttr}`);
-  } else if (/<numericalresponse\b/i.test(xml)) {
-    const answer = xmlAttribute(xml, 'numericalresponse', 'answer');
-    const tolerance = xmlAttribute(xml, 'responseparam', 'default');
-    if (answer) lines.push(`Đáp án: ${answer}${tolerance ? `, sai số: ${tolerance}` : ''}`);
-  } else if (/<stringresponse\b/i.test(xml)) {
-    const answer = xmlAttribute(xml, 'stringresponse', 'answer');
-    const mode = xmlAttribute(xml, 'stringresponse', 'type') === 'cs' ? 'phân biệt hoa/thường' : 'không phân biệt hoa/thường';
-    if (answer) lines.push(`Đáp án: ${answer} (${mode})`);
-  }
-
-  const solution = xmlTagText(xml, 'solution');
-  if (solution) lines.push(`Giải thích: ${clipPreviewText(solution, 220)}`);
-  return lines;
-}
-
-function formatFaqComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const faqData = asRecord(getComponentPayload(component, 'faq_data'));
-  const items = Array.isArray(faqData.items) ? faqData.items.map(asRecord) : [];
-  if (items.length === 0) return ['Danh sách hỏi đáp đã được tạo.'];
-
-  const questions = items.slice(0, 3).map((item, index) => {
-    const question = readString(item.question, `Câu hỏi ${index + 1}`, 180);
-    const answer = previewPlainText(readString(item.answer, '', 500), 140);
-    return `${index + 1}. ${question}${answer ? ` -> ${answer}` : ''}`;
-  });
-  if (items.length > questions.length) questions.push(`... và ${items.length - questions.length} câu hỏi khác`);
-  return [`Nội dung FAQ: ${questions.join(' | ')}`];
-}
-
-function formatSortableComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const data = asRecord(component.data);
-  const sortableData = asRecord(getComponentPayload(component, 'sortable_data'));
-  const items = Array.isArray(sortableData.items) ? sortableData.items.map(asRecord) : [];
-  const question = readString(asRecord(component.metadata).question_text ?? data.question_text, '', 300);
-  const orderedItems = items
-    .map((item, index) => `${index + 1}. ${readString(item.text ?? item.label ?? item.title, '', 120)}`)
-    .filter(item => !item.endsWith('. '))
-    .slice(0, 6);
-
-  const lines: string[] = [];
-  if (question) lines.push(`Yêu cầu: ${question}`);
-  if (orderedItems.length > 0) lines.push(`Thứ tự đúng: ${orderedItems.join(' -> ')}${items.length > orderedItems.length ? ` -> ... (${items.length} mục)` : ''}`);
-  return lines.length > 0 ? lines : ['Bài sắp xếp đã có danh sách đáp án đúng.'];
-}
-
-function formatCrosswordComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const crosswordData = asRecord(getComponentPayload(component, 'crossword_data'));
-  const words = Array.isArray(crosswordData.words) ? crosswordData.words.map(asRecord) : [];
-  if (words.length === 0) return ['Đố vui ô chữ đã có bộ từ khoá và gợi ý.'];
-
-  const preview = words.slice(0, 5).map((word, index) => {
-    const answer = readString(word.answer, `Từ ${index + 1}`, 80);
-    const clue = readString(word.clue ?? word.hint, '', 140);
-    return `${answer}${clue ? ` (${clue})` : ''}`;
-  });
-  if (words.length > preview.length) preview.push(`... và ${words.length - preview.length} từ khác`);
-  return [`Từ khoá: ${preview.join('; ')}`];
-}
-
-function formatDiagramComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const diagramData = asRecord(getComponentPayload(component, 'diagram_data'));
-  const diagrams = Array.isArray(diagramData.diagrams) ? diagramData.diagrams.map(asRecord) : [];
-  const diagram = diagrams[0] ?? {};
-  const nodes = Array.isArray(diagram.nodes) ? diagram.nodes.map(asRecord) : [];
-  const edges = Array.isArray(diagram.edges) ? diagram.edges.map(asRecord) : [];
-  const nodeLabels = nodes
-    .map(node => readString(asRecord(node.data).label ?? node.label, '', 120))
-    .filter(Boolean)
-    .slice(0, 8);
-
-  const lines: string[] = [];
-  if (nodeLabels.length > 0) lines.push(`Nút chính: ${nodeLabels.join(', ')}${nodes.length > nodeLabels.length ? `, ... (${nodes.length} nút)` : ''}`);
-  lines.push(`Liên kết: ${edges.length} cạnh quan hệ`);
-  return lines;
-}
-
-function formatHtmlComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  const dataRecord = asRecord(component.data);
-  const html = typeof component.data === 'string'
-    ? component.data
-    : readString(dataRecord.html ?? dataRecord.content, '', MAX_UNIT_HTML_CHARS);
-  const preview = previewPlainText(html, 320);
-  return preview ? [`Nội dung chính: ${preview}`] : ['Nội dung lý thuyết đã được soạn trong component.'];
-}
-
-function formatComponentDetails(component: LessonAuthorComponentProposal): string[] {
-  switch (component.type) {
-    case 'html':
-      return formatHtmlComponentDetails(component);
-    case 'problem':
-      return formatProblemComponentDetails(component);
-    case 'la_faq':
-      return formatFaqComponentDetails(component);
-    case 'la_sortable':
-      return formatSortableComponentDetails(component);
-    case 'la_crossword':
-      return formatCrosswordComponentDetails(component);
-    case 'la_diagram':
-      return formatDiagramComponentDetails(component);
-    default:
-      return [];
-  }
-}
-
-function getProposalMetrics(proposal: LessonAuthorProposal): { lessons: number; units: number; components: number } {
-  let lessons = 0;
-  let units = 0;
-  let components = 0;
-  for (const chapter of proposal.chapters) {
-    lessons += chapter.lessons.length;
-    for (const lesson of chapter.lessons) {
-      units += lesson.units.length;
-      for (const unit of lesson.units) components += (unit.components ?? []).length;
-    }
-  }
-  return { lessons, units, components };
 }
 
 function formatLessonAuthorActionPreview(
@@ -6149,146 +5912,6 @@ function formatProposalPreview(
 // Older presentation logic stays isolated while historical records are still
 // supported. New and hydrated chat bubbles intentionally use the concise
 // message above; proposal details are supplied by canonical job hydration.
-function formatLegacyProposalPreview(
-  proposal: LessonAuthorProposal,
-  chapterIndexOffset = 0,
-  locale: 'vi' | 'en' = 'vi',
-): string {
-  const pendingSummary = humanizeLessonAuthorPlanText(proposal.summary, locale)
-    .replace(/^đã tạo/i, locale === 'en' ? 'Proposed creation' : 'Đề xuất tạo')
-    .replace(/^da tao/i, locale === 'en' ? 'Proposed creation' : 'Đề xuất tạo')
-    .replace(/^đã cập nhật/i, locale === 'en' ? 'Proposed update' : 'Đề xuất cập nhật')
-    .replace(/^da cap nhat/i, locale === 'en' ? 'Proposed update' : 'Đề xuất cập nhật');
-  const metrics = getProposalMetrics(proposal);
-  const legacyResolvedChapterNumber = proposal.operation_plan?.target_number_path?.match(/^\d+/)?.[0];
-  const effectiveChapterIndexOffset = legacyResolvedChapterNumber
-    ? Math.max(0, Number(legacyResolvedChapterNumber) - 1)
-    : chapterIndexOffset;
-  const copy = locale === 'en'
-    ? {
-      intro: 'I prepared a detailed proposal. The course will not change until you click Apply.',
-      summary: 'Summary',
-      scope: `**Scope:** ${proposal.chapters.length} chapter(s), ${metrics.lessons} section(s), ${metrics.units} lesson(s).`,
-      details: 'Proposed learning content',
-      sourceEvidence: 'Source verification',
-      chapter: 'Chapter',
-      lesson: 'Section',
-      unit: 'Lesson',
-      material: 'Expected learning materials',
-      clipped: 'Details are shortened in this preview to keep the conversation readable.',
-      review: 'Review the proposal, then click **Apply** to update the lesson structure.',
-    }
-    : {
-      intro: 'Mình đã chuẩn bị bản đề xuất chi tiết. Nội dung khóa học chỉ được cập nhật sau khi bạn bấm Áp dụng.',
-      summary: 'Tóm tắt',
-      scope: `**Phạm vi:** ${proposal.chapters.length} chương, ${metrics.lessons} mục, ${metrics.units} bài học.`,
-      details: 'Chi tiết nội dung đề xuất',
-      sourceEvidence: 'Đối chiếu nguồn',
-      chapter: 'Chương',
-      lesson: 'Mục',
-      unit: 'Bài học',
-      material: 'Học liệu dự kiến',
-      clipped: 'Chi tiết học liệu được rút gọn trong bản xem trước để cuộc trò chuyện gọn hơn.',
-      review: 'Kiểm tra bản đề xuất, sau đó bấm **Áp dụng** để cập nhật cấu trúc bài học.',
-    };
-  const lines: string[] = [
-    copy.intro,
-    '',
-    `**${copy.summary}**`,
-    `- ${pendingSummary}`,
-    `- ${copy.scope}`,
-    '',
-    `**${copy.details}**`,
-  ];
-  const sourceEvidence = proposal.source_evidence;
-  if (sourceEvidence) {
-    const required = Number(sourceEvidence.required_count ?? 0);
-    const covered = Number(sourceEvidence.covered_count ?? 0);
-    const status = String(sourceEvidence.status ?? '').toLowerCase();
-    const hardLocked = sourceEvidence.hard_locked === true;
-    const complete = status === 'complete' && required > 0 && covered >= required;
-    lines.splice(3, 0, locale === 'en'
-      ? `- **${copy.sourceEvidence}:** ${covered}/${required} required source facts assigned${hardLocked ? '; source scope locked.' : '.'}`
-      : `- **${copy.sourceEvidence}:** đã gán ${covered}/${required} fact bắt buộc${hardLocked ? '; phạm vi nguồn đã khóa.' : '.'}`);
-    if (!complete) {
-      lines.splice(4, 0, locale === 'en'
-        ? '- **Warning:** source coverage is incomplete; review before applying.'
-        : '- **Cảnh báo:** coverage nguồn chưa hoàn tất; cần kiểm tra trước khi áp dụng.');
-    }
-  }
-  let detailedUnitCount = 0;
-  let clipped = false;
-  let currentChars = lines.join('\n').length;
-
-  const pushLine = (line = ''): boolean => {
-    if (clipped) return false;
-    const nextLength = currentChars + line.length + 1;
-    if (nextLength > MAX_PLAN_PREVIEW_CHARS) {
-      clipped = true;
-      return false;
-    }
-    lines.push(line);
-    currentChars = nextLength;
-    return true;
-  };
-
-  proposal.chapters.forEach((chapter, chapterIndex) => {
-    const displayChapterNumber = effectiveChapterIndexOffset + chapterIndex + 1;
-    pushLine('');
-    pushLine(`- **${copy.chapter} ${displayChapterNumber}: ${normalizeLessonAuthorTitle(chapter.title, 'chapter', `${copy.chapter} ${displayChapterNumber}`)}**`);
-    chapter.lessons.forEach((lesson, lessonIndex) => {
-      const componentTypes = new Set(
-        lesson.units.flatMap(unit => (unit.components ?? []).map(component => component.type)),
-      );
-      const typeText = formatComponentTypeLabels(componentTypes, locale) || componentTypeLabel('html', locale);
-      pushLine(`  - **${copy.lesson} ${displayChapterNumber}.${lessonIndex + 1}: ${normalizeLessonAuthorTitle(lesson.title, 'lesson', `${copy.lesson} ${displayChapterNumber}.${lessonIndex + 1}`)}**`);
-      pushLine(locale === 'en'
-        ? `    - Contains ${lesson.units.length} lesson(s); learning formats: ${typeText}.`
-        : `    - Gồm ${lesson.units.length} bài học; hình thức học liệu: ${typeText}.`);
-      lesson.units.forEach((unit, unitIndex) => {
-        const components = unit.components ?? [];
-        const unitTypes = formatComponentTypeLabels(components.map(component => component.type), locale) || componentTypeLabel('html', locale);
-        const shouldShowDetails = detailedUnitCount < MAX_DETAILED_PLAN_UNITS;
-        pushLine(`    - **${copy.unit} ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}: ${normalizeLessonAuthorTitle(unit.title, 'unit', `${copy.unit} ${displayChapterNumber}.${lessonIndex + 1}.${unitIndex + 1}`)}**`);
-        pushLine(`      - ${copy.material}: ${unitTypes}.`);
-        if (unit.component_plan && unit.component_plan.length > 0) {
-          unit.component_plan.forEach(plan => {
-            const rationale = plan.rationale?.trim();
-            if (rationale) {
-              pushLine(locale === 'en'
-                ? `      - Format rationale (${componentTypeLabel(plan.type, locale)}): ${rationale}`
-                : `      - Cơ sở chọn học liệu (${componentTypeLabel(plan.type, locale)}): ${rationale}`);
-            }
-          });
-        }
-
-        if (!shouldShowDetails) {
-          pushLine(`      - ${copy.clipped}`);
-          return;
-        }
-
-        detailedUnitCount += 1;
-        components.forEach((component, componentIndex) => {
-          pushLine(`      - **${componentIndex + 1}. ${component.title || componentTypeLabel(component.type, locale)}** (${componentTypeLabel(component.type, locale)})`);
-          for (const detail of formatComponentDetails(component)) {
-            pushLine(`        - ${detail}`);
-          }
-        });
-      });
-    });
-  });
-
-  if (clipped || metrics.units > MAX_DETAILED_PLAN_UNITS) {
-    lines.push('');
-    lines.push(locale === 'en'
-      ? `> The preview is shortened after the first ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} lesson(s) to keep the conversation readable. The full proposal is saved and will be applied when you click Apply.`
-      : `> Bản xem trước đã rút gọn sau ${Math.min(detailedUnitCount, MAX_DETAILED_PLAN_UNITS)} bài học đầu để cuộc trò chuyện gọn hơn. Đề xuất đầy đủ vẫn được lưu và sẽ được áp dụng khi bạn bấm Áp dụng.`);
-  }
-
-  lines.push('');
-  lines.push(locale === 'en' ? `> ${copy.review}` : `> ${copy.review}`);
-  return lines.join('\n');
-}
 
 function formatBlueprintPreview(
   _blueprint: LessonAuthorBlueprint,
@@ -7298,7 +6921,7 @@ async function loadLessonAuthorBlueprintForDraft(
     );
   } catch {
     const reason = 'Tài liệu nguồn của bản thiết kế đã thay đổi, bị xóa, hoặc chưa sẵn sàng. Vui lòng tạo lại bản thiết kế khóa học.';
-    await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason).catch(() => undefined);
+    await markLessonAuthorBlueprintSuperseded(stored.id, ctx.tenantId, reason).catch(swallowAndLog('lesson_author.blueprint_supersede'));
     throw new AppError(reason, 409);
   }
 
@@ -8031,6 +7654,7 @@ export async function applyLessonAuthorJob(
     if (status === 'succeeded' && existingJob) {
       const createdBlockIds = existingJob.created_block_ids ?? [];
       const updatedBlockIds = existingJob.updated_block_ids ?? [];
+      // Optional field of a replayed result: null when it cannot be read.
       const blueprintChapterIndex = await getBlueprintChapterIndexForJob(existingJob).catch(() => null);
       return {
         job_id: jobId,

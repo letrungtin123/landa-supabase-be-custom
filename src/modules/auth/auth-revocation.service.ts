@@ -163,7 +163,7 @@ export async function assertAuthRevocationRedisReady(): Promise<void> {
     markRedisUnhealthy(`Redis access-token revocation capability check failed: ${reason}`);
     throw new Error('Redis must permit GET and SET on auth:revoked:* when production revocation enforcement is enabled');
   } finally {
-    await client.del(probeKey).catch(() => undefined);
+    await client.del(probeKey).catch(() => undefined); // the probe key expires after 15 s anyway
   }
 }
 

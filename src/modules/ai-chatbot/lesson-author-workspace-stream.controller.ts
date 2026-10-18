@@ -7,9 +7,9 @@ import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import type { WorkspaceCommitHint } from './lesson-author-workspace-stream.service.js';
 import { env } from '../../config/env.js';
 import { onShutdownStart } from '../../config/process-lifecycle.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const HEARTBEAT_MS = 20_000;
 type Locale = 'vi' | 'en';
 
@@ -52,7 +52,7 @@ export function createWorkspaceStreamHandler(deps: {
     let leaveShutdown: (() => void) | null = null;
     const summary = (event: WorkspaceStreamDiagnostic['event'], internal: string | null = null, external: string | null = null) => {
       try { deps.report({ event, request_id: requestId, correlation_id: correlationId,
-        workspace_id: UUID.test(workspaceId ?? '') ? workspaceId : null, conversation_id: UUID.test(conversationId ?? '') ? conversationId : null,
+        workspace_id: UUID_PATTERN.test(workspaceId ?? '') ? workspaceId : null, conversation_id: UUID_PATTERN.test(conversationId ?? '') ? conversationId : null,
         course_id_hash: typeof courseId === 'string' && courseId.length <= 255 ? createHash('sha256').update(courseId).digest('hex') : null,
         failure_stage: external ? stage : null, internal_failure_code: internal, external_failure_code: external,
         duration_ms: Math.max(0, Math.round(performance.now() - started)), delivered_events: delivered }); } catch { /* log safe metadata only */ }
@@ -81,12 +81,12 @@ export function createWorkspaceStreamHandler(deps: {
       if (!res.headersSent && !res.writableEnded) res.status(status).json({ success: false, code, message: text, request_id: requestId });
     };
     const user = req.user ? Object.freeze({ ...req.user }) : null;
-    if (!user || !user.tenantId || !UUID.test(user.tenantId) || !UUID.test(user.id) || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
+    if (!isAiIdActor(user)) {
       reject(user ? 403 : 401, user ? 'WORKSPACE_READ_FORBIDDEN' : 'AUTH_REQUIRED'); return;
     }
     stage = 'workspace_stream_input';
     const after = numberQuery(req.query.after_sequence ?? '0');
-    if (!deps.enabled() || !UUID.test(workspaceId ?? '') || !UUID.test(conversationId ?? '') || typeof courseId !== 'string' || !courseId.trim()
+    if (!deps.enabled() || !UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(conversationId ?? '') || typeof courseId !== 'string' || !courseId.trim()
       || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId) || after === null
       || Object.keys(req.query).some(key => key !== 'ui_locale' && key !== 'after_sequence')
       || (req.query.ui_locale !== undefined && req.query.ui_locale !== 'vi' && req.query.ui_locale !== 'en')) {

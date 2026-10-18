@@ -1,13 +1,13 @@
 import { query } from '../../config/database.js';
 import { deleteFiles, extractStoragePath, STORAGE_BUCKET } from '../../config/storage.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export type DeletionJobKind = 'course' | 'user';
 
 const STORAGE_DELETE_BATCH_SIZE = 100;
 const STORAGE_ITEM_LEASE_SECONDS = 10 * 60;
 const STORAGE_DISCOVERY_BATCH_SIZE = 500;
-// PostgreSQL accepts every canonical UUID bit pattern, not only RFC v4/v7.
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type StorageItemRow = {
   id: string;
@@ -63,6 +63,7 @@ export function normalizeTenantStoragePath(value: unknown, tenantId: string): st
  * recovery exact to that user; callers cannot request a broad avatars scan.
  */
 export function getUserAvatarStorageStem(tenantId: string, userId: string): string | null {
+  // Any UUID bit pattern (UUID_PATTERN): PostgreSQL accepts every canonical one, not only RFC v4/v7.
   if (!UUID_PATTERN.test(tenantId) || !UUID_PATTERN.test(userId)) return null;
   const stem = `${tenantId}/avatars/${userId}.`;
   return normalizeTenantStoragePath(stem, tenantId) === stem ? stem : null;
@@ -325,7 +326,7 @@ export async function deleteStorageManifest(jobKind: DeletionJobKind, jobId: str
       await markStorageItemsSucceeded(items.map((item) => item.id));
       deleted += items.length;
     } catch (error) {
-      await releaseStorageItems(items.map((item) => item.id), error).catch(() => undefined);
+      await releaseStorageItems(items.map((item) => item.id), error).catch(swallowAndLog('storage_manifest.release'));
       throw error;
     }
   }

@@ -48,7 +48,6 @@ import aiCreditsRoutes from './modules/ai-credits/ai-credit.routes.js';
 import ssoRoutes from './modules/sso/sso.routes.js';
 import demoLoginRoutes from './modules/demo-login/demo-login.routes.js';
 import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
-import path from 'path';
 
 const app = express();
 // First, so every request is counted: GET /internal/metrics (loopback only)
@@ -124,9 +123,6 @@ const demoLoginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-
-// ── Static files (uploaded course assets) ──
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ── Health Check ──
 app.get('/api/health', async function healthCheck(_req, res) {

@@ -1,7 +1,7 @@
 import { getSessionClient } from '../../config/database.js';
 import { listenRetryDelayMs } from './lesson-author-listen-retry.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANNEL = 'lesson_author_source_document_event';
 const STATUSES = new Set(['learning', 'learned', 'error']);
 
@@ -44,9 +44,9 @@ export function createSourceDocumentHub(dependencies: { getClient?: typeof getSe
   function readPayload(payload: string | undefined): SourceDocumentHint | null {
     try {
       const value = JSON.parse(payload ?? '') as Record<string, unknown>;
-      if (typeof value.document_id !== 'string' || !UUID.test(value.document_id)
-        || typeof value.tenant_id !== 'string' || !UUID.test(value.tenant_id)
-        || typeof value.kb_id !== 'string' || !UUID.test(value.kb_id)
+      if (!isUuid(value.document_id)
+        || !isUuid(value.tenant_id)
+        || !isUuid(value.kb_id)
         || typeof value.status !== 'string' || !STATUSES.has(value.status)
         || typeof value.updated_at !== 'string' || !Number.isFinite(Date.parse(value.updated_at))) return null;
       return { documentId: value.document_id, tenantId: value.tenant_id, kbId: value.kb_id,
@@ -101,7 +101,7 @@ export function createSourceDocumentHub(dependencies: { getClient?: typeof getSe
 
   return {
     async subscribe(documentId: string, listener: Listener) {
-      if (!UUID.test(documentId)) throw new Error('SOURCE_STREAM_INPUT_INVALID');
+      if (!UUID_PATTERN.test(documentId)) throw new Error('SOURCE_STREAM_INPUT_INVALID');
       await ensure();
       const set = listeners.get(documentId) ?? new Set<Listener>();
       set.add(listener); listeners.set(documentId, set);

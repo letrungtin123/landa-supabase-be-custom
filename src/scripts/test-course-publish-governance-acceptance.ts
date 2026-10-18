@@ -33,7 +33,7 @@ async function begin(client: PoolClient): Promise<void> {
 }
 
 async function rollback(client: PoolClient): Promise<void> {
-  await client.query('ROLLBACK').catch(() => undefined);
+  await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
 }
 
 function required(value: string | undefined, label: string): string {
@@ -101,7 +101,7 @@ async function assertBlockedUntilRelease(
   release: () => Promise<void>,
 ): Promise<void> {
   let settled = false;
-  void operation.finally(() => { settled = true; }).catch(() => undefined);
+  void operation.finally(() => { settled = true; }).catch(() => undefined); // marks the rejection handled; the caller awaits operation
   await pause(150);
   assert.equal(settled, false, 'concurrent operation bypassed the required database lock');
   await release();

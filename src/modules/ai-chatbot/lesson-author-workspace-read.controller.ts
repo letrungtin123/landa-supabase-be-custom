@@ -4,11 +4,11 @@ import type { AuthUser } from '../../types/express.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { createWorkspaceReadRepository, WorkspaceReadError } from './lesson-author-workspace-read.repository.js';
 import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
 type ReadKind = 'status' | 'events' | 'detail' | 'graph';
 type Locale = 'vi' | 'en';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const ERRORS = {
   AUTH_REQUIRED: [401, 'Chưa xác thực.', 'Authentication is required.'],
   WORKSPACE_READ_FORBIDDEN: [403, 'Bạn không có quyền xem bản thảo này.', 'You do not have permission to view this draft.'],
@@ -75,11 +75,11 @@ export function createWorkspaceReadHandlers(deps: Dependencies) {
           deps.report({ event: external ? 'workspace_read_failed' : 'workspace_read_completed',
             failure_stage: external ? stage : null, internal_failure_code: internal, external_failure_code: external,
             request_id: requestId, correlation_id: correlationId,
-            workspace_id: UUID.test(workspaceId ?? '') ? workspaceId : null,
-            conversation_id: UUID.test(conversationId ?? '') ? conversationId : null,
+            workspace_id: UUID_PATTERN.test(workspaceId ?? '') ? workspaceId : null,
+            conversation_id: UUID_PATTERN.test(conversationId ?? '') ? conversationId : null,
             course_id_hash: typeof courseId === 'string' && courseId.length <= 255
               ? createHash('sha256').update(courseId).digest('hex') : null,
-            node_id: UUID.test(nodeId ?? '') ? nodeId : null,
+            node_id: UUID_PATTERN.test(nodeId ?? '') ? nodeId : null,
             operation, http_status: status, duration_ms: Math.max(0, Math.round(performance.now() - started)) });
         } catch { /* Logging must never convert an accepted read into failure/retry. */ }
       };
@@ -90,8 +90,7 @@ export function createWorkspaceReadHandlers(deps: Dependencies) {
       };
       const user = req.user ? Object.freeze({ ...req.user }) : null;
       if (!user) { reject('AUTH_REQUIRED'); return; }
-      if (!user.tenantId || !UUID.test(user.tenantId) || !UUID.test(user.id)
-        || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
+      if (!isAiIdActor(user)) {
         reject('WORKSPACE_READ_FORBIDDEN'); return;
       }
       stage = 'workspace_read_input';
@@ -102,12 +101,12 @@ export function createWorkspaceReadHandlers(deps: Dependencies) {
       const revision = operation === 'detail' ? (req.query.expected_revision === 'none' ? null : uint(req.query.expected_revision)) : undefined;
       const snapshot = req.query.snapshot_sequence === undefined ? undefined : uint(req.query.snapshot_sequence);
       const afterNode = req.query.after_node_id;
-      if (!UUID.test(workspaceId ?? '') || !UUID.test(conversationId ?? '')
+      if (!UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(conversationId ?? '')
         || typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)
-        || (operation === 'detail' && (!UUID.test(nodeId ?? '') || revision === undefined))
+        || (operation === 'detail' && (!UUID_PATTERN.test(nodeId ?? '') || revision === undefined))
         || (operation === 'events' && after === undefined)
         || (operation === 'graph' && ((req.query.snapshot_sequence !== undefined && snapshot === undefined)
-          || (afterNode !== undefined && (typeof afterNode !== 'string' || !UUID.test(afterNode) || snapshot === undefined))))
+          || (afterNode !== undefined && (!isUuid(afterNode) || snapshot === undefined))))
         || Object.keys(req.query).some(key => !allowedQuery.has(key))
         || (req.query.ui_locale !== undefined && req.query.ui_locale !== 'vi' && req.query.ui_locale !== 'en')) {
         reject('WORKSPACE_READ_INPUT_INVALID'); return;

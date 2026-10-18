@@ -17,6 +17,9 @@ import { generationSnapshotHash as hash, type GenerationJobRow } from './lesson-
 import type { GenerationJobSql, GenerationJobDatabase } from './lesson-author-generation-job.repository.js';
 import { runtimeTenantSql } from '../../config/runtime-tenant-fence.js';
 import { assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
+import { isAiIdActor, isAiIdAuthorRole } from './lesson-author-ai-id-access.logic.js';
 
 /** Injectable composition seam; production exports below retain their signatures.
  * Importing this module performs no config/connection/service initialization. */
@@ -65,7 +68,6 @@ const generateRagLessonAuthorCheckpoint:WorkspaceRuntimeDependencies['generateRa
   return deps.generateRagLessonAuthorCheckpoint(...args);
 };
 
-const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const db={transaction:withDatabaseTransaction};
 const log=(event:object)=>{try{deps.report(event);}catch{/* diagnostics never decide commits */}};
 function reject(code:string):never{throw new AppError('Workspace operation could not be completed.',409,code);}
@@ -75,7 +77,7 @@ function code(error:unknown){const e=error&&typeof error==='object'?error as {co
 async function authority(tx:GenerationJobSql,target:WorkspaceAdmissionTarget){
   const found=await tx.query(`SELECT role FROM users WHERE id=$1 AND is_active=true FOR SHARE`,[target.userId]);
   const role=found.rows[0]?.role;
-  if(found.rows.length!==1||!['staff','superuser','superadmin'].includes(String(role)))reject('WORKSPACE_RUNTIME_FORBIDDEN');
+  if(found.rows.length!==1||!isAiIdAuthorRole(role))reject('WORKSPACE_RUNTIME_FORBIDDEN');
   return adapters.createWorkspaceAuthority({id:target.userId,tenantId:target.tenantId,role:role as AuthUser['role'],username:'',sessionMode:'normal'});
 }
 async function canEdit(tx:GenerationJobSql,target:WorkspaceAdmissionTarget){return(await authority(tx,target)).canEdit(tx,target);}
@@ -86,15 +88,14 @@ async function lockWorkspace(tx:GenerationJobSql,t:WorkspaceAdmissionTarget){
   await tx.query("SET LOCAL lock_timeout = '3000ms'");
   const advisory=await tx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',[`course:${t.tenantId}:${t.courseId}`]);
   if(advisory.rows.length!==1||advisory.rows[0].acquired!==true)reject('WORKSPACE_RUNTIME_CONFLICT');
-  const course=await tx.query('SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE',[t.courseId,t.tenantId]);
-  if(course.rows.length!==1)reject('WORKSPACE_RUNTIME_FORBIDDEN');
+  if(!await createCourseAccessRepository(tx).lockCourseOfTenant(t.courseId,t.tenantId))reject('WORKSPACE_RUNTIME_FORBIDDEN');
   const ws=await tx.query(`SELECT w.id,w.status,w.correlation_id FROM lesson_author_workspaces w
     JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.course_id=w.course_id
       AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'
     WHERE w.id=$1 AND w.tenant_id=$2 AND w.course_id=$3 AND w.conversation_id=$4 AND w.requested_by=$5
       AND w.engine='self_built_rag' AND w.contract_version=1 FOR UPDATE OF w`,
   [t.workspaceId,t.tenantId,t.courseId,t.conversationId,t.userId]);
-  if(ws.rows.length!==1||!UUID.test(String(ws.rows[0].correlation_id)))reject('WORKSPACE_RUNTIME_FORBIDDEN');
+  if(ws.rows.length!==1||!UUID_PATTERN.test(String(ws.rows[0].correlation_id)))reject('WORKSPACE_RUNTIME_FORBIDDEN');
   return ws.rows[0];
 }
 
@@ -110,7 +111,7 @@ async function terminalSummary(tx:GenerationJobSql,t:WorkspaceAdmissionTarget){
     WHERE w.id=$1 AND w.tenant_id=$2 AND w.course_id=$3 AND w.conversation_id=$4 AND w.requested_by=$5`,
   [t.workspaceId,t.tenantId,t.courseId,t.conversationId,t.userId]);
   const w=result.rows[0];
-  if(result.rows.length!==1||!UUID.test(String(w.correlation_id))||!['en','vi'].includes(String(w.content_locale))
+  if(result.rows.length!==1||!UUID_PATTERN.test(String(w.correlation_id))||!['en','vi'].includes(String(w.content_locale))
     ||!Number.isSafeInteger(Number(w.sequence))||Number(w.sequence)<1)reject('WORKSPACE_RUNTIME_TERMINAL_UNCONFIRMED');
   const metadata={kind:'lesson_author_workspace_terminal',lesson_author_workspace_id:t.workspaceId,workspace_id:t.workspaceId,
     correlation_id:String(w.correlation_id),locale:String(w.content_locale),workspace_status:String(w.status),
@@ -129,7 +130,7 @@ async function terminalSummary(tx:GenerationJobSql,t:WorkspaceAdmissionTarget){
   if(!existing.rows.length){
     const inserted=await tx.query(`INSERT INTO chat_messages(conversation_id,role,content,metadata)
       VALUES($1::uuid,'assistant',$2::text,$3::jsonb) RETURNING id`,[t.conversationId,content,JSON.stringify(metadata)]);
-    if(inserted.rows.length!==1||!UUID.test(String(inserted.rows[0].id)))reject('WORKSPACE_RUNTIME_TERMINAL_UNCONFIRMED');
+    if(inserted.rows.length!==1||!UUID_PATTERN.test(String(inserted.rows[0].id)))reject('WORKSPACE_RUNTIME_TERMINAL_UNCONFIRMED');
     await tx.query('UPDATE chat_conversations SET updated_at=now() WHERE id=$1 AND tenant_id=$2',[t.conversationId,t.tenantId]);
   }
   const saved=await find();
@@ -152,8 +153,8 @@ async function seed(tx:GenerationJobSql,t:WorkspaceAdmissionTarget){
   [t.workspaceId,t.tenantId,t.courseId,t.conversationId,t.userId]);
   const w=result.rows[0];
   if(result.rows.length!==1||!w.blueprint||!['vi','en'].includes(String(w.content_locale))
-    ||![w.bot_id,w.kb_id,w.correlation_id,w.blueprint_id,w.blueprint_job_id,w.user_message_id].every(v=>typeof v==='string'&&UUID.test(v))
-    ||!Array.isArray(w.source_document_ids)||!w.source_document_ids.every(v=>typeof v==='string'&&UUID.test(v)))reject('WORKSPACE_RUNTIME_CONTEXT_INVALID');
+    ||![w.bot_id,w.kb_id,w.correlation_id,w.blueprint_id,w.blueprint_job_id,w.user_message_id].every(v=>isUuid(v))
+    ||!Array.isArray(w.source_document_ids)||!w.source_document_ids.every(v=>isUuid(v)))reject('WORKSPACE_RUNTIME_CONTEXT_INVALID');
   return { ...t, botId:String(w.bot_id),kbId:String(w.kb_id),correlationId:String(w.correlation_id),locale:w.content_locale as 'en'|'vi',
     sourceDocumentIds:w.source_document_ids as string[],sourceSnapshotHash:String(w.source_snapshot_hash),blueprint:w.blueprint as LessonAuthorBlueprint,
     blueprintId:String(w.blueprint_id),blueprintJobId:String(w.blueprint_job_id),architectureMessageId:String(w.user_message_id) };
@@ -214,10 +215,9 @@ function admission(){
  * provider call or independent correlation is generated on replay. */
 async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief}){
   if(!ready||!isDurableBlueprintWorkerReady())throw new AppError('Workspace worker is not ready.',503,'WORKSPACE_EXECUTION_DISABLED');
-  if(user.sessionMode!=='normal'||!user.tenantId||!['staff','superuser','superadmin'].includes(user.role)
-    ||![user.id,user.tenantId,input.conversationId,input.operationId].every(id=>UUID.test(id))
+  if(!isAiIdActor(user)||![input.conversationId,input.operationId].every(id=>UUID_PATTERN.test(id))
     ||!input.sourceDocumentIds.length||input.sourceDocumentIds.length>5||new Set(input.sourceDocumentIds).size!==input.sourceDocumentIds.length
-    ||input.sourceDocumentIds.some(id=>!UUID.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
+    ||input.sourceDocumentIds.some(id=>!UUID_PATTERN.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
   // QLT-6: this V1 path designs a course with the old blueprint generator; it can never keep a document as it is.
   assertLaunchModeAvailable(input.brief,false);
   const tenantId=user.tenantId,content=input.locale==='en'?'Create lesson content from the selected documents.':'Tạo nội dung bài học từ tài liệu đã chọn.';
@@ -232,8 +232,7 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
     const result=await withDatabaseTransaction(async tx=>{
       const a=adapters.createWorkspaceAuthority(user),target={tenantId,userId:user.id,conversationId:input.conversationId,courseId:input.courseId,workspaceId:input.operationId};
       // Consistent course→conversation→workspace lock order; no provider I/O.
-      const course=await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`,[input.courseId,tenantId]);
-      if(course.rows.length!==1)reject('WORKSPACE_RUNTIME_FORBIDDEN');
+      if(!await createCourseAccessRepository(tx).lockCourseOfTenant(input.courseId,tenantId))reject('WORKSPACE_RUNTIME_FORBIDDEN');
       if(!await a.canEdit(tx,target))reject('WORKSPACE_RUNTIME_FORBIDDEN');
       const deleting=await tx.query(`SELECT id FROM lesson_author_session_deletion_jobs WHERE tenant_id=$1 AND course_id=$2
         AND requested_by=$3 AND conversation_id=$4 AND is_terminal=false AND status IN ('queued','running','failed') FOR SHARE`,
@@ -393,7 +392,7 @@ async function tick(signal:AbortSignal){
       });
     }
     catch(error){log({event:'workspace_recovery_pending',workspace_id:String(a.workspace_id),work_item_id:String(a.id),
-      correlation_id:UUID.test(String(a.correlation_id))?String(a.correlation_id):null,internal_failure_code:code(error),
+      correlation_id:UUID_PATTERN.test(String(a.correlation_id))?String(a.correlation_id):null,internal_failure_code:code(error),
       failure_stage:'workspace_runtime_recovery',replay_after_dispatch:false});}
     return;
   }

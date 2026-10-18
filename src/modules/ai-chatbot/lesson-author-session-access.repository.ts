@@ -1,7 +1,7 @@
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { lessonAuthorSessionOwnerName } from './lesson-author-session-access.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** V2 run states in which generation is still executing (schema CHECK values). */
 export const LESSON_AUTHOR_ACTIVE_V2_RUN_STATUSES = ['planning', 'executing', 'finalizing'] as const;
 /** Legacy chat Blueprint generation states that still hold provider work. */
@@ -23,14 +23,14 @@ export interface LessonAuthorSessionOwnerRow {
 export async function findLessonAuthorSessionOwner(db: Sql, input: {
   tenantId: string; conversationId: string; courseId?: string;
 }): Promise<LessonAuthorSessionOwnerRow | null> {
-  if (!UUID.test(input.tenantId) || !UUID.test(input.conversationId)) return null;
+  if (!UUID_PATTERN.test(input.tenantId) || !UUID_PATTERN.test(input.conversationId)) return null;
   const result = await db.query<{ owner_id: string; course_id: string }>(`SELECT c.user_id::text AS owner_id,c.course_id
     FROM chat_conversations c
     WHERE c.id=$1::uuid AND c.tenant_id=$2::uuid AND c.target='lesson_author'
       AND ($3::text IS NULL OR c.course_id=$3)`,
   [input.conversationId, input.tenantId, input.courseId ?? null]);
   const row = result.rows[0];
-  return row && typeof row.owner_id === 'string' && UUID.test(row.owner_id) ? { owner_id: row.owner_id, course_id: row.course_id } : null;
+  return row && isUuid(row.owner_id) ? { owner_id: row.owner_id, course_id: row.course_id } : null;
 }
 
 export interface LessonAuthorActiveRun {

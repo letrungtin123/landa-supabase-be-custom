@@ -6,6 +6,7 @@ import { acceptWorkspaceGeneratedUnit, type WorkspaceGenerationContext } from '.
 import type { LessonAuthorProposal } from '../course-authoring/course-authoring.service.js';
 import type { WorkspaceUnitPublication, WorkspaceWorkItemContext, WorkspaceWorkItemLease,
   WorkspaceWorkItemReceipt } from './lesson-author-workspace-work-item.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export class WorkspaceUnitRunError extends Error {
   constructor(readonly code: 'WORKSPACE_UNIT_RUN_INVALID' | 'WORKSPACE_UNIT_WORKFLOW_TIMEOUT'
@@ -59,7 +60,6 @@ const realClock: WorkspaceUnitClock = {
   timeout: (fn, ms) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); },
   interval: (fn, ms) => { const timer = setInterval(fn, ms); return () => clearInterval(timer); },
 };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 function invalid(): never { throw new WorkspaceUnitRunError('WORKSPACE_UNIT_RUN_INVALID'); }
 function failureCode(error: unknown) {
@@ -101,8 +101,8 @@ export async function runWorkspaceUnit(execution: WorkspaceUnitExecution, deps: 
   const lease = Object.freeze({ ...execution.item.target });
   const item = Object.freeze({ ...structuredClone(execution.item),target:lease });
   const clock = deps.clock ?? realClock, started = clock.now(), deadline = execution.deadline_at.getTime();
-  if (item.kind !== 'generate_unit' || item.dispatched || !UUID.test(item.correlation_id)
-    || ![lease.tenantId,lease.userId,lease.workspaceId,lease.workItemId,lease.leaseToken,lease.conversationId,item.node_id].every(id=>UUID.test(id))
+  if (item.kind !== 'generate_unit' || item.dispatched || !UUID_PATTERN.test(item.correlation_id)
+    || ![lease.tenantId,lease.userId,lease.workspaceId,lease.workItemId,lease.leaseToken,lease.conversationId,item.node_id].every(id=>UUID_PATTERN.test(id))
     || ![item.input_context_hash,item.source_snapshot_hash,item.contract_hash].every(h=>HASH.test(h))
     || !Number.isFinite(deadline) || deadline-started>600_000
     || !Number.isInteger(item.max_output_tokens) || item.max_output_tokens<1 || item.max_output_tokens>65_536
@@ -136,7 +136,7 @@ export async function runWorkspaceUnit(execution: WorkspaceUnitExecution, deps: 
     controller.signal.addEventListener('abort',rejectAbort,{once:true});
     if(controller.signal.aborted)rejectAbort();
   });
-  void interrupted.catch(()=>undefined);
+  void interrupted.catch(()=>undefined); // marks the rejection handled; wait() races it
   const wait = <T>(promise: Promise<T>) => Promise.race([promise,interrupted]);
   const cancelDeadline=clock.timeout(()=>abort('WORKSPACE_UNIT_WORKFLOW_TIMEOUT'),Math.max(0,end-started));
   const cancelHeartbeat=clock.interval(()=>{

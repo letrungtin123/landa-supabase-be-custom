@@ -18,6 +18,7 @@ import {
   updateDocumentStatus,
 } from './kb.service.js';
 import { query } from '../../config/database.js';
+import { logSwallowedError } from '../../utils/best-effort.js';
 
 interface UploadJob {
   documentId: string;
@@ -122,7 +123,7 @@ async function processUploadJob(data: Record<string, any>): Promise<void> {
   } finally {
     // ALWAYS cleanup temp file
     if (tempPath) {
-      try { await fs.unlink(tempPath); } catch { /* ignore */ }
+      try { await fs.unlink(tempPath); } catch (error) { logSwallowedError('kb.temp_file_cleanup', error, { ignoreMissingFile: true }); }
     }
   }
 }
@@ -144,7 +145,7 @@ export async function startUploadWorker(): Promise<void> {
             await recordRestoreDocumentFinished(data.restoreJobId, data.documentId, data.kbId, data.tenantId, false, 'Max retries exceeded');
           }
         }
-      } catch { /* ignore */ }
+      } catch (error) { logSwallowedError('kb.upload_max_retry_status', error); }
     },
     // No database backoff behind this queue: retries wait instead of firing at once.
     { retryBackoff: true },

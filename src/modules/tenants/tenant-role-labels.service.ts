@@ -17,8 +17,6 @@ export const SYSTEM_ROLES = [
 
 const ROLE_SET = new Set<string>(SYSTEM_ROLES);
 const MAX_LABEL_LENGTH = 64;
-const CACHE_TTL_MS = 5 * 60_000;
-const roleLabelsCache = new Map<string, { labels: RoleLabelMap; expires: number }>();
 
 function isUndefinedTableError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '42P01';
@@ -56,11 +54,7 @@ export function sanitizeRoleLabels(input: unknown): RoleLabelMap {
 }
 
 export async function invalidateTenantRoleLabelsCache(tenantId?: string | null): Promise<void> {
-  if (!tenantId) {
-    roleLabelsCache.clear();
-    return;
-  }
-  roleLabelsCache.delete(tenantId);
+  if (!tenantId) return;
   await bumpCacheVersion(...cacheVersions.tenantLabels(tenantId, 'role'));
 }
 
@@ -89,7 +83,6 @@ async function getTenantRoleLabelsFromDb(tenantId: string): Promise<RoleLabelMap
       if (ROLE_SET.has(row.role)) labels[row.role] = row.label;
     }
 
-    roleLabelsCache.set(tenantId, { labels, expires: Date.now() + CACHE_TTL_MS });
     return labels;
   } catch (err) {
     if (isUndefinedTableError(err)) return {};

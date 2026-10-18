@@ -6,6 +6,7 @@ import {
   runDeletionJob,
 } from './course-deletion.service.js';
 import { stopOnShutdown } from '../../config/process-lifecycle.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 function parseJobId(data: Record<string, any>): string {
   const jobId = typeof data.jobId === 'string' ? data.jobId.trim() : '';
@@ -18,7 +19,7 @@ async function processCourseDeletionJob(data: Record<string, any>): Promise<void
   try {
     await runDeletionJob(jobId);
   } catch (err) {
-    await markJobRetryable(jobId, err).catch(() => {});
+    await markJobRetryable(jobId, err).catch(swallowAndLog('course_deletion.retry_mark'));
     throw err;
   }
 }

@@ -12,7 +12,7 @@ import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission } from '../../middleware/authorize.js';
 import { COURSE_ASSET_MAX_UPLOAD_BYTES, COURSE_ASSET_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { sendError } from '../../utils/response.js';
-import { isUuid } from '../../utils/client-error.js';
+import { isUuid } from '../../utils/uuid.js';
 import * as ctrl from './course-authoring.controller.js';
 import * as publishGovernance from './course-publish-governance.controller.js';
 import { COURSE_ASSET_TEMP_DIR, cleanupStaleCourseAssetTempFiles } from './course-asset-temp.js';

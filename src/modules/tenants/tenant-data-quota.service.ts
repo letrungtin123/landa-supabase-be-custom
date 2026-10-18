@@ -16,6 +16,8 @@ import {
   TENANT_DATA_QUOTA_RECONCILING_CODE,
   TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
 } from './tenant-data-quota.constants.js';
+import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export {
   TENANT_DATA_LIMIT_REACHED_CODE,
@@ -25,7 +27,6 @@ export {
 } from './tenant-data-quota.constants.js';
 
 const STORAGE_RESERVATION_TTL_MINUTES = 30;
-const TENANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type QuotaState = 'initializing' | 'observing' | 'enforced' | 'reconciling' | 'drifted';
 
@@ -106,7 +107,7 @@ export function getTenantIdFromStoragePath(storagePath: string): string | null {
   const separator = path.indexOf('/');
   if (separator <= 0) return null;
   const tenantId = path.slice(0, separator);
-  return TENANT_ID_PATTERN.test(tenantId) ? tenantId.toLowerCase() : null;
+  return RFC_UUID_PATTERN.test(tenantId) ? tenantId.toLowerCase() : null;
 }
 
 async function lockQuota(client: Awaited<ReturnType<typeof getClient>>, tenantId: string): Promise<LockedQuotaRow> {
@@ -229,7 +230,7 @@ export async function reserveStorageUpload(storagePath: string, requestedSize: n
     await client.query('COMMIT');
     return { id: reservationId, tenantId, storagePath, previousSizeBytes, requestedSizeBytes };
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -325,7 +326,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -393,7 +394,7 @@ export async function releaseStorageUploadReservation(reservation: StorageUpload
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -447,14 +448,14 @@ export async function reserveStorageDeletes(storagePaths: readonly string[]): Pr
         }
         await client.query('COMMIT');
       } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined);
+        await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
         throw error;
       } finally {
         client.release();
       }
     }
   } catch (error) {
-    await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+    await flagStorageDeletesForReconciliation(reservations).catch(swallowAndLog('storage.reconciliation_flag'));
     throw error;
   }
   return reservations;
@@ -533,7 +534,7 @@ export async function recordStorageDelete(
       }
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
+      await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
       throw error;
     } finally {
       client.release();

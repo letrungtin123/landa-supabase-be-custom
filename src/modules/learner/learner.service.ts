@@ -29,6 +29,7 @@ import {
   evaluateUserBadges,
   getEffectiveBadgeDefinitions,
 } from '../badges/badge-evaluation.service.js';
+import { isUuid } from '../../utils/uuid.js';
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -75,7 +76,7 @@ export async function assertCoursePopupAccess(
 
 /** A section popup can only be marked for a section (chapter) of that course. */
 export async function assertCourseSection(courseId: string, sectionId: unknown): Promise<string> {
-  if (typeof sectionId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sectionId)) {
+  if (!isUuid(sectionId)) {
     throw new AppError('Không tìm thấy phần học này', 404);
   }
   const result = await query(

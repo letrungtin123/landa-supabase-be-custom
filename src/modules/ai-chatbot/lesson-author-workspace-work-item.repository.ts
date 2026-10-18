@@ -3,6 +3,8 @@ import { generationSnapshotHash as hash } from './lesson-author-generation-job.l
 import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
 import { loadWorkspaceGenerationContext, loadWorkspaceChapterGenerationContext } from './lesson-author-workspace-generation-context.repository.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 /** Server-only lifecycle for ALREADY admitted work. No imports of connections,
  * config, providers, quota services, timers or routes. Admission, manifest building,
@@ -60,7 +62,6 @@ export class WorkspaceWorkItemError extends Error {
   constructor(readonly code: WorkspaceWorkItemErrorCode) { super(code); this.name = 'WorkspaceWorkItemError'; }
 }
 const fail = (code: WorkspaceWorkItemErrorCode): never => { throw new WorkspaceWorkItemError(code); };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 type Row = Record<string, unknown>;
 const terminal = new Set(['succeeded','failed','timed_out','outcome_unknown','canceled']);
@@ -80,7 +81,7 @@ function freeze<T>(value: T): T {
 }
 function targetCopy(input: WorkspaceWorkItemLease) {
   const copy = Object.freeze({ ...input });
-  if (![copy.tenantId,copy.userId,copy.conversationId,copy.workspaceId,copy.workItemId,copy.leaseToken].every(v => typeof v === 'string' && UUID.test(v))
+  if (![copy.tenantId,copy.userId,copy.conversationId,copy.workspaceId,copy.workItemId,copy.leaseToken].every(v => isUuid(v))
     || typeof copy.courseId !== 'string' || !copy.courseId || copy.courseId.length > 255) fail('WORKSPACE_WORK_ITEM_INVALID');
   return copy;
 }
@@ -113,8 +114,7 @@ export function createWorkspaceWorkItemRepository(deps: {
     await tx.query("SET LOCAL lock_timeout = '3000ms'");
     const advisory = await tx.query(`SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`, [`course:${t.tenantId}:${t.courseId}`]);
     if (advisory.rows.length !== 1 || advisory.rows[0].acquired !== true) fail('WORKSPACE_WORK_ITEM_CONFLICT');
-    const course = await tx.query(`SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [t.courseId,t.tenantId]);
-    if (course.rows.length !== 1) fail('WORKSPACE_WORK_ITEM_NOT_FOUND');
+    if (!await createCourseAccessRepository(tx).lockCourseOfTenant(t.courseId, t.tenantId)) fail('WORKSPACE_WORK_ITEM_NOT_FOUND');
     const ws = await tx.query(`SELECT w.id,w.status,w.source_snapshot_hash,w.correlation_id,w.content_locale
       FROM lesson_author_workspaces w JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
         AND c.course_id=w.course_id AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -130,9 +130,9 @@ export function createWorkspaceWorkItemRepository(deps: {
     if (item.rows.length !== 1) fail('WORKSPACE_WORK_ITEM_LEASE_LOST');
     const a = item.rows[0], w = ws.rows[0], r = run.rows[0];
     if (a.id !== t.workItemId || a.workspace_id !== t.workspaceId || a.tenant_id !== t.tenantId || a.course_id !== t.courseId || a.lease_token !== t.leaseToken
-      || typeof a.node_id !== 'string' || !UUID.test(a.node_id) || typeof a.ai_reservation_id !== 'string' || !UUID.test(a.ai_reservation_id)
+      || !isUuid(a.node_id) || !isUuid(a.ai_reservation_id)
       || !['generate_unit','validate_chapter'].includes(String(a.kind)) || !['running',...terminal].includes(String(a.status))
-      || !['vi','en'].includes(String(w.content_locale)) || typeof w.correlation_id !== 'string' || !UUID.test(w.correlation_id)
+      || !['vi','en'].includes(String(w.content_locale)) || !isUuid(w.correlation_id)
       || [a.contract_hash,a.input_context_hash,w.source_snapshot_hash,r.runtime_config_hash,r.inventory_hash,r.manifest_hash]
         .some(v => typeof v !== 'string' || !HASH.test(v))) fail('WORKSPACE_WORK_ITEM_READBACK_INVALID');
     const context = freeze({ target: t, node_id: a.node_id, kind: a.kind, ordinal: integer(a.ordinal),
@@ -195,8 +195,8 @@ export function createWorkspaceWorkItemRepository(deps: {
     const track: Track = context => { correlation = context.correlation_id; node = context.node_id; };
     const report = (status: WorkspaceWorkItemDiagnostic['status'], internalCode: string | null) => {
       try { deps.report({ event: 'workspace_work_item_operation', operation,
-        workspace_id: typeof target?.workspaceId === 'string' && UUID.test(target.workspaceId) ? target.workspaceId : '',
-        work_item_id: typeof target?.workItemId === 'string' && UUID.test(target.workItemId) ? target.workItemId : '',
+        workspace_id: typeof target?.workspaceId === 'string' && UUID_PATTERN.test(target.workspaceId) ? target.workspaceId : '',
+        work_item_id: typeof target?.workItemId === 'string' && UUID_PATTERN.test(target.workItemId) ? target.workItemId : '',
         correlation_id: correlation, node_id: node, status, internal_failure_code: internalCode,
         baseline_count: baselineCount, duration_ms: Math.max(0,Math.round(performance.now()-started)) }); } catch { /* telemetry is not authority */ }
     };
@@ -306,7 +306,7 @@ export function createWorkspaceWorkItemRepository(deps: {
         || candidate.baselines.length > 65 || Buffer.byteLength(JSON.stringify(candidate.baselines),'utf8') > 16*1024*1024
         || new Set(candidate.baselines.map(n => n.node_id)).size !== candidate.baselines.length) fail('WORKSPACE_WORK_ITEM_INVALID');
       for (const n of candidate.baselines) {
-        if (!UUID.test(n.node_id) || !HASH.test(n.contract_hash) || !HASH.test(n.content_hash)
+        if (!UUID_PATTERN.test(n.node_id) || !HASH.test(n.contract_hash) || !HASH.test(n.content_hash)
           || hash(readWorkspaceContent(n.content)) !== n.content_hash) fail('WORKSPACE_WORK_ITEM_INVALID');
       }
       return execute(target, 'publish_unit', async (tx,t,track) => {

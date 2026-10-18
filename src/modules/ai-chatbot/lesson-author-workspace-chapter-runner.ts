@@ -6,6 +6,7 @@ import { workspaceChapterValidationUnits, acceptWorkspaceChapterValidation } fro
 import type { WorkspaceChapterGenerationContext } from './lesson-author-workspace-generation-context.repository.js';
 import type { WorkspaceWorkItemContext, WorkspaceWorkItemLease, WorkspaceWorkItemReceipt } from './lesson-author-workspace-work-item.repository.js';
 import type { WorkspaceUnitClock, WorkspaceUnitUsage, WorkspaceUnitFailure } from './lesson-author-workspace-unit-runner.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export class WorkspaceChapterRunError extends Error {
   constructor(readonly code: 'WORKSPACE_CHAPTER_RUN_INVALID' | 'WORKSPACE_CHAPTER_WORKFLOW_TIMEOUT'
@@ -34,7 +35,7 @@ const realClock: WorkspaceUnitClock = {
   now:()=>Date.now(), timeout:(fn,ms)=>{const t=setTimeout(fn,ms);return()=>clearTimeout(t);},
   interval:(fn,ms)=>{const t=setInterval(fn,ms);return()=>clearInterval(t);},
 };
-const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i, HASH=/^[0-9a-f]{64}$/;
+const HASH=/^[0-9a-f]{64}$/;
 function invalid(): never { throw new WorkspaceChapterRunError('WORKSPACE_CHAPTER_RUN_INVALID'); }
 function failureCode(error: unknown) {
   const e=error && typeof error==='object' ? error as { internal_failure_code?: unknown; code?: unknown } : {};
@@ -65,7 +66,7 @@ export async function runWorkspaceChapter(execution: WorkspaceChapterExecution, 
   const lease=Object.freeze({...execution.item.target}),item=Object.freeze({...structuredClone(execution.item),target:lease});
   const clock=deps.clock??realClock,started=clock.now(),deadline=execution.deadline_at.getTime();
   if (item.kind!=='validate_chapter' || item.dispatched || item.max_output_tokens!==0 || item.max_provider_attempts!==0
-    || ![lease.tenantId,lease.userId,lease.workspaceId,lease.workItemId,lease.leaseToken,lease.conversationId,item.node_id,item.correlation_id].every(v=>UUID.test(v))
+    || ![lease.tenantId,lease.userId,lease.workspaceId,lease.workItemId,lease.leaseToken,lease.conversationId,item.node_id,item.correlation_id].every(v=>UUID_PATTERN.test(v))
     || ![item.input_context_hash,item.source_snapshot_hash,item.contract_hash].every(v=>HASH.test(v))
     || !Number.isFinite(deadline) || deadline-started>600_000 || !['en','vi'].includes(item.content_locale)) invalid();
   const end=Math.min(started+480_000,deadline-60_000),controller=new AbortController();
@@ -87,7 +88,7 @@ export async function runWorkspaceChapter(execution: WorkspaceChapterExecution, 
     rejectAbort=()=>reject(controller.signal.reason);controller.signal.addEventListener('abort',rejectAbort,{once:true});
     if(controller.signal.aborted)rejectAbort();
   });
-  void interrupted.catch(()=>undefined);
+  void interrupted.catch(()=>undefined); // marks the rejection handled; wait() races it
   const wait=<T>(promise:Promise<T>)=>Promise.race([promise,interrupted]);
   const cancelDeadline=clock.timeout(()=>abort('WORKSPACE_CHAPTER_WORKFLOW_TIMEOUT'),Math.max(0,end-started));
   const cancelHeartbeat=clock.interval(()=>{

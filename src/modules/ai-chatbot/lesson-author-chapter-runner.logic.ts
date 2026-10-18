@@ -75,7 +75,7 @@ export async function runChapterCheckpoint(draft: ChapterDraftRow, attempt: Chap
     rejectAbort = () => reject(controller.signal.reason);
     controller.signal.addEventListener('abort',rejectAbort,{once:true});
   });
-  void abort.catch(() => undefined);
+  void abort.catch(() => undefined); // marks the rejection handled; wait() races it
   const wait = <T>(work: Promise<T>) => Promise.race([work,abort]);
   const account = (response: RagChapterUnitResponse | RagChapterFinalResponse) => {
     if (!response.usage_complete) ledger.complete = false;

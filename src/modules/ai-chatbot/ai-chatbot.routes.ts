@@ -62,6 +62,7 @@ import {
   listLessonAuthorSessionController,
   renameLessonAuthorSessionController,
 } from './lesson-author-session.controller.js';
+import { hasAiIdCoursePermission } from './lesson-author-ai-id-access.service.js';
 
 const router = Router();
 
@@ -193,7 +194,7 @@ router.use(tenantContext);
 // Using AI never requires the ai_chatbot module (configuration pages only):
 // lesson-author runtime needs the course data permission. Sessions are shared
 // per course; only the creator continues one (localized 403 for other editors).
-const lessonAuthorAccess = { db: { query }, canEditCourses: (user: NonNullable<Request['user']>) => hasPermission(user, 'courses', 'can_edit') };
+const lessonAuthorAccess = { db: { query }, canEditCourses: hasAiIdCoursePermission };
 const lessonAuthorSessionOwnerOnly = createLessonAuthorSessionOwnerGuard(lessonAuthorAccess);
 const lessonAuthorCourseEditor = createLessonAuthorCourseEditorGuard(lessonAuthorAccess, getRuntimeChatTarget);
 // Routes not keyed by a conversation: staff+ in a normal session (never learner_plus).

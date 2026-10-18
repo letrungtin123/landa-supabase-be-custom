@@ -14,8 +14,7 @@ import {
   REPORT_FILTER_UNIT_INVALID_CODE,
   type ReportChatErrorCode,
 } from './report-chat-error.logic.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { isUuid } from '../../utils/uuid.js';
 
 const FilterShape = z.object({
   date_from: z.unknown().optional(),
@@ -53,7 +52,7 @@ export function parseReportFilters(value: unknown): ReportFilterParseResult {
   for (const key of ['group_id', 'subgroup_id', 'team_id'] as const) {
     const raw = input[key];
     if (raw === undefined || raw === null || raw === '' || raw === 'all') continue;
-    if (typeof raw !== 'string' || !UUID.test(raw)) return { ok: false, code: REPORT_FILTER_UNIT_INVALID_CODE };
+    if (!isUuid(raw)) return { ok: false, code: REPORT_FILTER_UNIT_INVALID_CODE };
     ids[key] = raw;
   }
   return { ok: true, value: { ...dates, ...ids } };

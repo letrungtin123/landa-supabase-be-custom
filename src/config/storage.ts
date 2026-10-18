@@ -24,6 +24,7 @@ import {
   reserveStorageDeletes,
   reserveStorageUpload,
 } from '../modules/tenants/tenant-data-quota.service.js';
+import { swallowAndLog } from '../utils/best-effort.js';
 
 // ── Supabase admin client (service_role — bypass RLS) ──
 const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_KEY, {
@@ -114,7 +115,7 @@ export async function uploadFile(
       await releaseStorageUploadReservation(reservation)
         .catch(() => flagStorageUploadForReconciliation(reservation));
     } else {
-      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+      await flagStorageUploadForReconciliation(reservation).catch(swallowAndLog('storage.reconciliation_flag'));
     }
     throw error;
   }
@@ -171,7 +172,7 @@ export async function uploadFileFromPath(
     if (!response.ok) {
       throw new StorageProviderRejectedError(`[Storage] Upload failed (${storagePath}): ${await storageErrorDetail(response)}`);
     }
-    await response.arrayBuffer().catch(() => undefined);
+    await response.arrayBuffer().catch(() => undefined); // drains the body; the upload already succeeded
 
     await commitStorageUpload(reservation, stat.size);
     return storagePath;
@@ -180,7 +181,7 @@ export async function uploadFileFromPath(
       await releaseStorageUploadReservation(reservation)
         .catch(() => flagStorageUploadForReconciliation(reservation));
     } else {
-      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+      await flagStorageUploadForReconciliation(reservation).catch(swallowAndLog('storage.reconciliation_flag'));
     }
     throw error;
   } finally {
@@ -247,7 +248,7 @@ export async function uploadCourseAssetFileFromPath(
       await releaseStorageUploadReservation(reservation)
         .catch(() => flagStorageUploadForReconciliation(reservation));
     } else {
-      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+      await flagStorageUploadForReconciliation(reservation).catch(swallowAndLog('storage.reconciliation_flag'));
     }
     throw error;
   }
@@ -297,7 +298,7 @@ export async function uploadLessonAuthorPrivateFileFromPath(
       await releaseStorageUploadReservation(reservation)
         .catch(() => flagStorageUploadForReconciliation(reservation));
     } else {
-      await flagStorageUploadForReconciliation(reservation).catch(() => undefined);
+      await flagStorageUploadForReconciliation(reservation).catch(swallowAndLog('storage.reconciliation_flag'));
     }
     throw error;
   }
@@ -326,7 +327,7 @@ export async function downloadLessonAuthorPrivateFileToTemp(
     );
     return tempPath;
   } catch (error) {
-    await fs.unlink(tempPath).catch(() => undefined);
+    await fs.unlink(tempPath).catch(swallowAndLog('storage.temp_file_cleanup', { ignoreMissingFile: true }));
     throw error;
   }
 }
@@ -373,7 +374,7 @@ export async function deleteLessonAuthorPrivateFiles(storagePaths: readonly stri
       await releaseStorageDeleteReservations(reservations)
         .catch(() => flagStorageDeletesForReconciliation(reservations));
     } else {
-      await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+      await flagStorageDeletesForReconciliation(reservations).catch(swallowAndLog('storage.reconciliation_flag'));
     }
     throw error;
   }
@@ -489,7 +490,7 @@ export async function deleteFiles(storagePaths: readonly string[]): Promise<void
         await releaseStorageDeleteReservations(reservations)
           .catch(() => flagStorageDeletesForReconciliation(reservations));
       } else {
-        await flagStorageDeletesForReconciliation(reservations).catch(() => undefined);
+        await flagStorageDeletesForReconciliation(reservations).catch(swallowAndLog('storage.reconciliation_flag'));
       }
       throw error;
     }
@@ -704,7 +705,7 @@ export async function downloadToTempFile(
     await pipeline(opened.body, idleWatch, file, { signal: controller.signal });
     return target;
   } catch (error) {
-    if (tempPath) await fs.unlink(tempPath).catch(() => undefined);
+    if (tempPath) await fs.unlink(tempPath).catch(swallowAndLog('storage.temp_file_cleanup', { ignoreMissingFile: true }));
     // An abort surfaces as a generic AbortError: report its reason (stall or caller) instead.
     const reason: unknown = controller.signal.aborted ? controller.signal.reason : undefined;
     throw reason instanceof Error ? reason : error;

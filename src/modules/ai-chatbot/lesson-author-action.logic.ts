@@ -1,7 +1,8 @@
+import { isUuid } from '../../utils/uuid.js';
 /** Button commands are routing authority, never authorization. Legacy callers
  * without an action keep the old contract. No provider or persistence here. */
 export type LessonAuthorAction = 'GENERATE_COURSE_BLUEPRINT' | 'DRAFT_BLUEPRINT_CHAPTER' | 'CONTINUE_CHAPTER';
-const uuid = (v: unknown) => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+const uuid = (v: unknown) => isUuid(v);
 export function resolveLessonAuthorAction(body: Record<string, unknown>, target: string): {
   action: LessonAuthorAction; mode: 'course_blueprint' | 'draft_lesson'; content: string;
 } | null {

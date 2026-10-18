@@ -70,5 +70,5 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await pool.end().catch(() => undefined);
+    await pool.end().catch(() => undefined); // exiting: closing the pool is best effort
   });

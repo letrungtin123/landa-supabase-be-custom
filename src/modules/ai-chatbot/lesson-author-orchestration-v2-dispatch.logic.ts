@@ -1,3 +1,4 @@
+import { UUID_PATTERN } from '../../utils/uuid.js';
 export type OrchestrationV2RuntimeRole = 'disabled' | 'dispatcher' | 'worker';
 
 export interface OrchestrationV2RuntimeIsolationInput {
@@ -33,7 +34,6 @@ export class OrchestrationV2DispatchContractError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const integer = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
 /** A process owns exactly one role. API replicas remain disabled by default. */
@@ -52,7 +52,7 @@ export function assertOrchestrationV2RuntimeIsolation(
 export function orchestrationV2DispatchEnvelope(
   input: OrchestrationV2DispatchIdentity,
 ): Readonly<OrchestrationV2DispatchEnvelope> {
-  if (!input || !UUID.test(input.outbox_id) || !UUID.test(input.run_id) || !UUID.test(input.task_id)
+  if (!input || !UUID_PATTERN.test(input.outbox_id) || !UUID_PATTERN.test(input.run_id) || !UUID_PATTERN.test(input.task_id)
     || !integer(input.dispatch_epoch, 0, 100) || !integer(input.routing_shard, 0, 4_095)) {
     throw new OrchestrationV2DispatchContractError('ORCHESTRATION_V2_DISPATCH_IDENTITY_INVALID');
   }

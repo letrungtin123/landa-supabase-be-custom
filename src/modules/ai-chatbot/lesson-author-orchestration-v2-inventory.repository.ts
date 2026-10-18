@@ -11,6 +11,7 @@ import type {
   OrchestrationV2TaskLease,
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 
@@ -27,7 +28,6 @@ export class OrchestrationV2InventoryRepositoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (code: OrchestrationV2InventoryRepositoryError['code']): never => {
   throw new OrchestrationV2InventoryRepositoryError(code);
@@ -125,7 +125,7 @@ export function createOrchestrationV2InventoryRepository(
           },
         };
         const current = task.id === lease.task_id;
-        if (!UUID.test(task.id) || !HASH.test(task.contract_hash)
+        if (!UUID_PATTERN.test(task.id) || !HASH.test(task.contract_hash)
           || (task.input_context_hash !== null && !HASH.test(task.input_context_hash))
           || (current ? row.status !== 'running' : row.status !== 'succeeded')) {
           fail('ORCHESTRATION_V2_INVENTORY_EVIDENCE_INVALID');
@@ -285,7 +285,7 @@ export function createOrchestrationV2InventoryRepository(
         for (const page of batches(unitTasks)) {
           const outboxRows = page.map(task => {
             const outboxId = id();
-            if (!UUID.test(outboxId)) fail('ORCHESTRATION_V2_INVENTORY_WRITE_UNCONFIRMED');
+            if (!UUID_PATTERN.test(outboxId)) fail('ORCHESTRATION_V2_INVENTORY_WRITE_UNCONFIRMED');
             return { id: outboxId, task_id: task.id };
           });
           const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox

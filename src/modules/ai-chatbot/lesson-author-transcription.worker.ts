@@ -28,6 +28,7 @@ import {
   normalizeTranscriptText,
 } from './lesson-author-transcription.logic.js';
 import { stopOnShutdown } from '../../config/process-lifecycle.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const execFile = promisify(execFileCallback);
 const FFMPEG_TIMEOUT_MS = 30 * 60_000;
@@ -93,8 +94,8 @@ async function cleanupStaleTempArtifacts(): Promise<void> {
     await Promise.all(entries.map(async entry => {
       if (!entry.isFile()) return;
       const filePath = path.resolve(directory, entry.name);
-      const stat = await fs.stat(filePath).catch(() => null);
-      if (stat && stat.mtimeMs < cutoff) await fs.unlink(filePath).catch(() => undefined);
+      const stat = await fs.stat(filePath).catch(() => null); // gone already (another process swept it)
+      if (stat && stat.mtimeMs < cutoff) await fs.unlink(filePath).catch(() => undefined); // the next sweep retries
     }));
   }
 }
@@ -150,11 +151,11 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
       expiresAt: new Date(Date.now() + env.LESSON_AUTHOR_TRANSCRIPT_RETENTION_HOURS * 60 * 60 * 1000),
     });
     if (!completed) {
-      await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(() => undefined);
+      await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(swallowAndLog('lesson_author.transcript_storage_cleanup'));
       return;
     }
     transcriptStoragePath = null;
-    await deleteLessonAuthorPrivateFiles([job.source_storage_path]).catch(() => undefined);
+    await deleteLessonAuthorPrivateFiles([job.source_storage_path]).catch(swallowAndLog('lesson_author.transcript_storage_cleanup'));
     try {
       if (!completed.conversation_id || !completed.requested_by) {
         throw new Error('Transcript job không còn thông tin cuộc hội thoại hoặc người yêu cầu.');
@@ -189,7 +190,7 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
       });
     }
   } catch (error) {
-    if (transcriptStoragePath) await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(() => undefined);
+    if (transcriptStoragePath) await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(swallowAndLog('lesson_author.transcript_storage_cleanup'));
     if (job.lease_token) {
       const failed = await failLessonAuthorTranscriptionJob({
         jobId: job.id,
@@ -202,7 +203,7 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
   } finally {
     await Promise.all([videoTempPath, audioTempPath, transcriptTempPath]
       .filter((value): value is string => Boolean(value))
-      .map(filePath => fs.unlink(filePath).catch(() => undefined)));
+      .map(filePath => fs.unlink(filePath).catch(() => undefined))); // a leftover is removed by the stale-file sweep
   }
 }
 

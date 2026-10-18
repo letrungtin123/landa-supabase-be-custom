@@ -56,6 +56,7 @@ import type {
   OrchestrationV2TaskLease,
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 type SettleProvider = Parameters<WorkerRepository['succeed']>[5];
@@ -95,7 +96,6 @@ export class OrchestrationV2PlanningRepositoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (code: OrchestrationV2PlanningRepositoryError['code']): never => {
   throw new OrchestrationV2PlanningRepositoryError(code);
@@ -129,10 +129,10 @@ export function createOrchestrationV2PlanningRepository(
         WHERE ${liveLeaseSql('t')} FOR SHARE OF w,c,ka`,
       [lease.task_id, lease.run_id, lease.workspace_id, lease.tenant_id, lease.lease_token]);
       const row = found.rows[0];
-      if (found.rows.length !== 1 || !row || !UUID.test(String(row.kb_id)) || !UUID.test(String(row.conversation_id))
-        || !UUID.test(String(row.correlation_id)) || !['vi', 'en'].includes(String(row.content_locale))
+      if (found.rows.length !== 1 || !row || !UUID_PATTERN.test(String(row.kb_id)) || !UUID_PATTERN.test(String(row.conversation_id))
+        || !UUID_PATTERN.test(String(row.correlation_id)) || !['vi', 'en'].includes(String(row.content_locale))
         || !Array.isArray(row.source_document_ids) || row.source_document_ids.length < 1
-        || row.source_document_ids.length > 5 || row.source_document_ids.some(value => !UUID.test(String(value)))) {
+        || row.source_document_ids.length > 5 || row.source_document_ids.some(value => !UUID_PATTERN.test(String(value)))) {
         fail('ORCHESTRATION_V2_PLANNING_AUTHORITY_INVALID');
       }
       const documents = await tx.query(`SELECT id::text AS document_id,kb_id::text,name,type,status

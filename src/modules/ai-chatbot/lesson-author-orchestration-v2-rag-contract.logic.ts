@@ -1,3 +1,4 @@
+import { UUID_PATTERN } from '../../utils/uuid.js';
 export interface OrchestrationV2RagUsage {
   inputTokens?: number;
   outputTokens?: number;
@@ -196,7 +197,6 @@ export class OrchestrationV2RagContractError extends Error {
 }
 
 const HASH = /^[0-9a-f]{64}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const KEY = /^[a-z0-9][a-z0-9_.:-]{0,159}$/;
 const OBJECTIVE_REF = /^lo_([1-9][0-9]*)$/;
 const COMPONENT_TYPES = new Set<OrchestrationV2ComponentType>(
@@ -301,7 +301,7 @@ export function readOrchestrationV2SourceAuthority(value: unknown): Orchestratio
   const chapters = (item.chapters as unknown[]).map((candidate, index) => {
     const chapter = requireRecord(candidate);
     if (!exactKeys(chapter, ['order', 'document_id', 'source_ref', 'title']) || chapter.order !== index
-      || !text(chapter.document_id, 64) || !UUID.test(chapter.document_id as string)
+      || !text(chapter.document_id, 64) || !UUID_PATTERN.test(chapter.document_id as string)
       || !text(chapter.source_ref, 255) || !text(chapter.title, 500)) fail();
     return chapter as unknown as OrchestrationV2SourceOutlineChapter;
   });
@@ -452,10 +452,10 @@ export function readOrchestrationV2SourceSnapshotPageResponse(
   const authority = readOrchestrationV2SourceAuthority(item.source_authority);
   const factKeys = new Set<string>();
   for (const fact of facts) {
-    if (!UUID.test(fact.document_id) || !KEY.test(fact.fact_key) || !KEY.test(fact.scope_key)
+    if (!UUID_PATTERN.test(fact.document_id) || !KEY.test(fact.fact_key) || !KEY.test(fact.scope_key)
       || factKeys.has(fact.fact_key) || fact.locator.source_revision !== item.source_revision
       || !text(fact.locator.scope_title, 500) || !text(fact.locator.index_id, 64)
-      || !UUID.test(String(fact.locator.index_id))) fail();
+      || !UUID_PATTERN.test(String(fact.locator.index_id))) fail();
     factKeys.add(fact.fact_key);
   }
   const actualBytes = facts.reduce((total, fact) => total + Buffer.byteLength(fact.fact_text, 'utf8'), 0);
@@ -463,7 +463,7 @@ export function readOrchestrationV2SourceSnapshotPageResponse(
   let nextCursor: OrchestrationV2SourceCursor | null = null;
   if (item.next_cursor !== null) {
     const cursor = requireRecord(item.next_cursor);
-    if (!text(cursor.document_id, 64) || !UUID.test(String(cursor.document_id))
+    if (!text(cursor.document_id, 64) || !UUID_PATTERN.test(String(cursor.document_id))
       || !integer(cursor.chunk_no, 0, Number.MAX_SAFE_INTEGER)) fail();
     nextCursor = { document_id: cursor.document_id as string, chunk_no: cursor.chunk_no as number };
   }

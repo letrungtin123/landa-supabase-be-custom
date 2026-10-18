@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export const LESSON_AUTHOR_ORCHESTRATION_V2 = 2 as const;
 export const LESSON_AUTHOR_PROVIDER_MAX_OUTPUT_TOKENS = 65_536;
@@ -132,7 +133,6 @@ export class OrchestrationV2Error extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const KEY = /^[a-z0-9][a-z0-9_.:-]{0,159}$/;
 const MAX_TASKS = 32_768;
@@ -189,12 +189,12 @@ export function buildOrchestrationV2Manifest(input: OrchestrationV2PlanInput): O
   const chapters = input.chapters.map(chapter => ({ ...chapter, units: [...chapter.units] }));
   const chapterKeys = new Set<string>(), nodeIds = new Set<string>();
   for (const chapter of chapters) {
-    if (!KEY.test(chapter.chapter_key) || chapterKeys.has(chapter.chapter_key) || !UUID.test(chapter.chapter_node_id)
+    if (!KEY.test(chapter.chapter_key) || chapterKeys.has(chapter.chapter_key) || !UUID_PATTERN.test(chapter.chapter_node_id)
       || nodeIds.has(chapter.chapter_node_id) || !HASH.test(chapter.source_scope_hash)
       || !chapter.units.length || chapter.units.length > MAX_UNITS_PER_CHAPTER) fail('ORCHESTRATION_V2_INPUT_INVALID');
     chapterKeys.add(chapter.chapter_key); nodeIds.add(chapter.chapter_node_id);
     for (const unit of chapter.units) {
-      if (!UUID.test(unit.node_id) || nodeIds.has(unit.node_id) || !HASH.test(unit.contract_hash)) fail('ORCHESTRATION_V2_INPUT_INVALID');
+      if (!UUID_PATTERN.test(unit.node_id) || nodeIds.has(unit.node_id) || !HASH.test(unit.contract_hash)) fail('ORCHESTRATION_V2_INPUT_INVALID');
       nodeIds.add(unit.node_id);
     }
   }
@@ -287,7 +287,7 @@ export function sealOrchestrationV2PersistedManifest(input: {
   for (const [index, task] of tasks.entries()) {
     if (task.ordinal !== index || !KEY.test(task.task_key) || keys.has(task.task_key) || !TASK_KINDS.has(task.kind)
       || (task.chapter_key !== null && !KEY.test(task.chapter_key))
-      || (task.node_id !== null && !UUID.test(task.node_id)) || !HASH.test(task.contract_hash)
+      || (task.node_id !== null && !UUID_PATTERN.test(task.node_id)) || !HASH.test(task.contract_hash)
       || (task.input_context_hash !== null && !HASH.test(task.input_context_hash))
       || !safeInteger(task.priority, 0, 1_000) || !safeInteger(task.max_attempts, 1, 2)
       || !Array.isArray(task.depends_on) || new Set(task.depends_on).size !== task.depends_on.length) {

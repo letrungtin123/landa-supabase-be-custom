@@ -5,6 +5,7 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export const ORCHESTRATION_V2_CHAPTER_CONTRACT = 'orchestration-chapter-receipt-v2';
 
@@ -54,7 +55,6 @@ export class OrchestrationV2ChapterError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_RECEIPT_BYTES = 1024 * 1024;
 const fail = (code: OrchestrationV2ChapterError['code']): never => { throw new OrchestrationV2ChapterError(code); };
@@ -78,7 +78,7 @@ export function validateOrchestrationV2Chapter(input: {
   baselines: readonly OrchestrationV2ChapterBaselineEvidence[];
 }): Readonly<OrchestrationV2ChapterReceipt> {
   const { assembly } = input;
-  if (!UUID.test(input.run_id) || !UUID.test(input.chapter_node_id) || !HASH.test(input.inventory_hash)
+  if (!UUID_PATTERN.test(input.run_id) || !UUID_PATTERN.test(input.chapter_node_id) || !HASH.test(input.inventory_hash)
     || !assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)
     || input.chapter_key.length < 1 || input.chapter_key.length > 160) {
     fail('ORCHESTRATION_V2_CHAPTER_INPUT_INVALID');
@@ -112,7 +112,7 @@ export function validateOrchestrationV2Chapter(input: {
   let componentCount = 0;
   for (const [index, expected] of expectedUnits.entries()) {
     const evidence = input.units[index];
-    if (!evidence || !UUID.test(evidence.task_id)
+    if (!evidence || !UUID_PATTERN.test(evidence.task_id)
       || evidence.task_key !== `content:${input.chapter_key}:unit:${index + 1}`
       || evidence.node_id !== orchestrationV2DeterministicUuid(input.run_id, `node:${expected.path}`)
       || !HASH.test(evidence.artifact_hash)) fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');

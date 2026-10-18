@@ -6,6 +6,7 @@ import {
   completeClaimedNewsAsset,
   releaseClaimedNewsAsset,
 } from '../modules/news/news.service.js';
+import { swallowAndLog } from '../utils/best-effort.js';
 
 const POLL_INTERVAL_MS = 60_000;
 const FAILURE_RETRY_MS = 15_000;
@@ -37,7 +38,7 @@ async function runCycle(): Promise<number> {
       await deleteFile(asset.storage_path);
       await completeClaimedNewsAsset(asset.id);
     } catch (error) {
-      await releaseClaimedNewsAsset(asset.id).catch(() => undefined);
+      await releaseClaimedNewsAsset(asset.id).catch(swallowAndLog('news.asset_claim_release'));
       console.warn(`[NewsAssetCleanup] Deferred ${asset.storage_path}:`, error instanceof Error ? error.message : String(error));
     }
   }
@@ -82,6 +83,6 @@ void bootstrap()
   .catch(async (error) => {
     console.error('[NewsAssetCleanup] Fatal error:', error);
     requestStop('fatal');
-    await pool.end().catch(() => undefined);
+    await pool.end().catch(() => undefined); // exiting: closing the pool is best effort
     process.exitCode = 1;
   });

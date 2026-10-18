@@ -199,7 +199,7 @@ export async function requestUserDeletion(
     response = { jobId, deletedUserName: target.username || target.email || target.id };
     revocationExpiresAt = expiresAt;
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -315,7 +315,7 @@ async function markJobSucceeded(jobId: string, stats: Record<string, number>): P
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();

@@ -8,6 +8,7 @@ import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/a
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const MAX_ACTIVE = 6;
 
@@ -251,13 +252,13 @@ export async function deleteTemplate(id: string, auditEntry?: TransactionalAudit
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
   }
-  if (removed?.avatar_url) await deleteFileByUrl(removed.avatar_url).catch(() => undefined);
-  if (removed?.fullbody_url) await deleteFileByUrl(removed.fullbody_url).catch(() => undefined);
+  if (removed?.avatar_url) await deleteFileByUrl(removed.avatar_url).catch(swallowAndLog('prompt_templates.image_cleanup'));
+  if (removed?.fullbody_url) await deleteFileByUrl(removed.fullbody_url).catch(swallowAndLog('prompt_templates.image_cleanup'));
   return true;
 }
 
@@ -293,7 +294,7 @@ export async function uploadAvatar(
       'SELECT avatar_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
       [id],
     );
-    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup')); return null; }
     oldPath = current.rows[0].avatar_url;
     const result = await client.query<PromptTemplate>(
       `UPDATE system_prompt_templates SET avatar_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
@@ -304,13 +305,13 @@ export async function uploadAvatar(
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    await deleteFileByUrl(storagePath).catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
+    await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup'));
     throw error;
   } finally {
     client.release();
   }
-  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(swallowAndLog('prompt_templates.image_cleanup'));
   return updated;
 }
 
@@ -332,7 +333,7 @@ export async function uploadFullbody(
       'SELECT fullbody_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
       [id],
     );
-    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup')); return null; }
     oldPath = current.rows[0].fullbody_url;
     const result = await client.query<PromptTemplate>(
       `UPDATE system_prompt_templates SET fullbody_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
@@ -343,12 +344,12 @@ export async function uploadFullbody(
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    await deleteFileByUrl(storagePath).catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
+    await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup'));
     throw error;
   } finally {
     client.release();
   }
-  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(swallowAndLog('prompt_templates.image_cleanup'));
   return updated;
 }

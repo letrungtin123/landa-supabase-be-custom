@@ -9,6 +9,7 @@ import {
   invalidateTenantCourseCaches,
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { assertCourseBelongsToTenant } from './course-access.service.js';
 import { classifyCourseMentorLogoOwnership } from './course-mentor-logo-ownership.logic.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
@@ -20,6 +21,7 @@ import {
   type CourseMarkdownBlock,
   type CourseMarkdownCourse,
 } from './course-markdown-exporter.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 interface CourseMentor {
   id: string;
@@ -199,13 +201,8 @@ async function insertMentorAssignmentHistory(
   else await query(sql, params);
 }
 
-async function ensureCourseInTenant(courseId: string, tenantId: string): Promise<void> {
-  const result = await query(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
-}
+/** The message these course endpoints have always returned for a course outside the tenant. */
+const COURSE_NOT_FOUND_MESSAGE = 'Course khong ton tai';
 
 export async function listCourses(tenantId: string | null, queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
@@ -401,7 +398,7 @@ async function updateCourseFromDb(
     await client.query('COMMIT');
     return updated;
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -448,11 +445,7 @@ export async function listMentorCandidates(
   tenantId: string,
   queryParams: Record<string, unknown>,
 ) {
-  const courseResult = await query(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
@@ -562,7 +555,7 @@ export async function updateCourseMentor(
     }
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw err;
   } finally {
     client.release();
@@ -593,7 +586,7 @@ export async function listCourseMentorAssignmentHistory(
   tenantId: string,
   queryParams: Record<string, unknown>,
 ) {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
   const pageSize = parseMentorHistoryPageSize(queryParams.page_size);
   const rawPage = parseInt(String(queryParams.page || '1'), 10) || 1;
@@ -676,7 +669,7 @@ export async function initializeCourseMentorSectionDefaults(
 }
 
 export async function getCourseMentorSection(courseId: string, tenantId: string): Promise<CourseMentorSection | null> {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
   const result = await query<any>(
     `SELECT course_id, description, logo_light_path, logo_dark_path, updated_at
      FROM course_mentor_sections
@@ -692,7 +685,7 @@ export async function upsertCourseMentorSection(
   userId: string,
   input: { description?: string | null },
 ): Promise<CourseMentorSection> {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
   const description = typeof input.description === 'string'
     ? input.description.trim() || null
     : null;
@@ -721,7 +714,7 @@ export async function uploadCourseMentorSectionLogo(
   file: Express.Multer.File,
   auditEntry?: TransactionalAuditEntry,
 ): Promise<CourseMentorSection> {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
   const current = await query<any>(
     `SELECT logo_light_path, logo_dark_path
@@ -758,10 +751,10 @@ export async function uploadCourseMentorSectionLogo(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     // The storage write happened before the transaction. If either the data
     // write or atomic audit insert fails, compensate by removing this new file.
-    await deleteFile(storagePath).catch(() => undefined);
+    await deleteFile(storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     throw error;
   } finally {
     client.release();
@@ -770,7 +763,7 @@ export async function uploadCourseMentorSectionLogo(
   if (oldPath && oldPath !== storagePath) {
     const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
     if (ownership.kind === 'course-owned') {
-      await deleteFile(ownership.storagePath).catch(() => {});
+      await deleteFile(ownership.storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     } else if (ownership.kind === 'unknown') {
       console.warn('[CourseMentorLogo] storage_reference_retained', {
         event: 'course_mentor_logo.storage_reference_retained',
@@ -794,7 +787,7 @@ export async function deleteCourseMentorSectionLogo(
   mode: MentorSectionLogoMode,
   auditEntry?: TransactionalAuditEntry,
 ): Promise<CourseMentorSection | null> {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
   const client = await getClient();
@@ -822,7 +815,7 @@ export async function deleteCourseMentorSectionLogo(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -831,7 +824,7 @@ export async function deleteCourseMentorSectionLogo(
   if (oldPath) {
     const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);
     if (ownership.kind === 'course-owned') {
-      await deleteFile(ownership.storagePath).catch(() => {});
+      await deleteFile(ownership.storagePath).catch(swallowAndLog('courses.mentor_logo_cleanup'));
     } else if (ownership.kind === 'unknown') {
       console.warn('[CourseMentorLogo] storage_reference_retained', {
         event: 'course_mentor_logo.storage_reference_retained',
@@ -866,7 +859,7 @@ export async function getCourseModalConfig(courseId: string) {
 }
 
 export async function upsertCourseModalConfig(courseId: string, tenantId: string, input: Record<string, unknown>) {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
   const fields = ['welcome_enabled', 'welcome_title', 'welcome_description', 'confirm_enabled', 'confirm_title', 'confirm_description', 'confirm_checkbox_text', 'completion_enabled', 'completion_title', 'completion_description', 'completion_social_type', 'completion_social_link'];
   const sets: string[] = [];
   const params: unknown[] = [courseId];
@@ -901,7 +894,7 @@ export async function upsertSectionModalConfig(
   tenantId: string,
   input: { section_id: string; enabled?: boolean; title?: string; description?: string },
 ) {
-  await ensureCourseInTenant(courseId, tenantId);
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
   await query(
     `INSERT INTO section_modal_configs (course_id, section_id, enabled, title, description)
      VALUES ($1, $2, $3, $4, $5)

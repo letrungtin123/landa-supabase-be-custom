@@ -25,6 +25,7 @@ import {
 } from './lesson-author-transcription.logic.js';
 import { getActiveKbAssignmentFresh } from './chat.service.js';
 import { stageTextBackedDocumentSource, createQueuedDocumentFromStagedSource } from './kb.service.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export interface LessonAuthorTranscriptionJob {
   id: string;
@@ -329,7 +330,7 @@ export async function prepareLessonAuthorTranscriptionUpload(input: {
     await ensureLessonAuthorTranscriptMessage(job, input.locale);
     return { job, already_exists: false };
   } catch (error: any) {
-    await deleteLessonAuthorPrivateFiles([storagePath]).catch(() => undefined);
+    await deleteLessonAuthorPrivateFiles([storagePath]).catch(swallowAndLog('lesson_author.transcript_storage_cleanup'));
     if (error?.code === '23505') {
       const duplicate = await query<LessonAuthorTranscriptionJob>(
         `SELECT * FROM lesson_author_transcription_jobs

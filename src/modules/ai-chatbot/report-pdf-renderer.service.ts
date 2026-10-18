@@ -114,7 +114,7 @@ async function readBrowserPid(browser: Browser, timeoutMs: number): Promise<numb
     return await withReportDeadline('report_pdf_browser_pid', timeoutMs, async () => {
       const session = await browser.newBrowserCDPSession();
       const info = await session.send('SystemInfo.getProcessInfo');
-      void session.detach().catch(() => undefined);
+      void session.detach().catch(() => undefined); // the session ends with the browser page anyway
       return info.processInfo.find((process) => process.type === 'browser')?.id ?? null;
     });
   } catch {
@@ -128,7 +128,7 @@ function renderDeadline(deadline: number, timeoutMs: number): { promise: Promise
   const promise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new ReportPdfRendererError('REPORT_PDF_RENDER_TIMEOUT', `Report PDF rendering exceeded ${timeoutMs} ms.`)), Math.max(0, deadline - Date.now()));
   });
-  promise.catch(() => undefined);
+  promise.catch(() => undefined); // marks the timeout rejection handled; the render races it
   return { promise, cancel: () => clearTimeout(timer) };
 }
 

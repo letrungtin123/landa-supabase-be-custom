@@ -772,7 +772,7 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
     );
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();

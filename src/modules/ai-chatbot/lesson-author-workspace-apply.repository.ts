@@ -20,8 +20,8 @@ import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes, readWorkspaceAss
 import { classifyWorkspaceApplyDrift, WorkspaceApplyConflictError, workspaceApplyConflictDetails, workspaceApplyOverwriteDecision,
   type WorkspaceApplyBlockEvidence, type WorkspaceApplyMappingEvidence } from './lesson-author-workspace-apply-conflict.logic.js';
 import { lessonAuthorSessionOwnerName } from './lesson-author-session-access.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 export type WorkspaceApplyCode = 'WORKSPACE_APPLY_FORBIDDEN' | 'WORKSPACE_APPLY_NOT_FOUND' | 'WORKSPACE_APPLY_STATE_INVALID'
   | 'WORKSPACE_APPLY_SOURCE_CHANGED' | 'WORKSPACE_APPLY_REVISION_CONFLICT' | 'WORKSPACE_APPLY_TARGET_CHANGED'
@@ -62,7 +62,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
     const value = result.rows[0]?.hash; if (result.rows.length !== 1 || !isHash(value)) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED'); return value;
   }
   async function apply(user: AuthUser, target: WorkspaceApplyTarget, expectedWorkspaceRevision: number, options: WorkspaceApplyOptions = {}): Promise<WorkspaceApplyReceipt> {
-    if (!Number.isSafeInteger(expectedWorkspaceRevision) || expectedWorkspaceRevision < 0 || ![target.tenantId, target.userId, target.workspaceId, target.conversationId, target.nodeId, target.operationId].every(v => UUID.test(v))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_READY');
+    if (!Number.isSafeInteger(expectedWorkspaceRevision) || expectedWorkspaceRevision < 0 || ![target.tenantId, target.userId, target.workspaceId, target.conversationId, target.nodeId, target.operationId].every(v => UUID_PATTERN.test(v))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_READY');
     if (target.userId !== user.id) throw new WorkspaceApplyError('WORKSPACE_APPLY_FORBIDDEN');
     const overwriteConfirmation = typeof options.overwriteConfirmation === 'string' && isHash(options.overwriteConfirmation) ? options.overwriteConfirmation : null;
     let cacheIds: string[] = [];
@@ -86,7 +86,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
           FROM chat_conversations c LEFT JOIN users u ON u.id=c.user_id
           WHERE c.id=$1 AND c.tenant_id=$2 AND c.course_id=$3 AND c.target='lesson_author' FOR SHARE OF c`,
         [target.conversationId, target.tenantId, target.courseId]);
-        if (creatorRow.rows.length !== 1 || !UUID.test(String(creatorRow.rows[0]?.creator_id))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
+        if (creatorRow.rows.length !== 1 || !UUID_PATTERN.test(String(creatorRow.rows[0]?.creator_id))) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
         const creator = creatorRow.rows[0] as Row;
         const session: WorkspaceApplyTarget = { ...target, userId: text(creator.creator_id) };
         const authority = createWorkspaceAuthority(user, { sessionOwnerId: session.userId });
@@ -111,7 +111,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const isV2 = w.blueprint_id === null && typeof w.v2_run_id === 'string';
         const isV1 = typeof w.blueprint_id === 'string' && w.v2_run_id === null;
         if (!['drafting', 'ready', 'needs_action'].includes(w.status) || !isHash(w.source_snapshot_hash)
-          || !isHash(w.runtime_config_hash) || !UUID.test(text(w.correlation_id)) || (!isV1 && !isV2)
+          || !isHash(w.runtime_config_hash) || !UUID_PATTERN.test(text(w.correlation_id)) || (!isV1 && !isV2)
           || isV1 && w.blueprint_source_hash !== w.source_snapshot_hash) throw new WorkspaceApplyError('WORKSPACE_APPLY_STATE_INVALID');
         if (isV1) {
           const blueprintAuthority = await tx.query(`SELECT id FROM lesson_author_blueprints

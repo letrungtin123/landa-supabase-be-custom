@@ -14,6 +14,7 @@ import { runReportAggregate } from './report-admission.service.js';
 import { resolveAutoReportBucket } from './report-buckets.logic.js';
 import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
 import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
+import { logSwallowedError } from '../../utils/best-effort.js';
 
 // ── Types ──
 
@@ -374,13 +375,6 @@ function getMonthRange(year: number, month: number): { startDate: Date; endDate:
   const startDate = new Date(year, month - 1, 1);
   const endDate = new Date(year, month, 0, 23, 59, 59, 999);
   return { startDate, endDate };
-}
-
-function getSnapshotEndDate(month?: number, year?: number, dateRange?: ReportDateRange): Date {
-  if (dateRange) return dateRange.endDate;
-  if (month && year) return getMonthRange(year, month).endDate;
-  if (year) return new Date(year, 11, 31, 23, 59, 59, 999);
-  return new Date();
 }
 
 function getReportRange(month?: number, year?: number, dateRange?: ReportDateRange): ReportDateRange {
@@ -2643,7 +2637,8 @@ export async function getUserStudyTime(
 export async function refreshReportSummary(): Promise<void> {
   try {
     await reportsQuery('SELECT refresh_report_summary()', []);
-  } catch {
-    // Function may not exist yet
+  } catch (error) {
+    // Function may not exist yet (still recorded: the endpoint reports success either way)
+    logSwallowedError('reports.summary_refresh', error);
   }
 }

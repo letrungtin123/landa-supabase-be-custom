@@ -19,6 +19,7 @@ import {
   extractGeminiAudioTranscriptionText,
   summarizeGeminiTranscriptionResponse,
 } from './gemini-transcription.logic.js';
+import { logSwallowedError, swallowAndLog } from '../../utils/best-effort.js';
 
 // ── Constants ──
 const LRO_POLL_INTERVAL = 5_000;   // 5 seconds
@@ -192,7 +193,7 @@ export async function transcribeAudioFile(
     }
     return { text, usage: aiUsageFromGeminiMetadata(response.usageMetadata) };
   } finally {
-    if (uploaded?.name) await filesApi.delete({ name: uploaded.name }).catch(() => undefined);
+    if (uploaded?.name) await filesApi.delete({ name: uploaded.name }).catch(swallowAndLog('gemini.uploaded_file_cleanup'));
   }
 }
 
@@ -354,7 +355,7 @@ export async function uploadToStore(
   } finally {
     // Cleanup .txt copy
     if (uploadPath !== localFilePath) {
-      try { await fs.unlink(uploadPath); } catch { /* ignore */ }
+      try { await fs.unlink(uploadPath); } catch (error) { logSwallowedError('gemini.temp_file_cleanup', error, { ignoreMissingFile: true }); }
     }
   }
 }

@@ -359,10 +359,10 @@ async function readSourceSnapshot(sourceDatabaseUrl: string, sourceSupabaseUrl: 
 
     return { folders: folderResult.rows, pages: pageResult.rows, files };
   } catch (error) {
-    await sourceDatabase.query('ROLLBACK').catch(() => undefined);
+    await sourceDatabase.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
-    await sourceDatabase.end().catch(() => undefined);
+    await sourceDatabase.end().catch(() => undefined); // exiting: closing the pool is best effort
   }
 }
 
@@ -488,7 +488,7 @@ async function insertHelpDocs(
     await client.query('COMMIT');
     return folderIdMap;
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
     throw error;
   } finally {
     client.release();
@@ -667,7 +667,7 @@ async function main(): Promise<void> {
     }
     throw error;
   } finally {
-    await database.pool.end().catch(() => undefined);
+    await database.pool.end().catch(() => undefined); // exiting: closing the pool is best effort
   }
 }
 

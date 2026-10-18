@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export const ORCHESTRATION_V2_SOURCE_PAGE_SIZE = 500;
 export const ORCHESTRATION_V2_FACT_MAX_BYTES = 32_768;
@@ -29,7 +30,6 @@ export class SourceFactV2Error extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const byteLength = (value: string) => Buffer.byteLength(value, 'utf8');
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
@@ -42,7 +42,7 @@ export function normalizeSourceFactPageV2(startOrdinal: number, facts: readonly 
   return facts.map((fact, index) => {
     const locator = fact.locator ?? {};
     const locatorBytes = byteLength(JSON.stringify(locator));
-    if (!fact || !UUID.test(fact.document_id) || typeof fact.fact_key !== 'string' || !fact.fact_key.trim()
+    if (!fact || !UUID_PATTERN.test(fact.document_id) || typeof fact.fact_key !== 'string' || !fact.fact_key.trim()
       || typeof fact.scope_key !== 'string' || !fact.scope_key.trim() || typeof fact.fact_text !== 'string'
       || byteLength(fact.fact_text) < 1 || byteLength(fact.fact_text) > ORCHESTRATION_V2_FACT_MAX_BYTES
       || locator === null || Array.isArray(locator) || typeof locator !== 'object' || locatorBytes > 4_096

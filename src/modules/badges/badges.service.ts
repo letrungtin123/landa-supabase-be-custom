@@ -5,6 +5,7 @@ import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js'
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { uploadFile, deleteFileByUrl, buildStoragePath } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 type TenantBadgeStatusUpdate = {
   badge_id: string;
@@ -251,14 +252,14 @@ async function uploadTenantBadgeImage(
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    await deleteFileByUrl(storagePath).catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
+    await deleteFileByUrl(storagePath).catch(swallowAndLog('badges.image_cleanup'));
     throw error;
   } finally {
     client.release();
   }
 
-  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(() => undefined);
+  if (oldPath && oldPath !== storagePath) await deleteFileByUrl(oldPath).catch(swallowAndLog('badges.image_cleanup'));
   await invalidateTenantBadgeCaches(tenantId);
 
   return storagePath;

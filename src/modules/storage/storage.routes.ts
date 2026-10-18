@@ -112,7 +112,7 @@ async function streamBody(webBody: ReadableStream, res: Response): Promise<void>
 
 /** Drops an upstream body that is not forwarded (error answers, HEAD). */
 function discardBody(upstreamRes: globalThis.Response): void {
-  upstreamRes.body?.cancel().catch(() => undefined);
+  upstreamRes.body?.cancel().catch(() => undefined); // releases an unread body; nothing to recover
 }
 
 /**

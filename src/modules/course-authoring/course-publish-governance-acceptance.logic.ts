@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 
+// Not UUID_PATTERN: four groups only (8-4-4-12), so no real UUID matches. Kept as is;
+// switching to isUuid changes which fixtures are accepted.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACCEPTANCE_DATABASE_NAME = /(acceptance|test|testing|staging|ci)/i;
 const CONFIRMATION = 'DESTROY_DISPOSABLE_COURSE_PUBLISH_FIXTURES';

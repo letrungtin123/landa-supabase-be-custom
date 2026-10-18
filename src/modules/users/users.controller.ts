@@ -19,6 +19,7 @@ import {
   type UserDeletionAuditTarget,
 } from './user-deletion.service.js';
 import { UserAuthorityError, requestUiLocale } from './user-authority.logic.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 function userDeletionAuditLabel(target: UserDeletionAuditTarget): string {
   const displayName = target.full_name?.trim();
@@ -291,7 +292,7 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
     } catch (error) {
       // A concurrent permanent deletion can fence the profile write after the
       // object upload completed. Do not leave that object behind.
-      await deleteFileByUrl(avatarPath).catch(() => undefined);
+      await deleteFileByUrl(avatarPath).catch(swallowAndLog('users.avatar_cleanup'));
       throw error;
     }
 

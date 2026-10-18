@@ -1,7 +1,7 @@
 import { getSessionClient } from '../../config/database.js';
 import { listenRetryDelayMs } from './lesson-author-listen-retry.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHANNEL = 'lesson_author_workspace_event';
 export interface WorkspaceCommitHint { workspaceId: string; sequence: number; }
 type Listener = (hint: WorkspaceCommitHint | null) => void;
@@ -37,7 +37,7 @@ export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getS
   function readPayload(payload: string | undefined): WorkspaceCommitHint | null {
     try {
       const value = JSON.parse(payload ?? '') as Record<string, unknown>;
-      if (typeof value.workspace_id !== 'string' || !UUID.test(value.workspace_id)
+      if (!isUuid(value.workspace_id)
         || !Number.isSafeInteger(value.sequence) || (value.sequence as number) < 1) return null;
       return { workspaceId: value.workspace_id, sequence: value.sequence as number };
     } catch { return null; }
@@ -89,7 +89,7 @@ export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getS
   }
   return {
     async subscribe(workspaceId: string, listener: Listener) {
-      if (!UUID.test(workspaceId)) throw new Error('WORKSPACE_STREAM_INPUT_INVALID');
+      if (!UUID_PATTERN.test(workspaceId)) throw new Error('WORKSPACE_STREAM_INPUT_INVALID');
       await ensure();
       const set = listeners.get(workspaceId) ?? new Set<Listener>();
       set.add(listener); listeners.set(workspaceId, set);

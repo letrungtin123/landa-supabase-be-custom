@@ -4,6 +4,8 @@ import { GENERATION_JOB_LEASE_MS, GENERATION_JOB_DEADLINE_MS, generationSnapshot
 import { workspaceBudgetForNextItem, type WorkspaceBudgetManifest, type WorkspaceBudgetEntry } from './lesson-author-workspace-budget.logic.js';
 import type { WorkspaceReadOwner } from './lesson-author-workspace-read.repository.js';
 import type { WorkspaceWorkItemLease } from './lesson-author-workspace-work-item.repository.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { createCourseAccessRepository } from '../courses/course-access.repository.js';
 
 export interface WorkspaceAdmissionTarget extends WorkspaceReadOwner { workspaceId: string; }
 /** Server preparation only: budget is the output of buildWorkspaceBudgetManifest.
@@ -37,7 +39,6 @@ export class WorkspaceAdmissionError extends Error {
   constructor(readonly code: WorkspaceAdmissionErrorCode) { super(code); this.name = 'WorkspaceAdmissionError'; }
 }
 function fail(code: WorkspaceAdmissionErrorCode): never { throw new WorkspaceAdmissionError(code); }
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 type Row = Record<string, unknown>;
 function integer(v: unknown): number {
@@ -60,7 +61,7 @@ function validateBudget(b: WorkspaceRunAdmission['budget']) {
   const ids = new Set<string>(); let tokens = 0, duration = 0;
   for (const [i,e] of m.entries.entries()) {
     if (Object.keys(e).sort().join(',') !== 'contract_hash,embedding_tokens,execution_budget_ms,input_tokens,kind,max_output_tokens,max_provider_attempts,node_id,ordinal,output_tokens'
-      || e.ordinal !== i || !UUID.test(e.node_id) || ids.has(e.node_id) || !HASH.test(e.contract_hash)
+      || e.ordinal !== i || !UUID_PATTERN.test(e.node_id) || ids.has(e.node_id) || !HASH.test(e.contract_hash)
       || !['generate_unit','validate_chapter'].includes(e.kind)
       || [e.ordinal,e.input_tokens,e.output_tokens,e.embedding_tokens,e.max_output_tokens,e.max_provider_attempts,e.execution_budget_ms]
         .some(n => !Number.isSafeInteger(n) || n < 0 || n > 2_000_000)
@@ -107,12 +108,12 @@ export function createWorkspaceAdmissionRepository(deps: {
     const t = Object.freeze({ ...input }), started = performance.now();
     const track: Tracking = { correlation: null, item: null, count: 0 };
     const report = (status: WorkspaceAdmissionDiagnostic['status'], internal_failure_code: string | null) => {
-      try { deps.report({ event:'workspace_admission_operation', operation, workspace_id: UUID.test(t.workspaceId) ? t.workspaceId : '',
+      try { deps.report({ event:'workspace_admission_operation', operation, workspace_id: UUID_PATTERN.test(t.workspaceId) ? t.workspaceId : '',
         correlation_id:track.correlation,work_item_id:track.item,status,internal_failure_code,item_count:track.count,
         duration_ms:Math.round(performance.now()-started) }); } catch { /* telemetry cannot undo a commit */ }
     };
     try {
-      if (![t.workspaceId,t.tenantId,t.userId,t.conversationId].every(v => typeof v === 'string' && UUID.test(v))
+      if (![t.workspaceId,t.tenantId,t.userId,t.conversationId].every(v => isUuid(v))
         || typeof t.courseId !== 'string' || !t.courseId || t.courseId.length > 255) fail('WORKSPACE_ADMISSION_INVALID');
       const result = await deps.db.transaction(tx => work(tx,t,track));
       report(result.replayed ? 'REPLAYED' : 'COMMITTED',null); return result;
@@ -127,8 +128,7 @@ export function createWorkspaceAdmissionRepository(deps: {
     await tx.query("SET LOCAL lock_timeout = '3000ms'");
     const advisory = await tx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',[`course:${t.tenantId}:${t.courseId}`]);
     if (advisory.rows.length !== 1 || advisory.rows[0].acquired !== true) fail('WORKSPACE_ADMISSION_CONFLICT');
-    const course = await tx.query('SELECT id FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE',[t.courseId,t.tenantId]);
-    if (course.rows.length !== 1) fail('WORKSPACE_ADMISSION_NOT_FOUND');
+    if (!await createCourseAccessRepository(tx).lockCourseOfTenant(t.courseId, t.tenantId)) fail('WORKSPACE_ADMISSION_NOT_FOUND');
     const ws = await tx.query(`SELECT w.id,w.status,w.blueprint_id,w.bot_id,w.kb_id,w.source_snapshot_hash,w.correlation_id,w.content_locale
       FROM lesson_author_workspaces w JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id
         AND c.course_id=w.course_id AND c.user_id=w.requested_by AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -136,7 +136,7 @@ export function createWorkspaceAdmissionRepository(deps: {
         AND w.engine='self_built_rag' AND w.contract_version=1 FOR UPDATE OF w`,[...scope(t),t.conversationId,t.userId]);
     if (ws.rows.length !== 1) fail('WORKSPACE_ADMISSION_NOT_FOUND');
     const w = ws.rows[0];
-    if (w.id !== t.workspaceId || ![w.blueprint_id,w.bot_id,w.kb_id,w.correlation_id].every(v => typeof v === 'string' && UUID.test(v))
+    if (w.id !== t.workspaceId || ![w.blueprint_id,w.bot_id,w.kb_id,w.correlation_id].every(v => isUuid(v))
       || typeof w.source_snapshot_hash !== 'string' || !HASH.test(w.source_snapshot_hash)
       || !['vi','en'].includes(String(w.content_locale))) fail('WORKSPACE_ADMISSION_READBACK_INVALID');
     track.correlation = String(w.correlation_id);
@@ -180,7 +180,7 @@ export function createWorkspaceAdmissionRepository(deps: {
     admitRun(input: WorkspaceAdmissionTarget, prepared: WorkspaceRunAdmission) {
       return execute(input,'admit_run',async (tx,t,track) => {
         const p = freeze(structuredClone(prepared)); validateBudget(p.budget);
-        if (!UUID.test(p.blueprint_job_id)) fail('WORKSPACE_ADMISSION_INVALID');
+        if (!UUID_PATTERN.test(p.blueprint_job_id)) fail('WORKSPACE_ADMISSION_INVALID');
         const w = await lock(tx,t,track), c = context(t,w,{...p,manifest_hash:p.budget.manifest_hash});
         await fresh(tx,c); const existing = await run(tx,t); track.count=p.budget.manifest.entries.length;
         if (existing) {
@@ -222,7 +222,7 @@ export function createWorkspaceAdmissionRepository(deps: {
       const requestCopy={...request};
       return execute(input,'claim_next',async (tx,t,track) => {
         if (!Number.isSafeInteger(requestCopy.expectedOrdinal) || requestCopy.expectedOrdinal < 0 || requestCopy.expectedOrdinal > 8191
-          || !UUID.test(requestCopy.idempotencyKey)) fail('WORKSPACE_ADMISSION_INVALID');
+          || !UUID_PATTERN.test(requestCopy.idempotencyKey)) fail('WORKSPACE_ADMISSION_INVALID');
         const w=await lock(tx,t,track), r=await run(tx,t);
         if (!r) fail('WORKSPACE_ADMISSION_NOT_FOUND');
         const c=context(t,w,r); await fresh(tx,c);
@@ -246,7 +246,7 @@ export function createWorkspaceAdmissionRepository(deps: {
           deadline_at:new Date(deadline).toISOString(),reserved_tokens:entry.input_tokens+entry.output_tokens+entry.embedding_tokens,
           budget_metadata:{durable_generation:true as const,workspace_id:t.workspaceId,workspace_work_item_id:id}});
         const grant=await deps.grant(tx,grantContext);
-        if (!grant || !UUID.test(grant.reservation_id)) fail('WORKSPACE_ADMISSION_GRANT_INVALID');
+        if (!grant || !UUID_PATTERN.test(grant.reservation_id)) fail('WORKSPACE_ADMISSION_GRANT_INVALID');
         const reservation=await tx.query('SELECT *,clock_timestamp() AS database_now FROM ai_token_reservations WHERE id=$1 FOR SHARE',[grant.reservation_id]);
         const q=reservation.rows[0], metadata=q?.budget_metadata as Row | undefined;
         if (reservation.rows.length !== 1 || q.id !== grant.reservation_id || q.tenant_id !== t.tenantId || q.user_id !== t.userId

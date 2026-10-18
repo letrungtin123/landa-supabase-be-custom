@@ -16,6 +16,7 @@ import {
   normalizeInputFilterConfig,
   type InputFilterConfig,
 } from './input-filter/input-filter.schema.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export interface Chatbot {
   id: string;
@@ -269,7 +270,7 @@ export async function uploadBotAvatar(
       'SELECT avatar_url FROM chatbots WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
       [botId, tenantId],
     );
-    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(() => undefined); return null; }
+    if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(swallowAndLog('bot.avatar_cleanup')); return null; }
     oldPath = current.rows[0].avatar_url;
     const result = await client.query<Chatbot>(
       `UPDATE chatbots SET avatar_url = $1, updated_at = now()
@@ -281,14 +282,14 @@ export async function uploadBotAvatar(
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
-    await deleteFileByUrl(storagePath).catch(() => undefined);
+    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
+    await deleteFileByUrl(storagePath).catch(swallowAndLog('bot.avatar_cleanup'));
     throw error;
   } finally {
     client.release();
   }
   // The previous value may predate the avatar_url lockdown: delete it only inside this tenant.
-  if (oldPath && oldPath !== storagePath) await deleteTenantFileByUrl(oldPath, tenantId).catch(() => undefined);
+  if (oldPath && oldPath !== storagePath) await deleteTenantFileByUrl(oldPath, tenantId).catch(swallowAndLog('bot.avatar_cleanup'));
   await invalidateBotConfigCaches(tenantId, botId);
   return updated;
 }

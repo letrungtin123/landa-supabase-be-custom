@@ -14,8 +14,7 @@ import {
   setCoursePublishPolicy,
 } from './course-publish-governance.repository.js';
 import { ensureCoursePublishGovernanceSchema } from './course-publish-governance-schema.repository.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 function sendGovernanceError(res: Response, error: unknown): void {
   const mapped = mapCoursePublishGovernanceError(error);
@@ -80,7 +79,7 @@ export async function assignReviewer(req: Request, res: Response): Promise<void>
     assertPolicyAdmin(req);
     const scopeBlockId = String(req.body?.scope_block_id ?? '');
     const reviewerId = String(req.body?.reviewer_id ?? '');
-    if (!UUID.test(scopeBlockId) || !UUID.test(reviewerId)) {
+    if (!UUID_PATTERN.test(scopeBlockId) || !UUID_PATTERN.test(reviewerId)) {
       throw new CoursePublishGovernanceError('COURSE_PUBLISH_REVIEWER_INELIGIBLE', 400,
         'Thông tin người duyệt hoặc phạm vi không hợp lệ.');
     }
@@ -96,7 +95,7 @@ export async function revokeReviewer(req: Request, res: Response): Promise<void>
   try {
     await assertEnabled();
     assertPolicyAdmin(req);
-    if (!UUID.test(req.params.assignmentId)) {
+    if (!UUID_PATTERN.test(req.params.assignmentId)) {
       throw new CoursePublishGovernanceError('COURSE_PUBLISH_ASSIGNMENT_FORBIDDEN', 400,
         'Mã phân công không hợp lệ.');
     }
@@ -109,7 +108,7 @@ export async function createCandidate(req: Request, res: Response): Promise<void
     await assertEnabled();
     const targetBlockId = String(req.body?.target_block_id ?? '');
     const idempotencyKey = String(req.body?.idempotency_key ?? '');
-    if (!UUID.test(targetBlockId) || !UUID.test(idempotencyKey)) {
+    if (!UUID_PATTERN.test(targetBlockId) || !UUID_PATTERN.test(idempotencyKey)) {
       throw new CoursePublishGovernanceError('COURSE_PUBLISH_CANDIDATE_INVALID', 400,
         'Thông tin bản duyệt không hợp lệ.');
     }
@@ -127,7 +126,7 @@ export async function approveCandidate(req: Request, res: Response): Promise<voi
     await assertEnabled();
     const assignmentId = String(req.body?.assignment_id ?? '');
     const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
-    if (!UUID.test(req.params.candidateId) || !UUID.test(assignmentId)) {
+    if (!UUID_PATTERN.test(req.params.candidateId) || !UUID_PATTERN.test(assignmentId)) {
       throw new CoursePublishGovernanceError('COURSE_PUBLISH_APPROVAL_FORBIDDEN', 400,
         'Thông tin phê duyệt không hợp lệ.');
     }

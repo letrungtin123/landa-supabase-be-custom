@@ -16,6 +16,7 @@ import type {
   OrchestrationV2ProviderUsageSource,
   OrchestrationV2TaskLease,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type TaskRow = Record<string, unknown>;
 type RuntimeSettings = Awaited<ReturnType<typeof getTenantAiRuntimeSettings>>;
@@ -27,7 +28,6 @@ interface AccountingDependencies {
   release: typeof releaseTenantAiTokenReservation;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const integer = (value: unknown, minimum = 0, maximum = 2_000_000): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 
@@ -52,7 +52,7 @@ function identity(task: TaskRow) {
     tenantId: String(task.tenant_id), courseId: typeof task.course_id === 'string' ? task.course_id : '',
     model: String(task.model), kind: String(task.kind),
   };
-  if (![output.taskId, output.runId, output.workspaceId, output.tenantId].every(value => UUID.test(value))
+  if (![output.taskId, output.runId, output.workspaceId, output.tenantId].every(value => UUID_PATTERN.test(value))
     || !output.courseId || !output.model
     || !['course_skeleton', 'chapter_blueprint', 'generate_unit'].includes(output.kind)) {
     fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
@@ -102,8 +102,8 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
       WHERE w.id=$3 AND w.tenant_id=$4 AND r.model=$5 FOR SHARE OF w,r,t`,
     [target.taskId, target.runId, target.workspaceId, target.tenantId, target.model]);
     const owner = authority.rows[0];
-    if (authority.rows.length !== 1 || !UUID.test(String(owner?.requested_by))
-      || !UUID.test(String(owner?.conversation_id)) || !UUID.test(String(owner?.correlation_id))) {
+    if (authority.rows.length !== 1 || !UUID_PATTERN.test(String(owner?.requested_by))
+      || !UUID_PATTERN.test(String(owner?.conversation_id)) || !UUID_PATTERN.test(String(owner?.correlation_id))) {
       fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     }
     await lockOrchestrationV2CourseFence(tx, target.courseId);
@@ -140,7 +140,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
         },
       },
     });
-    if (grant.isPartialGrant || grant.reservedTokens !== limits.total || !UUID.test(grant.id)) {
+    if (grant.isPartialGrant || grant.reservedTokens !== limits.total || !UUID_PATTERN.test(grant.id)) {
       fail('ORCHESTRATION_V2_ACCOUNTING_BUDGET_INVALID');
     }
     const readback = await tx.query(`SELECT id::text,status,estimated_tokens::text,budget_metadata
@@ -161,7 +161,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
   ): Promise<void> {
     const reservationId = lease.ai_reservation_id
       ?? fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
-    if (!UUID.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    if (!UUID_PATTERN.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     // Reject malformed exact usage before touching the locked reservation. The
     // upper-bound path deliberately derives usage from server-owned DB budgets.
     const observedUsage = usageSource === 'provider' ? completeUsage(observed) : null;
@@ -209,7 +209,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
 
   async function releaseUndispatched(tx: GenerationJobSql, task: TaskRow): Promise<void> {
     const target = identity(task), reservationId = String(task.ai_reservation_id);
-    if (!UUID.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    if (!UUID_PATTERN.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     await lockOrchestrationV2CourseFence(tx, target.courseId);
     const locked = await tx.query(`SELECT id::text FROM ai_token_reservations
       WHERE id=$1 AND tenant_id=$2 AND status='reserved' FOR UPDATE`, [reservationId, target.tenantId]);
@@ -229,7 +229,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
 
   async function holdUnknown(tx: GenerationJobSql, task: TaskRow): Promise<void> {
     const target = identity(task), reservationId = String(task.ai_reservation_id);
-    if (!UUID.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    if (!UUID_PATTERN.test(reservationId)) fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     await lockOrchestrationV2CourseFence(tx, target.courseId);
     // Reservation row -> monthly usage (M) before this size-changing update
     // takes the tenant quota lock, so a later reconcile (finalize) in the same
@@ -254,7 +254,7 @@ export function createOrchestrationV2QuotaAccounting(deps: AccountingDependencie
 
   async function reconcileUnknownAsBudget(tx: GenerationJobSql, task: TaskRow): Promise<void> {
     const target = identity(task), limits = budget(task), reservationId = String(task.ai_reservation_id);
-    if (!UUID.test(reservationId) || task.status !== 'outcome_unknown'
+    if (!UUID_PATTERN.test(reservationId) || task.status !== 'outcome_unknown'
       || task.accounting_state !== 'pending_reconciliation') {
       fail('ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
     }

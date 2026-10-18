@@ -16,7 +16,6 @@ import { clusterBus } from './config/cluster-bus.js';
 import { COURSE_ASSET_TEMP_MAX_AGE_MS, cleanupStaleCourseAssetTempFiles } from './modules/course-authoring/course-asset-temp.js';
 import { cleanupStaleReportExportSpools } from './modules/reports/report-export-flow.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
-import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb-operation.worker.js';
 import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/lesson-author-transcription.worker.js';
@@ -40,6 +39,7 @@ import {
 import { runtimeTenantDiagnostics } from './config/runtime-tenant-fence.js';
 import fs from 'fs/promises';
 import { startAiTokenReservationSweeper } from './modules/ai-chatbot/ai-token-quota.service.js';
+import { logSwallowedError } from './utils/best-effort.js';
 
 const AUDIT_LOG_RETENTION_DAYS = 30;
 const AUDIT_LOG_RETENTION_BATCH_SIZE = 5000;
@@ -134,6 +134,7 @@ async function cleanupOldAuditLogs(): Promise<number> {
     }
     return totalDeleted;
   } finally {
+    // Fails only with a broken connection, whose session (and so the lock) ends with it.
     if (lockHeld) await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [lockKey]).catch(() => undefined);
     client.release();
   }
@@ -159,6 +160,7 @@ async function initRabbitMQ(consumers: boolean): Promise<void> {
     await connectRabbitMQ(env.RABBITMQ_URL);
     // Assert queues (creates if not exists)
     await assertQueue(QUEUES.GEMINI_UPLOAD);
+    // Still declared so existing brokers keep it; no code publishes to or consumes this queue.
     await assertQueue(QUEUES.GEMINI_DELETE);
     await assertQueue(QUEUES.GEMINI_RESTORE);
     await assertQueue(QUEUES.COURSE_DELETE);
@@ -174,7 +176,6 @@ async function initRabbitMQ(consumers: boolean): Promise<void> {
 
     // Start consumers (workers)
     await startUploadWorker();
-    await startDeleteWorker();
     await startRestoreWorker();
     await startKbOperationWorker();
     await startLessonAuthorTranscriptionWorker();
@@ -203,17 +204,17 @@ async function runStartupCleanups(): Promise<void> {
   try {
     const deleted = await cleanupExpiredTokens();
     if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired/revoked tokens`);
-  } catch { /* ignore */ }
+  } catch (error) { logSwallowedError('startup.expired_token_cleanup', error); }
 
   try {
     const deleted = await cleanupExpiredAuthRevocations();
     if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} expired access revocations`);
-  } catch { /* ignore */ }
+  } catch (error) { logSwallowedError('startup.auth_revocation_cleanup', error); }
 
   try {
     const deleted = await cleanupCompletedDeletionJobs();
     if (deleted > 0) console.log(`[Cleanup] Startup: removed ${deleted} completed deletion job records`);
-  } catch { /* ignore */ }
+  } catch (error) { logSwallowedError('startup.deletion_job_cleanup', error); }
 
   // Dọn audit logs cũ ngay khi start và ghi kết quả, kể cả khi không có bản ghi bị xóa.
   await runAuditLogRetentionCleanup('startup');
@@ -333,7 +334,7 @@ async function bootstrap() {
     tempDirectories: async () => {
       try {
         await fs.mkdir(env.GEMINI_TEMP_DIR, { recursive: true });
-      } catch { /* ignore */ }
+      } catch (error) { logSwallowedError('startup.gemini_temp_dir', error); }
       // Report export temp files a crashed process left (only files older than any export).
       await cleanupStaleReportExportSpools();
     },

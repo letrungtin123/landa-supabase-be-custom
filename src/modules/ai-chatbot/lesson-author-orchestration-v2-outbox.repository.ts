@@ -5,6 +5,7 @@ import {
   withOrchestrationV2TransactionRetry,
   type OrchestrationV2TransientRetryOptions,
 } from './lesson-author-orchestration-v2-lock-order.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export interface OrchestrationV2OutboxLease extends OrchestrationV2DispatchIdentity {
   lease_token: string;
@@ -30,7 +31,6 @@ export class OrchestrationV2OutboxError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const integer = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 const fail = (code: OrchestrationV2OutboxError['code']): never => { throw new OrchestrationV2OutboxError(code); };
 
@@ -52,7 +52,7 @@ function lease(row: Record<string, unknown>): OrchestrationV2OutboxLease {
     dispatch_epoch: Number(row.dispatch_epoch), routing_shard: Number(row.routing_shard),
     lease_token: String(row.lease_token), attempt_count: Number(row.attempt_count),
   };
-  if (![output.outbox_id, output.run_id, output.task_id, output.lease_token].every(value => UUID.test(value))
+  if (![output.outbox_id, output.run_id, output.task_id, output.lease_token].every(value => UUID_PATTERN.test(value))
     || !integer(output.dispatch_epoch, 0, 100) || !integer(output.routing_shard, 0, 4_095)
     || !integer(output.attempt_count, 1, 100)) fail('ORCHESTRATION_V2_OUTBOX_LEASE_LOST');
   return output;
@@ -79,7 +79,7 @@ export function createOrchestrationV2OutboxRepository(
     assertOrchestrationV2OutboxConfig(config);
     return db.transaction(async tx => {
       const leaseToken = id();
-      if (!UUID.test(leaseToken)) fail('ORCHESTRATION_V2_OUTBOX_CONFIG_INVALID');
+      if (!UUID_PATTERN.test(leaseToken)) fail('ORCHESTRATION_V2_OUTBOX_CONFIG_INVALID');
       const result = await tx.query(`WITH eligible AS (
           SELECT pending.id,pending.tenant_id,pending.available_at,pending.created_at
           FROM lesson_author_workspace_v2_dispatch_outbox pending

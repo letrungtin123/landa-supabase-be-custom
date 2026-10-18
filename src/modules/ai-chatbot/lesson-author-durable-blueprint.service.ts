@@ -10,6 +10,7 @@ import type { GenerationAdmissionContext } from './lesson-author-generation-admi
 import { RagServiceError } from './ai-rag-client.service.js';
 import { BlueprintAcceptanceError } from './lesson-author-blueprint-acceptance.logic.js';
 import { finalizeTenantAiTokens, normalizeAiUsage, releaseTenantAiTokenReservation } from './ai-token-quota.service.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export const durableBlueprintRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
 type Prepared = NonNullable<Awaited<ReturnType<typeof prepareDurableBlueprint>>>;
@@ -53,7 +54,7 @@ export async function tryEnqueueDurableBlueprint(
   if (!env.LESSON_AUTHOR_GENERATION_ENABLED || options.target !== 'lesson_author') return null;
   admission?.stage('worker_readiness');
   if (!ready) throw new AppError('Dịch vụ tạo khóa học chưa sẵn sàng.', 503, 'GENERATION_WORKER_UNAVAILABLE');
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+  if (!UUID_PATTERN.test(idempotencyKey)) {
     throw new AppError('Idempotency key không hợp lệ.', 400, 'GENERATION_IDENTIFIER_INVALID');
   }
   admission?.stage('conversation_lock');

@@ -17,8 +17,6 @@ export const DEFAULT_GROUP_LABELS: Record<GroupLabelKey, string> = {
 
 const GROUP_LABEL_KEY_SET = new Set<string>(SYSTEM_GROUP_LABEL_KEYS);
 const MAX_LABEL_LENGTH = 64;
-const CACHE_TTL_MS = 5 * 60_000;
-const groupLabelsCache = new Map<string, { labels: GroupLabelMap; expires: number }>();
 
 function isUndefinedTableError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '42P01';
@@ -82,11 +80,7 @@ export function lowerGroupLabel(value: string): string {
 }
 
 export async function invalidateTenantGroupLabelsCache(tenantId?: string | null): Promise<void> {
-  if (!tenantId) {
-    groupLabelsCache.clear();
-    return;
-  }
-  groupLabelsCache.delete(tenantId);
+  if (!tenantId) return;
   await bumpCacheVersion(...cacheVersions.tenantLabels(tenantId, 'group'));
 }
 
@@ -115,7 +109,6 @@ async function getTenantGroupLabelsFromDb(tenantId: string): Promise<GroupLabelM
       if (GROUP_LABEL_KEY_SET.has(row.label_key)) labels[row.label_key] = row.label;
     }
 
-    groupLabelsCache.set(tenantId, { labels, expires: Date.now() + CACHE_TTL_MS });
     return labels;
   } catch (err) {
     if (isUndefinedTableError(err)) return {};

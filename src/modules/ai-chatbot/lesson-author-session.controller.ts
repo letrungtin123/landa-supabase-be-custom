@@ -11,11 +11,11 @@ import {
   requestLessonAuthorSessionDeletion,
   type LessonAuthorSessionOwner,
 } from './lesson-author-session.service.js';
+import { isAiIdAuthorRole } from './lesson-author-ai-id-access.logic.js';
 
 function owner(req: Request): LessonAuthorSessionOwner {
   const user = req.user;
-  if (!user || user.sessionMode !== 'normal' || !user.tenantId
-    || !['staff', 'superuser', 'superadmin'].includes(user.role)) {
+  if (!user || user.sessionMode !== 'normal' || !user.tenantId || !isAiIdAuthorRole(user.role)) {
     throw new LessonAuthorSessionError('FORBIDDEN');
   }
   return { tenantId: user.tenantId, userId: user.id, role: user.role, courseId: req.params.courseId };

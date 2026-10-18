@@ -57,7 +57,7 @@ function runWorker(filePath: string, options: Required<Omit<FaqSheetReadOptions,
       settled = true;
       clearTimeout(timer);
       settle();
-      void worker.terminate().catch(() => undefined);
+      void worker.terminate().catch(() => undefined); // the worker is discarded either way
     };
     const timer = setTimeout(() => finish(() => reject(new KbFaqSheetReadError('TOO_COMPLEX'))), options.timeoutMs);
     worker.once('message', (reply: WorkerReply) => finish(() => {

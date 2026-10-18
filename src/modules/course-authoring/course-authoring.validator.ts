@@ -3,8 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { z } from 'zod';
-
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 /** Schema tạo block */
 export const createBlockSchema = z.object({
@@ -23,7 +22,7 @@ export const createBlockSchema = z.object({
 /** Schema reorder children — validate UUID array */
 export const reorderSchema = z.object({
   children: z.array(
-    z.string().regex(uuidPattern, 'ID phải là UUID hợp lệ')
+    z.string().regex(UUID_PATTERN, 'ID phải là UUID hợp lệ')
   ).min(1).max(500, 'Tối đa 500 blocks'),
 });
 

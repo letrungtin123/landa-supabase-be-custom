@@ -39,6 +39,8 @@ import {
   beginCoursePublishCandidate,
   finishCoursePublishCandidate,
 } from './course-publish-governance.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
+import { assertCourseBelongsToTenant } from '../courses/course-access.service.js';
 export {
   getLessonAuthorSortableItems,
   orderLessonAuthorComponents,
@@ -1019,10 +1021,6 @@ async function getDescendantBlockIds(blockId: string): Promise<string[]> {
   return result.rows.map((row) => row.id);
 }
 
-export async function renameBlock(blockId: string, displayName: string): Promise<BlockInfo> {
-  return updateBlock(blockId, { display_name: displayName });
-}
-
 export async function publishBlock(
   blockId: string,
   tenantId?: string | null,
@@ -1166,48 +1164,6 @@ export async function publishBlock(
   return getBlockInfo(blockId, tenantId);
 }
 
-/**
- * Discard draft changes on a single block — revert data to the last published version.
- * Reverse of publishBlock: copies published_data → data, published_metadata → metadata.
- * Non-recursive: only reverts the targeted block, not its children.
- */
-export async function discardDraft(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
-  const block = await getBlockInfo(blockId, tenantId);
-
-  if (!block.has_draft_changes) {
-    throw new AppError('Block has no draft changes to discard', 400);
-  }
-
-  // Check if published_data exists (block must have been published at least once)
-  const pubCheck = await query<{ has_pub: boolean }>(
-    `SELECT published_data IS NOT NULL AS has_pub
-     FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
-    [blockId],
-  );
-  if (!pubCheck.rows[0]?.has_pub) {
-    throw new AppError('Block has never been published — cannot rollback', 400);
-  }
-
-  await query(
-    `UPDATE course_blocks
-     SET data = published_data,
-         metadata = published_metadata,
-         has_draft_changes = false,
-         updated_at = now()
-     WHERE id = $1 AND deleted_at IS NULL`,
-    [blockId],
-  );
-
-  // Propagate clean state upward: if no siblings remain dirty, clear ancestor flags
-  await recalculateAncestorDraftFlags(blockId);
-  await Promise.all([
-    invalidateCourseReadCaches(block.course_id),
-    invalidateBlockReadCaches([blockId]),
-  ]);
-
-  return getBlockInfo(blockId, tenantId);
-}
-
 export async function discardDraftCascade(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
   const block = await getBlockInfo(blockId, tenantId);
 
@@ -1309,9 +1265,8 @@ export async function reorderChildren(
   const parent = await getBlockInfo(parentId, tenantId);
 
   // Validate UUID format — chống SQL injection
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const id of childIds) {
-    if (!uuidRegex.test(id)) throw new AppError('Invalid block ID format', 400);
+    if (!UUID_PATTERN.test(id)) throw new AppError('Invalid block ID format', 400);
   }
 
   // Parameterized VALUES — $1 = parentId, $2/$3 = id/order pairs
@@ -1482,11 +1437,7 @@ export async function getCourseAssets(
 ): Promise<CourseAssetsResponse> {
   const safePage = Math.max(0, page);
   const safePageSize = Math.max(1, Math.min(pageSize, 100));
-  const courseCheck = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) throw new AppError('Course not found', 404);
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
   const conditions: string[] = ['ca.course_id = $1', 'ca.tenant_id = $2'];
   const params: any[] = [courseId, tenantId];
@@ -1611,6 +1562,8 @@ function decodeAssetCursor(cursor?: string | null): { created_at: string; id: st
       typeof parsed.created_at !== 'string' ||
       Number.isNaN(Date.parse(parsed.created_at)) ||
       typeof parsed.id !== 'string' ||
+      // Not UUID_PATTERN: four groups only (8-4-4-12), so no real asset id matches and
+      // every cursor is refused. Kept as is; switching to isUuid changes behaviour.
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id)
     ) {
       throw new AppError('invalid cursor payload', 400);
@@ -1665,11 +1618,7 @@ async function annotateAssetRowsWithOutlineReferences(courseId: string, rows: an
 /** 404 unless the course exists, is not deleted and belongs to the tenant. */
 export async function assertCourseInTenant(courseId: string, tenantId: string | null | undefined): Promise<void> {
   if (!tenantId) throw new AppError('Course not found', 404);
-  const result = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Course not found', 404);
+  await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 }
 
 export async function createAssetRecord(
@@ -1890,25 +1839,6 @@ async function collectDraftStoragePathsForSubtree(blockId: string): Promise<Set<
   for (const row of result.rows) {
     collectCourseStoragePaths(row.data, paths);
     collectCourseStoragePaths(row.metadata, paths);
-  }
-  return paths;
-}
-
-async function collectAllStoragePathsForCourse(courseId: string): Promise<Set<string>> {
-  const result = await query<ReferencingBlockRow>(
-    `SELECT id, data, metadata, published_data, published_metadata
-       FROM course_blocks
-      WHERE course_id = $1
-        AND deleted_at IS NULL`,
-    [courseId],
-  );
-
-  const paths = new Set<string>();
-  for (const row of result.rows) {
-    collectCourseStoragePaths(row.data, paths);
-    collectCourseStoragePaths(row.metadata, paths);
-    collectCourseStoragePaths(row.published_data, paths);
-    collectCourseStoragePaths(row.published_metadata, paths);
   }
   return paths;
 }
@@ -2414,7 +2344,7 @@ async function applyLessonAuthorOperationPlanWithClient(
   input: ApplyLessonAuthorProposalInput,
   plan: LessonAuthorOperationPlan,
 ): Promise<ApplyLessonAuthorProposalResult> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+  if (!UUID_PATTERN.test(plan.target_block_id)) {
     throw new AppError('Target block không hợp lệ', 400);
   }
 
@@ -2598,7 +2528,7 @@ async function assertLessonAuthorOperationTargetFreshWithClient(
   input: ApplyLessonAuthorProposalInput,
   plan: LessonAuthorOperationPlan,
 ): Promise<void> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+  if (!UUID_PATTERN.test(plan.target_block_id)) {
     throw new AppError('Target block không hợp lệ', 400);
   }
   const result = await client.query<{

@@ -8,12 +8,12 @@ import { buildWorkspaceInventory } from './lesson-author-workspace-inventory.log
 import { hydrateWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
 import { prepareWorkspaceUnitBaseline } from './lesson-author-workspace-baseline.logic.js';
 import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export class WorkspaceGenerationContextError extends Error {
   constructor(readonly code: 'WORKSPACE_GENERATION_CONTEXT_INVALID' | 'WORKSPACE_GENERATION_CONTEXT_TOO_LARGE' | 'WORKSPACE_GENERATION_CONTEXT_CHANGED') { super(code); }
 }
 function invalid(): never { throw new WorkspaceGenerationContextError('WORKSPACE_GENERATION_CONTEXT_INVALID'); }
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const integer = (v: unknown) => {
   if (!(typeof v === 'number' || typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v)) || !Number.isSafeInteger(Number(v)) || Number(v) < 0) invalid();
   return Number(v);
@@ -69,7 +69,7 @@ export async function loadWorkspaceChapterGenerationContext(tx: GenerationJobSql
 
 async function loadWorkspaceContext(tx: GenerationJobSql, target: WorkspaceGenerationTarget,
   allowed: ReadonlySet<CourseComponentType>, kind: 'unit' | 'chapter'): Promise<WorkspaceGenerationContext> {
-  if (![target.workspaceId, target.nodeId, target.tenantId, target.userId, target.conversationId].every(id => uuid.test(id))) invalid();
+  if (![target.workspaceId, target.nodeId, target.tenantId, target.userId, target.conversationId].every(id => UUID_PATTERN.test(id))) invalid();
   const params = [target.workspaceId, target.tenantId, target.courseId, target.conversationId, target.userId, target.nodeId, kind];
   const found = await tx.query(`SELECT n.canonical_path,w.source_snapshot_hash,w.correlation_id,w.content_locale,
       CASE WHEN octet_length(b.blueprint::text)<=16777216 THEN b.blueprint ELSE NULL END AS blueprint
@@ -83,7 +83,7 @@ async function loadWorkspaceContext(tx: GenerationJobSql, target: WorkspaceGener
       AND w.status='drafting' AND w.engine='self_built_rag' AND w.contract_version=1
       AND EXISTS (SELECT 1 FROM lesson_author_workspace_events e WHERE e.workspace_id=w.id AND e.event_kind='structure_ready')`, params);
   const row = found.rows[0];
-  if (found.rows.length !== 1 || !row.blueprint || !uuid.test(String(row.correlation_id)) || !['en','vi'].includes(String(row.content_locale))
+  if (found.rows.length !== 1 || !row.blueprint || !UUID_PATTERN.test(String(row.correlation_id)) || !['en','vi'].includes(String(row.content_locale))
     || !/^[0-9a-f]{64}$/.test(String(row.source_snapshot_hash))) invalid();
   const unitPath = String(row.canonical_path), chapterPath = unitPath.split('.')[0];
   if (!(kind === 'unit' ? /^chapter_[1-9][0-9]*\.lesson_[1-9][0-9]*\.unit_[1-9][0-9]*$/
@@ -111,7 +111,7 @@ async function loadWorkspaceContext(tx: GenerationJobSql, target: WorkspaceGener
   const baselines = new Map<string, WorkspaceContent>();
   for (const e of expected) {
     const n = byPath.get(e.canonical_path);
-    if (!n || !uuid.test(String(n.id)) || n.kind !== e.kind || n.sort_order !== e.sort_order || n.contract_hash !== e.contract_hash
+    if (!n || !UUID_PATTERN.test(String(n.id)) || n.kind !== e.kind || n.sort_order !== e.sort_order || n.contract_hash !== e.contract_hash
       || hash(n.protected_contract) !== e.contract_hash || (e.canonical_path !== chapterPath && n.parent_id !== byPath.get(e.parent_path!)?.id)) invalid();
     if (n.baseline_content !== null) {
       const content = readWorkspaceContent(n.baseline_content);

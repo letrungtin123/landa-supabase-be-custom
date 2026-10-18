@@ -47,6 +47,7 @@ export function readSafeBlueprintFailure(value: unknown): Record<string, string 
   for (const key of ['failure_stage', 'internal_failure_code']) {
     if (typeof raw[key] === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(raw[key])) result[key] = raw[key];
   }
+  // Looser than isUuid (any 36 hex digits or hyphens); kept so the reported ids do not change.
   if (typeof raw.correlation_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.correlation_id)) result.correlation_id = raw.correlation_id;
   if (typeof raw.total_repair_provider_calls === 'number' && Number.isInteger(raw.total_repair_provider_calls)
       && raw.total_repair_provider_calls >= 0 && raw.total_repair_provider_calls <= 3) result.total_repair_provider_calls = raw.total_repair_provider_calls;

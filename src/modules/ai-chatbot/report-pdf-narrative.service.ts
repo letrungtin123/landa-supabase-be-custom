@@ -27,6 +27,7 @@ import {
   validateReportPdfNarrative,
   type ReportPdfNarrative,
 } from './report-pdf-narrative.logic.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 const MAX_OUTPUT_TOKENS = 1_600;
 const MIN_OUTPUT_TOKENS = 500;
@@ -180,7 +181,7 @@ export function createReportPdfAiNarrativeWriter(
       deps.log({ ...base, outcome: 'accepted' });
       return narrative;
     } catch (error) {
-      if (reservationId) await deps.release(reservationId, context.tenantId).catch(() => undefined);
+      if (reservationId) await deps.release(reservationId, context.tenantId).catch(swallowAndLog('ai_tokens.reservation_release'));
       const code = (error as { code?: unknown })?.code;
       deps.log({ ...base, outcome: 'failed', reason: typeof code === 'string' ? code : error instanceof Error ? error.name : 'unknown' });
       return null;

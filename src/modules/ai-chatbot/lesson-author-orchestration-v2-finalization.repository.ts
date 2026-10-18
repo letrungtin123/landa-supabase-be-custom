@@ -15,6 +15,7 @@ import { orchestrationV2Hash, type OrchestrationV2TaskKind } from './lesson-auth
 import type { OrchestrationV2TaskLease, createOrchestrationV2WorkerRepository } from './lesson-author-orchestration-v2-worker.repository.js';
 import { IDM_DISPOSITIONS } from './lesson-author-idm.contract.js';
 import { loadIdmRunScopeView } from './lesson-author-idm-scope-view.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 
@@ -29,7 +30,6 @@ export class OrchestrationV2FinalizationRepositoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (code: OrchestrationV2FinalizationRepositoryError['code']): never => {
   throw new OrchestrationV2FinalizationRepositoryError(code);
@@ -228,7 +228,7 @@ export function createOrchestrationV2FinalizationRepository(
       },
       afterSuccess: async tx => {
         const receiptId = id();
-        if (!UUID.test(receiptId)) fail('ORCHESTRATION_V2_FINALIZATION_WRITE_UNCONFIRMED');
+        if (!UUID_PATTERN.test(receiptId)) fail('ORCHESTRATION_V2_FINALIZATION_WRITE_UNCONFIRMED');
         if (finalization.contract === ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT) {
           const review = finalization.review;
           const insertedReview = await tx.query(`INSERT INTO lesson_author_workspace_v2_review_receipts

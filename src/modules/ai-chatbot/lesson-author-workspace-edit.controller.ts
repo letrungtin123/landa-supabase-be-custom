@@ -6,8 +6,9 @@ import { createWorkspaceAuthority } from './lesson-author-workspace-authority.re
 import { WorkspaceComponentError } from './lesson-author-workspace-component.logic.js';
 import { WorkspaceContractError, WORKSPACE_CONTENT_MAX_BYTES, type WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
+import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ERRORS = {
   AUTH_REQUIRED: [401, 'Chưa xác thực.', 'Authentication is required.'],
   WORKSPACE_EDIT_FORBIDDEN: [403, 'Bạn không có quyền sửa bản thảo này.', 'You do not have permission to edit this draft.'],
@@ -65,7 +66,7 @@ export function createWorkspaceEditHandlers(deps: Dependencies) {
       let stage: WorkspaceEditDiagnostic['failure_stage'] = 'workspace_edit_auth';
       const { workspaceId, conversationId, courseId, nodeId } = req.params;
       const body: unknown = req.body;
-      const operationId = object(body) && typeof body.operation_id === 'string' && UUID.test(body.operation_id) ? body.operation_id : null;
+      const operationId = object(body) && isUuid(body.operation_id) ? body.operation_id : null;
       res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Request-ID', requestId);
       const report = (status: number, internal: string | null, external: ExternalCode | null) => {
         try {
@@ -74,9 +75,9 @@ export function createWorkspaceEditHandlers(deps: Dependencies) {
             correlation_id: correlationId, request_id: requestId, operation_id: operationId,
             expected_revision: object(body) && typeof body.expected_revision === 'number' && Number.isSafeInteger(body.expected_revision) && body.expected_revision >= 0 ? body.expected_revision : null,
             content_revision: committed?.revision ?? null, event_sequence: committed?.event_sequence ?? null, replayed: committed?.replayed ?? null,
-            workspace_id: UUID.test(workspaceId ?? '') ? workspaceId : null,
-            conversation_id: UUID.test(conversationId ?? '') ? conversationId : null,
-            node_id: UUID.test(nodeId ?? '') ? nodeId : null,
+            workspace_id: UUID_PATTERN.test(workspaceId ?? '') ? workspaceId : null,
+            conversation_id: UUID_PATTERN.test(conversationId ?? '') ? conversationId : null,
+            node_id: UUID_PATTERN.test(nodeId ?? '') ? nodeId : null,
             course_id_hash: typeof courseId === 'string' && courseId.length <= 255 ? createHash('sha256').update(courseId).digest('hex') : null,
             http_status: status, duration_ms: Math.max(0, Math.round(performance.now() - started)) });
         } catch { /* Logging failures must not trigger an ambiguous retry after commit. */ }
@@ -87,10 +88,9 @@ export function createWorkspaceEditHandlers(deps: Dependencies) {
       };
       const user = req.user ? Object.freeze({ ...req.user }) : null;
       if (!user) { reject('AUTH_REQUIRED'); return; }
-      if (!user.tenantId || !UUID.test(user.tenantId) || !UUID.test(user.id) || !['staff', 'superuser', 'superadmin'].includes(user.role)
-        || user.sessionMode !== 'normal') { reject('WORKSPACE_EDIT_FORBIDDEN'); return; }
+      if (!isAiIdActor(user)) { reject('WORKSPACE_EDIT_FORBIDDEN'); return; }
       stage = 'workspace_edit_input';
-      if (!UUID.test(workspaceId ?? '') || !UUID.test(conversationId ?? '') || !UUID.test(nodeId ?? '')
+      if (!UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(nodeId ?? '')
         || typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)
         || Object.keys(req.query).some(k => k !== 'ui_locale')
         || (req.query.ui_locale !== undefined && !['vi', 'en'].includes(String(req.query.ui_locale)))

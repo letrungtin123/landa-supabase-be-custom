@@ -13,8 +13,8 @@ import {
   reconcileTenantDataQuota,
   type TenantDataQuotaReconciliationOptions,
 } from '../modules/tenants/tenant-data-quota-reconciliation.service.js';
+import { RFC_UUID_PATTERN } from '../utils/uuid.js';
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DEFAULT_PAGE_SIZE = 500;
 const MAX_PAGE_SIZE = 1_000;
 
@@ -35,7 +35,7 @@ function parsePageSize(value: string | undefined): number {
 
 async function listTenantIds(runAll: boolean, requestedTenantId: string | undefined): Promise<string[]> {
   if (!runAll) {
-    if (!requestedTenantId || !UUID_PATTERN.test(requestedTenantId)) {
+    if (!requestedTenantId || !RFC_UUID_PATTERN.test(requestedTenantId)) {
       throw new Error('Usage: npm run reconcile:tenant-data-quota -- --tenant <tenant UUID> [--page-size 500]');
     }
     return [requestedTenantId.toLowerCase()];

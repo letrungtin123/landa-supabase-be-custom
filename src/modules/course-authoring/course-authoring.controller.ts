@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import fs from 'fs/promises';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { isUuid, sendClientError } from '../../utils/client-error.js';
+import { sendClientError } from '../../utils/client-error.js';
 import * as svc from './course-authoring.service.js';
 import { getTenantCourseComponentPermissions } from '../tenants/tenant-course-components.service.js';
 import { requestBlockDeletion } from '../course-deletion/course-deletion.service.js';
@@ -46,10 +46,10 @@ import {
   mapCoursePublishGovernanceError,
 } from './course-publish-governance.repository.js';
 import { ensureCoursePublishGovernanceSchema } from './course-publish-governance-schema.repository.js';
+import { isUuid } from '../../utils/uuid.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
 
 export { sanitizeCourseHtmlData } from './course-html-sanitizer.logic.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function componentAuditContext(block: {
   course_id: string;
@@ -135,7 +135,7 @@ function isSafeCourseAssetPath(src: unknown): src is string {
 
 async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
   if (!file.path) return;
-  await fs.unlink(file.path).catch(() => {});
+  await fs.unlink(file.path).catch(() => {}); // a leftover is removed by cleanupStaleCourseAssetTempFiles
 }
 
 function sanitizeProblemMedia(raw: any) {
@@ -172,7 +172,6 @@ function sanitizeProblemMedia(raw: any) {
 function sanitizeHtmlMedia(raw: any) {
   if (!raw || typeof raw !== 'object') return undefined;
 
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const images = Array.isArray(raw.images)
     ? raw.images
         .map((img: any) => {
@@ -180,7 +179,7 @@ function sanitizeHtmlMedia(raw: any) {
           return {
             src,
             alt: typeof img?.alt === 'string' ? img.alt.replace(/[<>]/g, '').slice(0, 200) : '',
-            ...(typeof img?.asset_id === 'string' && uuidRegex.test(img.asset_id) ? { asset_id: img.asset_id } : {}),
+            ...(isUuid(img?.asset_id) ? { asset_id: img.asset_id } : {}),
           };
         })
         .filter((img: any) => isSafeCourseAssetPath(img.src))
@@ -714,7 +713,7 @@ export async function updateBlock(req: Request, res: Response) {
             ? await getCoursePublishPolicyForBlock(req.params.blockId, tenantId)
             : null;
           if (enrolledPolicy) {
-            if (typeof candidate_id !== 'string' || !UUID.test(candidate_id)) {
+            if (!isUuid(candidate_id)) {
               throw new CoursePublishGovernanceError(
                 'COURSE_PUBLISH_CANDIDATE_REQUIRED',
                 409,
@@ -1053,7 +1052,7 @@ export async function uploadAsset(req: Request, res: Response) {
     sendSuccess(res, asset, undefined, 201);
   } catch (err) {
     if (storageUploaded && storagePath) {
-      await deleteFile(storagePath).catch(() => undefined);
+      await deleteFile(storagePath).catch(swallowAndLog('course_assets.storage_cleanup'));
     }
     console.error('[CourseAssets] storage upload failed', {
       course_id: courseId,

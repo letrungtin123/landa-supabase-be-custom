@@ -24,25 +24,14 @@ import { hasPermission } from '../../middleware/authorize.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { isIsoTimestamp, sendClientError } from '../../utils/client-error.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
-import {
-  buildReportPdfArtifact,
-  downloadReportPdfExportJob,
-  getReportPdfExportError,
-  getReportPdfExportJob,
-  startReportPdfExportJob,
-} from './report-pdf-export.service.js';
 import { parseReportFilters } from './report-chat-filter.logic.js';
 import { REPORT_PERMISSION_CHECK_FAILED_CODE, reportChatErrorBody, type ReportChatErrorCode } from './report-chat-error.logic.js';
 import * as chatService from './chat.service.js';
 import { assertChatCourseAccess, ChatCourseScopeError } from './chat-course-scope.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-// ── UUID validation ──
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const reportPdfLocks = new Set<string>();
-const reportPdfLastExportAt = new Map<string, number>();
-const REPORT_PDF_MIN_INTERVAL_MS = 10_000;
 // Chat answers streamed at once (H10): per tenant and in total, for the whole
 // cluster when several API processes run (ai-chat-admission.service.ts).
 // The metrics gauge reports the answers this process streams.
@@ -82,16 +71,6 @@ async function checkChatCourse(req: Request, res: Response, courseId: string | u
 function sendReportChatError(res: Response, code: ReportChatErrorCode, locale: 'vi' | 'en'): void {
   const { status, body } = reportChatErrorBody(code, locale);
   res.status(status).json(body);
-}
-
-function sendReportPdfError(res: Response, error: unknown): void {
-  const normalized = getReportPdfExportError(error);
-  if (normalized.statusCode >= 500) console.error('[ReportPdf] export failed:', normalized);
-  res.status(normalized.statusCode).json({
-    success: false,
-    message: normalized.message,
-    code: normalized.code,
-  });
 }
 
 function sendLessonAuthorApplyError(res: Response, error: unknown): void {
@@ -177,7 +156,7 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
   if (!target || typeof target !== 'string' || !chatService.isChatTarget(target)) {
     sendError(res, 'target phải là "admin", "learner" hoặc "lesson_author"', 400); return;
   }
-  if (!bot_id || typeof bot_id !== 'string' || !UUID_REGEX.test(bot_id)) {
+  if (!bot_id || !isUuid(bot_id)) {
     sendError(res, 'bot_id không hợp lệ', 400); return;
   }
 
@@ -235,7 +214,7 @@ export async function assignLessonAuthorKb(req: Request, res: Response): Promise
   const tenantId = req.user!.tenantId!;
   const { kb_id } = req.body ?? {};
 
-  if (!kb_id || typeof kb_id !== 'string' || !UUID_REGEX.test(kb_id)) {
+  if (!kb_id || !isUuid(kb_id)) {
     sendError(res, 'kb_id không hợp lệ', 400); return;
   }
 
@@ -267,7 +246,7 @@ export async function applyLessonAuthorJob(req: Request, res: Response): Promise
   const userId = req.user!.id;
   const { jobId } = req.params;
 
-  if (!UUID_REGEX.test(jobId)) {
+  if (!UUID_PATTERN.test(jobId)) {
     sendError(res, 'jobId không hợp lệ', 400); return;
   }
 
@@ -404,7 +383,7 @@ export async function createConversation(req: Request, res: Response): Promise<v
   const { persona_id } = req.body ?? {};
   const target = resolveTarget(req);
 
-  if (target !== 'lesson_author' && (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id))) {
+  if (target !== 'lesson_author' && (!persona_id || !isUuid(persona_id))) {
     sendError(res, 'persona_id không hợp lệ', 400); return;
   }
 
@@ -435,7 +414,7 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
     return;
   }
 
-  if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
   try {
     const deleted = await chatService.deleteConversation(id, userId, tenantId, resolveExplicitTarget(req));
@@ -457,7 +436,7 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
   // The cursor is the created_at of the oldest loaded message (ISO-8601).
   if (cursor !== undefined && !isIsoTimestamp(cursor)) { sendError(res, 'Không tải thêm được tin nhắn. Vui lòng tải lại trang.', 400); return; }
 
@@ -465,107 +444,6 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
     const result = await chatService.getConversationMessages(id, userId, tenantId, cursor, resolveExplicitTarget(req));
     sendSuccess(res, result);
   } catch (err) { sendClientError(req, res, err, 'Chat'); }
-}
-
-export async function exportReportPdf(req: Request, res: Response): Promise<void> {
-  const userId = req.user!.id;
-  const tenantId = req.user!.tenantId!;
-  const { id: conversationId } = req.params;
-  const assistantMessageId = req.body?.assistant_message_id;
-  if (isDemoIframeSession(req.user)) {
-    sendError(res, 'Phiên demo iframe không thể xuất báo cáo', 403);
-    return;
-  }
-  if (!UUID_REGEX.test(conversationId) || typeof assistantMessageId !== 'string' || !UUID_REGEX.test(assistantMessageId)) {
-    sendError(res, 'ID báo cáo không hợp lệ', 400);
-    return;
-  }
-  const exportKey = `${userId}:${assistantMessageId}`;
-  const lastExportAt = reportPdfLastExportAt.get(exportKey) ?? 0;
-  if (reportPdfLocks.has(exportKey)) {
-    sendError(res, 'Báo cáo đang được xuất. Vui lòng đợi.', 409);
-    return;
-  }
-  if (Date.now() - lastExportAt < REPORT_PDF_MIN_INTERVAL_MS) {
-    sendError(res, 'Vui lòng chờ vài giây trước khi xuất lại báo cáo.', 429);
-    return;
-  }
-
-  reportPdfLocks.add(exportKey);
-  try {
-    const artifact = await buildReportPdfArtifact({
-      actor: { userId, tenantId, role: req.user!.role },
-      conversationId,
-      assistantMessageId,
-    });
-    reportPdfLastExportAt.set(exportKey, Date.now());
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${artifact.fileName}"; filename*=UTF-8''${encodeURIComponent(artifact.fileName)}`);
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(artifact.pdf);
-  } catch (error) {
-    sendReportPdfError(res, error);
-  } finally {
-    reportPdfLocks.delete(exportKey);
-  }
-}
-
-export async function startReportPdfJob(req: Request, res: Response): Promise<void> {
-  const userId = req.user!.id;
-  const tenantId = req.user!.tenantId!;
-  const { id: conversationId } = req.params;
-  const assistantMessageId = req.body?.assistant_message_id;
-  if (isDemoIframeSession(req.user)) {
-    sendReportPdfError(res, new AppError('Phiên demo iframe không thể xuất báo cáo', 403, 'REPORT_PDF_DEMO_SESSION'));
-    return;
-  }
-  if (!UUID_REGEX.test(conversationId) || typeof assistantMessageId !== 'string' || !UUID_REGEX.test(assistantMessageId)) {
-    sendReportPdfError(res, new AppError('ID báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
-    return;
-  }
-  try {
-    const job = await startReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId });
-    sendSuccess(res, job, undefined, 202);
-  } catch (error) {
-    sendReportPdfError(res, error);
-  }
-}
-
-export async function getReportPdfJob(req: Request, res: Response): Promise<void> {
-  const userId = req.user!.id;
-  const tenantId = req.user!.tenantId!;
-  const { id: conversationId, jobId } = req.params;
-  const assistantMessageId = typeof req.query.assistant_message_id === 'string' ? req.query.assistant_message_id : '';
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId) || !UUID_REGEX.test(assistantMessageId)) {
-    sendReportPdfError(res, new AppError('ID tiến trình xuất báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
-    return;
-  }
-  try {
-    const job = await getReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
-    sendSuccess(res, job);
-  } catch (error) {
-    sendReportPdfError(res, error);
-  }
-}
-
-export async function downloadReportPdfJob(req: Request, res: Response): Promise<void> {
-  const userId = req.user!.id;
-  const tenantId = req.user!.tenantId!;
-  const { id: conversationId, jobId } = req.params;
-  const assistantMessageId = typeof req.query.assistant_message_id === 'string' ? req.query.assistant_message_id : '';
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId) || !UUID_REGEX.test(assistantMessageId)) {
-    sendReportPdfError(res, new AppError('ID tiến trình xuất báo cáo không hợp lệ', 400, 'REPORT_PDF_INVALID_REQUEST'));
-    return;
-  }
-  try {
-    const artifact = await downloadReportPdfExportJob({ userId, tenantId, role: req.user!.role, conversationId, assistantMessageId, jobId });
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${artifact.fileName}"; filename*=UTF-8''${encodeURIComponent(artifact.fileName)}`);
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(artifact.pdf);
-  } catch (error) {
-    sendReportPdfError(res, error);
-  }
 }
 
 /**
@@ -582,7 +460,7 @@ export async function getChapterCheckpoint(req: Request,res: Response):Promise<v
   if (isDemoIframeSession(req.user) || !req.user?.tenantId) {sendError(res,'Không có quyền truy cập.',403);return;}
   const id=req.params.conversationId;
   const draftId=typeof req.query.draft_id==='string'?req.query.draft_id:undefined;
-  if (!UUID_REGEX.test(id ?? '') || (draftId!==undefined && !UUID_REGEX.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
+  if (!UUID_PATTERN.test(id ?? '') || (draftId!==undefined && !UUID_PATTERN.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
   try {sendSuccess(res,await chatService.getChapterCheckpointStatus(id,req.user.id,req.user.tenantId,draftId));}
   catch (error) {
     const code=error instanceof AppError?error.code:'CHAPTER_CHECKPOINT_UNAVAILABLE';
@@ -622,7 +500,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!UUID_REGEX.test(conversationId)) {
+  if (!UUID_PATTERN.test(conversationId)) {
     sendError(res, 'ID không hợp lệ', 400); return;
   }
   if (!content || typeof content !== 'string') {
@@ -634,7 +512,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   if (locale !== undefined && locale !== 'vi' && locale !== 'en') {
     sendError(res, 'locale không hợp lệ', 400); return;
   }
-  if (blueprint_id !== undefined && (typeof blueprint_id !== 'string' || !UUID_REGEX.test(blueprint_id))) {
+  if (blueprint_id !== undefined && !isUuid(blueprint_id)) {
     sendError(res, 'blueprint_id không hợp lệ', 400); return;
   }
   if (blueprint_chapter_index !== undefined
@@ -643,10 +521,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
   const checkpointKey = req.header('X-Lesson-Author-Chapter-Key');
-  if ((checkpointKey !== undefined && !UUID_REGEX.test(checkpointKey)) || (chapter_resume !== undefined &&
+  if ((checkpointKey !== undefined && !UUID_PATTERN.test(checkpointKey)) || (chapter_resume !== undefined &&
     (!chapter_resume || typeof chapter_resume!=='object' || Array.isArray(chapter_resume)
       || Object.keys(chapter_resume).sort().join(',')!=='draft_id,previous_attempt_id'
-      || !UUID_REGEX.test(chapter_resume.draft_id ?? '') || !UUID_REGEX.test(chapter_resume.previous_attempt_id ?? '')
+      || !UUID_PATTERN.test(chapter_resume.draft_id ?? '') || !UUID_PATTERN.test(chapter_resume.previous_attempt_id ?? '')
       || !checkpointKey || target!=='lesson_author'))) {
     sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
   }
