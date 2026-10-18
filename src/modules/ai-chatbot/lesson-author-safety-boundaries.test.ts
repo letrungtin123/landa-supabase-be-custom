@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { composeV5BlueprintPolicy, V5_BLUEPRINT_POLICY_MAX_CHARS } from './lesson-author-prompt-policy.logic.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
-const chatServiceSource = readFileSync(fileURLToPath(new URL('./chat.service.ts', import.meta.url)), 'utf8');
+const chatServiceSource = readChatServiceSource();
 const routeSource = readFileSync(fileURLToPath(new URL('./ai-chatbot.routes.ts', import.meta.url)), 'utf8');
 const chatControllerSource = readFileSync(fileURLToPath(new URL('./chat.controller.ts', import.meta.url)), 'utf8');
 const aiRagClientSource = readFileSync(fileURLToPath(new URL('./ai-rag-client.service.ts', import.meta.url)), 'utf8');

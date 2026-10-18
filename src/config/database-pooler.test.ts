@@ -97,7 +97,7 @@ test('every LISTEN and session advisory lock of the app takes a session client',
     .filter((file) => SESSION_BOUND.test(readFileSync(file, 'utf8')))
     .map((file) => path.relative(src, file).split(path.sep).join('/'))
     .sort();
-  assert.deepEqual(users, KNOWN_SESSION_USERS, 'a new session-bound use must take getSessionClient()');
+  assert.deepEqual(users, [...KNOWN_SESSION_USERS].sort(), 'a new session-bound use must take getSessionClient()');
   for (const file of KNOWN_SESSION_USERS) {
     assert.match(readFileSync(path.join(src, file), 'utf8'), /getSessionClient\b/, file);
   }

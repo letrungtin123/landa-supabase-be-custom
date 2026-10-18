@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { buildNormalizedLessonAuthorCommand } from './lesson-author-command.logic.js';
 import {
@@ -16,6 +15,7 @@ import {
   resolveLessonAuthorDraftLocale,
   stripLessonAuthorSourceRangeSuffix,
 } from './lesson-author-intent.logic.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 const attachedCreationContext = buildLessonAuthorCreationContext({
   sourceDocuments: [{ document_id: '825c18ff-d1b2-42e6-b87b-3096426db3b5' }],
@@ -96,7 +96,7 @@ test('source hint never promotes named/numbered/deictic targets, edits, negation
 });
 
 test('durable admission and all stream classifications share creation context without bypassing source validation', () => {
-  const source = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const source = readChatServiceSource();
   const ast = ts.createSourceFile('chat.service.ts', source, ts.ScriptTarget.Latest, true);
   const calls: ts.CallExpression[] = [];
   const visit = (node: ts.Node) => {

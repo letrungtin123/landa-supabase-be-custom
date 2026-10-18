@@ -8,6 +8,7 @@ import type { WorkspaceEditContext } from './lesson-author-workspace-edit.reposi
 import { createWorkspaceAuthority } from './lesson-author-workspace-authority.repository.js';
 import { lessonAuthorSourceInfoSummary, lessonAuthorSourceSnapshotHash } from './lesson-author-source-snapshot.logic.js';
 import { COURSE_COMPONENT_TYPES } from '../tenants/tenant-course-components.constants.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const COURSES_MODULE = uuid(50);
@@ -236,7 +237,7 @@ test('new adapters are SELECT-only and no global cache/DB/provider imports; lega
   const adapter = readFileSync(new URL('./lesson-author-workspace-authority.repository.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(adapter, /from ['"].*(?:config\/database|chat\.service|middleware\/authorize|gemini)/);
   assert.doesNotMatch(adapter, /\b(?:INSERT INTO|UPDATE\s+\w+\s+SET|DELETE FROM|CREATE TABLE|ALTER TABLE)\b/);
-  const chat = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const chat = readChatServiceSource();
   assert.match(chat, /lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash/);
   assert.doesNotMatch(chat, /function createLessonAuthorBlueprintSourceSnapshotHash/);
 });

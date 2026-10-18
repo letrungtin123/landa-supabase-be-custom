@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { runGenerationJob, type GenerationRunDependencies } from './lesson-author-generation-runner.logic.js';
 import { GenerationJobError, type GenerationJobRow } from './lesson-author-generation-job.logic.js';
+import { readChatServiceSource } from './chat-service-source.fixture.js';
 
 function fixture(overrides: Partial<GenerationRunDependencies<string, string>> = {}, budget = 60_000) {
   const events: string[] = [];
@@ -102,7 +103,7 @@ test('terminal DB write failure defers recovery rather than replaying paid gener
 
 test('production wiring keeps quota holds, acceptance, auth and default-off deployment gate', () => {
   const service = readFileSync(new URL('./lesson-author-durable-blueprint.service.ts', import.meta.url), 'utf8');
-  const chat = readFileSync(new URL('./chat.service.ts', import.meta.url), 'utf8');
+  const chat = readChatServiceSource();
   const quota = readFileSync(new URL('./ai-token-quota.service.ts', import.meta.url), 'utf8');
   const config = readFileSync(new URL('../../config/env.ts', import.meta.url), 'utf8');
   assert.match(service, /await reconstruct\(current\)/);
