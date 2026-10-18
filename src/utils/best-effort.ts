@@ -7,7 +7,14 @@
 // never change control flow: they only record that the work failed, as
 //   [BestEffort] {"event":"best_effort_failed","tag":"...","error_kind":"..."}
 // with a short tag and the kind of error. Never the message, a path, an id or
-// any other data: those can carry personal data or tenant details.
+// any other data: those can carry personal data or tenant details (a JSON
+// parse message, for one, quotes the request body it failed on).
+//
+// - bestEffort(tag, fn) / bestEffortSync(tag, fn): run the work, record a
+//   failure, resolve (return) undefined instead of throwing. Use them in
+//   place of an empty `catch {}` around work that may fail.
+// - swallowAndLog(tag): the same for an existing `.catch(...)`.
+// - logSwallowedError(tag, error): inside a catch block that does more.
 
 const MAX_KIND_LENGTH = 80;
 
@@ -50,6 +57,50 @@ export function logSwallowedError(tag: string, error: unknown, options: SwallowO
   } catch {
     // Logging must never change the caller's control flow.
   }
+}
+
+/**
+ * Runs best-effort work. Its result when it succeeds; when it throws or
+ * rejects, the failure is recorded (tag and error kind only) and the result is
+ * undefined. Never throws.
+ */
+export async function bestEffort<T>(
+  tag: string,
+  work: () => T | PromiseLike<T>,
+  options: SwallowOptions = {},
+): Promise<Awaited<T> | undefined> {
+  try {
+    return await work();
+  } catch (error) {
+    logSwallowedError(tag, error, options);
+    return undefined;
+  }
+}
+
+/**
+ * bestEffort for synchronous work. A promise returned by mistake is not left
+ * unhandled: its rejection is recorded the same way, and the result is undefined.
+ */
+export function bestEffortSync<T>(tag: string, work: () => T, options: SwallowOptions = {}): T | undefined {
+  try {
+    const result = work();
+    if (isThenable(result)) {
+      result.then(undefined, (error: unknown) => logSwallowedError(tag, error, options));
+      return undefined;
+    }
+    return result;
+  } catch (error) {
+    logSwallowedError(tag, error, options);
+    return undefined;
+  }
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
 }
 
 /** For `.catch(...)`: records the failure and resolves to undefined, like `.catch(() => undefined)`. */

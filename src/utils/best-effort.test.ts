@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { errorKind, logSwallowedError, swallowAndLog } from './best-effort.js';
+import { bestEffort, bestEffortSync, errorKind, logSwallowedError, swallowAndLog } from './best-effort.js';
 
 // Best-effort failures are recorded with a tag and the error kind only, and
 // recording them never changes what the caller does next.
@@ -56,4 +56,52 @@ test('swallowAndLog keeps `.catch(() => undefined)` control flow: resolves undef
   assert.equal(await Promise.resolve(42).catch(swallowAndLog('unused')), 42);
   assert.equal(lines.length, 1);
   assert.match(lines[0]!, /"tag":"assignments\.storage_cleanup"/);
+});
+
+test('bestEffort returns the result of work that succeeds, sync or async, and logs nothing', async (t) => {
+  const lines = captureWarn(t);
+  assert.equal(await bestEffort('x', async () => 7), 7);
+  assert.equal(await bestEffort('x', () => 'sync'), 'sync');
+  assert.equal(await bestEffort('x', () => undefined), undefined);
+  assert.equal(lines.length, 0);
+});
+
+test('bestEffort: a rejection or a throw resolves undefined and is logged by tag and kind, never by message', async (t) => {
+  const lines = captureWarn(t);
+  const secret = 'FAKE-SECRET-3c1d tenant 1111 avatars/a.png';
+  assert.equal(await bestEffort('library.document_storage_cleanup', async () => {
+    throw Object.assign(new Error(secret), { code: 'ECONNRESET' });
+  }), undefined);
+  assert.equal(await bestEffort('users.avatar_cleanup', () => { throw new TypeError(secret); }), undefined);
+  assert.equal(await bestEffort('x', () => Promise.reject(secret)), undefined);
+  assert.equal(lines.length, 3);
+  assert.deepEqual(lines.map(line => JSON.parse(line.slice('[BestEffort] '.length))), [
+    { event: 'best_effort_failed', tag: 'library.document_storage_cleanup', error_kind: 'Error:ECONNRESET' },
+    { event: 'best_effort_failed', tag: 'users.avatar_cleanup', error_kind: 'TypeError' },
+    { event: 'best_effort_failed', tag: 'x', error_kind: 'string' },
+  ]);
+  assert.doesNotMatch(lines.join('\n'), /FAKE-SECRET|tenant|avatars/);
+});
+
+test('bestEffort keeps ignoreMissingFile', async (t) => {
+  const lines = captureWarn(t);
+  await bestEffort('kb.temp_file_cleanup', async () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); }, { ignoreMissingFile: true });
+  assert.equal(lines.length, 0);
+});
+
+test('bestEffortSync: result, or undefined and one log line on a throw', (t) => {
+  const lines = captureWarn(t);
+  assert.equal(bestEffortSync('x', () => 3), 3);
+  assert.equal(bestEffortSync('json.parse', () => JSON.parse('{"password":FAKE-SECRET}') as unknown), undefined);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]!.slice('[BestEffort] '.length)), { event: 'best_effort_failed', tag: 'json.parse', error_kind: 'SyntaxError' });
+  assert.doesNotMatch(lines[0]!, /FAKE-SECRET|password/);
+});
+
+test('bestEffortSync: a promise returned by mistake is not left unhandled', async (t) => {
+  const lines = captureWarn(t);
+  assert.equal(bestEffortSync('x', () => Promise.reject(new RangeError('late'))), undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /"error_kind":"RangeError"/);
 });
