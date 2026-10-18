@@ -7,6 +7,7 @@ import {
   throwIfReportsAborted,
   withReportsSnapshot,
 } from '../../config/reports-database.js';
+import { spoolReportExport, trackWorkbookBacklog, waitForWorkbookRoom } from './report-export-flow.js';
 import { loadReportPeriodOverviews, type ReportPeriodRange } from './report-period-summaries.repository.js';
 import { buildActiveLearnerEventsCte, buildReportEnrollmentCte, buildReportLearnerRosterCte, type ReportDateRange, type ReportSummary } from './reports.service.js';
 
@@ -1066,7 +1067,8 @@ async function writeLearnerSummarySheet(
   ];
   const writer = new SplitWorksheetWriter(workbook, copy.learnerList, copy.learnerListInScope, subtitle, columns);
   const learnerQuery = buildLearnerSummaryQuery(options);
-  await forEachReportsCursorBatch<LearnerSummaryRow>({ ...learnerQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
+  await forEachReportsCursorBatch<LearnerSummaryRow>({ ...learnerQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+    await waitForWorkbookRoom(workbook, options.signal);
     for (const item of rows) {
       const rate = roundPercent(item.completion_rate);
       writer.addRow([
@@ -1185,7 +1187,8 @@ async function writeCourseLearnerDetailSheets(
   const columns = courseLearnerColumns(options);
   const writer = new SplitWorksheetWriter(workbook, copy.courseLearnerDetail, copy.courseEnrollmentDetail, subtitle, columns);
   const enrollmentQuery = buildCourseLearnerQuery(options);
-  await forEachReportsCursorBatch<CourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
+  await forEachReportsCursorBatch<CourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+    await waitForWorkbookRoom(workbook, options.signal);
     for (const item of rows) addCourseLearnerRow(writer, item, options);
   });
   writer.finish();
@@ -1264,11 +1267,39 @@ function exportSnapshotOptions(options: ReportExcelExportOptions): { statementTi
   return { statementTimeoutMs: env.REPORTS_EXPORT_STATEMENT_TIMEOUT_MS, signal: options.signal };
 }
 
+/** A streaming workbook on `stream` whose sheet backlog the cursor sheets wait on (report-export-flow.ts). */
+function createExportWorkbook(stream: Writable, exporterName: string): ExcelJS.stream.xlsx.WorkbookWriter {
+  const writer = new ExcelJS.stream.xlsx.WorkbookWriter({
+    stream,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+  trackWorkbookBacklog(writer);
+  writer.creator = 'Landa';
+  writer.lastModifiedBy = exporterName || 'Landa';
+  writer.created = new Date();
+  writer.modified = new Date();
+  return writer;
+}
+
+/**
+ * The file is generated into a temp file and sent to options.stream as it
+ * grows, at the client's pace (report-export-flow.ts); the export stops when
+ * options.signal aborts or the stream goes away.
+ */
+export async function streamCourseLearnerExcel(options: CourseLearnerExcelExportOptions): Promise<void> {
+  await spoolReportExport(options.stream, options.signal, (sink, signal) => writeCourseLearnerWorkbook({ ...options, stream: sink, signal }));
+}
+
+export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
+  await spoolReportExport(options.stream, options.signal, (sink, signal) => writeReportWorkbook({ ...options, stream: sink, signal }));
+}
+
 /**
  * Every read of the file runs in one READ ONLY REPEATABLE READ snapshot on
  * the reports pool; its connection is released before the zip is finalized.
  */
-export async function streamCourseLearnerExcel(options: CourseLearnerExcelExportOptions): Promise<void> {
+async function writeCourseLearnerWorkbook(options: CourseLearnerExcelExportOptions): Promise<void> {
   const workbook = await withReportsSnapshot(exportSnapshotOptions(options), async () => {
     const copy = getReportExcelCopy(options.locale);
     const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
@@ -1280,15 +1311,7 @@ export async function streamCourseLearnerExcel(options: CourseLearnerExcelExport
       `${options.labels.team}: ${scopeNames.teamName}`,
       `${copy.exportedBy}: ${options.exporterName}`,
     ].join(' | ');
-    const writer = new ExcelJS.stream.xlsx.WorkbookWriter({
-      stream: options.stream,
-      useStyles: true,
-      useSharedStrings: false,
-    });
-    writer.creator = 'Landa';
-    writer.lastModifiedBy = options.exporterName || 'Landa';
-    writer.created = new Date();
-    writer.modified = new Date();
+    const writer = createExportWorkbook(options.stream, options.exporterName);
 
     const sheet = new SplitWorksheetWriter(
       writer,
@@ -1298,7 +1321,8 @@ export async function streamCourseLearnerExcel(options: CourseLearnerExcelExport
       courseLearnerColumns(options),
     );
     const enrollmentQuery = buildSingleCourseLearnerQuery(options);
-    await forEachReportsCursorBatch<SortedCourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, (rows) => {
+    await forEachReportsCursorBatch<SortedCourseLearnerRow>({ ...enrollmentQuery, batchSize: STREAM_BATCH_SIZE, signal: options.signal }, async (rows) => {
+      await waitForWorkbookRoom(writer, options.signal);
       for (const item of rows) addCourseLearnerRow(sheet, item, options);
     });
     sheet.finish();
@@ -1308,7 +1332,7 @@ export async function streamCourseLearnerExcel(options: CourseLearnerExcelExport
   await workbook.commit();
 }
 
-export async function streamReportExcel(options: ReportExcelExportOptions): Promise<void> {
+async function writeReportWorkbook(options: ReportExcelExportOptions): Promise<void> {
   const workbook = await withReportsSnapshot(exportSnapshotOptions(options), async () => {
     const copy = getReportExcelCopy(options.locale);
     const scopeNames = await resolveScopeNames(options.tenantId, options.scope, options.locale);
@@ -1324,16 +1348,7 @@ export async function streamReportExcel(options: ReportExcelExportOptions): Prom
     const selectedPeriodSubtitle = buildSubtitle(selectedPeriodText);
     const yearlySubtitle = buildSubtitle(yearlyPeriodText);
 
-    const writer = new ExcelJS.stream.xlsx.WorkbookWriter({
-      stream: options.stream,
-      useStyles: true,
-      useSharedStrings: false,
-    });
-
-    writer.creator = 'Landa';
-    writer.lastModifiedBy = options.exporterName || 'Landa';
-    writer.created = new Date();
-    writer.modified = new Date();
+    const writer = createExportWorkbook(options.stream, options.exporterName);
 
     // The export stops between sheets once the client has gone away.
     const sheets: Array<() => Promise<unknown>> = [

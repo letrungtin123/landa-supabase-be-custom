@@ -13,6 +13,7 @@ import { processRolePlan, signalProcessReady } from './config/process-role.js';
 import { shutdownStepsFor, startProcess } from './config/process-startup.js';
 import { clusterBus } from './config/cluster-bus.js';
 import { COURSE_ASSET_TEMP_MAX_AGE_MS, cleanupStaleCourseAssetTempFiles } from './modules/course-authoring/course-asset-temp.js';
+import { cleanupStaleReportExportSpools } from './modules/reports/report-export-flow.js';
 import { startUploadWorker } from './modules/ai-chatbot/upload.worker.js';
 import { startDeleteWorker } from './modules/ai-chatbot/delete.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/restore.worker.js';
@@ -329,6 +330,8 @@ async function bootstrap() {
       try {
         await fs.mkdir(env.GEMINI_TEMP_DIR, { recursive: true });
       } catch { /* ignore */ }
+      // Report export temp files a crashed process left (only files older than any export).
+      await cleanupStaleReportExportSpools();
     },
     listen,
     // PM2 wait_ready (cluster reloads wait for this before stopping the old process).
