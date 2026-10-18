@@ -1,0 +1,21 @@
+{
+  "description": "Folder mapping of scripts/codemods/split-ai-chatbot.mjs: every file and folder directly under src/modules/ai-chatbot goes to the folder of the first rule whose pattern matches its name. Move only.",
+  "module": "src/modules/ai-chatbot",
+  "folders": {
+    "ai-id": "AI ID (lesson author): V1 legacy (ai-id/legacy/), V2 orchestration, IDM, workspace, sessions, sources, transcription, generation jobs, chapter checkpoints",
+    "ai-report": "AI Report: report chat turn and router, report PDF (with report-pdf-template/), AI report settings",
+    "kb": "Knowledge bases: KB CRUD and documents, KB operations queue, upload and restore workers, FAQ sheets, local source content",
+    "chat": "Chat: learner and admin chat turn (chat.service.ts, SSE stream), conversations, bots, chat admission and stream locks",
+    "ai-platform": "Shared AI platform: AI settings, secrets, pricing, usage, token quota, metered calls, RAG client, engine transition, Gemini client and File Search store calls, input filter"
+  },
+  "keep": {
+    "ai-chatbot.routes.ts": "The module's router stays at the module root: app.ts mounts it at /api/ai-chatbot, and it wires the controllers of every sub-folder."
+  },
+  "rules": [
+    { "pattern": "^lesson-author", "folder": "ai-id" },
+    { "pattern": "^(report|ai-report\\.)", "folder": "ai-report" },
+    { "pattern": "^(kb[-.]|upload\\.worker\\.ts$|restore\\.worker\\.ts$)", "folder": "kb" },
+    { "pattern": "^(chat|bot)", "folder": "chat" },
+    { "pattern": "^(ai-|gemini[-.]|input-filter$)", "folder": "ai-platform" }
+  ]
+}
