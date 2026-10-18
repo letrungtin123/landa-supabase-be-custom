@@ -1019,10 +1019,6 @@ async function getDescendantBlockIds(blockId: string): Promise<string[]> {
   return result.rows.map((row) => row.id);
 }
 
-export async function renameBlock(blockId: string, displayName: string): Promise<BlockInfo> {
-  return updateBlock(blockId, { display_name: displayName });
-}
-
 export async function publishBlock(
   blockId: string,
   tenantId?: string | null,
@@ -1161,48 +1157,6 @@ export async function publishBlock(
   await Promise.all([
     invalidateCourseReadCaches(block.course_id),
     invalidateBlockReadCaches(descendantIds),
-  ]);
-
-  return getBlockInfo(blockId, tenantId);
-}
-
-/**
- * Discard draft changes on a single block — revert data to the last published version.
- * Reverse of publishBlock: copies published_data → data, published_metadata → metadata.
- * Non-recursive: only reverts the targeted block, not its children.
- */
-export async function discardDraft(blockId: string, tenantId?: string | null): Promise<BlockInfo> {
-  const block = await getBlockInfo(blockId, tenantId);
-
-  if (!block.has_draft_changes) {
-    throw new AppError('Block has no draft changes to discard', 400);
-  }
-
-  // Check if published_data exists (block must have been published at least once)
-  const pubCheck = await query<{ has_pub: boolean }>(
-    `SELECT published_data IS NOT NULL AS has_pub
-     FROM course_blocks WHERE id = $1 AND deleted_at IS NULL`,
-    [blockId],
-  );
-  if (!pubCheck.rows[0]?.has_pub) {
-    throw new AppError('Block has never been published — cannot rollback', 400);
-  }
-
-  await query(
-    `UPDATE course_blocks
-     SET data = published_data,
-         metadata = published_metadata,
-         has_draft_changes = false,
-         updated_at = now()
-     WHERE id = $1 AND deleted_at IS NULL`,
-    [blockId],
-  );
-
-  // Propagate clean state upward: if no siblings remain dirty, clear ancestor flags
-  await recalculateAncestorDraftFlags(blockId);
-  await Promise.all([
-    invalidateCourseReadCaches(block.course_id),
-    invalidateBlockReadCaches([blockId]),
   ]);
 
   return getBlockInfo(blockId, tenantId);
@@ -1890,25 +1844,6 @@ async function collectDraftStoragePathsForSubtree(blockId: string): Promise<Set<
   for (const row of result.rows) {
     collectCourseStoragePaths(row.data, paths);
     collectCourseStoragePaths(row.metadata, paths);
-  }
-  return paths;
-}
-
-async function collectAllStoragePathsForCourse(courseId: string): Promise<Set<string>> {
-  const result = await query<ReferencingBlockRow>(
-    `SELECT id, data, metadata, published_data, published_metadata
-       FROM course_blocks
-      WHERE course_id = $1
-        AND deleted_at IS NULL`,
-    [courseId],
-  );
-
-  const paths = new Set<string>();
-  for (const row of result.rows) {
-    collectCourseStoragePaths(row.data, paths);
-    collectCourseStoragePaths(row.metadata, paths);
-    collectCourseStoragePaths(row.published_data, paths);
-    collectCourseStoragePaths(row.published_metadata, paths);
   }
   return paths;
 }

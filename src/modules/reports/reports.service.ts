@@ -376,13 +376,6 @@ function getMonthRange(year: number, month: number): { startDate: Date; endDate:
   return { startDate, endDate };
 }
 
-function getSnapshotEndDate(month?: number, year?: number, dateRange?: ReportDateRange): Date {
-  if (dateRange) return dateRange.endDate;
-  if (month && year) return getMonthRange(year, month).endDate;
-  if (year) return new Date(year, 11, 31, 23, 59, 59, 999);
-  return new Date();
-}
-
 function getReportRange(month?: number, year?: number, dateRange?: ReportDateRange): ReportDateRange {
   if (dateRange) return dateRange;
 

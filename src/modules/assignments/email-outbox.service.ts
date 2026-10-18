@@ -1405,17 +1405,6 @@ export async function enqueueTeamMemberAddedEmails(
   return insertResult.rowCount || 0;
 }
 
-export async function enqueueAssignmentCreatedEmailsForNotification(
-  ctx: AssignmentCreatedEmailContext,
-): Promise<number> {
-  const client = await getClient();
-  try {
-    return await enqueueAssignmentCreatedEmails(client, ctx);
-  } finally {
-    client.release();
-  }
-}
-
 export async function enqueueCourseNotificationEmailJob(
   client: PoolClient,
   ctx: Pick<CourseNotificationEmailContext, 'tenantId' | 'notificationId' | 'courseId'>,
@@ -2345,16 +2334,6 @@ async function processEmailOutboxBatchStats(
   await Promise.all(Array.from({ length: groupConcurrency }, () => worker()));
 
   return stats;
-}
-
-export async function processEmailOutboxBatch(tenantId?: string, limit = EMAIL_OUTBOX_BATCH_SIZE): Promise<number> {
-  const stats = await processEmailOutboxBatchStats(
-    tenantId,
-    limit,
-    EMAIL_OUTBOX_CONCURRENCY,
-    Date.now() + EMAIL_OUTBOX_TICK_BUDGET_MS,
-  );
-  return stats.sent;
 }
 
 async function cleanupSentEmailOutboxBatch(): Promise<number> {
