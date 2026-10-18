@@ -813,7 +813,7 @@
   },
   "src/modules/learner/learner.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 44
+      "count": 24
     },
     "prefer-const": {
       "count": 1
