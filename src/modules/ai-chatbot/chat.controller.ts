@@ -7,6 +7,7 @@ import type { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { createChatStreamLifecycle } from './chat-stream-lifecycle.logic.js';
 import { AI_BUSY_CODE, AI_BUSY_ERROR, AI_BUSY_RETRY_AFTER_SECONDS, createConcurrencyGate } from './ai-chat-admission.logic.js';
+import { recordAiChatAdmissionRefused, registerAiChatAdmissionGauge } from '../metrics/metrics.service.js';
 import { CHAT_ANSWER_STOPPED_BY_CLIENT } from './chat-provider-turn.logic.js';
 import { env } from '../../config/env.js';
 import { trackShutdownWork } from '../../config/process-lifecycle.js';
@@ -45,6 +46,7 @@ const chatAnswerGate = createConcurrencyGate({
   perKey: env.AI_CHAT_TENANT_CONCURRENCY,
   total: env.AI_CHAT_GLOBAL_CONCURRENCY,
 });
+registerAiChatAdmissionGauge(() => chatAnswerGate.active());
 
 /** Body `locale` first (validated in sendMessage), then the dashboard's X-UI-Locale header. */
 function readReportRequestLocale(req: Request, bodyLocale: unknown): 'vi' | 'en' {
@@ -681,6 +683,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   // Admission before the stream opens, so a busy answer is a plain 429.
   const releaseChatSlot = chatAnswerGate.tryAcquire(tenantId);
   if (!releaseChatSlot) {
+    recordAiChatAdmissionRefused();
     const [status, vi, en] = AI_BUSY_ERROR;
     res.setHeader('Retry-After', String(AI_BUSY_RETRY_AFTER_SECONDS));
     res.status(status).json({ success: false, code: AI_BUSY_CODE, message: reportLocale === 'en' ? en : vi });

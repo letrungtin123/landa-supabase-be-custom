@@ -101,6 +101,15 @@ export function isRedisConfigured(): boolean {
   return Boolean(env.REDIS_URL);
 }
 
+/** Connection and breaker state, for GET /internal/metrics. */
+export function redisMetricsState(): { configured: boolean; ready: boolean; breakerOpen: boolean } {
+  return {
+    configured: isRedisConfigured(),
+    ready: Boolean(redisClient && redisClient.isOpen && redisClient.isReady),
+    breakerOpen: breaker.isOpen(),
+  };
+}
+
 /**
  * Runs one Redis command within the command deadline. A timeout or a
  * connection failure opens the breaker and rejects; the caller falls back.

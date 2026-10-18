@@ -236,6 +236,12 @@ export const env = {
   RABBITMQ_RETRY_BASE_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_BASE_DELAY_MS', 2_000, 0, 60_000),
   RABBITMQ_RETRY_MAX_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_MAX_DELAY_MS', 15_000, 0, 120_000),
 
+  // GET /internal/metrics (Prometheus text): answered only to callers on this
+  // host (loopback, no proxy forwarding header). With METRICS_TOKEN set,
+  // `Authorization: Bearer <token>` is required too. false = off (404).
+  METRICS_ENABLED: optionalBoolean('METRICS_ENABLED', true),
+  METRICS_TOKEN: process.env.METRICS_TOKEN?.trim() || '',
+
   // Redis (optional; DB fallback is used if unavailable)
   REDIS_URL: process.env.REDIS_URL?.trim() || '',
   REDIS_DATABASE: optionalNonNegativeInt('REDIS_DATABASE', 0),
