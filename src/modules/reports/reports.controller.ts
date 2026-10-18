@@ -6,7 +6,6 @@ import type { NextFunction, Request, Response } from 'express';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { AppError } from '../../middleware/error-handler.js';
-import { query } from '../../config/database.js';
 import { isReportsSnapshotAbortedError } from '../../config/reports-database.js';
 import { errorKind } from '../../utils/best-effort.js';
 import * as svc from './reports.service.js';
@@ -23,6 +22,13 @@ import {
 } from './report-admission.logic.js';
 import { tryAcquireReportExportSlot } from './report-admission.service.js';
 import { refreshReportSummaryOnce, type ReportSummaryRefreshOutcome } from './report-summary-refresh.service.js';
+import {
+  findReportCourse,
+  listReportGroups,
+  listReportSubGroups,
+  listReportTeams,
+  type ReportFilterRefusal,
+} from './report-filters.service.js';
 import {
   buildCourseLearnerExcelFileName,
   buildReportExcelFileName,
@@ -306,14 +312,8 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
   const courseId = req.params.courseId;
   if (!courseId) return sendError(res, 'courseId is required', 400);
 
-  const course = await query<{ display_name: string }>(
-    `SELECT display_name
-     FROM courses
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-     LIMIT 1`,
-    [courseId, tenantId],
-  );
-  if (!course.rows[0]) return sendError(res, 'Không tìm thấy khóa học', 404);
+  const course = await findReportCourse(tenantId, courseId);
+  if (!course) return sendError(res, 'Không tìm thấy khóa học', 404);
 
   const now = new Date();
   const dateRange = parseReportDateRange(req);
@@ -330,7 +330,7 @@ export async function exportCourseCompletionLearners(req: Request, res: Response
   if (!releaseExportSlot) return;
   const clientGone = abortWhenClientLeaves(res);
 
-  const courseName = course.rows[0].display_name;
+  const courseName = course.display_name;
   const fileName = buildCourseLearnerExcelFileName(locale, courseName, dateRange, month, year);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`);
@@ -576,134 +576,42 @@ export async function refreshSummary(req: Request, res: Response) {
   sendSuccess(res, { message: 'Report summary refreshed' });
 }
 
+/** [HTTP status, message] of each refused filter list (the messages the dashboard shows). */
+const REPORT_FILTER_REFUSALS: Record<ReportFilterRefusal, readonly [number, string]> = {
+  group_not_in_tenant: [400, 'Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại'],
+  group_not_allowed: [403, 'Không có quyền xem nhóm này'],
+  subgroup_not_in_group: [400, 'Nhóm con không hợp lệ hoặc không thuộc nhóm đã chọn'],
+};
+
+function sendFilterRefusal(res: Response, refusal: ReportFilterRefusal): void {
+  const [status, message] = REPORT_FILTER_REFUSALS[refusal];
+  sendError(res, message, status);
+}
+
 /**
  * GET /api/reports/groups — Danh sách org groups cho filter report.
  * Dùng quyền report_summary thay vì groups module.
  * learner_plus: chỉ trả groups mà user thuộc về.
  */
 export async function getReportGroups(req: Request, res: Response) {
-  const tenantId = req.user!.tenantId!;
-  const role = req.user!.role;
-
-  if (role === 'learner_plus') {
-    // Chỉ trả groups user thuộc về
-    const result = await query<{ id: string; name: string; subgroup_count: number }>(
-      `SELECT DISTINCT og.id, og.name,
-              (SELECT COUNT(*)::int FROM sub_groups sg2 WHERE sg2.org_group_id = og.id) AS subgroup_count
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE tm.user_id = $1
-       ORDER BY og.name`,
-      [req.user!.id],
-    );
-    return sendSuccess(res, { groups: result.rows, total: result.rows.length });
-  }
-
-  // Staff/superuser/superadmin: tất cả groups trong tenant
-  const result = await query<{ id: string; name: string; subgroup_count: number }>(
-    `SELECT og.id, og.name,
-            (SELECT COUNT(*)::int FROM sub_groups sg WHERE sg.org_group_id = og.id) AS subgroup_count
-     FROM org_groups og
-     WHERE og.tenant_id = $1
-     ORDER BY og.name`,
-    [tenantId],
-  );
-  sendSuccess(res, { groups: result.rows, total: result.rows.length });
+  const groups = await listReportGroups(reportActor(req));
+  sendSuccess(res, { groups, total: groups.length });
 }
 
 /**
  * GET /api/reports/groups/:groupId/subgroups — Danh sách subgroups cho filter report.
  */
 export async function getReportSubGroups(req: Request, res: Response) {
-  const tenantId = req.user!.tenantId!;
-  const groupId = req.params.groupId;
-  const role = req.user!.role;
-
-  const groupCheck = await query<{ id: string }>(
-    `SELECT id
-     FROM org_groups
-     WHERE id = $1 AND tenant_id = $2
-     LIMIT 1`,
-    [groupId, tenantId],
-  );
-  if (groupCheck.rows.length === 0) {
-    return sendError(res, 'Nhóm không hợp lệ hoặc không thuộc doanh nghiệp hiện tại', 400);
-  }
-
-  // learner_plus: validate group thuộc về user
-  if (role === 'learner_plus') {
-    const check = await query<{ group_id: string }>(
-      `SELECT DISTINCT og.id AS group_id
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE tm.user_id = $1 AND og.id = $2`,
-      [req.user!.id, groupId],
-    );
-    if (check.rows.length === 0) {
-      return sendError(res, 'Không có quyền xem nhóm này', 403);
-    }
-  }
-
-  const result = await query<{ id: string; name: string; team_count: number }>(
-    `SELECT sg.id, sg.name,
-            (SELECT COUNT(*)::int FROM teams t WHERE t.sub_group_id = sg.id) AS team_count
-     FROM sub_groups sg
-     WHERE sg.org_group_id = $1
-     ORDER BY sg.name`,
-    [groupId],
-  );
-  sendSuccess(res, { subgroups: result.rows, total: result.rows.length });
+  const result = await listReportSubGroups(reportActor(req), req.params.groupId);
+  if (result.refusal) return sendFilterRefusal(res, result.refusal);
+  sendSuccess(res, { subgroups: result.subgroups, total: result.subgroups.length });
 }
 
 /**
  * GET /api/reports/groups/:groupId/subgroups/:subgroupId/teams — Danh sách teams cho filter report.
  */
 export async function getReportTeams(req: Request, res: Response) {
-  const tenantId = req.user!.tenantId!;
-  const role = req.user!.role;
-  const groupId = req.params.groupId;
-  const subgroupId = req.params.subgroupId;
-
-  const subgroupCheck = await query<{ subgroup_id: string }>(
-    `SELECT sg.id AS subgroup_id
-     FROM sub_groups sg
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE sg.id = $1 AND og.id = $2 AND og.tenant_id = $3
-     LIMIT 1`,
-    [subgroupId, groupId, tenantId],
-  );
-  if (subgroupCheck.rows.length === 0) {
-    return sendError(res, 'Nhóm con không hợp lệ hoặc không thuộc nhóm đã chọn', 400);
-  }
-
-  // learner_plus: validate group thuộc về user, giữ cùng rule hiện tại của subgroup filter
-  if (role === 'learner_plus') {
-    const check = await query<{ group_id: string }>(
-      `SELECT DISTINCT og.id AS group_id
-       FROM team_members tm
-       JOIN teams t ON t.id = tm.team_id
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE tm.user_id = $1 AND og.id = $2`,
-      [req.user!.id, groupId],
-    );
-    if (check.rows.length === 0) {
-      return sendError(res, 'Không có quyền xem nhóm này', 403);
-    }
-  }
-
-  const result = await query<{ id: string; name: string; member_count: number }>(
-    `SELECT t.id, t.name,
-            (SELECT COUNT(*)::int FROM team_members tm WHERE tm.team_id = t.id) AS member_count
-     FROM teams t
-     WHERE t.sub_group_id = $1
-     ORDER BY t.name`,
-    [subgroupId],
-  );
-  sendSuccess(res, { teams: result.rows, total: result.rows.length });
+  const result = await listReportTeams(reportActor(req), req.params.groupId, req.params.subgroupId);
+  if (result.refusal) return sendFilterRefusal(res, result.refusal);
+  sendSuccess(res, { teams: result.teams, total: result.teams.length });
 }
-
