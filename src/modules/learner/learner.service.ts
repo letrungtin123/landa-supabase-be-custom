@@ -20,7 +20,8 @@ import { LEARNER_BLOCK_SERIALIZATION_VERSION } from './learner-answer-key.logic.
 import { gradeBlockAnswer } from './learner-grading.logic.js';
 import { createLearnerCoursesRepository } from './learner-courses.repository.js';
 import { createLearnerLibraryRepository } from './learner-library.repository.js';
-import { planBlockCompletion, type ActiveBlockCompletionRow, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
+import { createLearnerProgressRepository } from './learner-progress.repository.js';
+import { planBlockCompletion, type MarkBlocksCompleteResult } from './learner-completion.logic.js';
 import {
   buildLearnerCourseStructure,
   overlayLearnerBlockCompletions,
@@ -35,6 +36,7 @@ import { isUuid } from '../../utils/uuid.js';
 
 const coursesRepository = createLearnerCoursesRepository({ query });
 const libraryRepository = createLearnerLibraryRepository({ query });
+const progressRepository = createLearnerProgressRepository({ query });
 
 async function assertLearnerCourseAccess(
   courseId: string,
@@ -504,21 +506,7 @@ async function getMyLibraryDocumentsFromDb(
  * JOIN course_progress để lấy progress % và completion status.
  */
 export async function getMyEnrollments(userId: string, tenantId: string) {
-  const result = await query<any>(
-    `SELECT e.id, e.course_id, e.enrolled_at, e.is_active,
-            c.display_name, c.image_url, c.org,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at, cp.last_activity_at
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true AND c.deleted_at IS NULL
-     ORDER BY e.enrolled_at DESC`,
-    [userId, tenantId],
-  );
-
-  return result.rows;
+  return progressRepository.selectEnrollments(userId, tenantId);
 }
 
 /**
@@ -531,34 +519,22 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
   await assertLearnerCourseAccess(courseId, userId, tenantId, role);
 
   // Kiểm tra đã enroll chưa
-  const existing = await query<any>(
-    'SELECT id, is_active FROM enrollments WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3',
-    [userId, courseId, tenantId],
-  );
+  const existing = await progressRepository.findEnrollment(userId, courseId, tenantId);
 
-  if (existing.rowCount! > 0) {
-    if (existing.rows[0].is_active) {
-      return { enrollment_id: existing.rows[0].id, already_enrolled: true };
+  if (existing) {
+    if (existing.is_active) {
+      return { enrollment_id: existing.id, already_enrolled: true };
     }
     // Re-activate
-    await query('UPDATE enrollments SET is_active = true WHERE id = $1', [existing.rows[0].id]);
-    await recalculateEnrollmentProgress(existing.rows[0].id, courseId);
+    await progressRepository.reactivateEnrollment(existing.id);
+    await recalculateEnrollmentProgress(existing.id, courseId);
     await invalidateUserCourseProgressCache(userId, courseId);
     await invalidateUserBadgeCaches([userId]);
-    return { enrollment_id: existing.rows[0].id, already_enrolled: false };
+    return { enrollment_id: existing.id, already_enrolled: false };
   }
 
   // Tạo enrollment + course_progress
-  const result = await query<{ id: string }>(
-    `INSERT INTO enrollments (user_id, course_id, tenant_id) VALUES ($1, $2, $3) RETURNING id`,
-    [userId, courseId, tenantId],
-  );
-  const enrollmentId = result.rows[0].id;
-
-  await query(
-    'INSERT INTO course_progress (enrollment_id) VALUES ($1)',
-    [enrollmentId],
-  );
+  const enrollmentId = await progressRepository.createEnrollment(userId, courseId, tenantId);
   await invalidateUserCourseProgressCache(userId, courseId);
 
   return { enrollment_id: enrollmentId, already_enrolled: false };
@@ -573,13 +549,7 @@ export async function selfEnroll(userId: string, courseId: string, tenantId: str
  * version stay as they are (no cached answer contains last_activity_at).
  */
 async function touchEnrollmentLastActivity(enrollmentId: string): Promise<void> {
-  await query(
-    `UPDATE course_progress
-     SET last_activity_at = now()
-     WHERE enrollment_id = $1::uuid
-       AND (last_activity_at IS NULL OR last_activity_at < now() - interval '5 minutes')`,
-    [enrollmentId],
-  );
+  await progressRepository.touchLastActivity(enrollmentId);
 }
 
 /**
@@ -598,57 +568,15 @@ export async function markBlocksComplete(
   if (blockIds.length === 0) return { marked: 0, newly_completed: 0 };
 
   // Lấy enrollment
-  const enrollment = await query<{ id: string }>(
-    `SELECT e.id
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     WHERE e.user_id = $1
-       AND e.course_id = $2
-       AND e.is_active = true
-       AND c.deleted_at IS NULL
-     LIMIT 1`,
-    [userId, courseId],
-  );
+  const enrollmentId = await progressRepository.findActiveEnrollmentId(userId, courseId);
 
-  if (enrollment.rowCount === 0) {
+  if (enrollmentId === undefined) {
     throw new AppError('Chưa ghi danh khóa học này', 400);
   }
 
-  const enrollmentId = enrollment.rows[0].id;
-
   // Same block filter as before; `completed` tells which ones are already done.
-  const activeBlocks = await query<ActiveBlockCompletionRow>(
-    `WITH RECURSIVE ancestors AS (
-       SELECT id AS root_id, id, parent_id, deleted_at
-       FROM course_blocks
-       WHERE id = ANY($2::uuid[])
-       UNION ALL
-       SELECT a.root_id, parent.id, parent.parent_id, parent.deleted_at
-       FROM course_blocks parent
-       JOIN ancestors a ON parent.id = a.parent_id
-     )
-     SELECT b.id,
-            EXISTS (
-              SELECT 1
-              FROM block_completions bc
-              WHERE bc.enrollment_id = $3::uuid
-                AND bc.block_id = b.id
-            ) AS completed
-     FROM course_blocks b
-     WHERE b.course_id = $1
-       AND b.id = ANY($2::uuid[])
-       AND b.is_published = true
-       AND b.deleted_at IS NULL
-       AND b.block_type NOT IN ('course','chapter','sequential','vertical')
-       AND NOT EXISTS (
-         SELECT 1
-         FROM ancestors a
-         WHERE a.root_id = b.id
-           AND a.deleted_at IS NOT NULL
-       )`,
-    [courseId, blockIds, enrollmentId],
-  );
-  const { marked, missing } = planBlockCompletion(activeBlocks.rows);
+  const activeBlocks = await progressRepository.selectActiveBlocks(courseId, blockIds, enrollmentId);
+  const { marked, missing } = planBlockCompletion(activeBlocks);
 
   // Nothing new (all already completed, or no valid leaf): no completion
   // write, no recalculation, no cache bump; only "last activity" moves.
@@ -657,15 +585,7 @@ export async function markBlocksComplete(
     return { marked, newly_completed: 0 };
   }
 
-  const inserted = await query<{ block_id: string }>(
-    `INSERT INTO block_completions (enrollment_id, block_id)
-     SELECT $1::uuid, block_id
-     FROM unnest($2::uuid[]) AS requested(block_id)
-     ON CONFLICT DO NOTHING
-     RETURNING block_id`,
-    [enrollmentId, missing],
-  );
-  const newlyCompleted = inserted.rowCount ?? inserted.rows.length;
+  const newlyCompleted = await progressRepository.insertBlockCompletions(enrollmentId, missing);
   // A concurrent request inserted them first and recalculates for itself.
   if (newlyCompleted === 0) return { marked, newly_completed: 0 };
 
@@ -690,22 +610,12 @@ export async function markBlocksComplete(
  * Lấy progress chi tiết cho 1 khóa học.
  */
 export async function getMyProgress(userId: string, courseId: string) {
-  const result = await query<any>(
-    `SELECT cp.progress, cp.is_completed, cp.completed_at, cp.last_activity_at
-     FROM course_progress cp
-     JOIN enrollments e ON e.id = cp.enrollment_id
-     JOIN courses c ON c.id = e.course_id
-     WHERE e.user_id = $1 AND e.course_id = $2 AND e.is_active = true
-       AND c.deleted_at IS NULL
-     LIMIT 1`,
-    [userId, courseId],
-  );
+  const row = await progressRepository.selectProgress(userId, courseId);
 
-  if (result.rowCount === 0) {
+  if (!row) {
     return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
   }
 
-  const row = result.rows[0];
   return {
     ...row,
     progress: parseFloat(row.progress) || 0, // pg numeric → JS number
@@ -723,24 +633,7 @@ export async function getBatchProgress(
 ) {
   if (courseIds.length === 0) return { progress: {} };
 
-  const result = await query<{
-    course_id: string;
-    progress: string;
-    is_completed: boolean;
-    completed_at: string | null;
-  }>(
-    `SELECT e.course_id,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at
-     FROM enrollments e
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1
-       AND e.tenant_id = $2
-       AND e.course_id = ANY($3)
-       AND e.is_active = true`,
-    [userId, tenantId, courseIds],
-  );
+  const rows = await progressRepository.selectBatchProgress(userId, tenantId, courseIds);
 
   const progress: Record<string, {
     progress: number;
@@ -748,7 +641,7 @@ export async function getBatchProgress(
     completed_at: string | null;
   }> = {};
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     progress[row.course_id] = {
       progress: parseFloat(row.progress) || 0,
       is_completed: row.is_completed,
@@ -782,10 +675,7 @@ export async function saveBadge(userId: string, tenantId: string, _badgeId: stri
 
 export async function updateBadgeShown(userId: string, badgeId: string, isShown: boolean) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Tài khoản demo iframe không thể cập nhật huy hiệu');
-  await query(
-    'UPDATE user_badges SET is_shown = $1 WHERE user_id = $2 AND badge_id = $3',
-    [isShown, userId, badgeId],
-  );
+  await progressRepository.setBadgeShown(userId, badgeId, isShown);
   // The kept overview lists this badge as a pending popup.
   await invalidateUserBadgeCaches([userId]);
 }

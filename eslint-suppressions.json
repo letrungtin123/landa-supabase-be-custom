@@ -813,7 +813,7 @@
   },
   "src/modules/learner/learner.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 11
+      "count": 8
     }
   },
   "src/modules/learner/progress-calculation.service.ts": {
