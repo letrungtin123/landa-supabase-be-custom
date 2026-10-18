@@ -10,10 +10,11 @@ import {
   buildFileName,
   buildStoragePath,
   deleteFile,
-  downloadFileBuffer,
   fixMulterFilename,
+  openStorageObjectStream,
   uploadCourseAssetFileFromPath,
   uploadFile,
+  type StorageObjectStream,
 } from '../../config/storage.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
@@ -450,6 +451,7 @@ export async function createAssignment(
   const uploadedAttachment = await uploadAssignmentAttachment(attachmentFile, tenantId, courseId, assignmentId);
   const client = await getClient();
   let assignmentCreatedEmailJobQueued = false;
+  let createdAssignment: Record<string, unknown> = {};
   const deadline = normalizeDeadlineForWrite(input);
   const submissionUnlockMode = normalizeSubmissionUnlockMode(input.submission_unlock_mode);
 
@@ -576,22 +578,7 @@ export async function createAssignment(
 
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(assignment, course.display_name)));
     await client.query('COMMIT');
-
-    // Learners' unread counts include the new assignment notification.
-    if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
-
-    await scheduleCourseProgressRecalculation({
-      tenantId,
-      courseId,
-      reason: 'assignment_created',
-      assignmentId: assignment.id,
-    });
-
-    if (assignmentCreatedEmailJobQueued) {
-      wakeEmailOutboxWorker('assignment-created');
-    }
-
-    return normalizeAssignmentRow(assignment);
+    createdAssignment = assignment;
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     if (uploadedAttachment) {
@@ -604,6 +591,25 @@ export async function createAssignment(
   } finally {
     client.release();
   }
+
+  // After the commit and with the connection back in the pool: a slow
+  // broker or cache never holds it, and a failure here can no longer roll
+  // back (or delete the attachment of) the committed assignment.
+  // Learners' unread counts include the new assignment notification.
+  if (!course.visible_to_staff_only) await invalidateTenantNotificationCaches(tenantId);
+
+  await scheduleCourseProgressRecalculation({
+    tenantId,
+    courseId,
+    reason: 'assignment_created',
+    assignmentId: String(createdAssignment.id),
+  });
+
+  if (assignmentCreatedEmailJobQueued) {
+    wakeEmailOutboxWorker('assignment-created');
+  }
+
+  return normalizeAssignmentRow(createdAssignment);
 }
 
 export async function updateAssignment(
@@ -734,26 +740,27 @@ export async function deleteAssignment(
     if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(current)));
     await client.query('COMMIT');
-
-    await scheduleCourseProgressRecalculation({
-      tenantId,
-      courseId: current.course_id,
-      reason: 'assignment_deleted',
-      assignmentId: current.id,
-    });
-
-    return {
-      id: current.id,
-      title: current.title,
-      course_id: current.course_id,
-      course_name: current.course_name,
-    };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
     client.release();
   }
+
+  // After the commit and with the connection back in the pool.
+  await scheduleCourseProgressRecalculation({
+    tenantId,
+    courseId: current.course_id,
+    reason: 'assignment_deleted',
+    assignmentId: current.id,
+  });
+
+  return {
+    id: current.id,
+    title: current.title,
+    course_id: current.course_id,
+    course_name: current.course_name,
+  };
 }
 
 export async function reorderAssignments(
@@ -1566,7 +1573,44 @@ export async function listSubmissionFeedbackHistory(submissionId: string, tenant
   }));
 }
 
-export async function getAssignmentFileForDownload(fileId: string, user: AuthUser) {
+export interface AssignmentFileDownload {
+  body: StorageObjectStream['body'];
+  contentLength: number | null;
+  contentType: string;
+  originalName: string;
+}
+
+export interface AssignmentFileDownloadOptions {
+  /** Aborts the Storage request (the controller ties it to the client connection). */
+  signal?: AbortSignal;
+  openObject?: typeof openStorageObjectStream;
+}
+
+async function openAssignmentFile(
+  storagePath: string,
+  mimeType: string | null,
+  originalName: string,
+  options: AssignmentFileDownloadOptions,
+): Promise<AssignmentFileDownload> {
+  const opened = await (options.openObject ?? openStorageObjectStream)(storagePath, { signal: options.signal });
+  return {
+    body: opened.body,
+    contentLength: opened.contentLength,
+    contentType: mimeType || opened.contentType || 'application/octet-stream',
+    originalName,
+  };
+}
+
+/**
+ * An assignment attachment or submission/feedback file, after the access
+ * check, as a stream from Storage: a download is never held whole in the
+ * heap (many learners download at a deadline).
+ */
+export async function getAssignmentFileForDownload(
+  fileId: string,
+  user: AuthUser,
+  options: AssignmentFileDownloadOptions = {},
+): Promise<AssignmentFileDownload> {
   const attachment = await query<{
     assignment_id: string;
     tenant_id: string;
@@ -1611,12 +1655,7 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
       throw new AppError('Khong co quyen tai file nay', 403);
     }
 
-    const downloaded = await downloadFileBuffer(file.storage_path);
-    return {
-      buffer: downloaded.buffer,
-      contentType: file.mime_type || downloaded.contentType || 'application/octet-stream',
-      originalName: file.original_name || 'file',
-    };
+    return openAssignmentFile(file.storage_path, file.mime_type, file.original_name || 'file', options);
   }
 
   const result = await query<{
@@ -1651,10 +1690,5 @@ export async function getAssignmentFileForDownload(fileId: string, user: AuthUse
     throw new AppError('Khong co quyen tai file nay', 403);
   }
 
-  const downloaded = await downloadFileBuffer(file.storage_path);
-  return {
-    buffer: downloaded.buffer,
-    contentType: file.mime_type || downloaded.contentType || 'application/octet-stream',
-    originalName: file.original_name,
-  };
+  return openAssignmentFile(file.storage_path, file.mime_type, file.original_name, options);
 }

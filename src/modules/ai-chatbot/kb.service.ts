@@ -7,7 +7,9 @@ import { getClient, query } from '../../config/database.js';
 import { cacheKey } from '../../config/cache.js';
 import { invalidateTenantAiCaches } from '../../config/cache-invalidation.js';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { uploadFile, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../config/storage.js';
+import { uploadFile, uploadFileFromPath, buildStoragePath, buildFileName, deleteFile, STORAGE_BUCKET } from '../../config/storage.js';
+import { extractLocalSourceContent, extractLocalSourceContentFromFile } from './kb-local-source-content.js';
+import { readFaqSheetSummary } from './kb-faq-sheet.service.js';
 import { signKbDocumentSourceUrl } from './kb-source-download-url.logic.js';
 import { publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { getRedisClient } from '../../config/redis.js';
@@ -28,17 +30,9 @@ import {
 } from './gemini.service.js';
 import type { AiEngine } from './ai-engine.types.js';
 
-const LOCAL_SOURCE_CONTENT_EXTENSIONS = new Set(['.txt', '.md', '.csv']);
-const MAX_STORED_SOURCE_CONTENT_CHARS = 200_000;
 const KB_RESTORE_LOCK_TTL_SECONDS = 6 * 60 * 60;
 const ACTIVE_RESTORE_STATES = new Set(['queued', 'restoring', 'uploading']);
 const RESTORE_REQUIRED_STORE_STATUSES = new Set(['key_changed', 'permission_denied', 'not_found']);
-
-function extractLocalSourceContent(ext: string, buffer: Buffer): string | null {
-  if (!LOCAL_SOURCE_CONTENT_EXTENSIONS.has(ext)) return null;
-  const text = buffer.toString('utf8').replace(/\u0000/g, '').trim();
-  return text ? text.slice(0, MAX_STORED_SOURCE_CONTENT_CHARS) : null;
-}
 
 // ── Types ──
 export interface Knowledgebase {
@@ -1825,12 +1819,21 @@ export interface StagedKbSource {
   type: 'file' | 'faq' | 'article';
 }
 
+/** An uploaded source as multer's disk storage delivers it (kb-upload-storage.ts). */
+export interface KbUploadedTempFile {
+  path: string;
+  originalname: string;
+  mimetype: string;
+  size: number;
+}
+
+/** Streams the uploaded temp file to Storage (never read whole into the heap). */
 async function stageKbSource(
   tenantId: string,
   folder: Parameters<typeof buildStoragePath>[1],
   name: string,
   mimetype: string,
-  buffer: Buffer,
+  filePath: string,
   sourceInfo: Record<string, unknown>,
   type: StagedKbSource['type'],
   content: string | null = null,
@@ -1839,7 +1842,7 @@ async function stageKbSource(
   const dateFolder = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const safeName = suffix || buildFileName(name);
   const storagePath = buildStoragePath(tenantId, folder, safeName, dateFolder);
-  await uploadFile(storagePath, buffer, mimetype);
+  await uploadFileFromPath(storagePath, filePath, mimetype);
   return { storagePath, sourceInfo, content, name, type };
 }
 
@@ -1872,55 +1875,52 @@ export async function stageTextBackedDocumentSource(
 export async function stageDocumentSource(
   kbId: string,
   tenantId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+  file: KbUploadedTempFile,
 ): Promise<StagedKbSource> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'tai tai lieu moi');
   const displayName = normalizeKbDocumentDisplayName(file.originalname);
   const ext = displayName.substring(displayName.lastIndexOf('.')).toLowerCase();
+  const localContent = await extractLocalSourceContentFromFile(ext, file.path);
   return stageKbSource(
     tenantId,
     'kb-files',
     displayName,
     file.mimetype,
-    file.buffer,
+    file.path,
     { name: displayName, size: file.size, extension: ext, mime_type: file.mimetype },
     'file',
-    extractLocalSourceContent(ext, file.buffer),
+    localContent,
   );
 }
 
 export async function stageFaqSource(
   kbId: string,
   tenantId: string,
-  file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+  file: KbUploadedTempFile,
 ): Promise<StagedKbSource> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'tai FAQ');
   const displayName = normalizeKbDocumentDisplayName(file.originalname);
-  const workbook = XLSX.read(file.buffer, { type: 'buffer' });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new AppError('File xlsx không có sheet nào', 400);
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]);
-  if (rows.length === 0) throw new AppError('File xlsx trống, không có dữ liệu', 400);
-  const headers = Object.keys(rows[0]);
-  const qKey = headers.find(h => h.trim().toLowerCase() === 'question');
-  const aKey = headers.find(h => h.trim().toLowerCase() === 'answer');
-  if (!qKey || !aKey) {
-    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${headers.join(', ')}`, 400);
+  // Parsed in a worker thread (kb-faq-sheet.service.ts), never on the event loop.
+  const sheet = await readFaqSheetSummary(file.path);
+  if (sheet.kind === 'no_sheet') throw new AppError('File xlsx không có sheet nào', 400);
+  if (sheet.kind === 'empty') throw new AppError('File xlsx trống, không có dữ liệu', 400);
+  if (sheet.kind === 'bad_template') {
+    throw new AppError(`File không đúng template. Cần có 2 cột "Question" và "Answer". Cột hiện tại: ${sheet.headers.join(', ')}`, 400);
   }
-  const emptyRows = rows.filter(row => !String(row[qKey] || '').trim() || !String(row[aKey] || '').trim()).length;
+  const { rowCount, emptyRows } = sheet;
   return stageKbSource(
     tenantId,
     'kb-faqs',
     displayName,
     file.mimetype,
-    file.buffer,
+    file.path,
     {
       name: displayName,
       size: file.size,
       extension: '.xlsx',
       mime_type: file.mimetype,
-      row_count: rows.length,
-      valid_rows: rows.length - emptyRows,
+      row_count: rowCount,
+      valid_rows: rowCount - emptyRows,
     },
     'faq',
   );

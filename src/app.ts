@@ -12,6 +12,7 @@ import { errorHandler } from './middleware/error-handler.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
 import { useJsonBodyParsers } from './middleware/body-limits.js';
+import { mountMetrics } from './modules/metrics/metrics.routes.js';
 
 // Routes
 import authRoutes from './modules/auth/auth.routes.js';
@@ -48,6 +49,9 @@ import welcomeInitRoutes from './modules/welcome-init/welcome-init.routes.js';
 import path from 'path';
 
 const app = express();
+// First, so every request is counted: GET /internal/metrics (loopback only)
+// and the per-route-group request counters (modules/metrics).
+mountMetrics(app);
 if (env.TRUSTED_PROXY_CIDRS.length > 0) {
   // A CIDR allowlist is safe even if the backend port is reachable directly:
   // forwarded addresses are considered only when every proxy hop belongs to

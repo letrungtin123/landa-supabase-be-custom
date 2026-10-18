@@ -55,6 +55,10 @@ export async function startCourseProgressRecalculationWorker(): Promise<void> {
     },
     {
       prefetch: env.COURSE_PROGRESS_RECALC_RABBIT_PREFETCH,
+      // A failed job goes straight back to 'queued' (no backoff in its row),
+      // and after the last retry it is marked failed: wait between attempts
+      // so a short database or broker blip does not fail it within ms.
+      retryBackoff: true,
     },
   );
 

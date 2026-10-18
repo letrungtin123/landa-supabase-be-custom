@@ -14,6 +14,8 @@ import * as kbService from './kb.service.js';
 import { getGeminiApiKey } from './gemini.service.js';
 import { invalidateGeminiStoreNameCache } from './chat.service.js';
 import { fixMulterFilename } from '../../config/storage.js';
+import { withKbTempUploadCleanup } from './kb-upload-storage.js';
+import { KB_FAQ_SHEET_READ_CODE_PREFIX, KB_FAQ_SHEET_READ_ERRORS, KbFaqSheetReadError } from './kb-faq-sheet.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { describeKbDocumentDeletionFailure } from './kb-document-deletion.logic.js';
 import { syncLessonAuthorTranscriptMessagesById } from './lesson-author-transcription.service.js';
@@ -173,9 +175,12 @@ export async function listDocuments(req: Request, res: Response): Promise<void> 
 }
 
 /**
- * Multi-file upload (Files tab) — up to 20 files.
+ * Multi-file upload (Files tab) — up to 20 files, received as temp files
+ * (kb-upload-storage.ts) that are removed when the request ends.
  */
-export async function uploadDocuments(req: Request, res: Response): Promise<void> {
+export const uploadDocuments = withKbTempUploadCleanup(uploadDocumentsFromTempFiles);
+
+async function uploadDocumentsFromTempFiles(req: Request, res: Response): Promise<void> {
   if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
@@ -305,9 +310,12 @@ export async function retryDocuments(req: Request, res: Response): Promise<void>
 // ── FAQ Upload ──
 
 /**
- * Upload FAQ xlsx file — validate template → enqueue Gemini.
+ * Upload FAQ xlsx file — validate template → enqueue Gemini. The file is a
+ * temp file, removed when the request ends.
  */
-export async function uploadFaqDocument(req: Request, res: Response): Promise<void> {
+export const uploadFaqDocument = withKbTempUploadCleanup(uploadFaqDocumentFromTempFile);
+
+async function uploadFaqDocumentFromTempFile(req: Request, res: Response): Promise<void> {
   if (!paramsValid(req, res, ['kbId'])) return;
   const tenantId = req.user!.tenantId!;
   const kbId = req.params.kbId;
@@ -346,6 +354,15 @@ export async function uploadFaqDocument(req: Request, res: Response): Promise<vo
       throw err;
     }
   } catch (err) {
+    if (err instanceof KbFaqSheetReadError) {
+      const [status, vi, en] = KB_FAQ_SHEET_READ_ERRORS[err.code];
+      res.status(status).json({
+        success: false,
+        code: `${KB_FAQ_SHEET_READ_CODE_PREFIX}${err.code}`,
+        message: requestUiLocaleOf(req) === 'en' ? en : vi,
+      });
+      return;
+    }
     sendClientError(req, res, err, 'KnowledgeBase');
   }
 }

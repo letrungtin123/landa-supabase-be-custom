@@ -17,6 +17,7 @@ import { getActiveBot, getActiveKbAssignmentFresh } from './chat.service.js';
 import { getGeminiApiKey } from './gemini.service.js';
 import * as kbService from './kb.service.js';
 import { ALLOWED_KB_EXTENSIONS, MAX_KB_FILE_SIZE } from './kb.validator.js';
+import { createKbTempUpload, withKbTempUploadCleanup } from './kb-upload-storage.js';
 import { lessonAuthorRequestLocale } from './lesson-author-session-access.logic.js';
 
 const MAX_MB = Math.floor(MAX_KB_FILE_SIZE / (1024 * 1024));
@@ -44,7 +45,8 @@ function refuse(req: Request, res: Response, code: UploadErrorCode): void {
     message: lessonAuthorRequestLocale(req.query.ui_locale, req.get('X-UI-Locale')) === 'en' ? en : vi });
 }
 
-const sourceUpload = multer({ storage: multer.memoryStorage(), limits: { files: 1, fileSize: MAX_KB_FILE_SIZE } });
+// A temp file in the OS temp dir (not the heap), removed when the request ends.
+const sourceUpload = createKbTempUpload({ files: 1, fileSize: MAX_KB_FILE_SIZE });
 
 /** Multipart errors answer in the request locale instead of a generic 500. */
 export const parseLessonAuthorSourceUpload: RequestHandler = (req, res, next: NextFunction) => {
@@ -54,7 +56,9 @@ export const parseLessonAuthorSourceUpload: RequestHandler = (req, res, next: Ne
   });
 };
 
-export async function uploadLessonAuthorSourceDocument(req: Request, res: Response): Promise<void> {
+export const uploadLessonAuthorSourceDocument = withKbTempUploadCleanup(uploadLessonAuthorSourceFromTempFile);
+
+async function uploadLessonAuthorSourceFromTempFile(req: Request, res: Response): Promise<void> {
   const tenantId = req.user!.tenantId!;
   const file = req.file;
   if (!file || !file.size) { refuse(req, res, 'FILE_REQUIRED'); return; }

@@ -33,6 +33,7 @@ import { createWorkspaceAuthority } from './lesson-author-workspace-authority.re
 import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat.service.js';
 import { sendError } from '../../utils/response.js';
 import * as kbCtrl from './kb.controller.js';
+import { createKbTempUpload } from './kb-upload-storage.js';
 import * as botCtrl from './bot.controller.js';
 import * as chatCtrl from './chat.controller.js';
 import * as transcriptCtrl from './lesson-author-transcription.controller.js';
@@ -88,8 +89,12 @@ function allowRuntimeChatTarget(req: Request, res: Response, next: NextFunction)
   next();
 }
 
-// Multer — memory storage, 50MB limit
-const upload = multer({
+// KB documents and FAQ sheets: temp files in the OS temp dir (never the
+// heap), 50MB limit, removed by the handlers when the request ends.
+const upload = createKbTempUpload();
+
+// Multer — memory storage, 50MB limit (bot avatars; the handler accepts 5 MB)
+const avatarUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 50 * 1024 * 1024 },
 });
@@ -242,7 +247,7 @@ router.get('/bots/:id', checkPermission('ai_chatbot', 'can_view'), botCtrl.getBo
 router.post('/bots', checkPermission('ai_chatbot', 'can_add'), botCtrl.createBot);
 router.put('/bots/:id', checkPermission('ai_chatbot', 'can_edit'), botCtrl.updateBot);
 router.delete('/bots/:id', checkPermission('ai_chatbot', 'can_delete'), botCtrl.deleteBot);
-router.post('/bots/:id/avatar', checkPermission('ai_chatbot', 'can_edit'), upload.single('avatar'), botCtrl.uploadAvatar);
+router.post('/bots/:id/avatar', checkPermission('ai_chatbot', 'can_edit'), avatarUpload.single('avatar'), botCtrl.uploadAvatar);
 router.get('/bots/:id/input-filter', checkPermission('ai_chatbot', 'can_view'), botCtrl.getInputFilterConfig);
 router.put('/bots/:id/input-filter', checkPermission('ai_chatbot', 'can_edit'), botCtrl.updateInputFilterConfig);
 

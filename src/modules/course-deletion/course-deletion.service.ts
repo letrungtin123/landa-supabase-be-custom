@@ -1,4 +1,4 @@
-import { query, getClient, withDatabaseTransaction } from '../../config/database.js';
+import { afterCommit, query, getClient, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import {
@@ -710,7 +710,11 @@ export async function requestBlockDeletion(
     invalidateCourseReadCaches(courseId, tenantId),
     invalidateBlockReadCachesInBatches(blockIds),
   ]);
-  await publishDeleteJob(jobId);
+  // The job committed on its own connection above. AI ID applies a delete
+  // proposal inside its audited transaction (applyLessonAuthorJob): the
+  // wake-up waits for that transaction instead of holding it open; if it
+  // rolls back, the committed job is still picked up by the sweeper.
+  await afterCommit(() => publishDeleteJob(jobId));
   return { jobId, courseId };
 }
 
@@ -1298,7 +1302,10 @@ export async function retryTerminalCourseDeletionJob(jobId: string, tenantId: st
     );
   }
 
-  await publishDeleteJob(job.id);
+  // The retry endpoint runs this inside its audited transaction: the wake-up
+  // is sent once that commits and never holds the transaction open. A message
+  // lost after the commit is recovered by requeuePendingDeletionJobs().
+  await afterCommit(() => publishDeleteJob(job.id));
 }
 
 export async function getCourseDeletionJobStatus(jobId: string, tenantId: string) {

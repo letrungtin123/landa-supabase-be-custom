@@ -229,6 +229,18 @@ export const env = {
   // RabbitMQ (mandatory — crash if missing)
   RABBITMQ_URL: required('RABBITMQ_URL'),
   RABBITMQ_QUEUE_PREFIX: optionalString('RABBITMQ_QUEUE_PREFIX', ''),
+  // A failed message of a consumer with retry backoff waits about this long
+  // before its next attempt, doubling per attempt (3 retries), capped at the
+  // max. Also the wait before a message is requeued when its retry could not
+  // be published. 0 = no wait (the former behavior).
+  RABBITMQ_RETRY_BASE_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_BASE_DELAY_MS', 2_000, 0, 60_000),
+  RABBITMQ_RETRY_MAX_DELAY_MS: optionalBoundedInt('RABBITMQ_RETRY_MAX_DELAY_MS', 15_000, 0, 120_000),
+
+  // GET /internal/metrics (Prometheus text): answered only to callers on this
+  // host (loopback, no proxy forwarding header). With METRICS_TOKEN set,
+  // `Authorization: Bearer <token>` is required too. false = off (404).
+  METRICS_ENABLED: optionalBoolean('METRICS_ENABLED', true),
+  METRICS_TOKEN: process.env.METRICS_TOKEN?.trim() || '',
 
   // Redis (optional; DB fallback is used if unavailable)
   REDIS_URL: process.env.REDIS_URL?.trim() || '',
@@ -409,6 +421,11 @@ export const env = {
   KB_OPERATION_WORKER_RETRY_BASE_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_BASE_SECONDS', 30, 1, 3_600),
   KB_OPERATION_WORKER_RETRY_MAX_SECONDS: optionalBoundedInt('KB_OPERATION_WORKER_RETRY_MAX_SECONDS', 3_600, 30, 86_400),
   KB_RESTORE_RECOVERY_POLL_INTERVAL_MS: optionalBoundedInt('KB_RESTORE_RECOVERY_POLL_INTERVAL_MS', 30_000, 5_000, 300_000),
+  // Uploaded FAQ workbooks are parsed in a worker thread (never on the event
+  // loop): its deadline, its heap limit, and how many run at once per process.
+  KB_FAQ_SHEET_READ_TIMEOUT_MS: optionalBoundedInt('KB_FAQ_SHEET_READ_TIMEOUT_MS', 60_000, 1_000, 600_000),
+  KB_FAQ_SHEET_READ_MAX_MEMORY_MB: optionalBoundedInt('KB_FAQ_SHEET_READ_MAX_MEMORY_MB', 1_024, 64, 8_192),
+  KB_FAQ_SHEET_READ_CONCURRENCY: optionalBoundedInt('KB_FAQ_SHEET_READ_CONCURRENCY', 2, 1, 16),
 
   // Lesson-author video transcription. The upload route streams to a private
   // bucket; these limits are enforced before expensive media processing.
@@ -461,6 +478,9 @@ export const env = {
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_LESSON_AUTHOR_MODEL: process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
+  // Creating a KB's Gemini File Search store gives up after this long (no
+  // database transaction or connection is held while it runs).
+  GEMINI_STORE_CREATE_TIMEOUT_MS: optionalBoundedInt('GEMINI_STORE_CREATE_TIMEOUT_MS', 60_000, 5_000, 600_000),
 
   /** Kiểm tra môi trường production */
   get isProduction(): boolean {

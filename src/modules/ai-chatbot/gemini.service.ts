@@ -8,7 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import type { AiUsage } from './ai-engine.types.js';
 import { BilledAiCallError } from './ai-metered-call.service.js';
 import { aiUsageFromGeminiMetadata } from './ai-usage.logic.js';
-import { getClient, query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import fs from 'fs/promises';
 import {
@@ -196,9 +196,48 @@ export async function transcribeAudioFile(
   }
 }
 
+/** Serializes recording a KB's store row (pg_advisory_xact_lock key prefix). */
+const KB_GOOGLE_STORE_LOCK_PREFIX = 'kb-google-store:';
+
+type KbGoogleStoreRow = { id: string; store_name: string; api_key_fingerprint: string | null; remote_status: string };
+
+const KB_GOOGLE_STORE_SELECT_SQL =
+  `SELECT id, store_name, api_key_fingerprint, remote_status FROM kb_google_store WHERE kb_id = $1 LIMIT 1`;
+
+function usableStore(row: KbGoogleStoreRow, apiKeyFingerprint?: string | null): { storeId: string; storeName: string } {
+  if (
+    row.remote_status !== 'active' ||
+    (apiKeyFingerprint && row.api_key_fingerprint && row.api_key_fingerprint !== apiKeyFingerprint)
+  ) {
+    throw new Error('Knowledge Base store can khoi phuc truoc khi upload tai lieu moi.');
+  }
+  return { storeId: row.id, storeName: row.store_name };
+}
+
+/** Removes a store this call created but did not record; a failure leaves a logged remote orphan. */
+async function discardUnrecordedStore(storeName: string, aiClient: GoogleGenAI): Promise<void> {
+  try {
+    await deleteFileSearchStoreIfExists(storeName, aiClient);
+  } catch (cleanupErr: any) {
+    console.error('[Gemini] Failed to cleanup newly-created orphan store:', redactGeminiApiKeys(cleanupErr?.message || String(cleanupErr)));
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  const name = (err as { name?: unknown } | null)?.name;
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
 /**
  * Ensure a Gemini File Search Store exists for a KB.
  * Creates one if it doesn't exist (1:1 KB → Store).
+ *
+ * No transaction or pool connection is held during the Gemini call (it has
+ * its own deadline, GEMINI_STORE_CREATE_TIMEOUT_MS). The new store is then
+ * recorded in a short transaction under the KB's advisory lock, which reads
+ * the row again first: when another call recorded a store meanwhile, that
+ * store is used and the one created here is deleted, so a KB never ends up
+ * with two stores (kb_google_store.kb_id is also unique).
  * @returns { storeId, storeName }
  */
 export async function ensureStore(
@@ -206,59 +245,53 @@ export async function ensureStore(
   aiClient: GoogleGenAI,
   apiKeyFingerprint?: string | null,
 ): Promise<{ storeId: string; storeName: string }> {
-  const client = await getClient();
-  let createdStoreName: string | null = null;
+  const existing = await query<KbGoogleStoreRow>(KB_GOOGLE_STORE_SELECT_SQL, [kbId]);
+  if (existing.rows[0]) return usableStore(existing.rows[0], apiKeyFingerprint);
 
+  let store: Awaited<ReturnType<GoogleGenAI['fileSearchStores']['create']>>;
   try {
-    await client.query('BEGIN');
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kb-google-store:${kbId}`]);
-
-    const existing = await client.query<{ id: string; store_name: string; api_key_fingerprint: string | null; remote_status: string }>(
-      `SELECT id, store_name, api_key_fingerprint, remote_status FROM kb_google_store WHERE kb_id = $1 LIMIT 1`,
-      [kbId],
-    );
-
-    if (existing.rowCount && existing.rowCount > 0) {
-      if (
-        existing.rows[0].remote_status !== 'active' ||
-        (apiKeyFingerprint && existing.rows[0].api_key_fingerprint && existing.rows[0].api_key_fingerprint !== apiKeyFingerprint)
-      ) {
-        throw new Error('Knowledge Base store can khoi phuc truoc khi upload tai lieu moi.');
-      }
-      await client.query('COMMIT');
-      return { storeId: existing.rows[0].id, storeName: existing.rows[0].store_name };
-    }
-
-    const store = await aiClient.fileSearchStores.create({
-      config: { displayName: `kb-store-${kbId}` },
+    store = await aiClient.fileSearchStores.create({
+      config: {
+        displayName: `kb-store-${kbId}`,
+        abortSignal: AbortSignal.timeout(env.GEMINI_STORE_CREATE_TIMEOUT_MS),
+      },
     });
-    if (!store.name) {
-      throw new Error('Gemini File Search store creation did not return a store name');
-    }
-    createdStoreName = store.name;
-
-    const insertResult = await client.query<{ id: string }>(
-      `INSERT INTO kb_google_store (kb_id, store_name, api_key_fingerprint, remote_status, last_checked_at)
-       VALUES ($1, $2, $3, 'active', now())
-       RETURNING id`,
-      [kbId, createdStoreName, apiKeyFingerprint ?? null],
-    );
-
-    await client.query('COMMIT');
-    return { storeId: insertResult.rows[0].id, storeName: createdStoreName };
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch { /* ignore */ }
-    if (createdStoreName) {
-      try {
-        await deleteFileSearchStoreIfExists(createdStoreName, aiClient);
-      } catch (cleanupErr: any) {
-        console.error('[Gemini] Failed to cleanup newly-created orphan store:', redactGeminiApiKeys(cleanupErr?.message || String(cleanupErr)));
-      }
-    }
+    if (isAbortError(err)) throw new Error('Gemini không tạo được kho tài liệu trong thời gian cho phép.');
     throw err;
-  } finally {
-    client.release();
   }
+  if (!store.name) {
+    throw new Error('Gemini File Search store creation did not return a store name');
+  }
+  const createdStoreName = store.name;
+
+  let recorded: { row: KbGoogleStoreRow; inserted: boolean };
+  try {
+    recorded = await withDatabaseTransaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${KB_GOOGLE_STORE_LOCK_PREFIX}${kbId}`]);
+      const current = await client.query<KbGoogleStoreRow>(KB_GOOGLE_STORE_SELECT_SQL, [kbId]);
+      if (current.rows[0]) return { row: current.rows[0], inserted: false };
+      const insertResult = await client.query<{ id: string }>(
+        `INSERT INTO kb_google_store (kb_id, store_name, api_key_fingerprint, remote_status, last_checked_at)
+         VALUES ($1, $2, $3, 'active', now())
+         RETURNING id`,
+        [kbId, createdStoreName, apiKeyFingerprint ?? null],
+      );
+      return {
+        row: { id: insertResult.rows[0].id, store_name: createdStoreName, api_key_fingerprint: apiKeyFingerprint ?? null, remote_status: 'active' },
+        inserted: true,
+      };
+    });
+  } catch (err) {
+    await discardUnrecordedStore(createdStoreName, aiClient);
+    throw err;
+  }
+
+  if (!recorded.inserted) {
+    await discardUnrecordedStore(createdStoreName, aiClient);
+    return usableStore(recorded.row, apiKeyFingerprint);
+  }
+  return { storeId: recorded.row.id, storeName: createdStoreName };
 }
 
 /**

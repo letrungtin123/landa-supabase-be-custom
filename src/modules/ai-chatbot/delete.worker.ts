@@ -49,5 +49,7 @@ export async function startDeleteWorker(): Promise<void> {
     async function onMaxRetry(_queue: string, rawMessage: string) {
       console.error('[DeleteWorker] Max retries reached, message discarded:', rawMessage.substring(0, 200));
     },
+    // No database backoff behind this queue: retries wait instead of firing at once.
+    { retryBackoff: true },
   );
 }

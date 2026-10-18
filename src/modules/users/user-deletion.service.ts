@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { getClient, query } from '../../config/database.js';
+import { afterCommit, getClient, query } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import { AppError } from '../../middleware/error-handler.js';
@@ -621,7 +621,11 @@ export async function retryTerminalUserDeletionJob(jobId: string, tenantId: stri
      WHERE id = $1::uuid AND deletion_requested_at IS NOT NULL`,
     [job.user_id],
   );
-  await publishUserDeletionJob(job.id);
+  // The retry endpoint runs this inside its audited transaction: the wake-up
+  // is sent once that commits (a worker would otherwise find the job still
+  // terminal) and never holds the transaction open. A message lost after the
+  // commit is recovered by requeuePendingUserDeletionJobs().
+  await afterCommit(() => publishUserDeletionJob(job.id));
 }
 
 export async function getUserDeletionJobStatus(jobId: string, tenantId: string | null) {
