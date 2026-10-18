@@ -3,7 +3,8 @@
 //
 // Read on scrape only: event-loop delay (perf_hooks histogram, reset after
 // each scrape, so p50/p99/max cover the time since the previous scrape),
-// database pool, HTTP requests, AI chat admission and the Redis breaker.
+// database pool, HTTP requests, AI chat admission, the Redis breaker and the
+// process gauges of the heartbeat (role, pid, uptime, memory; heartbeat.logic.ts).
 // Every sample carries an `instance` label (PM2 instance number, else pid).
 // ═══════════════════════════════════════════════════════════════
 
@@ -11,6 +12,8 @@ import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks';
 import { env } from '../../config/env.js';
 import { pool } from '../../config/database.js';
 import { redisMetricsState } from '../../config/redis.js';
+import { processMetricFamilies } from './heartbeat.logic.js';
+import { sampleProcess } from './heartbeat.service.js';
 import {
   createRequestMetrics,
   formatPrometheus,
@@ -100,6 +103,11 @@ function redisFamilies(): MetricFamily[] {
   ];
 }
 
+/** The heartbeat numbers of this process (the event-loop delay is in eventLoopFamilies). */
+function processFamilies(): MetricFamily[] {
+  return processMetricFamilies(sampleProcess(env.LANDA_PROCESS_ROLE, null));
+}
+
 /** The `instance` label of every sample of this process (metricsInstanceLabel). */
 export const METRICS_INSTANCE = metricsInstanceLabel(env.NODE_APP_INSTANCE, process.pid);
 
@@ -110,5 +118,6 @@ export function collectMetricsText(): string {
     ...requestMetricFamilies(requestMetrics.snapshot()),
     ...aiChatFamilies(),
     ...redisFamilies(),
+    ...processFamilies(),
   ], { instance: METRICS_INSTANCE });
 }

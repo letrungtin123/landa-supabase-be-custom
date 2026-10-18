@@ -9,6 +9,7 @@
 //   step                       all   api   background
 //   in-memory cache sweepers    x     x     x
 //   inline email outbox        run   log   run
+//   heartbeat log (60 s)        x           x
 //   RabbitMQ + queues           x     x     x
 //   RabbitMQ consumers          x           x
 //   Redis                       x     x     x
@@ -33,6 +34,8 @@ export interface ProcessStarters {
    * only says where it runs. First, as when it started on importing app.ts.
    */
   inlineEmailOutbox(options: { run: boolean }): void;
+  /** The [Heartbeat] log line every 60 s (modules/metrics/heartbeat.service.ts); an API process serves /internal/metrics instead. */
+  heartbeat(): void;
   /** Connects and asserts the queues; with `consumers` it also starts them. Exits when the first connection fails. */
   rabbitmq(options: { consumers: boolean }): Promise<void>;
   redis(): Promise<void>;
@@ -55,6 +58,7 @@ export interface ProcessStarters {
 export async function startProcess(plan: ProcessRolePlan, starters: ProcessStarters): Promise<void> {
   starters.inMemorySweepers();
   starters.inlineEmailOutbox({ run: plan.runsBackgroundWork });
+  if (plan.runsBackgroundWork) starters.heartbeat();
   await starters.rabbitmq({ consumers: plan.runsBackgroundWork });
   await starters.redis();
   if (plan.sharesStateAcrossProcesses) await starters.clusterBus();

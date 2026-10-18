@@ -25,6 +25,7 @@ import {
   type TenantDataQuotaFoldOptions,
 } from '../modules/tenants/tenant-data-quota-ledger.logic.js';
 import { foldTenantDataQuotaDeltas } from '../modules/tenants/tenant-data-quota-ledger.service.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 const WORKER_LOCK_NAME = 'landa:tenant-data-quota-worker:v1';
 const WORKER_NAME = 'landa-tenant-data-quota-worker';
@@ -296,6 +297,8 @@ async function bootstrap(): Promise<void> {
     return;
   }
   void logDatabaseConnectionHeadroom('tenant-data-quota-worker', ownDirectConnectionMax({ readsReports: false }));
+  // The [Heartbeat] log line of this process (the database heartbeat above is the leader's).
+  startProcessHeartbeat({ role: 'tenant-data-quota-worker' });
 
   while (!stopping) {
     const acquired = await tryAcquireWorkerLock();

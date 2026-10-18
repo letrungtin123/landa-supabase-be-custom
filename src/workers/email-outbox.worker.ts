@@ -9,8 +9,10 @@ import {
   stopEmailOutboxWorker,
   triggerEmailOutboxWorker,
 } from '../modules/assignments/email-outbox.service.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 async function bootstrap(): Promise<void> {
+  startProcessHeartbeat({ role: 'email-outbox-worker' });
   void logDatabaseConnectionHeadroom('email-outbox-worker', ownDirectConnectionMax({ readsReports: false }));
   await connectRedis();
   await connectRabbitMQ(env.RABBITMQ_URL);

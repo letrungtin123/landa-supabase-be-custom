@@ -142,6 +142,12 @@ const MAINTENANCE = [
 /** Course asset temp residue sweep (only when other processes share the temp directory). */
 const COURSE_ASSET_TEMP_SWEEP = ['index.ts every 21600000 ms'];
 const INLINE_EMAIL_OUTBOX = ['modules/assignments/email-outbox.service.ts every 15000 ms'];
+/**
+ * Added after the matrix was pinned, the one intended change (wave 2, BE-S14):
+ * the [Heartbeat] log line of the processes that run background work and of
+ * the running workers. Unref'd: it never keeps a process alive.
+ */
+const HEARTBEAT = ['modules/metrics/heartbeat.service.ts every 60000 ms'];
 
 const ALL_QUEUES = [
   'LANDA_GEMINI_UPLOAD',
@@ -170,6 +176,7 @@ const LOG = {
   clusterBus: '[ClusterBus] Listening for invalidations from the other processes',
   listening: '[Server] LANDA Backend listening on 127.0.0.1:0',
   auditStartup: '[Audit] Retention cleanup (startup) completed',
+  heartbeat: '[Heartbeat] {"event":"heartbeat_started"',
 };
 
 interface Expected {
@@ -228,12 +235,12 @@ const boots = {
 };
 
 expectBoot('all (defaults): HTTP and every background start in one process', boots.all, {
-  intervals: [...IN_MEMORY_SWEEPERS, ...QUEUE_WORKERS, ...MAINTENANCE, ...INLINE_EMAIL_OUTBOX],
+  intervals: [...IN_MEMORY_SWEEPERS, ...QUEUE_WORKERS, ...MAINTENANCE, ...INLINE_EMAIL_OUTBOX, ...HEARTBEAT],
   listenChannels: [],
   consumedQueues: [...CONSUMED_QUEUES, 'LANDA_EMAIL_OUTBOX'],
   httpListen: 1,
   inlineEmailTimer: true,
-  logs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.listening, LOG.auditStartup, '[Process] role=all api_instances=1'],
+  logs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.listening, LOG.auditStartup, LOG.heartbeat, '[Process] role=all api_instances=1'],
   absentLogs: [LOG.publishingOnly, LOG.clusterBus, LOG.inlineEmailElsewhere, LOG.inlineEmailDisabled],
 });
 
@@ -244,7 +251,7 @@ expectBoot('api (defaults): HTTP, cluster bus and the in-memory sweepers; no con
   httpListen: 1,
   inlineEmailTimer: false,
   logs: [LOG.inlineEmailElsewhere, LOG.publishingOnly, LOG.clusterBus, LOG.listening, '[Process] role=api api_instances=2'],
-  absentLogs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.auditStartup, LOG.inlineEmailDisabled],
+  absentLogs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.auditStartup, LOG.inlineEmailDisabled, LOG.heartbeat],
 });
 
 expectBoot('background (defaults): consumers, pollers, maintenance and the inline email outbox; never listens', boots.background, {
@@ -255,22 +262,23 @@ expectBoot('background (defaults): consumers, pollers, maintenance and the inlin
     ...MAINTENANCE,
     ...COURSE_ASSET_TEMP_SWEEP,
     ...INLINE_EMAIL_OUTBOX,
+    ...HEARTBEAT,
   ],
   listenChannels: ['landa_cluster_bus'],
   consumedQueues: [...CONSUMED_QUEUES, 'LANDA_EMAIL_OUTBOX'],
   httpListen: 0,
   inlineEmailTimer: true,
-  logs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.clusterBus, LOG.auditStartup, '[Process] role=background api_instances=2'],
+  logs: [LOG.inlineEmailStarted, LOG.workersStarted, LOG.clusterBus, LOG.auditStartup, LOG.heartbeat, '[Process] role=background api_instances=2'],
   absentLogs: [LOG.listening, LOG.publishingOnly, LOG.inlineEmailElsewhere, LOG.inlineEmailDisabled],
 });
 
 expectBoot('all, inline email outbox off (production flag)', boots.allInlineOff, {
-  intervals: [...IN_MEMORY_SWEEPERS, ...QUEUE_WORKERS, ...MAINTENANCE],
+  intervals: [...IN_MEMORY_SWEEPERS, ...QUEUE_WORKERS, ...MAINTENANCE, ...HEARTBEAT],
   listenChannels: [],
   consumedQueues: CONSUMED_QUEUES,
   httpListen: 1,
   inlineEmailTimer: false,
-  logs: [LOG.inlineEmailDisabled, LOG.workersStarted, LOG.listening, LOG.auditStartup],
+  logs: [LOG.inlineEmailDisabled, LOG.workersStarted, LOG.listening, LOG.auditStartup, LOG.heartbeat],
   absentLogs: [LOG.inlineEmailStarted, LOG.inlineEmailElsewhere, LOG.publishingOnly, LOG.clusterBus],
 });
 
@@ -281,16 +289,16 @@ expectBoot('api, inline email outbox off (production flag)', boots.apiInlineOff,
   httpListen: 1,
   inlineEmailTimer: false,
   logs: [LOG.inlineEmailDisabled, LOG.publishingOnly, LOG.clusterBus, LOG.listening],
-  absentLogs: [LOG.inlineEmailStarted, LOG.inlineEmailElsewhere, LOG.workersStarted, LOG.auditStartup],
+  absentLogs: [LOG.inlineEmailStarted, LOG.inlineEmailElsewhere, LOG.workersStarted, LOG.auditStartup, LOG.heartbeat],
 });
 
 expectBoot('background, inline email outbox off (production flag)', boots.backgroundInlineOff, {
-  intervals: [...IN_MEMORY_SWEEPERS, ...CLUSTER_BUS, ...QUEUE_WORKERS, ...MAINTENANCE, ...COURSE_ASSET_TEMP_SWEEP],
+  intervals: [...IN_MEMORY_SWEEPERS, ...CLUSTER_BUS, ...QUEUE_WORKERS, ...MAINTENANCE, ...COURSE_ASSET_TEMP_SWEEP, ...HEARTBEAT],
   listenChannels: ['landa_cluster_bus'],
   consumedQueues: CONSUMED_QUEUES,
   httpListen: 0,
   inlineEmailTimer: false,
-  logs: [LOG.inlineEmailDisabled, LOG.workersStarted, LOG.clusterBus, LOG.auditStartup],
+  logs: [LOG.inlineEmailDisabled, LOG.workersStarted, LOG.clusterBus, LOG.auditStartup, LOG.heartbeat],
   absentLogs: [LOG.listening, LOG.inlineEmailStarted, LOG.inlineEmailElsewhere, LOG.publishingOnly],
 });
 
@@ -331,10 +339,10 @@ expectWorker('course-outline-transfer', {
   logs: ['[CourseOutlineTransferWorker] Disabled by COURSE_OUTLINE_TRANSFER_WORKER_ENABLED=false.'],
 });
 expectWorker('email-outbox', {
-  intervals: INLINE_EMAIL_OUTBOX,
+  intervals: [...INLINE_EMAIL_OUTBOX, ...HEARTBEAT],
   consumedQueues: ['LANDA_EMAIL_OUTBOX'],
   stillRunning: true,
-  logs: ['[EmailOutbox] Worker started source=dedicated', '[EmailOutboxWorker] Running environment=test'],
+  logs: ['[EmailOutbox] Worker started source=dedicated', '[EmailOutboxWorker] Running environment=test', LOG.heartbeat],
 });
 // Disabled by default; it imports the sign-out blacklist and chat modules, whose sweepers keep it running.
 expectWorker('lesson-author-orchestration-v2', {
@@ -347,7 +355,12 @@ expectWorker('lesson-author-orchestration-v2', {
   stillRunning: true,
   logs: ['[LessonAuthorOrchestrationV2] Disabled; no queue or database runtime was started.'],
 });
-expectWorker('news-assets-cleanup', { intervals: [], consumedQueues: [], stillRunning: true, logs: [] });
+expectWorker('news-assets-cleanup', {
+  intervals: HEARTBEAT,
+  consumedQueues: [],
+  stillRunning: true,
+  logs: [LOG.heartbeat],
+});
 expectWorker('tenant-data-quota', {
   intervals: [],
   consumedQueues: [],

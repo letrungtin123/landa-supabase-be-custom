@@ -27,6 +27,7 @@ import { verifyOrchestrationV2Schema } from '../modules/ai-chatbot/lesson-author
 // Last, so the module evaluation order stays as before (the imports above already load both).
 import { startBlacklistSweeper } from '../middleware/authenticate.js';
 import { startChatCacheSweepers } from '../modules/ai-chatbot/chat.service.js';
+import { startProcessHeartbeat } from '../modules/metrics/heartbeat.service.js';
 
 const shutdown = new AbortController();
 let consumer: OrchestrationV2RabbitConsumer | null = null;
@@ -65,6 +66,7 @@ async function bootstrap(): Promise<void> {
     console.log('[LessonAuthorOrchestrationV2] Disabled; no queue or database runtime was started.');
     return;
   }
+  startProcessHeartbeat({ role: `lesson-author-orchestration-v2-${config.role}` });
   void logDatabaseConnectionHeadroom(`lesson-author-orchestration-v2-${config.role}`, ownDirectConnectionMax({ readsReports: false }));
   const schema = await verifyOrchestrationV2Schema({ query });
   orchestrationV2RuntimeReporter({ event: 'schema_verified', ...schema, role: config.role });
