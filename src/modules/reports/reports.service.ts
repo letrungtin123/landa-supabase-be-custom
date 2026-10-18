@@ -15,9 +15,9 @@ import { resolveAutoReportBucket } from './report-buckets.logic.js';
 import { buildOrgUnitChartPoints, type OrgChartDimension } from './report-org-chart.logic.js';
 import { loadOrgChartEntities, loadOrgChartMonthValues } from './report-org-chart.repository.js';
 import { createReportChartRepository, type GroupedEnrollmentDimension } from './report-chart.repository.js';
+import { createReportCoursesRepository, type CoursePerformanceRow } from './report-courses.repository.js';
 import {
   buildActiveLearnerEventsCte,
-  buildGroupFilter,
   buildLearnerScopeExists,
   buildReportEnrollmentCte,
   buildReportLearnerRosterCte,
@@ -162,6 +162,7 @@ export interface LearnerDetailResponse {
 // ── Helpers ──
 
 const chartRepository = createReportChartRepository({ query: reportsQuery });
+const coursesRepository = createReportCoursesRepository({ query: reportsQuery });
 
 const MONTH_LABELS = [
   '', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
@@ -860,38 +861,10 @@ export async function getReportCoursePerformance(
   }));
 
   return cachedReportAggregate(tenantId, portfolioCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const rows = await coursesRepository.selectCoursePerformance({
+      tenantId, range, groupId, subgroupId, teamId, limit: safePageSize,
     });
-    const limitParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql},
-        aggregated AS (
-          SELECT
-            re.course_id,
-            MAX(re.course_name) AS name,
-            COUNT(*)::bigint AS total_enrollments,
-            COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-            COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-            COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-          FROM report_enrollments re
-          GROUP BY re.course_id
-        )
-       SELECT *
-       FROM aggregated
-       ORDER BY total_enrollments DESC, completion_rate ASC, name ASC
-       LIMIT $${limitParam}`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, safePageSize],
-    );
-    return result.rows.map((row) => ({
+    return rows.map((row) => ({
       course_id: row.course_id,
       name: row.name,
       total_enrollments: Number(row.total_enrollments) || 0,
@@ -926,22 +899,8 @@ export async function getReportCourseCount(
   }));
 
   return cachedReportAggregate(tenantId, countCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
-    });
-    const result = await reportsQuery<{ course_count: string }>(
-      `WITH ${cohort.sql}
-       SELECT COUNT(DISTINCT re.course_id)::bigint AS course_count
-       FROM report_enrollments re`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params],
-    );
-    return Number(result.rows[0]?.course_count) || 0;
+    const row = await coursesRepository.selectCourseCount({ tenantId, range, groupId, subgroupId, teamId });
+    return Number(row?.course_count) || 0;
   });
 }
 
@@ -972,43 +931,14 @@ export async function findReportCoursePerformanceByName(
   }));
 
   return cachedReportAggregate(tenantId, matchingCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const rows = await coursesRepository.selectCoursePerformanceByName({
+      tenantId, range, groupId, subgroupId, teamId, courseName: normalizedName,
     });
-    const courseNameParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql},
-        aggregated AS (
-          SELECT
-            re.course_id,
-            MAX(re.course_name) AS name,
-            COUNT(*)::bigint AS total_enrollments,
-            COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-            COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-            COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-            COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-          FROM report_enrollments re
-          GROUP BY re.course_id
-        )
-       SELECT *
-       FROM aggregated
-       WHERE name ILIKE '%' || $${courseNameParam} || '%'
-       ORDER BY total_enrollments DESC, completion_rate ASC, name ASC
-       LIMIT 25`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, normalizedName],
-    );
-    return result.rows.map(toReportCoursePerformance);
+    return rows.map(toReportCoursePerformance);
   });
 }
 
-function toReportCoursePerformance(row: ReportCoursePerformance): ReportCoursePerformance {
+function toReportCoursePerformance(row: CoursePerformanceRow): ReportCoursePerformance {
   return {
     course_id: row.course_id,
     name: row.name,
@@ -1049,33 +979,10 @@ export async function getReportCoursePerformanceById(
   }));
 
   return cachedReportAggregate(tenantId, byIdCacheKey, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
+    const row = await coursesRepository.selectCoursePerformanceById({
+      tenantId, range, groupId, subgroupId, teamId, courseId: id,
     });
-    const courseIdParam = 4 + cohort.params.length;
-    const result = await reportsQuery<ReportCoursePerformance>(
-      `WITH ${cohort.sql}
-       SELECT
-         re.course_id,
-         MAX(re.course_name) AS name,
-         COUNT(*)::bigint AS total_enrollments,
-         COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-         COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-         COUNT(*) FILTER (WHERE NOT re.has_started)::bigint AS not_started_enrollments,
-         COUNT(*) FILTER (WHERE re.has_started AND NOT re.is_completed)::bigint AS in_progress_enrollments,
-         COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-       FROM report_enrollments re
-       WHERE re.course_id = $${courseIdParam}
-       GROUP BY re.course_id`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params, id],
-    );
-    return result.rows[0] ? toReportCoursePerformance(result.rows[0]) : null;
+    return row ? toReportCoursePerformance(row) : null;
   });
 }
 
@@ -1097,29 +1004,7 @@ export async function getReportCompletionStatusDistribution(
     teamId,
   }));
   return cachedReportAggregate(tenantId, cacheKeyValue, getSummaryCacheTtl(range), async () => {
-    const cohort = buildReportEnrollmentCte({
-      tenantParam: '$1',
-      rangeStartParam: '$2',
-      rangeEndParam: '$3',
-      groupId,
-      subgroupId,
-      teamId,
-      scopeParamStart: 4,
-    });
-    const result = await reportsQuery<{
-      not_started: string;
-      in_progress: string;
-      completed: string;
-    }>(
-      `WITH ${cohort.sql}
-       SELECT
-         COUNT(*) FILTER (WHERE NOT has_started)::bigint AS not_started,
-         COUNT(*) FILTER (WHERE has_started AND NOT is_completed)::bigint AS in_progress,
-         COUNT(*) FILTER (WHERE is_completed)::bigint AS completed
-       FROM report_enrollments`,
-      [tenantId, range.startDate, range.endDate, ...cohort.params],
-    );
-    const row = result.rows[0];
+    const row = await coursesRepository.selectCompletionStatusDistribution({ tenantId, range, groupId, subgroupId, teamId });
     return {
       not_started: Number(row?.not_started) || 0,
       in_progress: Number(row?.in_progress) || 0,
@@ -1152,49 +1037,23 @@ export async function getReportCourseCompletionRanking(
     pageSize: safePageSize,
   }));
   return cachedReportAggregate(tenantId, rankingCacheKey, getSummaryCacheTtl(range), async () => {
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const limitParam = 4 + cohort.params.length;
-  const result = await reportsQuery<ReportCourseCompletionRanking & { full_count: string }>(
-    `WITH ${cohort.sql},
-      aggregated AS (
-        SELECT
-          re.course_id,
-          MAX(re.course_name) AS name,
-          COUNT(*)::bigint AS total_enrollments,
-          COUNT(*) FILTER (WHERE re.is_completed)::bigint AS completed_enrollments,
-          COUNT(*) FILTER (WHERE NOT re.is_completed)::bigint AS incomplete_enrollments,
-          COALESCE(ROUND(AVG(re.progress), 2), 0) AS completion_rate
-        FROM report_enrollments re
-        GROUP BY re.course_id
-      )
-     SELECT aggregated.*, COUNT(*) OVER() AS full_count
-     FROM aggregated
-     ORDER BY completion_rate DESC NULLS LAST, completed_enrollments DESC, total_enrollments DESC, name ASC
-     LIMIT $${limitParam} OFFSET $${limitParam + 1}`,
-    [tenantId, range.startDate, range.endDate, ...cohort.params, safePageSize, (safePage - 1) * safePageSize],
-  );
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
-  return {
-    count: total,
-    total_pages: Math.ceil(total / safePageSize),
-    current_page: safePage,
-    results: result.rows.map(row => ({
-      course_id: row.course_id,
-      name: row.name,
-      total_enrollments: Number(row.total_enrollments) || 0,
-      completed_enrollments: Number(row.completed_enrollments) || 0,
-      incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
-      completion_rate: Number(row.completion_rate) || 0,
-    })),
-  };
+    const rows = await coursesRepository.selectCourseCompletionRanking({
+      tenantId, range, groupId, subgroupId, teamId, limit: safePageSize, offset: (safePage - 1) * safePageSize,
+    });
+    const total = parseInt(rows[0]?.full_count ?? '0', 10);
+    return {
+      count: total,
+      total_pages: Math.ceil(total / safePageSize),
+      current_page: safePage,
+      results: rows.map(row => ({
+        course_id: row.course_id,
+        name: row.name,
+        total_enrollments: Number(row.total_enrollments) || 0,
+        completed_enrollments: Number(row.completed_enrollments) || 0,
+        incomplete_enrollments: Number(row.incomplete_enrollments) || 0,
+        completion_rate: Number(row.completion_rate) || 0,
+      })),
+    };
   });
 }
 
@@ -1231,63 +1090,35 @@ export async function getReportCourseCompletionLearners(
     status,
   });
   return cachedReportAggregate(tenantId, learnersCacheKey, getReportListCacheTtl(range.dateTo), async () => {
-  const cohort = buildReportEnrollmentCte({
-    tenantParam: '$1',
-    rangeStartParam: '$2',
-    rangeEndParam: '$3',
-    groupId,
-    subgroupId,
-    teamId,
-    scopeParamStart: 4,
-  });
-  const params: any[] = [tenantId, range.startDate, range.endDate, ...cohort.params, courseId];
-  let paramIdx = params.length + 1;
-  const filters = [`re.course_id = $${paramIdx - 1}`];
-  if (search?.trim()) {
-    filters.push(`(u.username ILIKE '%' || $${paramIdx} || '%' OR u.email ILIKE '%' || $${paramIdx} || '%' OR u.full_name ILIKE '%' || $${paramIdx} || '%')`);
-    params.push(search.trim());
-    paramIdx++;
-  }
-  const safeStatus = ['all', 'not_started', 'learning', 'completed'].includes(status) ? status : 'all';
-  if (safeStatus !== 'all') filters.push(`CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END = '${safeStatus}'`);
-  params.push(safePageSize, (safePage - 1) * safePageSize);
-  const result = await reportsQuery<ReportCourseCompletionLearner & { full_count: string }>(
-    `WITH ${cohort.sql}
-     SELECT
-       re.user_id,
-       u.username,
-       u.email,
-       u.full_name,
-       u.avatar_url AS avatar,
-       re.enrolled_at,
-       re.completed_at,
-       re.progress AS progress,
-       CASE WHEN re.is_completed THEN 'completed' WHEN re.has_started THEN 'learning' ELSE 'not_started' END AS status,
-       COUNT(*) OVER() AS full_count
-     FROM report_enrollments re
-     JOIN users u ON u.id = re.user_id
-     WHERE ${filters.join(' AND ')}
-     ORDER BY unaccent(LOWER(COALESCE(NULLIF(BTRIM(u.full_name), ''), u.username))), u.username, re.enrollment_id
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
-  return {
-    count: total,
-    total_pages: Math.ceil(total / safePageSize),
-    current_page: safePage,
-    results: result.rows.map(row => ({
-      user_id: row.user_id,
-      username: row.username,
-      email: row.email,
-      full_name: row.full_name || '',
-      avatar: row.avatar,
-      enrolled_at: row.enrolled_at,
-      completed_at: row.completed_at,
-      progress: row.progress === null || row.progress === undefined ? null : Number(row.progress),
-      status: row.status,
-    })),
-  };
+    const rows = await coursesRepository.selectCourseCompletionLearners({
+      tenantId,
+      courseId,
+      range,
+      groupId,
+      subgroupId,
+      teamId,
+      search,
+      status,
+      limit: safePageSize,
+      offset: (safePage - 1) * safePageSize,
+    });
+    const total = parseInt(rows[0]?.full_count ?? '0', 10);
+    return {
+      count: total,
+      total_pages: Math.ceil(total / safePageSize),
+      current_page: safePage,
+      results: rows.map(row => ({
+        user_id: row.user_id,
+        username: row.username,
+        email: row.email,
+        full_name: row.full_name || '',
+        avatar: row.avatar,
+        enrolled_at: row.enrolled_at,
+        completed_at: row.completed_at,
+        progress: row.progress === null || row.progress === undefined ? null : Number(row.progress),
+        status: row.status,
+      })),
+    };
   });
 }
 export async function getReportTopCourses(
@@ -1318,52 +1149,26 @@ export async function getReportTopCourses(
     teamId,
   });
   return cachedReportAggregate(tenantId, topCoursesCacheKey, getReportListCacheTtl(periodEnd), async () => {
-  const offset = (page - 1) * pageSize;
-  const conditions: string[] = ['e.tenant_id = $1', 'e.is_active = true'];
-  const params: any[] = [tenantId];
-  let paramIdx = 2;
+    const offset = (page - 1) * pageSize;
+    // The period: the date range, else the month of the year, else the year; none means all time.
+    const range = dateRange || (month && year) || year
+      ? dateRange
+        ?? (month && year
+          ? getReportRange(month, year)
+          : { startDate: new Date(year!, 0, 1), endDate: new Date(year!, 11, 31, 23, 59, 59, 999), dateFrom: `${year}-01-01`, dateTo: `${year}-12-31` })
+      : undefined;
+    const rows = await coursesRepository.selectTopCourses({
+      tenantId, range, groupId, subgroupId, teamId, limit: pageSize, offset,
+    });
 
-  if (dateRange || (month && year) || year) {
-    const range = dateRange
-      ?? (month && year
-        ? getReportRange(month, year)
-        : { startDate: new Date(year!, 0, 1), endDate: new Date(year!, 11, 31, 23, 59, 59, 999), dateFrom: `${year}-01-01`, dateTo: `${year}-12-31` });
-    conditions.push(`e.enrolled_at >= $${paramIdx} AND e.enrolled_at <= $${paramIdx + 1}`);
-    params.push(range.startDate, range.endDate);
-    paramIdx += 2;
-  }
+    const total = parseInt(rows[0]?.full_count ?? '0');
 
-  const gf = buildGroupFilter(groupId, subgroupId, teamId);
-  const gfConditions = gf.conditions.map(c => c.replace('$PARAM', `$${paramIdx++}`));
-  params.push(...gf.params);
-
-  const whereClause = [...conditions, ...gfConditions].join(' AND ');
-
-  // Single query: count + data using window function
-  params.push(pageSize, offset);
-  const result = await reportsQuery<ReportTopCourse & { full_count: string }>(
-    `SELECT e.course_id, c.display_name AS name,
-            COUNT(DISTINCT e.id) AS enrollments,
-            COUNT(*) OVER() AS full_count
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     JOIN users eu ON eu.id = e.user_id AND eu.role IN ('learner', 'learner_plus')
-     ${gf.joins}
-     WHERE ${whereClause}
-     GROUP BY e.course_id, c.display_name
-     ORDER BY enrollments DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
-  );
-
-  const total = parseInt(result.rows[0]?.full_count ?? '0');
-
-  return {
-    count: total,
-    total_pages: Math.ceil(total / pageSize),
-    current_page: page,
-    results: result.rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
-  };
+    return {
+      count: total,
+      total_pages: Math.ceil(total / pageSize),
+      current_page: page,
+      results: rows.map(r => ({ course_id: r.course_id, name: r.name, enrollments: Number(r.enrollments) })),
+    };
   });
 }
 
