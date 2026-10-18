@@ -41,6 +41,7 @@ export function decodeNewsCursor(raw: string | undefined, secret: string): NewsC
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Partial<NewsCursorPayload>;
     const validTimestamp = typeof parsed.timestamp === 'string' && Number.isFinite(Date.parse(parsed.timestamp));
+    // Looser than isUuid (any 36 hex digits or hyphens); kept so the accepted cursors do not change.
     const validId = typeof parsed.id === 'string' && /^[0-9a-f-]{36}$/i.test(parsed.id);
     if (parsed.v !== CURSOR_VERSION || !validTimestamp || !validId
       || !['active', 'archived'].includes(parsed.status || '') || typeof parsed.search !== 'string') {

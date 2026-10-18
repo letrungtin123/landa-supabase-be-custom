@@ -5,6 +5,7 @@ import {
   type OrchestrationV2ChapterShard,
   type OrchestrationV2ChapterShardPlan,
 } from './lesson-author-orchestration-v2-rag-contract.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export type WorkspaceArchitecturePreviewState = 'planned' | 'generating' | 'ready' | 'needs_action';
 export type WorkspaceArchitecturePreviewKind = 'course' | 'chapter' | 'lesson' | 'unit' | 'component' | 'media_brief';
@@ -39,7 +40,6 @@ export class WorkspaceArchitecturePreviewError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TASK_STATES = new Set(['blocked', 'queued', 'running', 'succeeded', 'failed', 'timed_out', 'outcome_unknown', 'canceled']);
 const TERMINAL_FAILURES = new Set(['failed', 'timed_out', 'outcome_unknown', 'canceled']);
 const MAX_PREVIEW_NODES = 10_000;
@@ -73,7 +73,7 @@ function readTaskRows(value: unknown): PreviewTaskRow[] {
   return (value as unknown[]).map((candidate: unknown) => {
     const row = record(candidate);
     if (!row) return fail();
-    if (!UUID.test(String(row.task_id)) || !text(row.task_key, 240) || !text(row.chapter_key, 160)
+    if (!UUID_PATTERN.test(String(row.task_id)) || !text(row.task_key, 240) || !text(row.chapter_key, 160)
       || !TASK_STATES.has(String(row.status)) || row.artifact_payload !== null && !record(row.artifact_payload)) fail();
     return { task_id: String(row.task_id), task_key: String(row.task_key), chapter_key: String(row.chapter_key),
       status: String(row.status), artifact_payload: record(row.artifact_payload) };
@@ -86,7 +86,7 @@ function readUnitTaskRows(value: unknown): PreviewUnitTaskRow[] {
   return (value as unknown[]).map((candidate: unknown) => {
     const row = record(candidate);
     if (!row) return fail();
-    if (!UUID.test(String(row.node_id)) || !TASK_STATES.has(String(row.status))) fail();
+    if (!UUID_PATTERN.test(String(row.node_id)) || !TASK_STATES.has(String(row.status))) fail();
     return { node_id: String(row.node_id).toLowerCase(), status: String(row.status) };
   });
 }
@@ -100,7 +100,7 @@ function readUnitTaskRows(value: unknown): PreviewUnitTaskRow[] {
 export function buildWorkspaceArchitecturePreview(value: unknown): WorkspaceArchitecturePreview {
   const input = record(value);
   if (!input) return fail();
-  if (!UUID.test(String(input.run_id)) || !text(input.course_title, 500)) fail();
+  if (!UUID_PATTERN.test(String(input.run_id)) || !text(input.course_title, 500)) fail();
   const runId = String(input.run_id).toLowerCase();
   const courseId = orchestrationV2DeterministicUuid(runId, 'node:course');
   const nodes: WorkspaceArchitecturePreviewNode[] = [];

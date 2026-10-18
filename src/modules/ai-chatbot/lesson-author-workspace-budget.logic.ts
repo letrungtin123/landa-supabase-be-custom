@@ -1,4 +1,5 @@
 import { GENERATION_JOB_DEADLINE_MS, generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export class WorkspaceBudgetError extends Error {
   constructor(readonly code: 'WORKSPACE_BUDGET_INVALID' | 'WORKSPACE_CHAPTER_BUDGET_CAPACITY_EXCEEDED' | 'WORKSPACE_BUDGET_EXHAUSTED') { super(code); }
@@ -16,7 +17,6 @@ export interface WorkspaceChapterBudgetInput {
    * These are admission estimates, never Gemini observed usage. */
   fixed_input_tokens: number; embedding_tokens: number; output_tokens: number; max_provider_attempts: number;
 }
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 function fail(): never { throw new WorkspaceBudgetError('WORKSPACE_BUDGET_INVALID'); }
 function integer(value: unknown, minimum = 0): number {
@@ -39,7 +39,7 @@ export function buildWorkspaceBudgetManifest(chapters: readonly WorkspaceChapter
     const total = sum([I * (chapter.units.length * A + 1), E * (chapter.units.length + 1), O * chapter.units.length * A]);
     if (total > 2_000_000) throw new WorkspaceBudgetError('WORKSPACE_CHAPTER_BUDGET_CAPACITY_EXCEEDED');
     function push(nodeId: string, contract: string, kind: WorkspaceBudgetEntry['kind']) {
-      if (!UUID.test(nodeId) || nodeIds.has(nodeId) || !HASH.test(contract)) fail();
+      if (!UUID_PATTERN.test(nodeId) || nodeIds.has(nodeId) || !HASH.test(contract)) fail();
       nodeIds.add(nodeId);
       const generate = kind === 'generate_unit';
       entries.push({ ordinal: entries.length, node_id: nodeId, kind, contract_hash: contract,

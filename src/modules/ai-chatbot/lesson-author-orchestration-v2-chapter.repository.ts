@@ -10,6 +10,7 @@ import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import type { OrchestrationV2TaskLease, createOrchestrationV2WorkerRepository } from './lesson-author-orchestration-v2-worker.repository.js';
 import { loadIdmRunScopeView, loadIdmScopeFacts } from './lesson-author-idm-scope-view.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 
@@ -24,7 +25,6 @@ export class OrchestrationV2ChapterRepositoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (code: OrchestrationV2ChapterRepositoryError['code']): never => {
   throw new OrchestrationV2ChapterRepositoryError(code);
@@ -169,7 +169,7 @@ export function createOrchestrationV2ChapterRepository(
     if (!ready.rows.length) return;
     if (ready.rows.length !== 1) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
     const outboxId = id();
-    if (!UUID.test(outboxId)) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
+    if (!UUID_PATTERN.test(outboxId)) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
     const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
         (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
       VALUES($1,$2,$3,$4,$5,$6,0,$7) RETURNING id::text`,

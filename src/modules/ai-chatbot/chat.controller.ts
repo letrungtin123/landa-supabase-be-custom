@@ -30,9 +30,8 @@ import * as chatService from './chat.service.js';
 import { assertChatCourseAccess, ChatCourseScopeError } from './chat-course-scope.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from './kb.service.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-// ── UUID validation ──
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Chat answers streamed at once (H10): per tenant and in total, for the whole
 // cluster when several API processes run (ai-chat-admission.service.ts).
 // The metrics gauge reports the answers this process streams.
@@ -157,7 +156,7 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
   if (!target || typeof target !== 'string' || !chatService.isChatTarget(target)) {
     sendError(res, 'target phải là "admin", "learner" hoặc "lesson_author"', 400); return;
   }
-  if (!bot_id || typeof bot_id !== 'string' || !UUID_REGEX.test(bot_id)) {
+  if (!bot_id || !isUuid(bot_id)) {
     sendError(res, 'bot_id không hợp lệ', 400); return;
   }
 
@@ -215,7 +214,7 @@ export async function assignLessonAuthorKb(req: Request, res: Response): Promise
   const tenantId = req.user!.tenantId!;
   const { kb_id } = req.body ?? {};
 
-  if (!kb_id || typeof kb_id !== 'string' || !UUID_REGEX.test(kb_id)) {
+  if (!kb_id || !isUuid(kb_id)) {
     sendError(res, 'kb_id không hợp lệ', 400); return;
   }
 
@@ -247,7 +246,7 @@ export async function applyLessonAuthorJob(req: Request, res: Response): Promise
   const userId = req.user!.id;
   const { jobId } = req.params;
 
-  if (!UUID_REGEX.test(jobId)) {
+  if (!UUID_PATTERN.test(jobId)) {
     sendError(res, 'jobId không hợp lệ', 400); return;
   }
 
@@ -384,7 +383,7 @@ export async function createConversation(req: Request, res: Response): Promise<v
   const { persona_id } = req.body ?? {};
   const target = resolveTarget(req);
 
-  if (target !== 'lesson_author' && (!persona_id || typeof persona_id !== 'string' || !UUID_REGEX.test(persona_id))) {
+  if (target !== 'lesson_author' && (!persona_id || !isUuid(persona_id))) {
     sendError(res, 'persona_id không hợp lệ', 400); return;
   }
 
@@ -415,7 +414,7 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
     return;
   }
 
-  if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
 
   try {
     const deleted = await chatService.deleteConversation(id, userId, tenantId, resolveExplicitTarget(req));
@@ -437,7 +436,7 @@ export async function getMessages(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!UUID_REGEX.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
+  if (!UUID_PATTERN.test(id)) { sendError(res, 'ID không hợp lệ', 400); return; }
   // The cursor is the created_at of the oldest loaded message (ISO-8601).
   if (cursor !== undefined && !isIsoTimestamp(cursor)) { sendError(res, 'Không tải thêm được tin nhắn. Vui lòng tải lại trang.', 400); return; }
 
@@ -461,7 +460,7 @@ export async function getChapterCheckpoint(req: Request,res: Response):Promise<v
   if (isDemoIframeSession(req.user) || !req.user?.tenantId) {sendError(res,'Không có quyền truy cập.',403);return;}
   const id=req.params.conversationId;
   const draftId=typeof req.query.draft_id==='string'?req.query.draft_id:undefined;
-  if (!UUID_REGEX.test(id ?? '') || (draftId!==undefined && !UUID_REGEX.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
+  if (!UUID_PATTERN.test(id ?? '') || (draftId!==undefined && !UUID_PATTERN.test(draftId))) {sendError(res,'ID không hợp lệ.',400);return;}
   try {sendSuccess(res,await chatService.getChapterCheckpointStatus(id,req.user.id,req.user.tenantId,draftId));}
   catch (error) {
     const code=error instanceof AppError?error.code:'CHAPTER_CHECKPOINT_UNAVAILABLE';
@@ -501,7 +500,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (!UUID_REGEX.test(conversationId)) {
+  if (!UUID_PATTERN.test(conversationId)) {
     sendError(res, 'ID không hợp lệ', 400); return;
   }
   if (!content || typeof content !== 'string') {
@@ -513,7 +512,7 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   if (locale !== undefined && locale !== 'vi' && locale !== 'en') {
     sendError(res, 'locale không hợp lệ', 400); return;
   }
-  if (blueprint_id !== undefined && (typeof blueprint_id !== 'string' || !UUID_REGEX.test(blueprint_id))) {
+  if (blueprint_id !== undefined && !isUuid(blueprint_id)) {
     sendError(res, 'blueprint_id không hợp lệ', 400); return;
   }
   if (blueprint_chapter_index !== undefined
@@ -522,10 +521,10 @@ export async function sendMessage(req: Request, res: Response): Promise<void> {
   }
   const inputMode = input_mode === 'voice' ? 'voice' : 'text';
   const checkpointKey = req.header('X-Lesson-Author-Chapter-Key');
-  if ((checkpointKey !== undefined && !UUID_REGEX.test(checkpointKey)) || (chapter_resume !== undefined &&
+  if ((checkpointKey !== undefined && !UUID_PATTERN.test(checkpointKey)) || (chapter_resume !== undefined &&
     (!chapter_resume || typeof chapter_resume!=='object' || Array.isArray(chapter_resume)
       || Object.keys(chapter_resume).sort().join(',')!=='draft_id,previous_attempt_id'
-      || !UUID_REGEX.test(chapter_resume.draft_id ?? '') || !UUID_REGEX.test(chapter_resume.previous_attempt_id ?? '')
+      || !UUID_PATTERN.test(chapter_resume.draft_id ?? '') || !UUID_PATTERN.test(chapter_resume.previous_attempt_id ?? '')
       || !checkpointKey || target!=='lesson_author'))) {
     sendError(res,'Yêu cầu tiếp tục chương không hợp lệ.',400); return;
   }

@@ -5,8 +5,7 @@ import type {
   OrchestrationV2AdmissionReceipt,
   OrchestrationV2AdmissionTarget,
 } from './lesson-author-orchestration-v2-admission.repository.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type Dependencies = {
   enabled(): boolean;
@@ -34,7 +33,7 @@ export function createOrchestrationV2AdmissionHandler(deps: Dependencies) {
     res.setHeader('X-Request-ID', requestId);
     const fail = (status: number, externalCode: string, internalCode = externalCode) => {
       safeReport(deps.report, { event: 'orchestration_v2_admission_failed', request_id: requestId,
-        workspace_id: UUID.test(req.params.workspaceId ?? '') ? req.params.workspaceId : null,
+        workspace_id: UUID_PATTERN.test(req.params.workspaceId ?? '') ? req.params.workspaceId : null,
         run_id: null, internal_failure_code: internalCode, external_failure_code: externalCode,
         http_status: status, duration_ms: Math.round(performance.now() - started) });
       res.status(status).json({ success: false, code: externalCode, request_id: requestId,
@@ -48,13 +47,13 @@ export function createOrchestrationV2AdmissionHandler(deps: Dependencies) {
     const queryKeys = Object.keys(req.query);
     const body = req.body as unknown;
     if (!user) { fail(401, 'AUTH_REQUIRED'); return; }
-    if (user.sessionMode !== 'normal' || !user.tenantId || !UUID.test(user.id) || !UUID.test(user.tenantId)
+    if (user.sessionMode !== 'normal' || !user.tenantId || !UUID_PATTERN.test(user.id) || !UUID_PATTERN.test(user.tenantId)
       || !['staff', 'superuser', 'superadmin'].includes(user.role)) {
       fail(403, 'ORCHESTRATION_V2_ADMISSION_FORBIDDEN'); return;
     }
     if (!deps.enabled()) { fail(503, 'ORCHESTRATION_V2_ADMISSION_DISABLED'); return; }
     if (typeof courseId !== 'string' || !courseId.trim() || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)
-      || !UUID.test(conversationId ?? '') || !UUID.test(workspaceId ?? '')
+      || !UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(workspaceId ?? '')
       || queryKeys.some(key => key !== 'ui_locale')
       || (req.query.ui_locale !== undefined && !['en', 'vi'].includes(req.query.ui_locale as string))
       || (body !== undefined && body !== null
@@ -67,7 +66,7 @@ export function createOrchestrationV2AdmissionHandler(deps: Dependencies) {
     };
     try {
       const receipt = await deps.admit(user, target);
-      if (!receipt || typeof receipt.created !== 'boolean' || !UUID.test(receipt.run_id)) {
+      if (!receipt || typeof receipt.created !== 'boolean' || !UUID_PATTERN.test(receipt.run_id)) {
         fail(503, 'ORCHESTRATION_V2_ADMISSION_UNAVAILABLE', 'ORCHESTRATION_V2_ADMISSION_READBACK_INVALID');
         return;
       }

@@ -1,4 +1,5 @@
 import { extractStoragePath } from '../../config/storage.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export type CourseMentorLogoOwnership =
   | { kind: 'course-owned'; storagePath: string }
@@ -9,8 +10,6 @@ export type CourseMentorLogoOwnership =
       reason: 'invalid-owner' | 'invalid-storage-path' | 'foreign-or-untrusted-tenant-path' | 'unrecognized-tenant-path';
       storagePath?: string;
     };
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isSafeCourseId(courseId: string): boolean {
   return courseId.length > 0

@@ -7,6 +7,7 @@ import {
   type ChapterAttemptRow, type ChapterCheckpointOwner, type ChapterCheckpointSnapshot,
   type ChapterDraftRow, type ChapterUnitContract, type ChapterUnitIdentity, type ChapterUnitPayload, type ChapterUnitRow,
 } from './lesson-author-chapter-checkpoint.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export interface ChapterExecutionLease extends ChapterCheckpointOwner {
   draftId: string;
@@ -317,7 +318,7 @@ export function createChapterCheckpointRepository(db: GenerationJobDatabase) {
         // Caller must have completed Python full-chapter validation and MUST rerun
         // Node acceptance/current permissions here before creating the complete job.
         const result = await acceptAndPersist(tx, draft, stored);
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.jobId)
+        if (!UUID_PATTERN.test(result.jobId)
           || !['settled', 'pending_reconciliation'].includes(result.accounting)) {
           throw new ChapterCheckpointError('CHAPTER_CHECKPOINT_CONTRACT_INVALID');
         }

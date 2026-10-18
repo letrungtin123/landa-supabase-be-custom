@@ -13,11 +13,11 @@ import { workspaceApplyAuthorReview, workspaceApplyScopeChapter, workspaceApplyT
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed } from './lesson-author-workspace-storyboard.logic.js';
 import { assertWorkspaceDraftApplyReady, readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export const ORCHESTRATION_V2_APPLY_CONTRACT = 'workspace-scoped-apply-2';
 export const ORCHESTRATION_V2_QUALITY_CANONICALIZATION = 'workspace-quality-subject-1';
 export const ORCHESTRATION_V2_QUALITY_EVALUATOR = 'workspace-v2-draft-compiler-1';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_NODES = 32_768;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -123,7 +123,7 @@ export function compileOrchestrationV2WorkspaceApply(input: OrchestrationV2Apply
 }
 
 function compile(input: OrchestrationV2ApplyInput) {
-  if (![input.workspace_id, input.course_node_id, input.run_id].every(value => UUID.test(value))
+  if (![input.workspace_id, input.course_node_id, input.run_id].every(value => UUID_PATTERN.test(value))
     || !['vi', 'en'].includes(input.content_locale) || !Number.isSafeInteger(input.event_head) || input.event_head < 0
     || ![input.source_snapshot_hash, input.runtime_config_hash, input.architecture_hash, input.inventory_hash]
       .every(value => HASH.test(value)) || input.request.expected_workspace_revision !== input.event_head) {
@@ -195,7 +195,7 @@ function compile(input: OrchestrationV2ApplyInput) {
     unitOrdinalByChapter.set(binding.chapter_key, unitOrdinal);
     if (!artifact) fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
     const acceptedArtifact = artifact!;
-    if (artifacts.has(acceptedArtifact.node_id) || !UUID.test(acceptedArtifact.task_id) || !HASH.test(acceptedArtifact.artifact_hash)
+    if (artifacts.has(acceptedArtifact.node_id) || !UUID_PATTERN.test(acceptedArtifact.task_id) || !HASH.test(acceptedArtifact.artifact_hash)
       || acceptedArtifact.chapter_key !== binding.chapter_key
       || acceptedArtifact.task_key !== `content:${binding.chapter_key}:unit:${unitOrdinal}`) {
       fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
@@ -266,7 +266,7 @@ function compile(input: OrchestrationV2ApplyInput) {
     || !same(expectedManifest, revisionManifest)) fail('WORKSPACE_APPLY_REVISION_CONFLICT');
 
   const mappings = new Map(input.targets.mappings.map(mapping => [mapping.node_id, mapping]));
-  if (!UUID.test(input.targets.course_root_id) || !HASH.test(input.targets.course_root_hash)
+  if (!UUID_PATTERN.test(input.targets.course_root_id) || !HASH.test(input.targets.course_root_hash)
     || mappings.size !== input.targets.mappings.length
     || new Set(input.targets.mappings.map(mapping => mapping.target_block_id)).size !== mappings.size) {
     fail('WORKSPACE_APPLY_TARGET_CHANGED');

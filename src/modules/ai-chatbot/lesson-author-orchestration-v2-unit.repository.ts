@@ -16,6 +16,7 @@ import type {
   ReleaseUndispatched,
   createOrchestrationV2WorkerRepository,
 } from './lesson-author-orchestration-v2-worker.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 type SettleProvider = Parameters<WorkerRepository['succeed']>[5];
@@ -45,7 +46,6 @@ export class OrchestrationV2UnitRepositoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const PATH = /^chapter_([1-9][0-9]*)\.lesson_([1-9][0-9]*)\.unit_([1-9][0-9]*)$/;
 const fail = (code: OrchestrationV2UnitRepositoryError['code']): never => {
@@ -83,11 +83,11 @@ export function createOrchestrationV2UnitRepository(
       const match = typeof row?.canonical_path === 'string' ? PATH.exec(row.canonical_path) : null;
       if (authorityResult.rows.length !== 1 || !row || Number(match?.[1]) < 1
         || row.content_state !== 'planned' || row.current_revision !== null
-        || !UUID.test(String(row.kb_id)) || !UUID.test(String(row.conversation_id))
-        || !UUID.test(String(row.correlation_id)) || !HASH.test(String(row.node_contract_hash))
+        || !UUID_PATTERN.test(String(row.kb_id)) || !UUID_PATTERN.test(String(row.conversation_id))
+        || !UUID_PATTERN.test(String(row.correlation_id)) || !HASH.test(String(row.node_contract_hash))
         || !['vi', 'en'].includes(String(row.content_locale)) || !Array.isArray(row.source_document_ids)
         || row.source_document_ids.length < 1 || row.source_document_ids.length > 5
-        || row.source_document_ids.some((value: unknown) => !UUID.test(String(value)))) {
+        || row.source_document_ids.some((value: unknown) => !UUID_PATTERN.test(String(value)))) {
         fail('ORCHESTRATION_V2_UNIT_AUTHORITY_INVALID');
       }
       if (!match) fail('ORCHESTRATION_V2_UNIT_AUTHORITY_INVALID');
@@ -247,7 +247,7 @@ export function createOrchestrationV2UnitRepository(
     if (!ready.rows.length) return;
     if (ready.rows.length !== 1) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
     const outboxId = id();
-    if (!UUID.test(outboxId)) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
+    if (!UUID_PATTERN.test(outboxId)) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
     const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
         (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
       VALUES($1,$2,$3,$4,$5,$6,0,$7) RETURNING id::text`,

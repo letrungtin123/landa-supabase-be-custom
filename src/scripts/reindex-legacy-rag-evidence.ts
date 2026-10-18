@@ -1,10 +1,10 @@
 import { pool, query, withDatabaseTransaction } from '../config/database.js';
 import { enqueueKbOperation } from '../modules/ai-chatbot/kb-operation.service.js';
+import { RFC_UUID_PATTERN } from '../utils/uuid.js';
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const CONFIRMATION = 'REINDEX_LEGACY_RAG_EVIDENCE';
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type LegacyDocument = {
   tenant_id: string;
@@ -17,14 +17,14 @@ type LegacyDocument = {
 
 function readRequiredUuid(args: readonly string[], name: string): string {
   const value = args.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3).trim();
-  if (!value || !UUID_PATTERN.test(value)) throw new Error(`--${name}=<uuid> is required`);
+  if (!value || !RFC_UUID_PATTERN.test(value)) throw new Error(`--${name}=<uuid> is required`);
   return value;
 }
 
 function readOptionalUuid(args: readonly string[], name: string): string | null {
   const value = args.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3).trim();
   if (!value) return null;
-  if (!UUID_PATTERN.test(value)) throw new Error(`--${name} must be a UUID`);
+  if (!RFC_UUID_PATTERN.test(value)) throw new Error(`--${name} must be a UUID`);
   return value;
 }
 

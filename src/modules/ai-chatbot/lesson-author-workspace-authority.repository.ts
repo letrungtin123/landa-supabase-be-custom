@@ -5,8 +5,8 @@ import { WorkspaceEditError } from './lesson-author-workspace-edit.repository.js
 import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import { lessonAuthorSourceSnapshotHash, type LessonAuthorSnapshotDocument } from './lesson-author-source-snapshot.logic.js';
 import { normalizeCourseComponentTypes } from '../tenants/tenant-course-components.constants.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const sameIds = (left: unknown, right: unknown): boolean => Array.isArray(left) && Array.isArray(right)
   && left.length === right.length && left.every(value => typeof value === 'string' && right.includes(value));
 function unavailable(): never { throw new WorkspaceEditError('WORKSPACE_EDIT_UNAVAILABLE'); }
@@ -29,10 +29,10 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
   sessionOwnerId?: string;
 } = {}) {
   const subject = Object.freeze({ ...subjectInput });
-  const sessionOwnerId = options.sessionOwnerId && UUID.test(options.sessionOwnerId) ? options.sessionOwnerId : null;
+  const sessionOwnerId = options.sessionOwnerId && UUID_PATTERN.test(options.sessionOwnerId) ? options.sessionOwnerId : null;
   function validSubject(owner: WorkspaceReadOwner): boolean {
     return subject.sessionMode === 'normal' && ['staff', 'superuser', 'superadmin'].includes(subject.role)
-      && UUID.test(subject.id) && !!subject.tenantId && UUID.test(subject.tenantId) && subject.tenantId === owner.tenantId;
+      && UUID_PATTERN.test(subject.id) && !!subject.tenantId && UUID_PATTERN.test(subject.tenantId) && subject.tenantId === owner.tenantId;
   }
   /** canEdit always evaluates the authenticated subject itself. */
   function matches(owner: WorkspaceReadOwner): boolean {
@@ -81,12 +81,12 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
       [target.workspaceId, target.tenantId, target.courseId, target.conversationId, target.userId]);
       const w = result.rows[0];
       if (result.rows.length !== 1 || !w || w.source_snapshot_hash !== context.source_snapshot_hash
-        || typeof w.kb_id !== 'string' || !UUID.test(w.kb_id)
-        || typeof w.bot_id !== 'string' || !UUID.test(w.bot_id) || !Array.isArray(w.source_document_ids)
+        || !isUuid(w.kb_id)
+        || !isUuid(w.bot_id) || !Array.isArray(w.source_document_ids)
         || w.source_document_ids.length < 1 || w.source_document_ids.length > 5
-        || w.source_document_ids.some(id => typeof id !== 'string' || !UUID.test(id))
+        || w.source_document_ids.some(id => !isUuid(id))
         || new Set(w.source_document_ids).size !== w.source_document_ids.length) sourceChanged();
-      if (typeof w.blueprint_id === 'string' && UUID.test(w.blueprint_id)) {
+      if (isUuid(w.blueprint_id)) {
         const blueprint = await tx.query(`SELECT b.id FROM lesson_author_blueprints b
           WHERE b.id=$1 AND b.tenant_id=$2 AND b.course_id=$3 AND b.conversation_id=$4 AND b.kb_id=$5
             AND b.engine='self_built_rag' AND b.status='proposed' AND b.source_snapshot_hash=$6 FOR SHARE OF b`,
@@ -101,8 +101,8 @@ export function createWorkspaceAuthority(subjectInput: AuthUser, options: {
           WHERE r.workspace_id=$1 AND r.tenant_id=$2 AND r.course_id=$3 FOR SHARE OF r,s`,
         [target.workspaceId, target.tenantId, target.courseId]);
         const authority = v2.rows[0];
-        if (v2.rows.length !== 1 || !authority || !UUID.test(String(authority.run_id))
-          || !UUID.test(String(authority.snapshot_id)) || authority.snapshot_status !== 'sealed'
+        if (v2.rows.length !== 1 || !authority || !UUID_PATTERN.test(String(authority.run_id))
+          || !UUID_PATTERN.test(String(authority.snapshot_id)) || authority.snapshot_status !== 'sealed'
           || authority.source_snapshot_hash !== context.source_snapshot_hash
           || !sameIds(authority.source_document_ids, w.source_document_ids)) sourceChanged();
       } else sourceChanged();

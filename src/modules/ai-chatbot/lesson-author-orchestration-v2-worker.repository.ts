@@ -22,6 +22,7 @@ import {
   withOrchestrationV2TransactionRetry,
   type OrchestrationV2TransientRetryOptions,
 } from './lesson-author-orchestration-v2-lock-order.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
 export interface OrchestrationV2TaskLease {
   task_id: string;
@@ -109,7 +110,6 @@ export type OrchestrationV2ProviderCompletion =
   | Readonly<{ mode: OrchestrationV2ProviderUsageSource }>
   | Readonly<{ mode: 'deterministic_fallback'; releaseUndispatched: ReleaseUndispatched }>;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const providerKinds = `('course_skeleton','chapter_blueprint','generate_unit')`;
 const terminal = new Set(['succeeded', 'failed', 'timed_out', 'outcome_unknown', 'canceled']);
@@ -124,7 +124,7 @@ async function lockWorkspaceLifecycle(
   workspaceId: unknown,
 ): Promise<void> {
   if (typeof tenantId !== 'string' || typeof workspaceId !== 'string'
-    || !UUID.test(tenantId) || !UUID.test(workspaceId)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+    || !UUID_PATTERN.test(tenantId) || !UUID_PATTERN.test(workspaceId)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
   // claimExact takes global -> tenant -> workspace. Lifecycle commits only
   // need the final workspace fence; they never wait for global/tenant, so this
   // cannot form a lock cycle with a claimant and serializes run/task changes.
@@ -151,7 +151,7 @@ async function syncNeedsActionWorkspace(
   [task.workspace_id, task.tenant_id, task.course_id]);
   if (workspace.rows.length > 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
   if (workspace.rows.length === 0) return;
-  const operationId = typeof task.id === 'string' && UUID.test(task.id) ? task.id : task.run_id;
+  const operationId = isUuid(task.id) ? task.id : task.run_id;
   const event = await tx.query(`INSERT INTO lesson_author_workspace_events
       (workspace_id,tenant_id,course_id,event_kind,operation_id)
     VALUES($1,$2,$3,'run_needs_action',$4) RETURNING sequence`,
@@ -226,7 +226,7 @@ function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {
     ai_reservation_id: row.ai_reservation_id === null ? null : String(row.ai_reservation_id),
   };
   if (![lease.task_id, lease.run_id, lease.workspace_id, lease.tenant_id, lease.source_snapshot_id, lease.lease_token]
-    .every(value => UUID.test(value)) || !HASH.test(lease.contract_hash) || !HASH.test(lease.source_snapshot_hash)
+    .every(value => UUID_PATTERN.test(value)) || !HASH.test(lease.contract_hash) || !HASH.test(lease.source_snapshot_hash)
     || !HASH.test(lease.runtime_config_hash)
     || (lease.input_context_hash !== null && !HASH.test(lease.input_context_hash))
     || typeof row.provider_replay_required !== 'boolean'
@@ -268,7 +268,7 @@ export function createOrchestrationV2WorkerRepository(
       [envelope.outbox_id, envelope.run_id, envelope.task_id, envelope.dispatch_epoch, envelope.routing_shard]);
       if (identity.rows.length !== 1) return { disposition: 'stale' };
       const tenantId = String(identity.rows[0].tenant_id), workspaceId = String(identity.rows[0].workspace_id);
-      if (!UUID.test(tenantId) || !UUID.test(workspaceId)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+      if (!UUID_PATTERN.test(tenantId) || !UUID_PATTERN.test(workspaceId)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
 
       // Every claimant takes these transaction locks in the same order. The
       // short global lock makes global/provider admission exact across replicas;
@@ -337,9 +337,9 @@ export function createOrchestrationV2WorkerRepository(
       // course-scoped; it takes the course fence (C) itself before that write,
       // so this claim keeps run/task/outbox -> C -> M -> Q like every writer.
       const reservationId = provider ? await reserveProvider(tx, task) : null;
-      if (provider && !UUID.test(String(reservationId))) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+      if (provider && !UUID_PATTERN.test(String(reservationId))) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
       const leaseToken = id();
-      if (!UUID.test(leaseToken)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
+      if (!UUID_PATTERN.test(leaseToken)) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
       const claimed = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='running',
           attempt_count=attempt_count+1,dispatch_epoch=dispatch_epoch+1,lease_token=$3::uuid,
           heartbeat_at=claim_clock.claimed_at,
@@ -503,7 +503,7 @@ export function createOrchestrationV2WorkerRepository(
         task_kind: String(row.task_kind) as OrchestrationV2TaskKind,
       };
       if (![result.outbox_id, result.run_id, result.task_id, result.tenant_id, result.workspace_id]
-        .every(value => UUID.test(value))
+        .every(value => UUID_PATTERN.test(value))
         || !['source_snapshot', 'course_skeleton', 'chapter_blueprint', 'validate_architecture',
           'publish_inventory', 'generate_unit', 'validate_chapter', 'finalize_course'].includes(result.task_kind)) {
         fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');

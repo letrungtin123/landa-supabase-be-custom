@@ -7,8 +7,8 @@ import {
   type LessonAuthorSessionErrorCode,
 } from './lesson-author-session-access.logic.js';
 import { findLessonAuthorSessionOwner, listLessonAuthorActiveRuns } from './lesson-author-session-access.repository.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 
 export interface LessonAuthorSessionAccessDependencies {
@@ -33,7 +33,7 @@ function refuse(req: Request, res: Response, code: LessonAuthorSessionErrorCode)
 
 function courseEditorCandidate(user: AuthUser | undefined): user is AuthUser & { tenantId: string } {
   return !!user && user.sessionMode === 'normal' && AUTHOR_ROLES.has(user.role)
-    && typeof user.tenantId === 'string' && UUID.test(user.tenantId) && UUID.test(user.id);
+    && isUuid(user.tenantId) && UUID_PATTERN.test(user.id);
 }
 
 /**
@@ -49,7 +49,7 @@ export function createLessonAuthorSessionOwnerGuard(deps: LessonAuthorSessionAcc
     async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       const user = req.user;
       const conversationId = req.params[conversationParam];
-      if (!courseEditorCandidate(user) || typeof conversationId !== 'string' || !UUID.test(conversationId)) { next(); return; }
+      if (!courseEditorCandidate(user) || !isUuid(conversationId)) { next(); return; }
       const courseId = options.courseParam ? req.params[options.courseParam] : undefined;
       try {
         const owner = await findLessonAuthorSessionOwner(deps.db, {

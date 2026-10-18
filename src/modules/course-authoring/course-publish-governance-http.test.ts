@@ -28,7 +28,8 @@ test('eligibility is read-only and derived by the backend for course viewers', (
 
 test('an enrolled course cannot use the ordinary publish path without an exact candidate UUID', () => {
   assert.match(controller, /const enrolledPolicy =[\s\S]*getCoursePublishPolicyForBlock/);
-  assert.match(controller, /typeof candidate_id !== 'string' \|\| !UUID\.test\(candidate_id\)/);
+  // isUuid() = a string matching UUID_PATTERN (src/utils/uuid.ts), the same check as before.
+  assert.match(controller, /if \(!isUuid\(candidate_id\)\)/);
   assert.match(controller, /COURSE_PUBLISH_CANDIDATE_REQUIRED/);
   assert.match(controller, /candidateId: candidate_id/);
 });

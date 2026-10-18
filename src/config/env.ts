@@ -6,6 +6,7 @@
 import { config as dotenvConfig } from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { isUuid } from '../utils/uuid.js';
 
 // Xác định thư mục gốc project (chứa .env files)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -119,7 +120,7 @@ function optionalCsv(key: string): string[] {
 
 function optionalUuidCsv(key: string): string[] {
   const values = optionalCsv(key).map((item) => item.toLowerCase());
-  const invalid = values.find((item) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(item));
+  const invalid = values.find((item) => !isUuid(item));
   if (invalid !== undefined) {
     throw new Error(`[ENV] ${key} must be a comma-separated list of UUIDs, received: "${invalid}"`);
   }

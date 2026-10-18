@@ -10,6 +10,7 @@ import {
 } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { idmAuthorNote, idmChapterLessonDesigns } from './lesson-author-idm-architecture.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export interface OrchestrationV2StoredTask extends OrchestrationV2PersistedTask { id: string }
 
@@ -72,7 +73,6 @@ export class OrchestrationV2InventoryError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const KEY = /^[a-z0-9][a-z0-9_.:-]{0,159}$/;
 const MAX_NODES = 32_768;
@@ -83,7 +83,7 @@ const fail = (code: OrchestrationV2InventoryError['code'] = 'ORCHESTRATION_V2_IN
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 export function orchestrationV2DeterministicUuid(namespace: string, value: string): string {
-  if (!UUID.test(namespace) || !value || value.length > 512) fail();
+  if (!UUID_PATTERN.test(namespace) || !value || value.length > 512) fail();
   const digest = createHash('sha256').update(namespace.toLowerCase()).update('\0').update(value).digest();
   digest[6] = (digest[6]! & 0x0f) | 0x80;
   digest[8] = (digest[8]! & 0x3f) | 0x80;
@@ -119,7 +119,7 @@ export function prepareOrchestrationV2InventoryIdentity(input: {
   assembly: Readonly<OrchestrationV2ArchitectureAssembly>;
 }): Readonly<OrchestrationV2InventoryIdentity> {
   const { run_id: runId, assembly } = input;
-  if (!UUID.test(runId) || !assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)) fail();
+  if (!UUID_PATTERN.test(runId) || !assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)) fail();
 
   const nodes: OrchestrationV2InventoryNode[] = [];
   const paths = new Map<string, string>();
@@ -245,12 +245,12 @@ export function prepareOrchestrationV2InventoryPublication(input: {
   budgets: OrchestrationV2InventoryBudgets;
 }): Readonly<OrchestrationV2InventoryPublication> {
   const { run_id: runId, assembly, budgets } = input;
-  if (!UUID.test(runId) || !assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)
+  if (!UUID_PATTERN.test(runId) || !assembly || assembly.contract_version !== 2 || !HASH.test(assembly.assembly_hash)
     || !Array.isArray(input.existing_tasks) || !input.existing_tasks.length
     || !budgets || !Number.isSafeInteger(budgets.chapter_validation_budget_ms)
     || !Number.isSafeInteger(budgets.finalization_budget_ms)) fail();
   const existing = [...input.existing_tasks].sort((a, b) => a.ordinal - b.ordinal);
-  if (existing.some((task, index) => !UUID.test(task.id) || task.ordinal !== index)
+  if (existing.some((task, index) => !UUID_PATTERN.test(task.id) || task.ordinal !== index)
     || existing.at(-1)?.kind !== 'publish_inventory'
     || existing.some(task => !['source_snapshot', 'course_skeleton', 'chapter_blueprint',
       'validate_architecture', 'publish_inventory'].includes(task.kind))) fail();

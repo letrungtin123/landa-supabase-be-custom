@@ -9,6 +9,7 @@ import { createWorkspaceAuthority } from './lesson-author-workspace-authority.re
 import {
   assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
 } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type Query = (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
 type ExistingWorkspace = {
@@ -50,7 +51,6 @@ export interface WorkspaceV2LaunchDependencies {
   report?(event: Record<string, unknown>): void;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 
 function sameIds(left: unknown, right: readonly string[]): boolean {
@@ -83,11 +83,11 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
   function validInput(user: AuthUser, input: WorkspaceLaunchInput): user is AuthUser & { tenantId: string } {
     return user.sessionMode === 'normal' && typeof user.tenantId === 'string'
       && ['staff', 'superuser', 'superadmin'].includes(user.role)
-      && [user.id, user.tenantId, input.conversationId, input.operationId].every(value => UUID.test(value))
+      && [user.id, user.tenantId, input.conversationId, input.operationId].every(value => UUID_PATTERN.test(value))
       && typeof input.courseId === 'string' && input.courseId.trim().length > 0 && input.courseId.length <= 255
       && !/[\x00-\x1f\x7f]/.test(input.courseId)
       && input.sourceDocumentIds.length >= 1 && input.sourceDocumentIds.length <= 5
-      && input.sourceDocumentIds.every(value => UUID.test(value))
+      && input.sourceDocumentIds.every(value => UUID_PATTERN.test(value))
       && new Set(input.sourceDocumentIds).size === input.sourceDocumentIds.length
       && ['en', 'vi'].includes(input.locale)
       // QLT-6: the controller already parsed and cleaned the brief; anything else is a caller bug.
@@ -118,7 +118,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       if (!replay) await prepared.filterInput();
 
       const root = replay?.correlation_id ?? id();
-      if (!UUID.test(root)) fail('WORKSPACE_CREATE_CONFLICT');
+      if (!UUID_PATTERN.test(root)) fail('WORKSPACE_CREATE_CONFLICT');
       let admittedRunId: string | null = null;
       const result = await deps.db.transaction(async (tx: GenerationJobSql) => {
         const authority = createWorkspaceAuthority(user);
@@ -154,7 +154,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         } else {
           replayed = false;
           const workspaceId = id();
-          if (!UUID.test(workspaceId) || !HASH.test(prepared.identity.requestHash)
+          if (!UUID_PATTERN.test(workspaceId) || !HASH.test(prepared.identity.requestHash)
             || !HASH.test(prepared.identity.sourceSnapshotHash)) fail('WORKSPACE_CREATE_CONFLICT');
           // QLT-6: the launch brief is written once here; the workspace guard trigger keeps it immutable.
           const inserted = await tx.query(`INSERT INTO lesson_author_workspaces(id,tenant_id,course_id,conversation_id,requested_by,bot_id,kb_id,
@@ -191,7 +191,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
           WHERE workspace_id=$1 AND tenant_id=$2 AND course_id=$3 FOR UPDATE`, [confirmedWorkspace.id, tenantId, input.courseId]);
         if (existingRun.rows.length > 1) fail('WORKSPACE_CREATE_CONFLICT');
         if (existingRun.rows[0]?.id) {
-          if (!UUID.test(String(existingRun.rows[0].id))) fail('WORKSPACE_CREATE_CONFLICT');
+          if (!UUID_PATTERN.test(String(existingRun.rows[0].id))) fail('WORKSPACE_CREATE_CONFLICT');
           admittedRunId = String(existingRun.rows[0].id);
         } else {
           // Atomic V2 creation cannot leave a shell without its run. Refuse to

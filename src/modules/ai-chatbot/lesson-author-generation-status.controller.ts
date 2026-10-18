@@ -3,8 +3,8 @@ import type { AuthUser } from '../../types/express.js';
 import {
   generationJobStatusView, type GenerationJobOwner, type GenerationJobRow,
 } from './lesson-author-generation-job.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 
 interface GenerationStatusDependencies {
@@ -39,7 +39,7 @@ export function createGenerationStatusHandler(deps: GenerationStatusDependencies
       return;
     }
     const { conversationId, jobId } = req.params;
-    if (!UUID.test(conversationId ?? '') || !UUID.test(jobId ?? '')) {
+    if (!UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(jobId ?? '')) {
       reject(400, 'GENERATION_IDENTIFIER_INVALID', 'ID tác vụ hoặc cuộc hội thoại không hợp lệ.');
       return;
     }

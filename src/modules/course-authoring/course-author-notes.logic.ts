@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 /**
  * AI ID author notes (QC course 364564, defect N6).
@@ -121,7 +122,7 @@ export interface CourseAuthorNotesV1 {
   assessment_reviews?: CourseAuthorAssessmentReviewV1[];
 }
 
-const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+const uuid = z.string().regex(UUID_PATTERN);
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const text = (max: number) => z.string().max(max);

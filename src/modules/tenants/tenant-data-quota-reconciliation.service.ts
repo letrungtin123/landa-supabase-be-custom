@@ -9,9 +9,9 @@
 import { randomUUID } from 'crypto';
 import { getClient, query } from '../../config/database.js';
 import { TENANT_STORAGE_BUCKETS } from '../../config/storage.js';
+import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
 
 const MAX_BIGINT = 9223372036854775807n;
-const CANONICAL_TENANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MINIMUM_SLICE_LEASE_GUARD_MS = 30_000;
 const MINIMUM_FINALIZATION_START_GUARD_MS = 30_000;
 const FINALIZATION_LEASE_GUARD_MS = 60_000;
@@ -108,7 +108,7 @@ function encodeStorageCursor(bucketId: string, name: string): string {
 
 export function tenantStorageKeysetBounds(tenantId: string): { lowerBound: string; upperBound: string } {
   const normalizedTenantId = tenantId.toLowerCase();
-  if (!CANONICAL_TENANT_ID_PATTERN.test(normalizedTenantId)) {
+  if (!RFC_UUID_PATTERN.test(normalizedTenantId)) {
     throw new Error(`Invalid tenant UUID for Storage reconciliation: ${tenantId}`);
   }
 

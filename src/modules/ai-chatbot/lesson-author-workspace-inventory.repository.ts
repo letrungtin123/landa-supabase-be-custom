@@ -10,6 +10,7 @@ import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
 import { WorkspaceComponentError } from './lesson-author-workspace-component.logic.js';
 import { WorkspaceEditError } from './lesson-author-workspace-edit.repository.js';
 import { buildWorkspaceInventory, WorkspacePublicationError, type WorkspacePublicationCode } from './lesson-author-workspace-inventory.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
 export interface WorkspaceInventoryTarget extends WorkspaceReadOwner { workspaceId: string; blueprintId: string; operationId: string; }
 export interface WorkspaceInventoryDiagnostic {
@@ -19,7 +20,6 @@ export interface WorkspaceInventoryDiagnostic {
   node_count: number; unit_count: number; duration_ms: number;
   validation_codes: string[];
 }
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function fail(code: WorkspacePublicationCode): never { throw new WorkspacePublicationError(code); }
 const integer = (v: unknown) => {
   if (!(typeof v === 'number' || typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v)) || !Number.isSafeInteger(Number(v)) || Number(v) < 0) fail('WORKSPACE_PUBLICATION_READBACK_INVALID');
@@ -57,13 +57,13 @@ export function createWorkspaceInventoryRepository(deps: {
     let validationCodes: string[] = [];
     const started = performance.now();
     function report(status: WorkspaceInventoryDiagnostic['status'], code: string | null, internal = code, sqlstate: string | null = null) {
-      try { deps.report({ event: 'workspace_inventory_publication', workspace_id: UUID.test(target.workspaceId) ? target.workspaceId : '',
-        correlation_id: correlation, operation_id: UUID.test(target.operationId) ? target.operationId : null,
+      try { deps.report({ event: 'workspace_inventory_publication', workspace_id: UUID_PATTERN.test(target.workspaceId) ? target.workspaceId : '',
+        correlation_id: correlation, operation_id: UUID_PATTERN.test(target.operationId) ? target.operationId : null,
         stage, status, internal_failure_code: internal, external_failure_code: code, db_sqlstate: sqlstate, node_count: nodes, unit_count: units,
         validation_codes: validationCodes, duration_ms: Math.round(performance.now() - started) }); } catch { /* logging is not commit authority */ }
     }
     try {
-      if (![target.tenantId, target.userId, target.conversationId, target.workspaceId, target.blueprintId, target.operationId].every(v => typeof v === 'string' && UUID.test(v))
+      if (![target.tenantId, target.userId, target.conversationId, target.workspaceId, target.blueprintId, target.operationId].every(v => isUuid(v))
         || typeof target.courseId !== 'string' || !target.courseId || target.courseId.length > 255) fail('WORKSPACE_PUBLICATION_INVALID');
       const receipt = await deps.db.transaction(async tx => {
         if (!await deps.canEdit(tx, target)) fail('WORKSPACE_PUBLICATION_FORBIDDEN');
@@ -76,7 +76,7 @@ export function createWorkspaceInventoryRepository(deps: {
           WHERE w.id=$1 AND w.tenant_id=$2 AND w.course_id=$3 AND w.conversation_id=$4 AND w.requested_by=$5
             AND w.contract_version=1 AND w.engine='self_built_rag' FOR UPDATE OF w`, params);
         const w = result.rows[0];
-        if (result.rows.length !== 1 || !UUID.test(String(w.correlation_id)) || !/^[0-9a-f]{64}$/.test(String(w.source_snapshot_hash))
+        if (result.rows.length !== 1 || !UUID_PATTERN.test(String(w.correlation_id)) || !/^[0-9a-f]{64}$/.test(String(w.source_snapshot_hash))
           || !['vi', 'en'].includes(String(w.content_locale))) fail('WORKSPACE_PUBLICATION_FORBIDDEN');
         correlation = String(w.correlation_id);
         const events = await tx.query(`SELECT event_kind,sequence FROM lesson_author_workspace_events

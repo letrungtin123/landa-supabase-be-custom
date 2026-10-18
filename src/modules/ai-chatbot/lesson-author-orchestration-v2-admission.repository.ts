@@ -7,6 +7,7 @@ import {
   prepareOrchestrationV2Admission,
   type OrchestrationV2AdmissionConfig,
 } from './lesson-author-orchestration-v2-admission.logic.js';
+import { isUuid } from '../../utils/uuid.js';
 
 export interface OrchestrationV2AdmissionTarget {
   workspaceId: string;
@@ -44,9 +45,8 @@ type Dependencies = {
   id?: () => string;
 };
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
-const validId = (value: unknown): value is string => typeof value === 'string' && UUID.test(value);
+const validId = (value: unknown): value is string => isUuid(value);
 const fail = (code: OrchestrationV2AdmissionError['code']): never => { throw new OrchestrationV2AdmissionError(code); };
 
 /**

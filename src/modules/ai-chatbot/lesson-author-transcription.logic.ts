@@ -1,11 +1,10 @@
+import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
 export type LessonAuthorTranscriptLocale = 'vi' | 'en';
-
-const SAFE_UPLOAD_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Browser supplied for diagnostics/idempotency only; never an authority ID. */
 export function normalizeLessonAuthorUploadAttemptId(value: unknown): string | null {
   const normalized = typeof value === 'string' ? value.trim() : '';
-  return SAFE_UPLOAD_ATTEMPT_ID.test(normalized) ? normalized.toLowerCase() : null;
+  return RFC_UUID_PATTERN.test(normalized) ? normalized.toLowerCase() : null;
 }
 
 export const LESSON_AUTHOR_TRANSCRIPTION_STATUSES = [

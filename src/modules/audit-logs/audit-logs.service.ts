@@ -6,6 +6,7 @@ import { query } from '../../config/database.js';
 import { AppError } from '../../middleware/error-handler.js';
 import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
+import { RFC_UUID_PATTERN, isRfcUuid } from '../../utils/uuid.js';
 
 export const AUDIT_LOG_RETENTION_DAYS = 30;
 /**
@@ -18,7 +19,6 @@ export const DEFAULT_AUDIT_LOG_PAGE_SIZE = 10;
 type AuditLogPageSize = (typeof AUDIT_LOG_PAGE_SIZES)[number];
 const CURSOR_VERSION = 1;
 const MAX_LEGACY_AUDIT_OFFSET = 10_000;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ACTIONS = new Set(['CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT']);
 
 /**
@@ -79,8 +79,7 @@ function decodeCursor(rawCursor: unknown): CursorPayload | null {
       parsed.v !== CURSOR_VERSION
       || typeof parsed.createdAt !== 'string'
       || Number.isNaN(new Date(parsed.createdAt).getTime())
-      || typeof parsed.id !== 'string'
-      || !UUID_PATTERN.test(parsed.id)
+      || !isRfcUuid(parsed.id)
     ) throw new Error('Invalid cursor payload');
     return parsed;
   } catch {
@@ -339,7 +338,7 @@ export async function getAuditLogDetail(
   viewer: AuditLogDetailViewer,
   queryParams: Record<string, unknown>,
 ) {
-  if (!UUID_PATTERN.test(auditLogId)) throw new AppError('Mã nhật ký không hợp lệ', 400);
+  if (!RFC_UUID_PATTERN.test(auditLogId)) throw new AppError('Mã nhật ký không hợp lệ', 400);
   const { params, conditions } = addBaseFilters(tenantId, viewer.role, queryParams);
   const piiProjection = getAuditLogDetailPiiProjection(viewer, params);
   params.push(auditLogId);

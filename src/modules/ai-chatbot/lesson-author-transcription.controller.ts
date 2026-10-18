@@ -11,8 +11,7 @@ import {
   toPublicLessonAuthorTranscriptionJob,
 } from './lesson-author-transcription.service.js';
 import { normalizeLessonAuthorUploadAttemptId } from './lesson-author-transcription.logic.js';
-
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 function locale(value: unknown): 'vi' | 'en' {
   return value === 'en' ? 'en' : 'vi';
@@ -39,7 +38,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
   const clientAttemptId = normalizeLessonAuthorUploadAttemptId(req.get('x-lesson-author-upload-attempt'))
     ?? normalizeLessonAuthorUploadAttemptId(idempotencyKey);
   const startedAt = Date.now();
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(idempotencyKey)) {
+  if (!UUID_PATTERN.test(conversationId) || !UUID_PATTERN.test(idempotencyKey)) {
     console.warn('[LessonAuthorTranscription] upload rejected', {
       client_attempt_id: clientAttemptId,
       conversation_id: conversationId,
@@ -105,7 +104,7 @@ export async function createLessonAuthorTranscription(req: Request, res: Respons
 
 export async function getLessonAuthorTranscription(req: Request, res: Response): Promise<void> {
   const { conversationId, jobId } = req.params;
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId)) {
+  if (!UUID_PATTERN.test(conversationId) || !UUID_PATTERN.test(jobId)) {
     sendError(res, 'ID không hợp lệ', 400);
     return;
   }
@@ -124,7 +123,7 @@ export async function getLessonAuthorTranscription(req: Request, res: Response):
 
 export async function downloadLessonAuthorTranscript(req: Request, res: Response): Promise<void> {
   const { conversationId, jobId } = req.params;
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId)) {
+  if (!UUID_PATTERN.test(conversationId) || !UUID_PATTERN.test(jobId)) {
     sendError(res, 'ID không hợp lệ', 400);
     return;
   }
@@ -145,7 +144,7 @@ export async function downloadLessonAuthorTranscript(req: Request, res: Response
 
 export async function commitLessonAuthorTranscript(req: Request, res: Response): Promise<void> {
   const { conversationId, jobId } = req.params;
-  if (!UUID_REGEX.test(conversationId) || !UUID_REGEX.test(jobId)) {
+  if (!UUID_PATTERN.test(conversationId) || !UUID_PATTERN.test(jobId)) {
     sendError(res, 'ID không hợp lệ', 400);
     return;
   }

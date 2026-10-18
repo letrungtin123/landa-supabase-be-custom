@@ -4,8 +4,8 @@ import type { AuthUser } from '../../types/express.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import type { SourceDocumentHint } from './lesson-author-source-stream.service.js';
 import { onShutdownStart } from '../../config/process-lifecycle.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AUTHOR_ROLES = new Set(['staff', 'superuser', 'superadmin']);
 const HEARTBEAT_MS = 20_000;
 const AUTH_LEASE_MS = 60_000;
@@ -53,8 +53,8 @@ export function createSourceDocumentStreamHandler(deps: {
     let unsubscribe: (() => void) | null = null, heartbeat: NodeJS.Timeout | null = null, lease: NodeJS.Timeout | null = null;
     let leaveShutdown: (() => void) | null = null;
     const report = (event: SourceStreamDiagnostic['event'], failure: string | null = null) => {
-      try { deps.report({ event, request_id: requestId, document_id: UUID.test(documentId ?? '') ? documentId : null,
-        tenant_id: user?.tenantId && UUID.test(user.tenantId) ? user.tenantId : null, failure_code: failure,
+      try { deps.report({ event, request_id: requestId, document_id: UUID_PATTERN.test(documentId ?? '') ? documentId : null,
+        tenant_id: user?.tenantId && UUID_PATTERN.test(user.tenantId) ? user.tenantId : null, failure_code: failure,
         duration_ms: Math.max(0, Math.round(performance.now() - started)), delivered_events: delivered }); } catch { /* logging cannot fail request */ }
     };
     // Every exit path (refusal, read failure, hub failure, client disconnect
@@ -80,11 +80,11 @@ export function createSourceDocumentStreamHandler(deps: {
       res.status(status).json({ success: false, code,
         message: locale === 'en' ? 'The source status stream is unavailable.' : 'Chưa thể theo dõi trạng thái tài liệu.', request_id: requestId });
     };
-    if (!user || !user.tenantId || !UUID.test(user.tenantId) || !UUID.test(user.id)
+    if (!user || !user.tenantId || !UUID_PATTERN.test(user.tenantId) || !UUID_PATTERN.test(user.id)
       || !AUTHOR_ROLES.has(user.role) || user.sessionMode !== 'normal') {
       reject(user ? 403 : 401, user ? 'SOURCE_STREAM_FORBIDDEN' : 'AUTH_REQUIRED'); return;
     }
-    if (!UUID.test(documentId ?? '') || Object.keys(req.query).some(key => key !== 'ui_locale')
+    if (!UUID_PATTERN.test(documentId ?? '') || Object.keys(req.query).some(key => key !== 'ui_locale')
       || (req.query.ui_locale !== undefined && req.query.ui_locale !== 'vi' && req.query.ui_locale !== 'en')) {
       reject(400, 'SOURCE_STREAM_INPUT_INVALID'); return;
     }

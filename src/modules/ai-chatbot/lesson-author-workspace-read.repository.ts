@@ -7,6 +7,7 @@ import {
 import { buildWorkspaceArchitecturePreview } from './lesson-author-workspace-preview.logic.js';
 import { readIdmAuthorGuidance } from './lesson-author-idm-guidance.logic.js';
 import { LaunchBriefStoredInvalidError, readStoredLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
 export interface WorkspaceReadOwner {
   tenantId: string;
@@ -20,7 +21,6 @@ export class WorkspaceReadError extends Error {
   constructor(readonly code: WorkspaceReadCode) { super(code); this.name = 'WorkspaceReadError'; }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATES = ['queued', 'designing', 'drafting', 'ready', 'needs_action', 'failed', 'canceled'] as const;
 const KINDS = ['course', 'chapter', 'lesson', 'unit', 'component', 'media_brief'] as const;
 const CONTENT_STATES = ['planned', 'generating', 'content_ready', 'needs_action'] as const;
@@ -65,7 +65,7 @@ function integer(value: unknown): number {
   return number;
 }
 function id(value: unknown): string {
-  if (typeof value !== 'string' || !UUID.test(value)) invalid();
+  if (!isUuid(value)) invalid();
   return value;
 }
 function enumeration<T extends string>(value: unknown, values: readonly T[]): T {
@@ -117,7 +117,7 @@ export function createWorkspaceReadRepository(deps: {
 }) {
   async function read(owner: WorkspaceReadOwner, workspaceId: string, suffix: string, extra: unknown[] = []) {
     const scope = Object.freeze({ ...owner });
-    if (![workspaceId, scope.tenantId, scope.userId, scope.conversationId].every(value => UUID.test(value))
+    if (![workspaceId, scope.tenantId, scope.userId, scope.conversationId].every(value => UUID_PATTERN.test(value))
       || typeof scope.courseId !== 'string' || !scope.courseId || scope.courseId.length > 255) invalid();
     try {
       if (!await deps.canRead(scope)) throw new WorkspaceReadError('WORKSPACE_READ_FORBIDDEN');

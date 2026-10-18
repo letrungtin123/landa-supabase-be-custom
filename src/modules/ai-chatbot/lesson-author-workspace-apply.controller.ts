@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import type { AuthUser } from '../../types/express.js';
 import { WorkspaceApplyConflictError, type WorkspaceApplyConflictDetails } from './lesson-author-workspace-apply-conflict.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const roles = new Set(['staff', 'superuser', 'superadmin']);
 /** [HTTP status, Vietnamese, English]. Codes stay machine-only; messages are for people. */
@@ -45,7 +45,7 @@ export function createWorkspaceApplyHandler(deps: {
     const fail = (external: External, internal: string = external, conflict?: WorkspaceApplyConflictDetails) => {
       const [status, vi, en] = WORKSPACE_APPLY_ERRORS[external];
       try { deps.report({ event: 'workspace_apply_failed', request_id: requestId, correlation_id: null,
-        workspace_id: UUID.test(workspaceId ?? '') ? workspaceId : null, node_id: UUID.test(nodeId ?? '') ? nodeId : null,
+        workspace_id: UUID_PATTERN.test(workspaceId ?? '') ? workspaceId : null, node_id: UUID_PATTERN.test(nodeId ?? '') ? nodeId : null,
         course_id_hash: typeof courseId === 'string' ? createHash('sha256').update(courseId).digest('hex') : null,
         operation_id: operationId, failure_stage: 'workspace_apply', internal_failure_code: internal,
         external_failure_code: external, http_status: status, conflict_count: conflict?.total ?? null,
@@ -55,9 +55,9 @@ export function createWorkspaceApplyHandler(deps: {
     };
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Request-ID', requestId);
     if (!user) { fail('AUTH_REQUIRED'); return; }
-    if (!user.tenantId || !roles.has(user.role) || user.sessionMode !== 'normal' || !UUID.test(user.id) || !UUID.test(user.tenantId)) { fail('WORKSPACE_APPLY_FORBIDDEN'); return; }
+    if (!user.tenantId || !roles.has(user.role) || user.sessionMode !== 'normal' || !UUID_PATTERN.test(user.id) || !UUID_PATTERN.test(user.tenantId)) { fail('WORKSPACE_APPLY_FORBIDDEN'); return; }
     if (!deps.enabled()) { fail('WORKSPACE_APPLY_DISABLED'); return; }
-    if (!UUID.test(conversationId ?? '') || !UUID.test(workspaceId ?? '') || !UUID.test(nodeId ?? '') || !operationId || !UUID.test(operationId)
+    if (!UUID_PATTERN.test(conversationId ?? '') || !UUID_PATTERN.test(workspaceId ?? '') || !UUID_PATTERN.test(nodeId ?? '') || !operationId || !UUID_PATTERN.test(operationId)
       || !courseId || courseId.length > 255 || /[\x00-\x1f\x7f]/.test(courseId)
       || Object.keys(req.query).some(key => key !== 'ui_locale') || !body
       || Object.keys(body).some(key => !['operation_id', 'expected_workspace_revision', 'overwrite_confirmation'].includes(key))

@@ -7,15 +7,15 @@ import {
   isLaunchBriefErrorCode, isNormalizedLaunchBrief, LAUNCH_BRIEF_BODY_KEYS, LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError,
   parseLaunchBrief, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
 } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const states=['queued','designing','drafting','ready','needs_action','failed','canceled'];
 const BASE_CREATE_KEYS='content_locale,operation_id,source_document_ids';
 /** `brief` (QLT-6): the validated launch brief of the Create request, stored write-once with the workspace. */
 export interface WorkspaceLaunchInput{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief;}
 /** `launch_brief`: null for a workspace created before QLT-6 (storage `version` is never exposed). */
 export interface WorkspaceLaunchResult{workspace_id:string;conversation_id:string;correlation_id:string;content_locale:'en'|'vi';status:string;launch_brief:LessonAuthorLaunchBrief|null;replayed?:boolean;}
-function validResult(value:WorkspaceLaunchResult){return[ value.workspace_id,value.conversation_id,value.correlation_id ].every(id=>UUID.test(id))
+function validResult(value:WorkspaceLaunchResult){return[ value.workspace_id,value.conversation_id,value.correlation_id ].every(id=>UUID_PATTERN.test(id))
   &&['en','vi'].includes(value.content_locale)&&states.includes(value.status)
   &&(value.launch_brief===null||isNormalizedLaunchBrief(value.launch_brief));}
 function object(v:unknown):v is Record<string,unknown>{return !!v&&typeof v==='object'&&!Array.isArray(v);}
@@ -40,7 +40,7 @@ export function createWorkspaceLaunchHandlers(deps:{
       };
       const user=req.user,courseId=req.params.courseId;
       if(!user){failure(401,'AUTH_REQUIRED');return;}
-      if(user.sessionMode!=='normal'||!user.tenantId||![user.id,user.tenantId].every(id=>UUID.test(id))
+      if(user.sessionMode!=='normal'||!user.tenantId||![user.id,user.tenantId].every(id=>UUID_PATTERN.test(id))
         ||!['staff','superuser','superadmin'].includes(user.role)){failure(403,'WORKSPACE_READ_FORBIDDEN');return;}
       if(typeof courseId!=='string'||!courseId.trim()||courseId.length>255||/[\x00-\x1f\x7f]/.test(courseId)
         ||Object.keys(req.query).some(k=>k!=='ui_locale')||(req.query.ui_locale!==undefined&&!['en','vi'].includes(req.query.ui_locale as string))){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
@@ -50,11 +50,11 @@ export function createWorkspaceLaunchHandlers(deps:{
         if(action==='create'){
           const body:unknown=req.body,conversationId=req.params.conversationId;
           // Exactly the three base keys plus the QLT-6 brief keys; the brief keys are checked below with their own codes.
-          if(!UUID.test(conversationId??'')||!object(body)
+          if(!UUID_PATTERN.test(conversationId??'')||!object(body)
             ||Object.keys(body).filter(k=>!(LAUNCH_BRIEF_BODY_KEYS as readonly string[]).includes(k)).sort().join(',')!==BASE_CREATE_KEYS
-            ||typeof body.operation_id!=='string'||!UUID.test(body.operation_id)||typeof body.content_locale!=='string'||!['en','vi'].includes(body.content_locale)
+            ||!isUuid(body.operation_id)||typeof body.content_locale!=='string'||!['en','vi'].includes(body.content_locale)
             ||!Array.isArray(body.source_document_ids)||body.source_document_ids.length<1||body.source_document_ids.length>5
-            ||body.source_document_ids.some(id=>typeof id!=='string'||!UUID.test(id))||new Set(body.source_document_ids).size!==body.source_document_ids.length){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
+            ||body.source_document_ids.some(id=>!isUuid(id))||new Set(body.source_document_ids).size!==body.source_document_ids.length){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
           let brief:LessonAuthorLaunchBrief;
           try{brief=parseLaunchBrief(body);}
           catch(error){if(error instanceof LaunchBriefError){failure(400,error.code);return;}throw error;}

@@ -10,7 +10,7 @@
 
 import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
-import { isUuid } from '../../utils/client-error.js';
+import { isUuid } from '../../utils/uuid.js';
 import { sendError } from '../../utils/response.js';
 
 export const BOT_AVATAR_MAX_BYTES = 5 * 1024 * 1024;

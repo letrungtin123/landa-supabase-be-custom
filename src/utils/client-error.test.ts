@@ -7,7 +7,8 @@ import {
   TENANT_DATA_LIMIT_REACHED_MESSAGE,
   TENANT_DATA_LIMIT_REACHED_SQLSTATE,
 } from '../modules/tenants/tenant-data-quota.constants.js';
-import { UNEXPECTED_ERROR, describeClientError, isIsoTimestamp, isUuid, sendClientError } from './client-error.js';
+import { UNEXPECTED_ERROR, describeClientError, isIsoTimestamp, sendClientError } from './client-error.js';
+import { isUuid } from './uuid.js';
 
 // S2 T9: only errors raised on purpose reach the browser; database, storage
 // and provider text never does.

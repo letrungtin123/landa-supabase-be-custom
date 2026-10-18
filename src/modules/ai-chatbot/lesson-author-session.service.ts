@@ -12,8 +12,8 @@ import {
   type LessonAuthorSessionScope,
 } from './lesson-author-session-access.logic.js';
 import { readStoredLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN, isUuid } from '../../utils/uuid.js';
 
-const UUID =/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTIVE_WORKSPACE_STATUSES = ['queued', 'designing', 'drafting'];
 const DELETE_LEASE_SECONDS = 15 * 60;
 
@@ -59,7 +59,7 @@ interface DeleteJobRow {
 }
 
 function assertOwner(owner: LessonAuthorSessionOwner): void {
-  if (!UUID.test(owner.tenantId) || !UUID.test(owner.userId) || !owner.courseId.trim()
+  if (!UUID_PATTERN.test(owner.tenantId) || !UUID_PATTERN.test(owner.userId) || !owner.courseId.trim()
     || owner.courseId.length > 255 || /[\x00-\x1f\x7f]/.test(owner.courseId)) {
     throw new LessonAuthorSessionError('INPUT_INVALID');
   }
@@ -96,7 +96,7 @@ function decodeCursor(cursor?: string): [string, string] | null {
     if (cursor.length > 512) throw new Error('too long');
     const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== 'string'
-      || !Number.isFinite(new Date(parsed[0]).getTime()) || typeof parsed[1] !== 'string' || !UUID.test(parsed[1])) throw new Error('invalid');
+      || !Number.isFinite(new Date(parsed[0]).getTime()) || !isUuid(parsed[1])) throw new Error('invalid');
     // Keep the exact PostgreSQL text representation. Normalizing through a
     // JavaScript Date truncates microseconds and breaks keyset/optimistic
     // comparisons against timestamptz values stored with six-digit precision.
@@ -205,7 +205,7 @@ export async function renameLessonAuthorSession(
 ): Promise<{ conversation_id: string; title: string; updated_at: string }> {
   assertOwner(owner);
   const normalized = title.normalize('NFC').replace(/\s+/g, ' ').trim();
-  if (!UUID.test(conversationId) || !normalized || normalized.length > 200
+  if (!UUID_PATTERN.test(conversationId) || !normalized || normalized.length > 200
     || expectedUpdatedAt !== undefined && !Number.isFinite(new Date(expectedUpdatedAt).getTime())) {
     throw new LessonAuthorSessionError('INPUT_INVALID');
   }
@@ -228,7 +228,7 @@ export async function renameLessonAuthorSession(
 
 export async function getLessonAuthorSessionDeleteImpact(owner: LessonAuthorSessionOwner, conversationId: string) {
   assertOwner(owner);
-  if (!UUID.test(conversationId)) throw new LessonAuthorSessionError('INPUT_INVALID');
+  if (!UUID_PATTERN.test(conversationId)) throw new LessonAuthorSessionError('INPUT_INVALID');
   assertCanManage(owner, await sessionCreator(owner, conversationId));
   const result = await query<{ total_nodes: number | string; applied_nodes: number | string; active: boolean }>(`SELECT
       COUNT(DISTINCT n.id)::int AS total_nodes,
@@ -270,7 +270,7 @@ async function publishSessionDelete(jobId: string): Promise<void> {
  */
 export async function requestLessonAuthorSessionDeletion(owner: LessonAuthorSessionOwner, conversationId: string): Promise<{ job_id: string; replayed: boolean; creator_id: string }> {
   assertOwner(owner);
-  if (!UUID.test(conversationId)) throw new LessonAuthorSessionError('INPUT_INVALID');
+  if (!UUID_PATTERN.test(conversationId)) throw new LessonAuthorSessionError('INPUT_INVALID');
   const result = await withDatabaseTransaction(async tx => {
     const creatorId = await sessionCreator(owner, conversationId, true);
     assertCanManage(owner, creatorId);
@@ -310,7 +310,7 @@ async function claimDeleteJob(jobId: string): Promise<DeleteJobRow | null> {
 }
 
 export async function runLessonAuthorSessionDeletion(jobId: string): Promise<void> {
-  if (!UUID.test(jobId)) throw new Error('Invalid session deletion jobId');
+  if (!UUID_PATTERN.test(jobId)) throw new Error('Invalid session deletion jobId');
   const job = await claimDeleteJob(jobId);
   if (!job) return;
   const heartbeat = setInterval(() => { void query(`UPDATE lesson_author_session_deletion_jobs
@@ -391,7 +391,7 @@ export async function requeueLessonAuthorSessionDeletionJobs(limit = 100): Promi
 /** The person who asked for the deletion follows its status. */
 export async function getLessonAuthorSessionDeletionStatus(owner: LessonAuthorSessionOwner, jobId: string) {
   assertOwner(owner);
-  if (!UUID.test(jobId)) throw new LessonAuthorSessionError('INPUT_INVALID');
+  if (!UUID_PATTERN.test(jobId)) throw new LessonAuthorSessionError('INPUT_INVALID');
   const result = await query(`SELECT id,status,attempts,is_terminal,requested_at,started_at,finished_at,next_attempt_at,last_error,stats
     FROM lesson_author_session_deletion_jobs WHERE id=$1::uuid AND tenant_id=$2::uuid AND requested_by=$3::uuid AND course_id=$4`,
   [jobId, owner.tenantId, owner.userId, owner.courseId]);

@@ -77,12 +77,6 @@ export function sendClientError(req: Request, res: Response, err: unknown, conte
   });
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function isUuid(value: unknown): value is string {
-  return typeof value === 'string' && UUID.test(value);
-}
-
 /** Strict ISO-8601 timestamp (as produced by Date#toISOString or with an offset). */
 export function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== 'string' || value.length > 40) return false;

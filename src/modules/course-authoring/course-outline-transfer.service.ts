@@ -24,6 +24,7 @@ import {
   TENANT_DATA_QUOTA_RECONCILING_MESSAGE,
   TENANT_DATA_QUOTA_RECONCILING_SQLSTATE,
 } from '../tenants/tenant-data-quota.constants.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export type CourseOutlineTransferOperation = 'duplicate' | 'move';
 export type CourseOutlineTransferStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -192,7 +193,7 @@ function normalizeDestinationPath(value: unknown): string[] {
 }
 
 function assertUuid(value: string, label: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+  if (!UUID_PATTERN.test(value)) {
     throw new AppError(`${label} không hợp lệ`, 400);
   }
 }

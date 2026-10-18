@@ -8,10 +8,10 @@ import type { WorkspaceApplyMapping, WorkspaceApplyWrite } from './lesson-author
 import { workspaceAssessmentReviews, workspaceAuthorNotesHash, workspaceAuthorNotesRefreshes, workspaceCourseAuthorNotes,
   type WorkspaceAuthorNotesContext } from './lesson-author-workspace-author-notes.logic.js';
 import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
+import { isUuid } from '../../utils/uuid.js';
 
 type Row = Record<string, any>;
 const HASH = /^[0-9a-f]{64}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** A stored revision's content only when its hash verifies (V1 generation
  * snapshot hash or V2 orchestration hash); otherwise null, never a throw. */
@@ -56,7 +56,7 @@ export async function readWorkspaceAssessmentReviews(tx: GenerationJobSql, input
   const count = (value: unknown): number => typeof value === 'number' ? value
     : typeof value === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(value) ? Number(value) : -1;
   return workspaceAssessmentReviews(rows.map(row => ({
-    obligation_id: String(row.obligation_id), unit_node_id: typeof row.unit_node_id === 'string' && UUID.test(row.unit_node_id) ? row.unit_node_id : null,
+    obligation_id: String(row.obligation_id), unit_node_id: isUuid(row.unit_node_id) ? row.unit_node_id : null,
     unit_path: String(row.unit_path), component_index: count(row.planned_component_index), required_kind: String(row.required_assessment_kind),
     learning_objective_refs: Array.isArray(row.learning_objective_refs) ? row.learning_objective_refs.map(String) : [],
     unresolved_reason: String(row.unresolved_reason), evidence_fact_count: count(row.evidence_fact_count),

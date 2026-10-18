@@ -1,12 +1,11 @@
 import { env } from './env.js';
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+import { RFC_UUID_PATTERN } from '../utils/uuid.js';
 
 function normalizedTenantSet(values: readonly string[], label: string): ReadonlySet<string> {
   const result = new Set<string>();
   for (const raw of values) {
     const value = raw.trim().toLowerCase();
-    if (!UUID.test(value)) throw new Error(`[ENV] ${label} contains an invalid tenant UUID`);
+    if (!RFC_UUID_PATTERN.test(value)) throw new Error(`[ENV] ${label} contains an invalid tenant UUID`);
     result.add(value);
   }
   return result;
@@ -28,7 +27,7 @@ export function createRuntimeTenantFence(allowedValues: readonly string[], denie
     isAllowed(tenantId: string | null | undefined): boolean {
       if (!tenantId) return allowedTenants.size === 0;
       const normalized = tenantId.trim().toLowerCase();
-      if (!UUID.test(normalized)) return false;
+      if (!RFC_UUID_PATTERN.test(normalized)) return false;
       if (deniedTenants.has(normalized)) return false;
       return allowedTenants.size === 0 || allowedTenants.has(normalized);
     },

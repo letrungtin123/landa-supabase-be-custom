@@ -4,7 +4,8 @@
 
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { clientErrorMessage, isUuid, requestUiLocaleOf, sendClientError } from '../../utils/client-error.js';
+import { clientErrorMessage, requestUiLocaleOf, sendClientError } from '../../utils/client-error.js';
+import { isUuid } from '../../utils/uuid.js';
 import {
   createKbSchema, updateKbSchema, createArticleSchema, updateArticleSchema,
   ALLOWED_KB_EXTENSIONS, MAX_KB_FILE_SIZE,

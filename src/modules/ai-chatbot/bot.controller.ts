@@ -5,7 +5,8 @@
 import type { Request, Response } from 'express';
 import { ZodError } from 'zod';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { isUuid, sendClientError } from '../../utils/client-error.js';
+import { sendClientError } from '../../utils/client-error.js';
+import { isUuid } from '../../utils/uuid.js';
 import { createBotSchema, updateBotSchema } from './bot.validator.js';
 import * as botService from './bot.service.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';

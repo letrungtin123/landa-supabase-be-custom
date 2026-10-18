@@ -1,6 +1,7 @@
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { isNormalizedLaunchBrief, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
 import type { OrchestrationV2RunPipeline } from './lesson-author-idm.contract.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 export interface OrchestrationV2AdmissionAuthority {
   workspace_id: string;
@@ -40,7 +41,6 @@ export class OrchestrationV2AdmissionContractError extends Error {
   }
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (): never => { throw new OrchestrationV2AdmissionContractError('ORCHESTRATION_V2_ADMISSION_INVALID'); };
 const integer = (value: number, minimum: number, maximum: number) => Number.isSafeInteger(value)
@@ -51,10 +51,10 @@ export function prepareOrchestrationV2Admission(
   authority: OrchestrationV2AdmissionAuthority,
   config: OrchestrationV2AdmissionConfig,
 ): PreparedOrchestrationV2Admission {
-  if (!authority || !config || !UUID.test(authority.workspace_id) || !UUID.test(authority.tenant_id)
+  if (!authority || !config || !UUID_PATTERN.test(authority.workspace_id) || !UUID_PATTERN.test(authority.tenant_id)
     || !authority.course_id.trim() || authority.course_id.length > 255 || !HASH.test(authority.source_snapshot_hash)
     || !Array.isArray(authority.source_document_ids) || authority.source_document_ids.length < 1
-    || authority.source_document_ids.length > 5 || authority.source_document_ids.some(id => !UUID.test(id))
+    || authority.source_document_ids.length > 5 || authority.source_document_ids.some(id => !UUID_PATTERN.test(id))
     || new Set(authority.source_document_ids).size !== authority.source_document_ids.length
     || !HASH.test(config.runtime_config_hash) || !config.model.trim() || config.model.length > 128
     || !integer(config.source_snapshot_budget_ms, 1, 600_000)

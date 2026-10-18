@@ -164,6 +164,7 @@ import { isKbStorePermissionFailure } from './report-chat-error.logic.js';
 import { withoutAuthorOnlyMetadata } from '../course-authoring/course-author-notes.logic.js';
 import { assertChatCourseAccess } from './chat-course-scope.service.js';
 import { withLaunchBriefIdentity, type LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 // ── Constants ──
 const MAX_CONVERSATIONS_PER_USER = 10;
@@ -219,8 +220,7 @@ const MAX_STORED_LESSON_AUTHOR_PROMPT_CHARS = 12_000;
 const LESSON_AUTHOR_APPLY_IN_PROGRESS_CODE = 'LESSON_AUTHOR_APPLY_IN_PROGRESS';
 
 // ── UUID validation ──
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-function isValidUUID(s: string): boolean { return UUID_REGEX.test(s); }
+function isValidUUID(s: string): boolean { return UUID_PATTERN.test(s); }
 
 function isRetryableLessonAuthorApplyError(error: unknown): boolean {
   return error instanceof AppError && error.code === LESSON_AUTHOR_OUTLINE_BUSY_CODE;

@@ -5,6 +5,7 @@ import { WorkspaceComponentError } from './lesson-author-workspace-component.log
 import { WORKSPACE_AGGREGATE_EDIT, WORKSPACE_MEDIA_EDIT } from './lesson-author-workspace-storyboard.logic.js';
 import { prepareWorkspaceEdit, prepareWorkspaceReset, readWorkspaceContent, workspaceLocale, WorkspaceContractError,
   type WorkspaceNodeSnapshot, type WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
+import { isUuid } from '../../utils/uuid.js';
 
 export type WorkspaceEditCode = 'WORKSPACE_EDIT_FORBIDDEN' | 'WORKSPACE_EDIT_NOT_FOUND'
   | 'WORKSPACE_EDIT_STATE_INVALID' | 'WORKSPACE_EDIT_CONTRACT_INVALID' | 'WORKSPACE_EDIT_VALIDATION_REQUIRED'
@@ -61,7 +62,6 @@ export function workspaceEditChecksAccepted(kind: WorkspaceNodeSnapshot['kind'],
     && acceptance.checks.pedagogy === 'NOT_RUN' && acceptance.checks.registry === 'NOT_APPLICABLE';
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const KINDS = ['course', 'chapter', 'lesson', 'unit', 'component', 'media_brief'];
 function fail(code: WorkspaceEditCode): never { throw new WorkspaceEditError(code); }
@@ -101,7 +101,7 @@ export function createWorkspaceEditRepository(deps: {
   async function execute(targetInput: WorkspaceEditTarget, request: unknown, reset: boolean) {
     const target = freeze({ ...targetInput });
     if (![target.tenantId, target.userId, target.conversationId, target.workspaceId, target.nodeId, target.operationId]
-      .every(value => typeof value === 'string' && UUID.test(value)) || !target.courseId || target.courseId.length > 255) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
+      .every(value => isUuid(value)) || !target.courseId || target.courseId.length > 255) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
     try {
       return await deps.db.transaction(async tx => {
         if (!await deps.canEdit(tx, target)) fail('WORKSPACE_EDIT_FORBIDDEN');
@@ -125,7 +125,7 @@ export function createWorkspaceEditRepository(deps: {
           FOR UPDATE OF w`, [target.workspaceId, target.tenantId, target.courseId, target.conversationId, target.userId]);
         const w = workspaces.rows[0];
         if (!w || workspaces.rows.length !== 1) fail('WORKSPACE_EDIT_NOT_FOUND');
-        if (w.contract_version !== 1 || typeof w.correlation_id !== 'string' || !UUID.test(w.correlation_id)
+        if (w.contract_version !== 1 || !isUuid(w.correlation_id)
           || typeof w.source_snapshot_hash !== 'string' || !HASH.test(w.source_snapshot_hash)) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
         const nodes = await tx.query(`SELECT id,kind,content_state,current_revision,protected_contract,contract_hash
           FROM lesson_author_workspace_nodes WHERE workspace_id=$1 AND id=$2 AND tenant_id=$3 AND course_id=$4 FOR UPDATE`,

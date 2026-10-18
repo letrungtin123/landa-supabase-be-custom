@@ -39,6 +39,7 @@ import {
   beginCoursePublishCandidate,
   finishCoursePublishCandidate,
 } from './course-publish-governance.repository.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 export {
   getLessonAuthorSortableItems,
   orderLessonAuthorComponents,
@@ -1263,9 +1264,8 @@ export async function reorderChildren(
   const parent = await getBlockInfo(parentId, tenantId);
 
   // Validate UUID format — chống SQL injection
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const id of childIds) {
-    if (!uuidRegex.test(id)) throw new AppError('Invalid block ID format', 400);
+    if (!UUID_PATTERN.test(id)) throw new AppError('Invalid block ID format', 400);
   }
 
   // Parameterized VALUES — $1 = parentId, $2/$3 = id/order pairs
@@ -1565,6 +1565,8 @@ function decodeAssetCursor(cursor?: string | null): { created_at: string; id: st
       typeof parsed.created_at !== 'string' ||
       Number.isNaN(Date.parse(parsed.created_at)) ||
       typeof parsed.id !== 'string' ||
+      // Not UUID_PATTERN: four groups only (8-4-4-12), so no real asset id matches and
+      // every cursor is refused. Kept as is; switching to isUuid changes behaviour.
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsed.id)
     ) {
       throw new AppError('invalid cursor payload', 400);
@@ -2349,7 +2351,7 @@ async function applyLessonAuthorOperationPlanWithClient(
   input: ApplyLessonAuthorProposalInput,
   plan: LessonAuthorOperationPlan,
 ): Promise<ApplyLessonAuthorProposalResult> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+  if (!UUID_PATTERN.test(plan.target_block_id)) {
     throw new AppError('Target block không hợp lệ', 400);
   }
 
@@ -2533,7 +2535,7 @@ async function assertLessonAuthorOperationTargetFreshWithClient(
   input: ApplyLessonAuthorProposalInput,
   plan: LessonAuthorOperationPlan,
 ): Promise<void> {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(plan.target_block_id)) {
+  if (!UUID_PATTERN.test(plan.target_block_id)) {
     throw new AppError('Target block không hợp lệ', 400);
   }
   const result = await client.query<{

@@ -12,10 +12,10 @@ import {
   type CoursePublishEligibilityBlocker,
   type CoursePublishPolicy,
 } from './course-publish-governance.logic.js';
+import { UUID_PATTERN } from '../../utils/uuid.js';
 
 type Sql = Pick<typeof import('../../config/database.js'), 'query'>['query'];
 type TransactionRunner = <T>(work: () => Promise<T>) => Promise<T>;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const databaseTransaction: TransactionRunner = (work) => withDatabaseTransaction(() => work());
 
 export interface CoursePublishPolicyRow {
@@ -128,7 +128,7 @@ export function mapCoursePublishGovernanceError(error: unknown): CoursePublishGo
 }
 
 function requireContext(subject: AuthUser): { actorId: string; tenantId: string } {
-  if (!UUID.test(subject.id) || !subject.tenantId || !UUID.test(subject.tenantId)
+  if (!UUID_PATTERN.test(subject.id) || !subject.tenantId || !UUID_PATTERN.test(subject.tenantId)
     || subject.sessionMode !== 'normal') {
     throw new CoursePublishGovernanceError('COURSE_PUBLISH_FORBIDDEN', 403, messages.COURSE_PUBLISH_FORBIDDEN!.message);
   }
@@ -273,7 +273,7 @@ export async function createCoursePublishCandidate(
   transaction: TransactionRunner = databaseTransaction,
 ): Promise<CoursePublishCandidateRow> {
   const { actorId, tenantId } = requireContext(subject);
-  if (!UUID.test(input.targetBlockId) || !UUID.test(input.idempotencyKey)) {
+  if (!UUID_PATTERN.test(input.targetBlockId) || !UUID_PATTERN.test(input.idempotencyKey)) {
     throw new CoursePublishGovernanceError('COURSE_PUBLISH_CANDIDATE_INVALID', 400, 'Thông tin bản duyệt không hợp lệ.');
   }
   const ttlMinutes = input.ttlMinutes ?? 1_440;
@@ -426,7 +426,7 @@ export async function getCoursePublishCandidateEligibility(
   sql: Sql = query,
 ): Promise<CoursePublishCandidateEligibility> {
   const { tenantId } = requireContext(subject);
-  if (!UUID.test(candidateId)) {
+  if (!UUID_PATTERN.test(candidateId)) {
     throw new CoursePublishGovernanceError('COURSE_PUBLISH_CANDIDATE_INVALID', 400,
       messages.COURSE_PUBLISH_CANDIDATE_INVALID!.message);
   }
@@ -562,7 +562,7 @@ export async function beginCoursePublishCandidate(
   input: { candidateId: string; tenantId: string; courseId: string; targetBlockId: string; actorId: string },
   sql: Sql = query,
 ): Promise<{ already_published: boolean; policy: CoursePublishPolicy }> {
-  if (![input.candidateId, input.tenantId, input.targetBlockId, input.actorId].every(value => UUID.test(value))) {
+  if (![input.candidateId, input.tenantId, input.targetBlockId, input.actorId].every(value => UUID_PATTERN.test(value))) {
     throw new CoursePublishGovernanceError('COURSE_PUBLISH_CANDIDATE_INVALID', 400,
       messages.COURSE_PUBLISH_CANDIDATE_INVALID!.message);
   }
