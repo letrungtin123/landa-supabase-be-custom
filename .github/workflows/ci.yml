@@ -1,0 +1,66 @@
+# Typecheck, lint, tests and build of landa-backend on every push and pull
+# request to main and refactor branches. No secrets and no services: every
+# service URL points at a closed port, and the values env.ts requires are
+# placeholders. Tests that need the sibling checkouts (../supabase/manual_sql,
+# ../landa-ai-rag/.venv-dev) skip with their reason; database suites
+# (npm run test:integration) do not run here.
+name: CI
+
+on:
+  push:
+    branches: [main, 'refactor/**']
+  pull_request:
+    branches: [main, 'refactor/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci
+      REDIS_URL: redis://127.0.0.1:1
+      RABBITMQ_URL: amqp://ci:ci@127.0.0.1:1
+      SUPABASE_URL: http://127.0.0.1:1
+      AI_RAG_SERVICE_URL: http://127.0.0.1:1
+      SUPABASE_SERVICE_KEY: ci-placeholder-not-a-key
+      JWT_SECRET: ci-placeholder-not-a-secret
+      CORS_ORIGIN: http://localhost:5274
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Node version prod 226 runs.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - run: npm ci
+
+      # env.ts exits without a .env file; the job env above wins over its values.
+      - name: .env from .env.example
+        run: cp .env.example .env
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format (allowlisted files)
+        run: npm run format:check
+
+      - name: Tests (no database)
+        run: npm test
+
+      - name: Build
+        run: npm run build
