@@ -1,4 +1,5 @@
 import { pool } from '../config/database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from '../config/database-headroom.js';
 import { deleteFile } from '../config/storage.js';
 import {
   claimNewsAssetCleanupBatch,
@@ -44,6 +45,7 @@ async function runCycle(): Promise<number> {
 }
 
 async function bootstrap(): Promise<void> {
+  void logDatabaseConnectionHeadroom('news-assets-cleanup-worker', ownDirectConnectionMax({ readsReports: false }));
   while (!stopping) {
     try {
       const claimed = await runCycle();

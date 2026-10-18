@@ -31,3 +31,25 @@ test('a session ended by the server while a client is checked out is logged, nev
   attachClientErrorLogger(other);
   assert.doesNotThrow(() => other.emit('error', new Error('server closed the connection unexpectedly')));
 });
+
+// P3: pools keep no idle connection, and without DATABASE_POOLER_URL every
+// client (session-bound ones included) is a main-pool client, as before.
+test('pooled connections are closed when idle and none is kept open', () => {
+  const options = pool.options as unknown as Record<string, unknown>;
+  assert.equal(options.min, 0);
+  assert.equal(options.idleTimeoutMillis, env.DB_POOL_IDLE_TIMEOUT_MS);
+});
+
+test('without DATABASE_POOLER_URL session clients are main-pool clients on DATABASE_URL', async (t) => {
+  if (env.DATABASE_POOLER_URL) {
+    t.skip('DATABASE_POOLER_URL is set in this environment');
+    return;
+  }
+  const { getSessionClient, isDatabasePoolerEnabled, pooledDatabaseUrl } = await import('./database.js');
+  assert.equal(isDatabasePoolerEnabled(), false);
+  assert.equal(pooledDatabaseUrl(), env.DATABASE_URL);
+  assert.equal((pool.options as { connectionString?: string }).connectionString, env.DATABASE_URL);
+  const marker = { release() {} };
+  t.mock.method(pool, 'connect', async () => marker);
+  assert.equal(await getSessionClient(), marker);
+});

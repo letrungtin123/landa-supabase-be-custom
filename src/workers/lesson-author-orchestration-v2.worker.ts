@@ -1,4 +1,5 @@
 import { pool, query } from '../config/database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from '../config/database-headroom.js';
 import { env } from '../config/env.js';
 import {
   assertQueue,
@@ -57,6 +58,7 @@ async function bootstrap(): Promise<void> {
     console.log('[LessonAuthorOrchestrationV2] Disabled; no queue or database runtime was started.');
     return;
   }
+  void logDatabaseConnectionHeadroom(`lesson-author-orchestration-v2-${config.role}`, ownDirectConnectionMax({ readsReports: false }));
   const schema = await verifyOrchestrationV2Schema({ query });
   orchestrationV2RuntimeReporter({ event: 'schema_verified', ...schema, role: config.role });
   await connectRabbitMQ(env.RABBITMQ_URL);

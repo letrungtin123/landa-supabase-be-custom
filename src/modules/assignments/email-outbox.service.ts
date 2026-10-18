@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { getClient, query } from '../../config/database.js';
+import { getClient, getSessionClient, query } from '../../config/database.js';
 import { env } from '../../config/env.js';
 import { consume, publish, QUEUES } from '../../config/rabbitmq/index.js';
 import { decryptSecret } from '../../utils/secret-crypto.js';
@@ -2377,7 +2377,8 @@ async function cleanupSentEmailOutboxBatch(): Promise<number> {
 }
 
 async function withEmailOutboxRetentionLock(fn: () => Promise<void>): Promise<boolean> {
-  const client = await getClient();
+  // Session advisory lock: a direct session (getSessionClient), never a pooled one.
+  const client = await getSessionClient();
   try {
     const lock = await client.query<{ locked: boolean }>(
       'SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS locked',

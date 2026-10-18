@@ -8,7 +8,8 @@
 
 import { randomUUID } from 'crypto';
 import type { PoolClient } from 'pg';
-import { getClient, pool } from '../config/database.js';
+import { endSessionPool, getSessionClient, pool } from '../config/database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from '../config/database-headroom.js';
 import { env } from '../config/env.js';
 import {
   assertTenantDataQuotaReconciliationOptions,
@@ -202,7 +203,8 @@ function stopFoldTimer(): void {
 }
 
 async function tryAcquireWorkerLock(): Promise<boolean> {
-  const client = await getClient();
+  // The leader's session advisory lock lives as long as this session.
+  const client = await getSessionClient();
   try {
     const result = await client.query<{ locked: boolean }>(
       `SELECT pg_try_advisory_lock(hashtextextended($1::text, 20260907)) AS locked`,
@@ -293,6 +295,7 @@ async function bootstrap(): Promise<void> {
     console.log('[TenantDataQuotaWorker] Disabled by TENANT_DATA_QUOTA_WORKER_ENABLED=false.');
     return;
   }
+  void logDatabaseConnectionHeadroom('tenant-data-quota-worker', ownDirectConnectionMax({ readsReports: false }));
 
   while (!stopping) {
     const acquired = await tryAcquireWorkerLock();
@@ -335,12 +338,14 @@ process.once('SIGTERM', () => {
 bootstrap().then(async () => {
   stopHeartbeatTimer();
   stopFoldTimer();
+  await endSessionPool();
   await pool.end();
 }).catch(async (error) => {
   console.error('[TenantDataQuotaWorker] Fatal error:', error);
   stopHeartbeatTimer();
   stopFoldTimer();
   await releaseWorkerLock();
+  await endSessionPool().catch(() => undefined);
   await pool.end();
   process.exit(1);
 });

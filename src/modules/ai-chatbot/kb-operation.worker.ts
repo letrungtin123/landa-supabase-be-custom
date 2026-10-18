@@ -5,7 +5,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { env } from '../../config/env.js';
-import { getClient, query } from '../../config/database.js';
+import { getSessionClient, query } from '../../config/database.js';
 import { deleteFile, downloadToTempFile } from '../../config/storage.js';
 import { deleteFromStore, ensureStore, getGeminiApiKeyFingerprint, getGeminiClient, uploadToStore } from './gemini.service.js';
 import { getTenantAiRuntimeSettings, getGoogleAiStudioApiKey } from './ai-settings.service.js';
@@ -263,7 +263,7 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
   // Keep a session-level per-KB lock across remote calls. Document jobs share
   // it; a whole-KB delete is exclusive. This prevents a late Gemini upload
   // from recreating remote state after a delete worker has started.
-  let lockClient: Awaited<ReturnType<typeof getClient>> | null = null;
+  let lockClient: Awaited<ReturnType<typeof getSessionClient>> | null = null;
   // The lock connection idles for minutes during the remote call. If it
   // breaks, PostgreSQL has already dropped the session lock; the connection
   // must then be discarded, never returned to the pool.
@@ -280,7 +280,8 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
     : 'pg_advisory_unlock_shared';
 
   try {
-    lockClient = await getClient();
+    // Session advisory lock held for the whole operation: a direct session.
+    lockClient = await getSessionClient();
     lockClient.on('error', onLockConnectionError);
     await lockClient.query(`SELECT ${lockFunction}(hashtextextended($1, 20260909))`, [`kb-operation:${job.kb_id}`]);
     await assertLease(job);

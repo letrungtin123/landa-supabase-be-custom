@@ -19,23 +19,46 @@ const { Pool } = pg;
  */
 const transactionClientStorage = new AsyncLocalStorage<pg.PoolClient>();
 
+/** statement_timeout of every pooled connection (main, session and reports pools). */
+export const POOL_STATEMENT_TIMEOUT_MS = 30_000;
+
+/** Whether the ordinary pools connect through DATABASE_POOLER_URL (opt-in). */
+export function isDatabasePoolerEnabled(): boolean {
+  return env.DATABASE_POOLER_URL !== '';
+}
+
+/**
+ * Connection string of the ordinary pools (main and reports): the pooler
+ * when DATABASE_POOLER_URL is set, else DATABASE_URL. Session-bound clients
+ * (getSessionClient) always use DATABASE_URL.
+ */
+export function pooledDatabaseUrl(): string {
+  return isDatabasePoolerEnabled() ? env.DATABASE_POOLER_URL : env.DATABASE_URL;
+}
+
+function poolOptions(connectionString: string): pg.PoolConfig {
+  return {
+    connectionString,
+    max: env.DB_POOL_MAX,           // Mặc định 20 connections đồng thời
+    // No idle connection is kept: one left idle DB_POOL_IDLE_TIMEOUT_MS (10 s) is closed.
+    min: 0,
+    idleTimeoutMillis: env.DB_POOL_IDLE_TIMEOUT_MS,
+    connectionTimeoutMillis: 5_000, // Timeout kết nối 5s
+    statement_timeout: POOL_STATEMENT_TIMEOUT_MS, // Timeout query 30s — tránh long-running
+    // A transaction left open and idle is ended by PostgreSQL instead of
+    // holding its row/advisory locks (and a pool slot) forever.
+    ...(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS > 0
+      ? { idle_in_transaction_session_timeout: env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS }
+      : {}),
+    ...(env.DB_LOCK_TIMEOUT_MS > 0 ? { lock_timeout: env.DB_LOCK_TIMEOUT_MS } : {}),
+  };
+}
+
 /**
  * Connection pool — chia sẻ connections cho toàn bộ app.
  * Pool size 20 phù hợp cho server trung bình, tăng nếu cần (DB_POOL_MAX).
  */
-export const pool = new Pool({
-  connectionString: env.DATABASE_URL,
-  max: env.DB_POOL_MAX,           // Mặc định 20 connections đồng thời
-  idleTimeoutMillis: 30_000,      // Đóng connection idle sau 30s
-  connectionTimeoutMillis: 5_000, // Timeout kết nối 5s
-  statement_timeout: 30_000,      // Timeout query 30s — tránh long-running
-  // A transaction left open and idle is ended by PostgreSQL instead of
-  // holding its row/advisory locks (and a pool slot) forever.
-  ...(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS > 0
-    ? { idle_in_transaction_session_timeout: env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS }
-    : {}),
-  ...(env.DB_LOCK_TIMEOUT_MS > 0 ? { lock_timeout: env.DB_LOCK_TIMEOUT_MS } : {}),
-});
+export const pool = new Pool(poolOptions(pooledDatabaseUrl()));
 
 // Log connection errors (không crash app)
 pool.on('error', function handlePoolError(err) {
@@ -145,6 +168,40 @@ export async function withDatabaseTransaction<T>(
  */
 export async function getClient(): Promise<pg.PoolClient> {
   return pool.connect();
+}
+
+// Session-bound clients: LISTEN (cluster bus, SSE hubs) and session advisory
+// locks need one server session for as long as they hold the client, which a
+// transaction-mode pooler does not give. Without DATABASE_POOLER_URL they are
+// ordinary main-pool clients, as before; with it they come from a pool of the
+// same size on DATABASE_URL, created on first use.
+let sessionPool: pg.Pool | null = null;
+
+function getSessionPool(): pg.Pool {
+  if (!isDatabasePoolerEnabled()) return pool;
+  if (sessionPool) return sessionPool;
+  const created = new Pool(poolOptions(env.DATABASE_URL));
+  created.on('error', function handleSessionPoolError(err) {
+    console.error('[DB] Session pool error:', err.message);
+  });
+  created.on('connect', attachClientErrorLogger);
+  sessionPool = created;
+  return created;
+}
+
+/**
+ * A client on its own server session (LISTEN, session advisory locks),
+ * always on DATABASE_URL. PHẢI gọi client.release() sau khi xong.
+ */
+export async function getSessionClient(): Promise<pg.PoolClient> {
+  return getSessionPool().connect();
+}
+
+/** Graceful shutdown of the session pool (a no-op when it is the main pool or was never opened). */
+export async function endSessionPool(): Promise<void> {
+  const current = sessionPool;
+  sessionPool = null;
+  if (current) await current.end();
 }
 
 /**

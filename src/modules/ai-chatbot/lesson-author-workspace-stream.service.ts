@@ -1,4 +1,4 @@
-import { getClient } from '../../config/database.js';
+import { getSessionClient } from '../../config/database.js';
 import { listenRetryDelayMs } from './lesson-author-listen-retry.logic.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -13,12 +13,12 @@ type Listener = (hint: WorkspaceCommitHint | null) => void;
  * notifies streams to reconnect/replay rather than pretending the provider
  * failed or running a timer per workspace.
  */
-export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getClient; now?: () => number } = {}) {
-  const acquire = dependencies.getClient ?? getClient;
+export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getSessionClient; now?: () => number } = {}) {
+  const acquire = dependencies.getClient ?? getSessionClient; // LISTEN: its own server session
   const now = dependencies.now ?? (() => Date.now());
   const listeners = new Map<string, Set<Listener>>();
   // The pool connection that holds LISTEN; release() hands it back exactly once.
-  let connection: { client: Awaited<ReturnType<typeof getClient>>; release: (error?: Error) => void } | null = null;
+  let connection: { client: Awaited<ReturnType<typeof getSessionClient>>; release: (error?: Error) => void } | null = null;
   let connecting: Promise<void> | null = null;
   let unavailable = false;
   let consecutiveFailures = 0;
@@ -52,7 +52,7 @@ export function createWorkspaceCommitHub(dependencies: { getClient?: typeof getC
     // After a failure the next LISTEN attempt waits (the stream answers 503 and the browser retries).
     if (now() < retryAt) throw new Error('WORKSPACE_STREAM_LISTEN_RETRY_PENDING');
     connecting = (async () => {
-      let next: Awaited<ReturnType<typeof getClient>>;
+      let next: Awaited<ReturnType<typeof getSessionClient>>;
       try { next = await acquire(); } catch (error) { noteFailure(); throw error; }
       let released = false;
       const release = (error?: Error) => {

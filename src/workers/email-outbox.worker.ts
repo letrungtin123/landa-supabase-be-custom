@@ -1,4 +1,5 @@
-import { pool } from '../config/database.js';
+import { endSessionPool, pool } from '../config/database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from '../config/database-headroom.js';
 import { env } from '../config/env.js';
 import { assertQueue, closeRabbitMQ, connectRabbitMQ, QUEUES } from '../config/rabbitmq/index.js';
 import { closeRedis, connectRedis } from '../config/redis.js';
@@ -10,6 +11,7 @@ import {
 } from '../modules/assignments/email-outbox.service.js';
 
 async function bootstrap(): Promise<void> {
+  void logDatabaseConnectionHeadroom('email-outbox-worker', ownDirectConnectionMax({ readsReports: false }));
   await connectRedis();
   await connectRabbitMQ(env.RABBITMQ_URL);
   await assertQueue(QUEUES.EMAIL_OUTBOX);
@@ -24,6 +26,7 @@ async function shutdown(signal: string): Promise<void> {
   stopEmailOutboxWorker();
   await closeRedis();
   await closeRabbitMQ();
+  await endSessionPool();
   await pool.end();
   process.exit(0);
 }

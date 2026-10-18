@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { randomUUID } from 'node:crypto';
-import { afterCommit, getClient, pool } from './database.js';
+import { afterCommit, getSessionClient, pool } from './database.js';
 import { processRolePlan } from './process-role.js';
 import { listenRetryDelayMs } from '../modules/ai-chatbot/lesson-author-listen-retry.logic.js';
 
@@ -281,7 +281,8 @@ export function createClusterBus(options: ClusterBusOptions): ClusterBus {
 /** The bus of this process: enabled whenever other processes share the caches. */
 export const clusterBus: ClusterBus = createClusterBus({
   enabled: processRolePlan.sharesStateAcrossProcesses,
-  acquire: () => getClient(),
+  // LISTEN needs its own server session (never a transaction-mode pooler).
+  acquire: () => getSessionClient(),
   notify: (channel, payload) => pool.query('SELECT pg_notify($1, $2)', [channel, payload]),
   afterCommit,
 });

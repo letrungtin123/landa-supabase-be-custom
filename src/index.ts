@@ -5,8 +5,9 @@ import { createGracefulShutdown } from './config/graceful-shutdown.js';
 import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js';
 import { cleanupExpiredTokens } from './modules/auth/auth.service.js';
 import { ensureBucket } from './config/storage.js';
-import { getClient, pool, query } from './config/database.js';
+import { endSessionPool, getSessionClient, pool, query } from './config/database.js';
 import { endReportsPool } from './config/reports-database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from './config/database-headroom.js';
 import { closeRedis, connectRedis, getRedisClient } from './config/redis.js';
 import { connectRabbitMQ, assertQueue, cancelConsumers, closeRabbitMQ, QUEUES } from './config/rabbitmq/index.js';
 import { processRolePlan, signalProcessReady } from './config/process-role.js';
@@ -102,7 +103,8 @@ async function cleanupCompletedDeletionJobs(): Promise<number> {
  * Chạy 1 lần khi start + mỗi 24 giờ.
  */
 async function cleanupOldAuditLogs(): Promise<number> {
-  const client = await getClient();
+  // Session advisory lock: a direct session (getSessionClient), never a pooled one.
+  const client = await getSessionClient();
   const lockKey = 'audit_logs:retention-cleanup';
   let lockHeld = false;
   let totalDeleted = 0;
@@ -317,6 +319,8 @@ function listen(): Promise<void> {
 async function bootstrap() {
   console.log('[RuntimeTenantFence]', JSON.stringify(runtimeTenantDiagnostics()));
   console.log(`[Process] role=${processRolePlan.role} api_instances=${processRolePlan.apiInstances}`);
+  // Once per process, in the background: a warning when its pools may not fit under max_connections.
+  void logDatabaseConnectionHeadroom(`${processRolePlan.role}:${process.pid}`, ownDirectConnectionMax({ readsReports: processRolePlan.servesHttp }));
   await startProcess(processRolePlan, {
     // MUST succeed — the process exits otherwise.
     rabbitmq: ({ consumers }) => initRabbitMQ(consumers),
@@ -378,7 +382,7 @@ const gracefulShutdown = createGracefulShutdown({
     redis: { name: 'Redis', run: closeRedis },
     // Created on first report read; a no-op in a process that never made it.
     reportsPool: { name: 'reports database pool', run: endReportsPool },
-    pool: { name: 'database pool', run: () => pool.end() },
+    pool: { name: 'database pool', run: async () => { await endSessionPool(); await pool.end(); } },
   }),
   exit: (code) => process.exit(code),
 });

@@ -2,6 +2,7 @@
 // job with SKIP LOCKED, so a future second process cannot process it twice.
 
 import { pool } from '../config/database.js';
+import { logDatabaseConnectionHeadroom, ownDirectConnectionMax } from '../config/database-headroom.js';
 import { env } from '../config/env.js';
 import {
   isCourseOutlineTransferSchemaReady,
@@ -31,6 +32,7 @@ async function run(): Promise<void> {
   }
 
   console.log(`[CourseOutlineTransferWorker] Started. environment=${env.NODE_ENV}`);
+  void logDatabaseConnectionHeadroom('course-outline-transfer-worker', ownDirectConnectionMax({ readsReports: false }));
   while (!stopping) {
     if (!await isCourseOutlineTransferSchemaReady()) {
       if (!schemaWarningShown) {

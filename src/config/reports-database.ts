@@ -16,7 +16,7 @@
 import pg from 'pg';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from './env.js';
-import { attachClientErrorLogger, pool as mainPool } from './database.js';
+import { attachClientErrorLogger, pool as mainPool, pooledDatabaseUrl } from './database.js';
 
 const { Pool } = pg;
 
@@ -25,9 +25,11 @@ export const REPORTS_STATEMENT_TIMEOUT_MS = 30_000;
 
 export function reportsPoolOptions(): pg.PoolConfig {
   return {
-    connectionString: env.DATABASE_URL,
+    // The pooler when DATABASE_POOLER_URL is set: a snapshot is one transaction.
+    connectionString: pooledDatabaseUrl(),
     max: env.REPORTS_DB_POOL_MAX,
-    idleTimeoutMillis: 30_000,
+    min: 0,
+    idleTimeoutMillis: env.DB_POOL_IDLE_TIMEOUT_MS,
     connectionTimeoutMillis: 5_000,
     statement_timeout: REPORTS_STATEMENT_TIMEOUT_MS,
     ...(env.DB_IDLE_IN_TRANSACTION_TIMEOUT_MS > 0
