@@ -35,6 +35,7 @@
     "test:client-errors": "tsx --test --test-force-exit src/utils/client-error.test.ts src/modules/ai-chatbot/chatbot-client-errors.test.ts",
     "test:learner-answers": "tsx --test --test-force-exit src/modules/learner/learner-answer-key.test.ts src/modules/learner/learner-popup-scope.test.ts",
     "test:platform": "tsx --test --test-force-exit src/config/redis.test.ts src/config/cache.test.ts src/config/database.test.ts src/config/graceful-shutdown.test.ts src/middleware/body-limits.test.ts src/modules/storage/storage-proxy.test.ts src/modules/assignments/assignment-submission-upload.test.ts",
+    "test:platform-2": "tsx --test --test-force-exit src/modules/ai-chatbot/gemini-store.test.ts",
     "test:learner-perf": "tsx --test --test-force-exit src/config/database-after-commit.test.ts src/modules/learner/learner-completion.test.ts src/modules/learner/learner-course-blocks.test.ts src/modules/learner/learner-notifications.test.ts src/modules/badges/badge-overview.test.ts",
     "test:auth-security": "tsx --test --test-force-exit src/middleware/rate-limit-key.test.ts src/middleware/rate-limit-store.test.ts src/middleware/auth-rate-limit.test.ts src/modules/auth/login-enumeration.test.ts src/modules/auth/auth-audit-events.test.ts",
     "test:tenant-isolation": "tsx --test --test-force-exit src/config/storage-tenant-path.test.ts src/modules/course-authoring/course-asset-tenant.test.ts src/modules/groups/groups-tenant.test.ts src/modules/ai-chatbot/chat-course-scope.test.ts",

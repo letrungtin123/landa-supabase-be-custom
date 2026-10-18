@@ -461,6 +461,9 @@ export const env = {
   GEMINI_CHAT_MODEL: process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_LESSON_AUTHOR_MODEL: process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
   GEMINI_TEMP_DIR: process.env.GEMINI_TEMP_DIR?.trim() || './tmp/gemini',
+  // Creating a KB's Gemini File Search store gives up after this long (no
+  // database transaction or connection is held while it runs).
+  GEMINI_STORE_CREATE_TIMEOUT_MS: optionalBoundedInt('GEMINI_STORE_CREATE_TIMEOUT_MS', 60_000, 5_000, 600_000),
 
   /** Kiểm tra môi trường production */
   get isProduction(): boolean {
