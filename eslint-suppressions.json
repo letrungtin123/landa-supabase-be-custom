@@ -1,0 +1,1028 @@
+{
+  "src/app.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/config/database.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/config/graceful-shutdown.test.ts": {
+    "@typescript-eslint/no-floating-promises": {
+      "count": 1
+    }
+  },
+  "src/config/rabbitmq/connection.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/config/rabbitmq/consumer.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 5
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/config/reports-database.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 2
+    },
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/config/storage.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/index.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 4
+    }
+  },
+  "src/middleware/authenticate.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    }
+  },
+  "src/middleware/authorize.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/middleware/rate-limit-store.ts": {
+    "@typescript-eslint/no-floating-promises": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/ai-chatbot.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 139
+    }
+  },
+  "src/modules/ai-chatbot/ai-metered-call.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 8
+    }
+  },
+  "src/modules/ai-chatbot/ai-pricing.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/chat-admission.controller.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat-course-scope.service.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat.controller.ts": {
+    "@typescript-eslint/no-floating-promises": {
+      "count": 1
+    },
+    "prefer-const": {
+      "count": 9
+    }
+  },
+  "src/modules/ai-chatbot/chat.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 33
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 5
+    }
+  },
+  "src/modules/ai-chatbot/delete.worker.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/gemini.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 14
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/filters/gibberish.filter.ts": {
+    "no-control-regex": {
+      "count": 1
+    },
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/filters/language.filter.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    },
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/filters/length.filter.ts": {
+    "no-misleading-character-class": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/filters/repeat.filter.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/types/filter.types.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/input-filter/core/utils/normalize.ts": {
+    "no-misleading-character-class": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb-local-source-content.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb-upload-disk.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/kb.validator.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-chapter-checkpoint-schema.test.ts": {
+    "no-useless-escape": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-chapter-cross-language.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 6
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-chapter-runner.logic.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-component-registry.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 10
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-component-registry.logic.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    },
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-diagram-layout.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-generation-admission.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-generation-status.controller.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-acceptance.cross-language.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-architecture.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-chain.fixture.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-intent.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-scope-view.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm-workspace.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm.contract.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-idm.fixture.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-launch-brief.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-accounting.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-admission-http.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-admission.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-apply.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-deployment.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-idm-execution.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-inventory.logic.ts": {
+    "@typescript-eslint/no-empty-object-type": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-launch.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-provider-stop.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-rag-contract.logic.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-orchestration-v2-rag-contract.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-pedagogical-validator.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-session-access.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-session.service.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-transcription.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-transcription.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-accounting.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-accounting.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-admission.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/only-throw-error": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-apply.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-apply.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 15
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-apply.repository.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    },
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-author-notes.repository.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-chapter-validation.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-chapter-validation.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 9
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-component.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 37
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-component.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 8
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    },
+    "no-control-regex": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-content.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-edit.controller.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-edit.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-edit.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/only-throw-error": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-inventory.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-launch.controller.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-launch.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-problem.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-read.controller.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-read.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-read.repository.ts": {
+    "no-useless-escape": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-runtime.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-storyboard.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-stream.controller.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-v2-launch.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/lesson-author-workspace-work-item.repository.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/only-throw-error": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/report-chat-narrative.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/report-chat-turn.service.test.ts": {
+    "@typescript-eslint/only-throw-error": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/report-chat.service.ts": {
+    "@typescript-eslint/only-throw-error": {
+      "count": 6
+    }
+  },
+  "src/modules/ai-chatbot/report-date.logic.ts": {
+    "@typescript-eslint/only-throw-error": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/report-pdf-quality.logic.test.ts": {
+    "no-irregular-whitespace": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/restore.worker.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/upload.worker.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/ai-credits/ai-credit.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 16
+    }
+  },
+  "src/modules/assignments/assignment-download-stream.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/assignments/assignment-submission-upload.test.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/assignments/assignments.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/assignments/assignments.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 22
+    }
+  },
+  "src/modules/assignments/assignments.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 8
+    }
+  },
+  "src/modules/assignments/email-outbox.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "no-useless-catch": {
+      "count": 2
+    }
+  },
+  "src/modules/audit-logs/audit-logs.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 6
+    }
+  },
+  "src/modules/auth/auth.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 19
+    }
+  },
+  "src/modules/auth/auth.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/badges/badge-evaluation.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/badges/badges.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 6
+    }
+  },
+  "src/modules/badges/badges.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/branding/branding-permission.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "src/modules/branding/branding.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 9
+    }
+  },
+  "src/modules/branding/branding.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 4
+    },
+    "prefer-const": {
+      "count": 2
+    }
+  },
+  "src/modules/branding/dashboard-content.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 7
+    }
+  },
+  "src/modules/branding/dashboard-content.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/course-authoring/course-asset-reference-tenant.test.ts": {
+    "@typescript-eslint/await-thenable": {
+      "count": 1
+    }
+  },
+  "src/modules/course-authoring/course-author-notes.boundaries.test.ts": {
+    "no-regex-spaces": {
+      "count": 1
+    }
+  },
+  "src/modules/course-authoring/course-authoring.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 24
+    },
+    "no-control-regex": {
+      "count": 2
+    }
+  },
+  "src/modules/course-authoring/course-authoring.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 60
+    }
+  },
+  "src/modules/course-authoring/course-authoring.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 56
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 3
+    }
+  },
+  "src/modules/course-authoring/course-markup-scrubber.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/course-authoring/course-outline-transfer.service.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 3
+    }
+  },
+  "src/modules/course-authoring/course-publish-governance.repository.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/course-authoring/diagram-data.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/course-authoring/lesson-author-components.logic.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
+  "src/modules/course-categories/course-categories.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 2
+    }
+  },
+  "src/modules/course-categories/course-categories.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 18
+    }
+  },
+  "src/modules/course-deletion/course-deletion.worker.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
+  "src/modules/courses/courses.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/courses/courses.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 42
+    }
+  },
+  "src/modules/courses/courses.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 18
+    }
+  },
+  "src/modules/demo-login/demo-login.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/demo-login/demo-login.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 13
+    }
+  },
+  "src/modules/email-templates/email-templates.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 10
+    }
+  },
+  "src/modules/enrollments/enrollments.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/enrollments/enrollments.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 14
+    }
+  },
+  "src/modules/enrollments/enrollments.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/groups/groups.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 10
+    }
+  },
+  "src/modules/groups/groups.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 56
+    }
+  },
+  "src/modules/help-docs/help-docs.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/help-docs/help-docs.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 18
+    }
+  },
+  "src/modules/learner/learner-answer-key.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 6
+    }
+  },
+  "src/modules/learner/learner-block-row.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 11
+    }
+  },
+  "src/modules/learner/learner-notifications.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/learner/learner.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/learner/learner.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 31
+    }
+  },
+  "src/modules/learner/learner.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 44
+    },
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/modules/learner/progress-calculation.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/library/library.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/library/library.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 25
+    }
+  },
+  "src/modules/library/library.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/modules/modules.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 6
+    }
+  },
+  "src/modules/news/news-remote-image.logic.ts": {
+    "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/news/news.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 33
+    }
+  },
+  "src/modules/notifications/notifications.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 8
+    }
+  },
+  "src/modules/permissions/permissions.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 13
+    }
+  },
+  "src/modules/permissions/permissions.service.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/prompt-templates/prompt-templates.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 9
+    }
+  },
+  "src/modules/reports/report-access.service.ts": {
+    "@typescript-eslint/only-throw-error": {
+      "count": 8
+    }
+  },
+  "src/modules/reports/reports-request-errors.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/reports/reports.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 32
+    }
+  },
+  "src/modules/reports/reports.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 11
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/sso/sso.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 7
+    }
+  },
+  "src/modules/sso/sso.service.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/storage/storage.routes.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 1
+    }
+  },
+  "src/modules/tenant-badges/tenant-badges.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 8
+    }
+  },
+  "src/modules/tenant-badges/tenant-badges.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/tenants/tenant-course-components.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/tenants/tenants.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/tenants/tenants.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 26
+    }
+  },
+  "src/modules/tenants/tenants.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/users/users-authority.service.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/users/users.controller.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
+    }
+  },
+  "src/modules/users/users.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 25
+    }
+  },
+  "src/modules/users/users.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
+  "src/modules/welcome-init/welcome-init.routes.ts": {
+    "@typescript-eslint/no-misused-promises": {
+      "count": 3
+    }
+  },
+  "src/scripts/transfer-help-docs-between-supabase.ts": {
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/scripts/verify-audit-event-usage.ts": {
+    "no-useless-escape": {
+      "count": 2
+    }
+  },
+  "src/scripts/verify-tenant-data-quota.ts": {
+    "@typescript-eslint/no-unused-expressions": {
+      "count": 2
+    }
+  },
+  "src/utils/smtp-client.ts": {
+    "no-control-regex": {
+      "count": 2
+    }
+  }
+}

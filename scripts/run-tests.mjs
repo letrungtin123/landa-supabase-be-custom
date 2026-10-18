@@ -87,7 +87,9 @@ async function readSuites() {
 
 function checkEnvironment() {
   const nodeEnv = process.env.NODE_ENV?.trim() || 'test';
-  if (nodeEnv === 'production') fail('NODE_ENV=production would load .env.production; run the tests with NODE_ENV=test.');
+  if (nodeEnv === 'production') {
+    fail('NODE_ENV=production would load .env.production; run the tests with NODE_ENV=test.');
+  }
   // env.ts loads .env.development.local over everything else when NODE_ENV is not production.
   const localOverrides = path.join(root, '.env.development.local');
   if (existsSync(localOverrides)) {
@@ -128,7 +130,13 @@ function runSuite(name, env) {
       for (const match of output.matchAll(/^(?:ℹ|#) (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$/gm)) {
         counts[match[1]] = (counts[match[1]] ?? 0) + Number(match[2]);
       }
-      resolve({ name, ok: code === 0 && !signal, code: signal ?? code, counts, seconds: (Date.now() - started) / 1000 });
+      resolve({
+        name,
+        ok: code === 0 && !signal,
+        code: signal ?? code,
+        counts,
+        seconds: (Date.now() - started) / 1000,
+      });
     });
   });
 }
@@ -185,6 +193,10 @@ for (const name of selected) {
   results.push(await runSuite(name, env));
 }
 printSummary(results);
-if (orphans.length > 0) console.error(`[run-tests] FAIL: ${orphans.length} test files belong to no test:* script (see above).`);
-if (missing.length > 0) console.error(`[run-tests] FAIL: ${missing.length} listed test files do not exist (see above).`);
+if (orphans.length > 0) {
+  console.error(`[run-tests] FAIL: ${orphans.length} test files belong to no test:* script (see above).`);
+}
+if (missing.length > 0) {
+  console.error(`[run-tests] FAIL: ${missing.length} listed test files do not exist (see above).`);
+}
 process.exitCode = results.every(result => result.ok) && orphans.length === 0 && missing.length === 0 ? 0 : 1;

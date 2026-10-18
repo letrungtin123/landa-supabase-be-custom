@@ -1,0 +1,27 @@
+# Prettier (npm run format / format:check) covers only the paths re-included
+# below: files written after Prettier was added (2026-10-18). The rest of the
+# code base predates it and is not reformatted in one go.
+#
+# To widen it, one directory per commit and with no other change in it:
+#   npx prettier --write src/modules/news
+# then re-include the directory here, re-including each parent level first:
+#   !/src/modules/
+#   /src/modules/*
+#   !/src/modules/news/
+# Keep ecosystem.production-no-ai.config.cjs out: it is byte for byte the
+# file prod 226 runs.
+/*
+!/.github/
+!/.prettierrc.json
+!/eslint.config.mjs
+!/scripts/
+/scripts/*
+!/scripts/run-tests.mjs
+!/scripts/lesson-author-orchestration-v2-test-files.mjs
+!/scripts/test-lesson-author-orchestration-v2.mjs
+!/src/
+/src/*
+!/src/test-support/
+!/src/config/
+/src/config/*
+!/src/config/pm2-ecosystem.test.ts

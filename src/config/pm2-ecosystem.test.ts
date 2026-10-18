@@ -78,11 +78,11 @@ test('prod 226 runs no AI ID: every workspace flag is off and publish governance
 });
 
 test('prod 226: the API is a PM2 cluster of api processes next to exactly one background process', () => {
-  const api = prodApps.find((app) => app.name === 'landa-refactor-backend');
+  const api = prodApps.find(app => app.name === 'landa-refactor-backend');
   assert.ok(api, 'landa-refactor-backend is missing');
   assert.equal(api.script, MAIN_SCRIPT);
   assert.equal(api.exec_mode, 'cluster');
-  const background = prodApps.filter((app) => app.script === MAIN_SCRIPT && role(app.env ?? {}) === 'background');
+  const background = prodApps.filter(app => app.script === MAIN_SCRIPT && role(app.env ?? {}) === 'background');
   assert.equal(background.length, 1, 'exactly one background process');
   assert.equal(background[0]!.exec_mode, 'fork');
   assert.equal(background[0]!.instances, 1);
@@ -95,7 +95,7 @@ test('prod 226: the API is a PM2 cluster of api processes next to exactly one ba
     assert.equal(role(env), 'background', label);
     assert.equal(Number(env.LANDA_API_INSTANCES), api.instances, `${label}: LANDA_API_INSTANCES matches the API`);
   }
-  for (const app of prodApps.filter((candidate) => candidate.script !== MAIN_SCRIPT)) {
+  for (const app of prodApps.filter(candidate => candidate.script !== MAIN_SCRIPT)) {
     for (const [label, env] of environments(app)) {
       assert.equal('LANDA_API_INSTANCES' in env, false, `${label}: a worker gets no LANDA_API_INSTANCES`);
     }
@@ -119,11 +119,11 @@ test('prod 226: every pool is sized explicitly and all of them fit under the con
 
 test('the repo and prod 226 files give the shared apps the same names and scripts', () => {
   for (const app of prodApps) {
-    const repoApp = repoApps.find((candidate) => candidate.name === app.name);
+    const repoApp = repoApps.find(candidate => candidate.name === app.name);
     assert.ok(repoApp, `${app.name} is not in ecosystem.config.cjs`);
     assert.equal(app.script, repoApp.script, `${app.name}: script`);
   }
-  const repoOnly = repoApps.map((app) => app.name).filter((name) => !prodApps.some((app) => app.name === name));
+  const repoOnly = repoApps.map(app => app.name).filter(name => !prodApps.some(app => app.name === name));
   assert.deepEqual(
     repoOnly,
     REPO_ONLY_APPS,
