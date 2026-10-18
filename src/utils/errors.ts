@@ -92,14 +92,3 @@ export function errorBody(
   }
   return body;
 }
-
-/**
- * The same body with `code` filled in when it is missing or empty. Every other
- * field, `code` included when present, is kept as it is.
- */
-export function withErrorCode<T extends Record<string, unknown>>(
-  status: number,
-  body: T,
-): T & { code: string } {
-  return { ...body, code: resolveErrorCode(status, body.code) };
-}

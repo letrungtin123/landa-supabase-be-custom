@@ -1,14 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AppError as MiddlewareAppError } from '../middleware/error-handler.js';
-import {
-  AppError,
-  HTTP_STATUS_ERROR_CODES,
-  errorBody,
-  errorCodeForStatus,
-  resolveErrorCode,
-  withErrorCode,
-} from './errors.js';
+import { AppError, HTTP_STATUS_ERROR_CODES, errorBody, errorCodeForStatus, resolveErrorCode } from './errors.js';
 
 const UPPER_SNAKE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/;
 
@@ -88,17 +81,4 @@ test('errorBody: success, message and code first; extra fields kept but never re
   });
   assert.deepEqual(body, { success: false, message: 'Sai tháng', code: 'AI_CREDIT_INVALID_INPUT', field: 'month' });
   assert.deepEqual(Object.keys(body), ['success', 'message', 'code', 'field']);
-});
-
-test('withErrorCode: adds a code only when the body has none', () => {
-  assert.deepEqual(withErrorCode(404, { success: false, message: 'File not found' }), {
-    success: false,
-    message: 'File not found',
-    code: 'NOT_FOUND',
-  });
-  assert.deepEqual(withErrorCode(429, { success: false, code: 'API_RATE_LIMITED', message: 'Quá nhiều yêu cầu' }), {
-    success: false,
-    code: 'API_RATE_LIMITED',
-    message: 'Quá nhiều yêu cầu',
-  });
 });
