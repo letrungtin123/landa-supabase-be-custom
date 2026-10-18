@@ -890,11 +890,6 @@
       "count": 32
     }
   },
-  "src/modules/reports/reports.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    }
-  },
   "src/modules/sso/sso.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 7
