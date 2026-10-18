@@ -806,11 +806,6 @@
       "count": 31
     }
   },
-  "src/modules/learner/progress-calculation.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/library/library.controller.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1

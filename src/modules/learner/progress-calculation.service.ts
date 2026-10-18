@@ -3,7 +3,7 @@ import { query as databaseQuery } from '../../config/database.js';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
-async function runQuery<T extends QueryResultRow = any>(
+async function runQuery<T extends QueryResultRow = Record<string, unknown>>(
   client: Queryable | undefined,
   text: string,
   params?: unknown[],
