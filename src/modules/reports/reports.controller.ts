@@ -8,6 +8,7 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { query } from '../../config/database.js';
 import { isReportsSnapshotAbortedError } from '../../config/reports-database.js';
+import { errorKind } from '../../utils/best-effort.js';
 import * as svc from './reports.service.js';
 import {
   REPORTS_BUSY_CODE,
@@ -536,9 +537,26 @@ export async function getUserStudyTime(req: Request, res: Response) {
   sendSuccess(res, result);
 }
 
+export const REPORT_SUMMARY_REFRESH_FAILED_CODE = 'REPORT_SUMMARY_REFRESH_FAILED';
+/** [HTTP status, Vietnamese, English]: the summary could not be refreshed (a database failure). */
+export const REPORT_SUMMARY_REFRESH_FAILED_ERROR = [
+  503,
+  'Không làm mới được báo cáo, vui lòng thử lại sau.',
+  'The report could not be refreshed. Please try again later.',
+] as const;
+
 /** POST /api/reports/refresh — Manually refresh materialized view */
 export async function refreshSummary(req: Request, res: Response) {
-  await svc.refreshReportSummary();
+  try {
+    await svc.refreshReportSummary();
+  } catch (error) {
+    // Success only when the summary was refreshed. The log has the error kind, never its text.
+    console.error(`[Reports] ${JSON.stringify({
+      event: 'report_summary_refresh_failed', tenant_id: req.user!.tenantId ?? null, error_kind: errorKind(error),
+    })}`);
+    const [status, vi, en] = REPORT_SUMMARY_REFRESH_FAILED_ERROR;
+    throw new AppError(requestUiLocale(req) === 'en' ? en : vi, status, REPORT_SUMMARY_REFRESH_FAILED_CODE);
+  }
   await runAuditedTransaction(
     () => Promise.resolve(),
     () => createTransactionalAuditEntry(req, 'UPDATE', 'report_summary', { code: 'report.summary.refreshed' }, req.user!.tenantId || undefined, 'report_summary'),
