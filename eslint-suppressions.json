@@ -724,9 +724,14 @@
       "count": 1
     }
   },
-  "src/modules/course-authoring/course-outline-transfer.service.ts": {
+  "src/modules/course-authoring/course-outline-transfer-job.service.ts": {
     "@typescript-eslint/no-unused-vars": {
-      "count": 3
+      "count": 2
+    }
+  },
+  "src/modules/course-authoring/course-outline-transfer.types.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
     }
   },
   "src/modules/course-authoring/course-outline.controller.ts": {

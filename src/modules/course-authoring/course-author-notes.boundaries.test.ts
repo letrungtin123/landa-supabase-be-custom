@@ -20,7 +20,10 @@ const routes = read('./course-authoring.routes.ts');
 const service = ['./course-outline.service.ts', './course-blocks.repository.ts', './course-author-notes.service.ts']
   .map(read)
   .join('\n');
-const transfer = read('./course-outline-transfer.service.ts');
+// Course outline transfers are split by concern; the duplicate's SQL is in the job service.
+const transfer = ['./course-outline-transfer.service.ts', './course-outline-transfer-job.service.ts']
+  .map(read)
+  .join('\n');
 const courses = read('../courses/courses.service.ts');
 const chat = readChatServiceSource().replace(/\r\n/g, '\n');
 
