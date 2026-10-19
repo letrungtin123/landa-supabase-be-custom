@@ -387,8 +387,8 @@ export function createEnrollmentsRepository(db: EnrollmentsDb) {
 
     /**
      * The user's active enrollments of the tenant (course not deleted),
-     * newest first, and their count. The count statement is sent exactly as
-     * before: with a search it names $5 but receives three parameters.
+     * newest first, and their count. The count statement has no page
+     * parameters, so its search is $3; the page statement's search is $5.
      */
     async selectUserEnrollmentPage(
       userId: string,
@@ -397,6 +397,8 @@ export function createEnrollmentsRepository(db: EnrollmentsDb) {
       offset: number,
       search: string,
     ): Promise<{ countRow: { count: string } | undefined; rows: EnrollmentWithCourse[] }> {
+      const countSearchFilter = search ? `AND c.display_name ILIKE '%' || $3 || '%'` : '';
+      const countParams: unknown[] = search ? [userId, tenantId, search] : [userId, tenantId];
       const searchFilter = search ? `AND c.display_name ILIKE '%' || $5 || '%'` : '';
       const params: unknown[] = [userId, tenantId, pageSize, offset];
       if (search) params.push(search);
@@ -405,8 +407,8 @@ export function createEnrollmentsRepository(db: EnrollmentsDb) {
         `SELECT COUNT(*) AS count
      FROM enrollments e
      JOIN courses c ON c.id = e.course_id AND c.deleted_at IS NULL
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}`,
-        params.slice(0, search ? 5 : 4).filter((_, i) => i < 2 || i === 4),
+     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${countSearchFilter}`,
+        countParams,
       );
 
       const dataResult = await db.query<EnrollmentWithCourse>(
