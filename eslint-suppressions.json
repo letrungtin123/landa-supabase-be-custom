@@ -63,6 +63,16 @@
       "count": 139
     }
   },
+  "src/modules/ai-chatbot/ai-id/legacy/chat-turn-blueprint.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/ai-id/legacy/chat-turn-draft.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
   "src/modules/ai-chatbot/ai-id/legacy/component-normalize.logic.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 2
@@ -505,8 +515,23 @@
       "count": 1
     }
   },
+  "src/modules/ai-chatbot/chat/chat-course-context.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
   "src/modules/ai-chatbot/chat/chat-course-scope.service.ts": {
     "no-control-regex": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat-turn-admission.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat-turn-prompt.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
       "count": 1
     }
   },
@@ -515,17 +540,19 @@
       "count": 1
     }
   },
+  "src/modules/ai-chatbot/chat/chat-turn-settle.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    }
+  },
+  "src/modules/ai-chatbot/chat/chat-turn-stream.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 8
+    }
+  },
   "src/modules/ai-chatbot/chat/chat.controller.ts": {
     "prefer-const": {
       "count": 9
-    }
-  },
-  "src/modules/ai-chatbot/chat/chat.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 19
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
     }
   },
   "src/modules/ai-chatbot/kb/kb-local-source-content.ts": {

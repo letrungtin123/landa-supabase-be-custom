@@ -183,6 +183,41 @@ function getInputFilterConfigFromBotConfig(botConfig: unknown): unknown {
   return (botConfig as Record<string, unknown>)[INPUT_FILTER_CONFIG_KEY] ?? null;
 }
 
+/** The one answer for a conversation the caller cannot use: missing, another user's, another tenant's or another target's. */
+function conversationNotFound(): AppError {
+  return new AppError('Cuộc hội thoại không tồn tại', 404);
+}
+
+/**
+ * The conversation is the caller's: same tenant and user, the expected target
+ * when given, and its bot still deployed (the conversation conditions of
+ * loadConversationContext). Checked before the conversation locks, so another
+ * user's conversation is answered exactly like a missing one, never with
+ * "already processing".
+ */
+export async function assertChatConversationOwner(
+  conversationId: string,
+  userId: string,
+  tenantId: string,
+  expectedTarget?: ChatTarget,
+): Promise<void> {
+  const result = await query<{ id: string }>(
+    `SELECT cc.id
+     FROM chat_conversations cc
+     JOIN tenant_bot_assignments tba
+       ON tba.tenant_id = cc.tenant_id
+      AND tba.target = cc.target
+      AND tba.bot_id = cc.bot_id
+     JOIN chatbots c ON c.id = cc.bot_id AND c.tenant_id = cc.tenant_id
+     WHERE cc.id = $1
+       AND cc.user_id = $2
+       AND cc.tenant_id = $3
+       AND ($4::text IS NULL OR cc.target = $4)`,
+    [conversationId, userId, tenantId, expectedTarget ?? null],
+  );
+  if (!result.rowCount) throw conversationNotFound();
+}
+
 export async function loadConversationContext(
   conversationId: string,
   userId: string,
@@ -221,7 +256,7 @@ export async function loadConversationContext(
   );
 
   if (!result.rowCount || result.rowCount === 0) {
-    throw new AppError('Cuộc hội thoại không tồn tại', 404);
+    throw conversationNotFound();
   }
 
   const row = result.rows[0];
@@ -292,4 +327,9 @@ export function sanitizeGeminiError(err: any): Error {
 
 export function logLessonAuthorFlow(stage: string, details: Record<string, unknown> = {}): void {
   console.log(`[LessonAuthorFlow] ${stage}`, details);
+}
+
+// Moved from chat.service.ts (used by the chat turn prompt and stream stages).
+export function logChatCourseFlow(stage: string, details: Record<string, unknown> = {}): void {
+  console.log(`[ChatCourseFlow] ${stage}`, details);
 }
