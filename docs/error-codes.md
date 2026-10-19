@@ -264,6 +264,7 @@ earlier answer (for example `course_id và title là bắt buộc`).
 | `PASSWORD_INPUT_INVALID` | `POST /api/auth/change-password`, `POST /api/users/profile/change-password` (passwords text) | `auth.validator.ts` |
 | `HELP_DOC_INPUT_INVALID` | `POST /api/help-docs/folders`, `PATCH /api/help-docs/folders/:id`, `POST /api/help-docs/pages`, `PATCH /api/help-docs/pages/:id` (title required on create; folder title 200, icon 100, page title 500 characters; folder id a UUID; content text; published a boolean) | `help-docs.validator.ts` |
 | `EMAIL_TEMPLATE_INPUT_INVALID` | `PUT /api/email-templates/:key` (a JSON object; each field keeps the service's own checks) | `email-templates.validator.ts` |
+| `TEAM_COURSE_CATEGORY_IDS_INVALID` | `POST /api/groups/teams/:teamId/course-categories` (a JSON object; every `category_ids` item a UUID, at most 500; a `category_ids` that is not a list keeps `category_ids phải là mảng`) | `groups.validator.ts` |
 
 ### Other modules
 
