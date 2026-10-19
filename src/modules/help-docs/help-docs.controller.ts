@@ -8,6 +8,10 @@ import {
   HELP_DOC_INPUT_INVALID_CODE,
   createHelpFolderSchema,
   createHelpPageSchema,
+  helpFolderOrderSchema,
+  helpPageOrderSchema,
+  reorderHelpFoldersBodySchema,
+  reorderHelpPagesBodySchema,
   updateHelpFolderSchema,
   updateHelpPageSchema,
 } from './help-docs.validator.js';
@@ -91,11 +95,21 @@ export async function reorderFoldersController(req: Request, res: Response, next
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const { ordered_ids } = req.body;
-    if (!Array.isArray(ordered_ids)) { sendError(res, 'ordered_ids phải là mảng', 400); return; }
+    const parsed = reorderHelpFoldersBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    if (!Array.isArray(parsed.data.ordered_ids)) { sendError(res, 'ordered_ids phải là mảng', 400); return; }
+    const order = helpFolderOrderSchema.safeParse(parsed.data.ordered_ids);
+    if (!order.success) {
+      sendError(res, order.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const orderedIds = order.data;
     await runAuditedTransaction(
-      () => svc.reorderFolders(tenantId, ordered_ids),
-      () => createTransactionalAuditEntry(req, 'UPDATE', 'help_folder', { code: 'help_folder.reordered', context: { affected_count: ordered_ids.length } }),
+      () => svc.reorderFolders(tenantId, orderedIds),
+      () => createTransactionalAuditEntry(req, 'UPDATE', 'help_folder', { code: 'help_folder.reordered', context: { affected_count: orderedIds.length } }),
     );
     sendSuccess(res, { success: true });
   } catch (err) { next(err); }
@@ -192,8 +206,18 @@ export async function reorderPagesController(req: Request, res: Response, next: 
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const { folder_id, ordered_ids } = req.body;
-    if (!folder_id || !Array.isArray(ordered_ids)) { sendError(res, 'folder_id và ordered_ids bắt buộc', 400); return; }
+    const parsed = reorderHelpPagesBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    if (!parsed.data.folder_id || !Array.isArray(parsed.data.ordered_ids)) { sendError(res, 'folder_id và ordered_ids bắt buộc', 400); return; }
+    const order = helpPageOrderSchema.safeParse(parsed.data);
+    if (!order.success) {
+      sendError(res, order.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const { folder_id, ordered_ids } = order.data;
     const folder = (await svc.listFolders(tenantId)).folders.find((item: { id: string; title: string }) => item.id === folder_id);
     await runAuditedTransaction(
       () => svc.reorderPages(tenantId, folder_id, ordered_ids),

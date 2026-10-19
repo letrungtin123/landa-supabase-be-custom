@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { z } from 'zod';
+import { isUuid } from '../../utils/uuid.js';
 
 /** Create org group */
 export const createOrgGroupSchema = z.object({
@@ -57,6 +58,43 @@ export const teamCourseCategoryIdsSchema = z
     TEAM_COURSE_CATEGORY_MAX_IDS,
     `Mỗi lần chỉ gán được tối đa ${TEAM_COURSE_CATEGORY_MAX_IDS} danh mục khóa học.`,
   );
+
+/** Code of a refused team document category assignment (docs/error-codes.md). */
+export const TEAM_DOCUMENT_CATEGORY_IDS_INVALID_CODE = 'TEAM_DOCUMENT_CATEGORY_IDS_INVALID';
+export const TEAM_DOCUMENT_CATEGORY_IDS_INVALID_MESSAGE = 'Danh sách danh mục tài liệu không hợp lệ. Vui lòng tải lại trang và chọn lại.';
+/**
+ * The most items one document category assignment request may send. The
+ * dashboard (AssignCategoriesModal) sends ids from the server's own list and
+ * can select every assignable category of the tenant across pages, with no
+ * client cap; each id is one insert.
+ */
+export const TEAM_DOCUMENT_CATEGORY_MAX_IDS = 500;
+
+/** POST /api/groups/teams/:teamId/categories: a JSON object (a non-list category_ids keeps its own answer). */
+export const assignTeamDocCategoriesBodySchema = z.object(
+  { category_ids: z.unknown() },
+  { required_error: TEAM_DOCUMENT_CATEGORY_IDS_INVALID_MESSAGE, invalid_type_error: TEAM_DOCUMENT_CATEGORY_IDS_INVALID_MESSAGE },
+);
+
+/**
+ * Its category_ids list, at most the cap. assignTeamDocCategories skips an
+ * item that is not text or is blank, trims the others and assigns a repeated
+ * id once, so those requests keep working as before. A trimmed id that is not
+ * a UUID used to fail the $2::uuid cast in the database (500, after the
+ * earlier inserts of the request had run in its transaction): it is refused.
+ * The texts go on as sent; the service still trims them.
+ */
+export const teamDocCategoryIdsSchema = z
+  .array(z.unknown())
+  .max(
+    TEAM_DOCUMENT_CATEGORY_MAX_IDS,
+    `Mỗi lần chỉ gán được tối đa ${TEAM_DOCUMENT_CATEGORY_MAX_IDS} danh mục tài liệu.`,
+  )
+  .refine(
+    ids => ids.every(id => typeof id !== 'string' || id.trim() === '' || isUuid(id.trim())),
+    TEAM_DOCUMENT_CATEGORY_IDS_INVALID_MESSAGE,
+  )
+  .transform(ids => ids.filter((id): id is string => typeof id === 'string'));
 
 /** Assign category */
 export const assignCategorySchema = z.object({

@@ -6,7 +6,9 @@ import type { Request, Response, NextFunction } from 'express';
 import * as svc from './groups.service.js';
 import {
   TEAM_COURSE_CATEGORY_IDS_INVALID_CODE,
+  TEAM_DOCUMENT_CATEGORY_IDS_INVALID_CODE,
   assignTeamCourseCategoriesBodySchema,
+  assignTeamDocCategoriesBodySchema,
   createOrgGroupSchema,
   createSubGroupSchema,
   createTeamSchema,
@@ -14,6 +16,7 @@ import {
   groupPageQuerySchema,
   groupSearchQuerySchema,
   teamCourseCategoryIdsSchema,
+  teamDocCategoryIdsSchema,
 } from './groups.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import {
@@ -353,11 +356,21 @@ export async function revokeTeamCourseController(req: Request, res: Response, ne
 
 export async function assignTeamDocCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { category_ids } = req.body;
+    const body = assignTeamDocCategoriesBodySchema.safeParse(req.body);
+    if (!body.success) {
+      sendError(res, body.error.errors[0].message, 400, TEAM_DOCUMENT_CATEGORY_IDS_INVALID_CODE);
+      return;
+    }
+    const { category_ids } = body.data;
     if (!Array.isArray(category_ids)) { sendError(res, 'category_ids phải là mảng', 400); return; }
+    const categoryIds = teamDocCategoryIdsSchema.safeParse(category_ids);
+    if (!categoryIds.success) {
+      sendError(res, categoryIds.error.errors[0].message, 400, TEAM_DOCUMENT_CATEGORY_IDS_INVALID_CODE);
+      return;
+    }
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const result = await svc.assignTeamDocCategories(req.params.teamId, category_ids, tenantId, ({ teamName, assigned }) =>
+    const result = await svc.assignTeamDocCategories(req.params.teamId, categoryIds.data, tenantId, ({ teamName, assigned }) =>
       createTransactionalAuditEntry(
         req,
         'UPDATE',
