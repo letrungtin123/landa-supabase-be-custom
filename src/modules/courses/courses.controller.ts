@@ -13,6 +13,10 @@ import {
   mentorSectionLogoModeSchema,
   MENTOR_SECTION_LOGO_MIME_TYPES,
   MENTOR_SECTION_LOGO_MAX_SIZE,
+  courseListQuerySchema,
+  mentorCandidatesQuerySchema,
+  mentorHistoryQuerySchema,
+  sectionModalQuerySchema,
 } from './courses.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
@@ -20,7 +24,7 @@ import { createTransactionalAuditEntry, runAuditedTransaction } from '../../midd
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    sendSuccess(res, await svc.listCourses(tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listCourses(tenantId, courseListQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -153,7 +157,7 @@ export async function listMentorCandidatesController(req: Request, res: Response
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
-    const result = await svc.listMentorCandidates(req.params.id, tenantId, req.query as Record<string, unknown>);
+    const result = await svc.listMentorCandidates(req.params.id, tenantId, mentorCandidatesQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -190,7 +194,7 @@ export async function listMentorHistoryController(req: Request, res: Response, n
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     if (!canManageCourseMentor(req.user!.role)) { sendError(res, 'Forbidden', 403); return; }
-    const result = await svc.listCourseMentorAssignmentHistory(req.params.id, tenantId, req.query as Record<string, unknown>);
+    const result = await svc.listCourseMentorAssignmentHistory(req.params.id, tenantId, mentorHistoryQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -301,7 +305,7 @@ export async function updateModalConfigController(req: Request, res: Response, n
 
 export async function getSectionModalController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const sectionId = req.query.section_id as string;
+    const sectionId = sectionModalQuerySchema.parse(req.query).section_id;
     if (!sectionId) { sendError(res, 'section_id is required', 400); return; }
     sendSuccess(res, await svc.getSectionModalConfig(req.params.id, sectionId));
   } catch (err) { next(err); }
