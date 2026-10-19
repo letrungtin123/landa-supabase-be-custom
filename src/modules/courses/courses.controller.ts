@@ -277,9 +277,14 @@ export async function deleteMentorSectionLogoController(req: Request, res: Respo
   } catch (err) { next(err); }
 }
 
+// The popup reads check the tenant exactly as their writes do: no tenant (a
+// superadmin without a selected tenant) is a 400, a course of another tenant a 404.
 export async function getModalConfigController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try { sendSuccess(res, await svc.getCourseModalConfig(req.params.id)); }
-  catch (err) { next(err); }
+  try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
+    sendSuccess(res, await svc.getCourseModalConfig(req.params.id, tenantId));
+  } catch (err) { next(err); }
 }
 
 export async function updateModalConfigController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -301,9 +306,11 @@ export async function updateModalConfigController(req: Request, res: Response, n
 
 export async function getSectionModalController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
+    const tenantId = req.user!.tenantId;
+    if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
     const sectionId = req.query.section_id as string;
     if (!sectionId) { sendError(res, 'section_id is required', 400); return; }
-    sendSuccess(res, await svc.getSectionModalConfig(req.params.id, sectionId));
+    sendSuccess(res, await svc.getSectionModalConfig(req.params.id, tenantId, sectionId));
   } catch (err) { next(err); }
 }
 

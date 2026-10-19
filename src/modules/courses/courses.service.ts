@@ -77,12 +77,15 @@ export interface CourseAuditSnapshot {
   image_url: string | null;
 }
 
+/** The 404 a course write answers (getCourseAuditName runs first) for a course outside the caller's tenant. */
+const COURSE_MISSING_MESSAGE = 'Course không tồn tại';
+
 export async function getCourseAuditName(courseId: string, tenantId: string): Promise<string> {
   const result = await query<{ display_name: string }>(
     'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
     [courseId, tenantId],
   );
-  if (result.rowCount === 0) throw new AppError('Course không tồn tại', 404);
+  if (result.rowCount === 0) throw new AppError(COURSE_MISSING_MESSAGE, 404);
   return result.rows[0].display_name;
 }
 
@@ -850,7 +853,9 @@ export async function hardDeleteCourse(courseId: string, tenantId: string) {
 
 // ── Modal Config ──
 
-export async function getCourseModalConfig(courseId: string) {
+/** Read like the write: only a live course of the caller's tenant, else the same 404. */
+export async function getCourseModalConfig(courseId: string, tenantId: string) {
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_MISSING_MESSAGE);
   const result = await query('SELECT * FROM course_modal_configs WHERE course_id = $1', [courseId]);
   if (result.rowCount === 0) {
     return { course_id: courseId, welcome_enabled: false, welcome_title: '', welcome_description: '', confirm_enabled: false, confirm_title: '', confirm_description: '', confirm_checkbox_text: '', completion_enabled: false, completion_title: '', completion_description: '', completion_social_type: '', completion_social_link: '', updated_at: null };
@@ -881,7 +886,9 @@ export async function upsertCourseModalConfig(courseId: string, tenantId: string
 
 // ── Section Modal Config ──
 
-export async function getSectionModalConfig(courseId: string, sectionId: string) {
+/** Read like the write: only a live course of the caller's tenant, else the same 404. */
+export async function getSectionModalConfig(courseId: string, tenantId: string, sectionId: string) {
+  await assertCourseBelongsToTenant(courseId, tenantId, COURSE_MISSING_MESSAGE);
   const result = await query('SELECT * FROM section_modal_configs WHERE course_id = $1 AND section_id = $2', [courseId, sectionId]);
   if (result.rowCount === 0) {
     return { course_id: courseId, section_id: sectionId, enabled: false, title: '', description: '', updated_at: null };
