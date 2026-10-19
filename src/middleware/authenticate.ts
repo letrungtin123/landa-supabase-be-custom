@@ -114,7 +114,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     if (blacklistedAt) {
       // JWT được sign TRƯỚC khi blacklist → reject
       // JWT được sign SAU blacklist → OK (đã có role mới)
-      const tokenIssuedAt = (payload as any).iat ? (payload as any).iat * 1000 : 0;
+      const tokenIssuedAt = payload.iat ? payload.iat * 1000 : 0;
       if (tokenIssuedAt < blacklistedAt) {
         sendError(res, 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại', 401);
         return;
@@ -174,7 +174,7 @@ export async function optionalAuth(req: Request, _res: Response, next: NextFunct
       // Check blacklist
       const blacklistedAt = getBlacklistedAt(payload.sub, normalizeSessionMode(payload.session_mode));
       if (blacklistedAt) {
-        const tokenIssuedAt = (payload as any).iat ? (payload as any).iat * 1000 : 0;
+        const tokenIssuedAt = payload.iat ? payload.iat * 1000 : 0;
         if (tokenIssuedAt < blacklistedAt) {
           // Token cũ → bỏ qua, coi như chưa auth
           next();
