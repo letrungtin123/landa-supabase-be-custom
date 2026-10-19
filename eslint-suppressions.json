@@ -48,11 +48,6 @@
       "count": 4
     }
   },
-  "src/middleware/authenticate.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 4
-    }
-  },
   "src/middleware/authorize.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
@@ -641,11 +636,6 @@
   "src/modules/auth/auth.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 19
-    }
-  },
-  "src/modules/auth/auth.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
     }
   },
   "src/modules/badges/badge-evaluation.service.ts": {

@@ -3,37 +3,18 @@ import { env } from '../../config/env.js';
 import { blacklistUser } from '../../middleware/authenticate.js';
 import { AppError } from '../../utils/errors.js';
 import { calcOffset, calcTotalPages, parsePagination } from '../../utils/query-helpers.js';
+import {
+  createDemoIframeRepository,
+  type DemoIframeDb,
+  type DemoIframeSettingsRow,
+} from './demo-iframe.repository.js';
+import type { DemoTenantRow as TenantRow, TimestampLike } from './demo-login.repository.js';
 
 export type DemoIframeSessionMode = 'normal' | 'demo_iframe';
 
-type TimestampLike = Date | string | null;
-
-interface TenantRow {
-  id: string;
-  name: string;
-  domain_learner: string | null;
-  is_active: boolean;
-}
-
-interface DemoIframeSettingsRow {
-  tenant_id: string;
-  is_enabled: boolean;
-  allowed_origin: string | null;
-  demo_user_id: string | null;
-  public_embed_id: string;
-  updated_by: string | null;
-  created_at: TimestampLike;
-  updated_at: TimestampLike;
-  tenant_name: string;
-  tenant_domain_learner: string | null;
-  tenant_is_active: boolean;
-  learner_username: string | null;
-  learner_email: string | null;
-  learner_full_name: string | null;
-  learner_avatar_url: string | null;
-  learner_is_active: boolean | null;
-  learner_role: string | null;
-}
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: DemoIframeDb = { query };
+const demoIframeRepository = createDemoIframeRepository(poolDb);
 
 export interface DemoIframeConfigInput {
   is_enabled?: boolean;
@@ -185,85 +166,34 @@ function formatSettings(row: DemoIframeSettingsRow) {
 }
 
 async function getTenantById(tenantId: string): Promise<TenantRow> {
-  const result = await query<TenantRow>(
-    'SELECT id, name, domain_learner, is_active FROM tenants WHERE id = $1',
-    [tenantId],
-  );
-  const tenant = result.rows[0];
+  const tenant = await demoIframeRepository.selectTenantById(tenantId);
   if (!tenant) throw new AppError('Tenant không tồn tại', 404);
   return tenant;
 }
 
 async function ensureDemoIframeSettings(tenantId: string): Promise<void> {
   await getTenantById(tenantId);
-  await query(
-    `INSERT INTO tenant_demo_iframe_settings (tenant_id)
-     VALUES ($1)
-     ON CONFLICT (tenant_id) DO NOTHING`,
-    [tenantId],
-  );
+  await demoIframeRepository.insertSettingsIfMissing(tenantId);
 }
 
 async function getSettingsRow(tenantId: string): Promise<DemoIframeSettingsRow> {
-  const result = await query<DemoIframeSettingsRow>(
-    `SELECT s.tenant_id, s.is_enabled, s.allowed_origin, s.demo_user_id,
-            s.public_embed_id, s.updated_by, s.created_at, s.updated_at,
-            t.name AS tenant_name, t.domain_learner AS tenant_domain_learner,
-            t.is_active AS tenant_is_active,
-            u.username AS learner_username, u.email AS learner_email,
-            u.full_name AS learner_full_name, u.avatar_url AS learner_avatar_url,
-            u.is_active AS learner_is_active, u.role::text AS learner_role
-     FROM tenant_demo_iframe_settings s
-     JOIN tenants t ON t.id = s.tenant_id
-     LEFT JOIN users u ON u.id = s.demo_user_id
-     WHERE s.tenant_id = $1`,
-    [tenantId],
-  );
-  const row = result.rows[0];
+  const row = await demoIframeRepository.selectSettingsRow(tenantId);
   if (!row) throw new AppError('Cấu hình demo iframe không tồn tại', 404);
   return row;
 }
 
 async function validateDemoLearner(tenantId: string, userId: string): Promise<void> {
-  const result = await query<{ id: string }>(
-    `SELECT id
-     FROM users
-     WHERE id = $1
-       AND tenant_id = $2
-       AND role = 'learner'
-       AND is_active = true`,
-    [userId, tenantId],
-  );
-  if (result.rowCount === 0) {
+  if (!(await demoIframeRepository.isActiveLearnerOfTenant(tenantId, userId))) {
     throw new AppError('Chỉ được chọn tài khoản learner đang hoạt động của tenant này', 400);
   }
 }
 
 async function revokeRefreshTokens(userId: string, mode?: DemoIframeSessionMode): Promise<void> {
-  const params: unknown[] = [userId];
-  let modeClause = '';
-  if (mode) {
-    params.push(mode);
-    modeClause = ` AND session_mode = $${params.length}`;
-  }
-  await query(
-    `UPDATE refresh_tokens
-     SET revoked = true, revoked_at = COALESCE(revoked_at, now())
-     WHERE user_id = $1
-       AND revoked = false${modeClause}`,
-    params,
-  );
+  await demoIframeRepository.revokeRefreshTokens(userId, mode);
 }
 
 export async function revokeNormalSessionsForDemoIframeAccount(userId: string): Promise<void> {
-  await query(
-    `UPDATE refresh_tokens
-     SET revoked = true, revoked_at = COALESCE(revoked_at, now())
-     WHERE user_id = $1
-       AND revoked = false
-       AND COALESCE(session_mode, 'normal') = 'normal'`,
-    [userId],
-  );
+  await demoIframeRepository.revokeNormalRefreshTokens(userId);
   blacklistUser(userId, 'normal');
 }
 
@@ -295,16 +225,13 @@ export async function updateDemoIframeConfig(
     await validateDemoLearner(tenantId, nextDemoUserId);
   }
 
-  await query(
-    `UPDATE tenant_demo_iframe_settings
-     SET is_enabled = $2,
-         allowed_origin = $3,
-         demo_user_id = $4,
-         updated_by = $5,
-         updated_at = now()
-     WHERE tenant_id = $1`,
-    [tenantId, nextEnabled, nextAllowedOrigin, nextDemoUserId, actorId],
-  );
+  await demoIframeRepository.updateSettings({
+    tenantId,
+    isEnabled: nextEnabled,
+    allowedOrigin: nextAllowedOrigin,
+    demoUserId: nextDemoUserId,
+    actorId,
+  });
 
   const currentDemoUserId = current.demo_user_id;
   if (currentDemoUserId && (!nextEnabled || currentDemoUserId !== nextDemoUserId)) {
@@ -321,14 +248,7 @@ export async function updateDemoIframeConfig(
 export async function regenerateDemoIframeEmbedId(tenantId: string, actorId: string | null) {
   await ensureDemoIframeSettings(tenantId);
   const current = await getSettingsRow(tenantId);
-  await query(
-    `UPDATE tenant_demo_iframe_settings
-     SET public_embed_id = gen_random_uuid(),
-         updated_by = $2,
-         updated_at = now()
-     WHERE tenant_id = $1`,
-    [tenantId, actorId],
-  );
+  await demoIframeRepository.regenerateEmbedId(tenantId, actorId);
   if (current.demo_user_id) {
     await revokeRefreshTokens(current.demo_user_id, 'demo_iframe');
     blacklistUser(current.demo_user_id, 'demo_iframe');
@@ -340,44 +260,12 @@ export async function searchEligibleIframeLearners(tenantId: string, queryParams
   await getTenantById(tenantId);
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [tenantId];
-  const conditions = [
-    'u.tenant_id = $1',
-    "u.role = 'learner'",
-    'u.is_active = true',
-  ];
-
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(u.username ILIKE $${params.length} OR u.email ILIKE $${params.length} OR u.full_name ILIKE $${params.length})`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const [countResult, dataResult] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM users u ${where}`, params),
-    query<{
-      id: string;
-      username: string;
-      email: string;
-      full_name: string | null;
-      avatar_url: string | null;
-      created_at: TimestampLike;
-      is_demo_iframe_active: boolean;
-    }>(
-      `SELECT u.id, u.username, u.email, u.full_name, u.avatar_url, u.created_at,
-              EXISTS (
-                SELECT 1
-                FROM tenant_demo_iframe_settings s
-                WHERE s.demo_user_id = u.id
-                  AND s.is_enabled = true
-              ) AS is_demo_iframe_active
-       FROM users u
-       ${where}
-       ORDER BY u.created_at DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
-  ]);
+  const [countResult, dataResult] = await demoIframeRepository.searchEligibleLearners({
+    tenantId,
+    search,
+    pageSize,
+    offset,
+  });
 
   const total = Number.parseInt(countResult.rows[0].count, 10);
   return {
@@ -407,32 +295,7 @@ export async function resolveDemoIframeBootstrap(
   const requestOrigin = normalizeAllowedOrigin(requestOriginRaw);
   if (!requestOrigin) throw new AppError('Không xác định được origin khởi tạo demo iframe', 403);
 
-  const result = await query<{
-    tenant_id: string;
-    tenant_name: string;
-    tenant_domain_learner: string | null;
-    allowed_origin: string;
-    demo_user_id: string;
-    username: string;
-    full_name: string | null;
-  }>(
-    `SELECT s.tenant_id, t.name AS tenant_name, t.domain_learner AS tenant_domain_learner,
-            s.allowed_origin, s.demo_user_id, u.username, u.full_name
-     FROM tenant_demo_iframe_settings s
-     JOIN tenants t ON t.id = s.tenant_id
-     JOIN users u ON u.id = s.demo_user_id
-     WHERE s.public_embed_id = $1
-       AND s.is_enabled = true
-       AND s.allowed_origin IS NOT NULL
-       AND s.demo_user_id IS NOT NULL
-       AND t.is_active = true
-       AND u.role = 'learner'
-       AND u.is_active = true
-     LIMIT 1`,
-    [embedId],
-  );
-
-  const row = result.rows[0];
+  const row = await demoIframeRepository.selectBootstrap(embedId);
   if (!row) throw new AppError('Demo iframe không khả dụng', 404);
   const learnerOrigin = buildComparableOrigin(row.tenant_domain_learner);
   if (!learnerOrigin) {
@@ -460,16 +323,7 @@ export async function resolveDemoIframeBootstrap(
 
 export async function isActiveDemoIframeAccount(userId: string): Promise<boolean> {
   try {
-    const result = await query<{ exists: boolean }>(
-      `SELECT EXISTS (
-        SELECT 1
-        FROM tenant_demo_iframe_settings
-        WHERE demo_user_id = $1
-          AND is_enabled = true
-      ) AS exists`,
-      [userId],
-    );
-    return result.rows[0]?.exists === true;
+    return await demoIframeRepository.isEnabledDemoLearner(userId);
   } catch (err) {
     if ((err as { code?: string }).code === '42P01' || (err as { code?: string }).code === '42703') return false;
     throw err;
@@ -480,14 +334,7 @@ export async function getActiveDemoIframeUserIds(userIds: string[]): Promise<Set
   const unique = [...new Set(userIds)].filter(Boolean);
   if (unique.length === 0) return new Set();
   try {
-    const result = await query<{ demo_user_id: string }>(
-      `SELECT demo_user_id
-       FROM tenant_demo_iframe_settings
-       WHERE demo_user_id = ANY($1::uuid[])
-         AND is_enabled = true`,
-      [unique],
-    );
-    return new Set(result.rows.map((row) => row.demo_user_id));
+    return new Set(await demoIframeRepository.selectEnabledDemoLearnerIds(unique));
   } catch (err) {
     if ((err as { code?: string }).code === '42P01' || (err as { code?: string }).code === '42703') return new Set();
     throw err;

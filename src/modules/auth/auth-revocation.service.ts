@@ -5,6 +5,11 @@ import { getRedisClient, isRedisConfigured, markRedisUnhealthy, redisConnectionE
 import { parseExpiresIn } from '../../utils/jwt.js';
 import { clusterBus } from '../../config/cluster-bus.js';
 import { logSwallowedError } from '../../utils/best-effort.js';
+import { createAuthRevocationRepository, type AuthRevocationDb } from './auth-revocation.repository.js';
+
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: AuthRevocationDb = { query };
+const revocationRepository = createAuthRevocationRepository(poolDb);
 
 const REVOCATION_KEY_PREFIX = 'auth:revoked:';
 /** Clock-skew margin on top of the access-token lifetime when copying recent revocations. */
@@ -98,15 +103,9 @@ export function resyncAccessRevocationMirror(): Promise<boolean> {
     const generation = mirrorGeneration;
     const copiesStarted = mirrorCopiesStarted;
     const windowMs = parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) + MIRROR_WINDOW_MARGIN_MS;
-    const result = await query<{ user_id: string; reason: string; revoked_at: Date; expires_at: Date }>(
-      `SELECT user_id::text AS user_id, reason, revoked_at, expires_at
-       FROM auth_revocations
-       WHERE expires_at > now()
-         AND revoked_at > now() - ($1::bigint * interval '1 millisecond')`,
-      [windowMs],
-    );
-    for (let index = 0; index < result.rows.length; index += MIRROR_RESYNC_BATCH_SIZE) {
-      await Promise.all(result.rows.slice(index, index + MIRROR_RESYNC_BATCH_SIZE).map((row) => withRedisDeadline(
+    const rows = await revocationRepository.selectRecentRevocations(windowMs);
+    for (let index = 0; index < rows.length; index += MIRROR_RESYNC_BATCH_SIZE) {
+      await Promise.all(rows.slice(index, index + MIRROR_RESYNC_BATCH_SIZE).map((row) => withRedisDeadline(
         'access revocation resync',
         client.set(revocationKey(row.user_id), revocationValue(row), { EX: revocationTtlSeconds(row.expires_at) }),
       )));
@@ -186,22 +185,14 @@ export async function assertAuthRevocationRedisReady(): Promise<void> {
 export async function recordUserSessionRevocation(userId: string, reason: SessionRevocationReason): Promise<Date> {
   const revokedAt = new Date();
   const expiresAt = new Date(revokedAt.getTime() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN) + 60_000);
-  await query(
-    `INSERT INTO auth_revocations (user_id, revoked_at, expires_at, reason)
-     VALUES ($1::uuid, $2::timestamptz, $3::timestamptz, $4)
-     ON CONFLICT (user_id) DO UPDATE
-       SET revoked_at = GREATEST(auth_revocations.revoked_at, EXCLUDED.revoked_at),
-           expires_at = GREATEST(auth_revocations.expires_at, EXCLUDED.expires_at),
-           reason = EXCLUDED.reason
-       WHERE auth_revocations.reason <> $5`,
-    [userId, revokedAt, expiresAt, reason, PERMANENT_DELETION_REASON],
-  );
-  await query(
-    `UPDATE refresh_tokens
-     SET revoked = true, revoked_at = $2::timestamptz
-     WHERE user_id = $1::uuid AND revoked = false`,
-    [userId, revokedAt],
-  );
+  await revocationRepository.upsertSessionRevocation({
+    userId,
+    revokedAt,
+    expiresAt,
+    reason,
+    protectedReason: PERMANENT_DELETION_REASON,
+  });
+  await revocationRepository.revokeUserRefreshTokensAt(userId, revokedAt);
   return revokedAt;
 }
 
@@ -217,14 +208,8 @@ export async function syncUserAccessRevocationCache(userId: string): Promise<voi
 
 async function copyDatabaseRevocationToRedis(userId: string): Promise<void> {
   await copyRevocationToRedis(userId, async () => {
-    const result = await query<{ reason: string; revoked_at: Date; expires_at: Date }>(
-      `SELECT reason, revoked_at, expires_at
-       FROM auth_revocations
-       WHERE user_id = $1::uuid AND expires_at > now()`,
-      [userId],
-    );
-    const row = result.rows[0];
-    return row ? { value: revocationValue(row), ttlSeconds: revocationTtlSeconds(row.expires_at) } : null;
+    const row = await revocationRepository.selectLiveRevocation(userId);
+    return row ?{ value: revocationValue(row), ttlSeconds: revocationTtlSeconds(row.expires_at) } : null;
   });
 }
 
@@ -267,13 +252,7 @@ export async function isAccessTokenRevoked(userId: string, issuedAtSeconds: numb
     void resyncAccessRevocationMirror();
   }
 
-  const result = await query<{ reason: string; revoked_at: Date }>(
-    `SELECT reason, revoked_at
-     FROM auth_revocations
-     WHERE user_id = $1::uuid AND expires_at > now()`,
-    [userId],
-  );
-  const row = result.rows[0];
+  const row = await revocationRepository.selectLiveRevocationForCheck(userId);
   if (!row) return false;
   return isRevokedForIssuedAt(
     { full: row.reason === PERMANENT_DELETION_REASON, revokedAtMs: new Date(row.revoked_at).getTime() },
@@ -290,18 +269,5 @@ export async function cacheUserAccessRevocation(userId: string, expiresAt: Date)
 
 /** Bounded retention cleanup; never scan/delete an unbounded production table. */
 export async function cleanupExpiredAuthRevocations(limit = 10_000): Promise<number> {
-  const result = await query(
-    `WITH doomed AS (
-       SELECT user_id
-       FROM auth_revocations
-       WHERE expires_at <= now()
-       ORDER BY expires_at ASC
-       LIMIT $1::int
-     )
-     DELETE FROM auth_revocations revocation
-     USING doomed
-     WHERE revocation.user_id = doomed.user_id`,
-    [limit],
-  );
-  return result.rowCount || 0;
+  return revocationRepository.deleteExpiredRevocations(limit);
 }

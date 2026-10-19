@@ -27,6 +27,11 @@ import {
   revokeNormalSessionsForDemoIframeAccount,
   type DemoIframeSessionMode,
 } from '../demo-login/demo-iframe.service.js';
+import { createAuthRepository, type AuthDb } from './auth.repository.js';
+
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: AuthDb = { query };
+const authRepository = createAuthRepository(poolDb);
 
 /** Hash refresh token bằng SHA-256 trước khi lưu DB */
 function hashToken(token: string): string {
@@ -94,11 +99,7 @@ function startLoginLookup<T>(needed: boolean, lookup: () => Promise<T>): Promise
  * never a HOT update) each time.
  */
 async function touchLastLogin(userId: string): Promise<void> {
-  await query(
-    `UPDATE users SET last_login_at = now()
-     WHERE id = $1 AND (last_login_at IS NULL OR last_login_at < now() - interval '1 minute')`,
-    [userId],
-  );
+  await authRepository.touchLastLogin(userId);
 }
 
 /**
@@ -136,37 +137,17 @@ async function resolveSessionContext(
   return { permissions, ...tenantContext, memberGroups };
 }
 
-const LOGIN_USER_SELECT = `
-  SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-         u.role, u.is_active, u.tenant_id,
-         u.password_hash,
-         t.name AS tenant_name, t.is_active AS tenant_active
-  FROM users u
-  LEFT JOIN tenants t ON t.id = u.tenant_id
-`;
-
 async function findLoginUser(identifierInput: string) {
   const identifier = identifierInput.trim();
   if (!identifier) return null;
 
   if (looksLikeEmailIdentifier(identifier)) {
     const normalizedEmail = normalizeEmail(identifier);
-    const emailResult = await query(
-      `${LOGIN_USER_SELECT}
-       WHERE btrim(u.email) <> ''
-         AND lower(btrim(u.email)) = $1
-       LIMIT 1`,
-      [normalizedEmail],
-    );
+    const emailResult = await authRepository.selectLoginUserByEmail(normalizedEmail);
     if (emailResult.rowCount! > 0) return emailResult;
   }
 
-  return query(
-    `${LOGIN_USER_SELECT}
-     WHERE u.username = $1
-     LIMIT 1`,
-    [identifier],
-  );
+  return authRepository.selectLoginUserByUsername(identifier);
 }
 
 /**
@@ -199,17 +180,9 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const originTenantLookup = startLoginLookup(Boolean(origin) && user.role !== 'superadmin',
     () => resolveTenantByOrigin(origin!));
   const adminGroupCountLookup = startLoginLookup(clientApp === 'admin' && user.role === 'learner_plus',
-    () => query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
-      [user.id],
-    ));
+    () => authRepository.countUserPermissionGroups(user.id));
   const managedTenantCountLookup = startLoginLookup(user.role === 'superuser',
-    () => query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM user_tenants ut
-       JOIN tenants t ON t.id = ut.tenant_id
-       WHERE ut.user_id = $1 AND t.is_active = true`,
-      [user.id],
-    ));
+    () => authRepository.countActiveManagedTenants(user.id));
   const demoAccountLookup = startLoginLookup(user.role === 'learner', () => isActiveDemoIframeAccount(user.id));
 
   // ── Kiểm tra user có thuộc tenant của domain đang login không ──
@@ -287,11 +260,13 @@ export async function login(username: string, password: string, clientApp?: 'adm
   const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
   // Lưu refresh token hash vào DB
-  await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE, sessionId],
-  );
+  await authRepository.insertRefreshToken({
+    userId: user.id,
+    tokenHash: refreshHash,
+    expiresAt: refreshExpiresAt,
+    sessionMode: NORMAL_SESSION_MODE,
+    sessionId,
+  });
 
   // last_login_at (at most once a minute) and the session context, together.
   const [, {
@@ -345,24 +320,7 @@ const refreshHandoffs = createRefreshHandoffStore({
 
 /** Locks a refresh token row (with its user, tenant and session revocation) for the rotation. */
 async function lockRefreshTokenRow(tokenHash: string) {
-  const result = await query(
-    `SELECT rt.id AS rt_id, rt.user_id, rt.revoked, rt.expires_at, rt.revoked_at,
-            rt.session_id,
-            COALESCE(rt.session_mode, 'normal') AS session_mode,
-            u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.is_active, u.tenant_id,
-            t.name AS tenant_name, t.is_active AS tenant_active,
-            ar.revoked_at AS session_revoked_at
-     FROM refresh_tokens rt
-     JOIN users u ON u.id = rt.user_id
-     LEFT JOIN tenants t ON t.id = u.tenant_id
-     LEFT JOIN auth_revocations ar ON ar.user_id = rt.user_id AND ar.expires_at > now()
-     WHERE rt.token_hash = $1
-     LIMIT 1
-     FOR UPDATE OF rt`,
-    [tokenHash],
-  );
-  return result.rowCount === 0 ? null : result.rows[0];
+  return authRepository.lockRefreshTokenRow(tokenHash);
 }
 
 /**
@@ -399,17 +357,9 @@ async function rotateRefreshToken(tokenHash: string, successorHash?: string) {
       // must end only the affected session family; other roles retain the
       // existing account-wide policy for now.
       if (row.role === 'superadmin' && row.session_id) {
-        await query(
-          `UPDATE refresh_tokens
-           SET revoked = true, revoked_at = COALESCE(revoked_at, now())
-           WHERE user_id = $1 AND session_id = $2 AND revoked = false`,
-          [row.user_id, row.session_id],
-        );
+        await authRepository.revokeSessionFamily(row.user_id, row.session_id);
       } else if (row.role !== 'superadmin') {
-        await query(
-          'UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1 AND revoked = false',
-          [row.user_id],
-        );
+        await authRepository.revokeAllUserRefreshTokens(row.user_id);
       }
       // Return the business error so the transaction can COMMIT the revocation.
       // Throwing here would make withDatabaseTransaction roll it back.
@@ -453,21 +403,21 @@ async function rotateRefreshToken(tokenHash: string, successorHash?: string) {
     ? await isActiveDemoIframeAccount(row.user_id)
     : false;
   if (isActiveIframeLearner && sessionMode !== 'demo_iframe') {
-    await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
+    await authRepository.revokeRefreshTokenKeepingTime(row.rt_id);
     return {
       ok: false as const,
       error: new AppError('Tài khoản đang được khóa cho demo iframe', 403),
     };
   }
   if (sessionMode === 'demo_iframe' && !isActiveIframeLearner) {
-    await query('UPDATE refresh_tokens SET revoked = true, revoked_at = COALESCE(revoked_at, now()) WHERE id = $1', [row.rt_id]);
+    await authRepository.revokeRefreshTokenKeepingTime(row.rt_id);
     return {
       ok: false as const,
       error: new AppError('Phiên demo iframe không còn khả dụng', 401),
     };
   }
 
-  await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE id = $1', [row.rt_id]);
+  await authRepository.revokeRefreshTokenNow(row.rt_id);
 
   // Tạo token pair mới (rotation)
   const newAccessToken = signAccessToken({
@@ -482,11 +432,13 @@ async function rotateRefreshToken(tokenHash: string, successorHash?: string) {
   const newRefreshHash = hashToken(newRefreshToken);
   const newRefreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
 
-  await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [row.user_id, newRefreshHash, newRefreshExpiresAt, sessionMode, sessionId],
-  );
+  await authRepository.insertRefreshToken({
+    userId: row.user_id,
+    tokenHash: newRefreshHash,
+    expiresAt: newRefreshExpiresAt,
+    sessionMode,
+    sessionId,
+  });
 
   return {
     ok: true as const,
@@ -601,7 +553,7 @@ export async function refresh(refreshToken: string, selectedTenantId?: string) {
  */
 export async function logout(refreshToken: string): Promise<void> {
   const tokenHash = hashToken(refreshToken);
-  await query('UPDATE refresh_tokens SET revoked = true, revoked_at = now() WHERE token_hash = $1', [tokenHash]);
+  await authRepository.revokeRefreshTokenByHash(tokenHash);
 }
 
 /**
@@ -612,18 +564,9 @@ export async function issueSessionForUserId(
   options?: { sessionMode?: DemoIframeSessionMode; updateLastLogin?: boolean },
 ) {
   const sessionMode = options?.sessionMode ?? NORMAL_SESSION_MODE;
-  const userResult = await query(
-    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.is_active, u.tenant_id,
-            t.name AS tenant_name, t.is_active AS tenant_active
-     FROM users u
-     LEFT JOIN tenants t ON t.id = u.tenant_id
-     WHERE u.id = $1`,
-    [userId],
-  );
+  const user = await authRepository.selectSessionUser(userId);
 
-  if (userResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  const user = userResult.rows[0];
+  if (!user) throw new AppError('User không tồn tại', 404);
   if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
   if (user.role !== 'superadmin' && user.tenant_id && !user.tenant_active) {
     throw new AppError('Tổ chức đã bị vô hiệu hóa', 403);
@@ -652,11 +595,13 @@ export async function issueSessionForUserId(
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
   const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
-  await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [user.id, refreshHash, refreshExpiresAt, sessionMode, sessionId],
-  );
+  await authRepository.insertRefreshToken({
+    userId: user.id,
+    tokenHash: refreshHash,
+    expiresAt: refreshExpiresAt,
+    sessionMode,
+    sessionId,
+  });
   const [, {
     permissions, managedTenants, tenantModules, roleLabels, groupLabels, memberGroups,
   }] = await Promise.all([
@@ -690,22 +635,12 @@ export async function issueSessionForUserId(
 }
 
 export async function getMe(userId: string, selectedTenantId?: string | null) {
-  const result = await query(
-    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.tenant_id, u.bio, u.gender, u.country, u.language,
-            u.level_of_education, u.year_of_birth,
-            t.name AS tenant_name
-     FROM users u
-     LEFT JOIN tenants t ON t.id = u.tenant_id
-     WHERE u.id = $1`,
-    [userId],
-  );
+  const user = await authRepository.selectMeUser(userId);
 
-  if (result.rowCount === 0) {
+  if (!user) {
     throw new AppError('User không tồn tại', 404);
   }
 
-  const user = result.rows[0];
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
     ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
@@ -757,36 +692,19 @@ export async function getMe(userId: string, selectedTenantId?: string | null) {
 async function resolvePermissions(userId: string, role: string, tenantId: string | null): Promise<PermissionsMap> {
   // superadmin & superuser: full permissions trên tất cả modules
   if (role === 'superadmin' || role === 'superuser') {
-    const modules = await query<{ code: string }>('SELECT code FROM modules WHERE is_active = true ORDER BY sort_order');
+    const modules = await authRepository.selectActiveModuleCodes();
     const map: PermissionsMap = {};
-    for (const m of modules.rows) {
+    for (const m of modules) {
       map[m.code] = { can_view: true, can_add: true, can_edit: true, can_delete: true };
     }
     return map;
   }
 
   // staff/learner: aggregate từ tất cả permission groups
-  const result = await query<{ code: string; can_view: boolean; can_add: boolean; can_edit: boolean; can_delete: boolean }>(
-    `SELECT m.code,
-            bool_or(pgm.can_view) AS can_view,
-            bool_or(pgm.can_add) AS can_add,
-            bool_or(pgm.can_edit) AS can_edit,
-            bool_or(pgm.can_delete) AS can_delete
-     FROM user_permission_groups upg
-     JOIN permission_group_modules pgm
-       ON pgm.permission_group_id = upg.permission_group_id
-      AND pgm.tenant_id = upg.tenant_id
-     JOIN modules m ON m.id = pgm.module_id
-     JOIN permission_groups pg ON pg.id = upg.permission_group_id
-     WHERE upg.user_id = $1
-       AND upg.tenant_id = $2
-       AND pg.tenant_id = $2
-     GROUP BY m.code`,
-    [userId, tenantId],
-  );
+  const rows = await authRepository.selectPermissionRows(userId, tenantId);
 
   const map: PermissionsMap = {};
-  for (const row of result.rows) {
+  for (const row of rows) {
     map[row.code] = {
       can_view: row.can_view,
       can_add: row.can_add,
@@ -804,20 +722,13 @@ async function resolvePermissions(userId: string, role: string, tenantId: string
 async function resolveTenantModules(tenantId: string | null): Promise<string[]> {
   if (!tenantId) {
     // superadmin → tất cả modules
-    const result = await query<{ code: string }>('SELECT code FROM modules WHERE is_active = true ORDER BY sort_order');
-    return result.rows.map(function getCode(r) { return r.code; });
+    const rows = await authRepository.selectActiveModuleCodes();
+    return rows.map(function getCode(r) { return r.code; });
   }
 
-  const result = await query<{ code: string }>(
-    `SELECT m.code
-     FROM tenant_modules tm
-     JOIN modules m ON m.id = tm.module_id
-     WHERE tm.tenant_id = $1 AND tm.is_enabled = true AND m.is_active = true
-     ORDER BY m.sort_order`,
-    [tenantId],
-  );
+  const rows = await authRepository.selectTenantModuleCodes(tenantId);
 
-  return result.rows.map(function getCode(r) { return r.code; });
+  return rows.map(function getCode(r) { return r.code; });
 }
 
 /**
@@ -832,19 +743,12 @@ async function resolveManagedTenants(
 ): Promise<{ id: string; name: string }[]> {
   // superadmin: trả TẤT CẢ tenants active
   if (role === 'superadmin') {
-    const result = await query<{ id: string; name: string }>(
-      'SELECT id, name FROM tenants WHERE is_active = true ORDER BY name ASC',
-    );
-    return result.rows;
+    return authRepository.selectAllActiveTenants();
   }
 
   // superuser: CHỈ tenant chính (không multi-tenant)
   if (primaryTenantId) {
-    const result = await query<{ id: string; name: string }>(
-      'SELECT id, name FROM tenants WHERE id = $1 AND is_active = true',
-      [primaryTenantId],
-    );
-    return result.rows;
+    return authRepository.selectActiveTenant(primaryTenantId);
   }
 
   return [];
@@ -855,17 +759,7 @@ async function resolveManagedTenants(
  * Dùng cho learner_plus để giới hạn scope xem báo cáo.
  */
 async function resolveMemberGroups(userId: string): Promise<{ id: string; name: string }[]> {
-  const result = await query<{ id: string; name: string }>(
-    `SELECT DISTINCT og.id, og.name
-     FROM team_members tm
-     JOIN teams t ON t.id = tm.team_id
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tm.user_id = $1
-     ORDER BY og.name`,
-    [userId],
-  );
-  return result.rows;
+  return authRepository.selectMemberGroups(userId);
 }
 
 /**
@@ -887,22 +781,14 @@ async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | n
 
   // So sánh trực tiếp origin với domain_learner / domain_admin
   // Domain trong DB có thể có hoặc không có trailing slash, protocol khác nhau
-  const result = await query<{ id: string }>(
-    `SELECT id FROM tenants
-     WHERE (
-       REPLACE(REPLACE(domain_learner, '/', ''), ' ', '') = REPLACE(REPLACE($1, '/', ''), ' ', '')
-       OR REPLACE(REPLACE(domain_admin, '/', ''), ' ', '') = REPLACE(REPLACE($1, '/', ''), ' ', '')
-     ) AND is_active = true
-     LIMIT 1`,
-    [normalizedOrigin],
-  );
+  const found = await authRepository.selectActiveTenantIdByOrigin(normalizedOrigin);
 
-  if (result.rowCount === 0) {
+  if (!found) {
     originTenantCache.set(normalizedOrigin, null);
     return null;
   }
 
-  const tenant = { id: result.rows[0].id, expires: Date.now() + ORIGIN_CACHE_TTL };
+  const tenant = { id: found.id, expires: Date.now() + ORIGIN_CACHE_TTL };
   originTenantCache.set(normalizedOrigin, tenant);
   return tenant;
 }
@@ -913,12 +799,7 @@ async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | n
 export async function cleanupExpiredTokens(): Promise<number> {
   // Chỉ xóa tokens hết hạn hoặc đã revoked > 1 ngày trước
   // Giữ recently-revoked tokens để grace period detection hoạt động
-  const result = await query(
-    `DELETE FROM refresh_tokens
-     WHERE expires_at < now()
-        OR (revoked = true AND revoked_at < now() - interval '1 day')`,
-  );
-  return result.rowCount ?? 0;
+  return authRepository.deleteExpiredRefreshTokens();
 }
 
 // ── One-Time Token (OTT) — Cross-app SSO ──
@@ -965,18 +846,9 @@ export async function exchangeOTT(token: string) {
   }
 
   // Lấy user từ DB (giống getMe nhưng tạo token pair)
-  const userResult = await query(
-    `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url,
-            u.role, u.is_active, u.tenant_id,
-            t.name AS tenant_name, t.is_active AS tenant_active
-     FROM users u
-     LEFT JOIN tenants t ON t.id = u.tenant_id
-     WHERE u.id = $1`,
-    [entry.userId],
-  );
+  const user = await authRepository.selectSessionUser(entry.userId);
 
-  if (userResult.rowCount === 0) throw new AppError('User không tồn tại', 404);
-  const user = userResult.rows[0];
+  if (!user) throw new AppError('User không tồn tại', 404);
   if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
 
   // Tạo token pair (giống login)
@@ -993,11 +865,13 @@ export async function exchangeOTT(token: string) {
   const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
   const sessionId = user.role === 'superadmin' ? uuidv4() : null;
 
-  await query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, expires_at, session_mode, session_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [user.id, refreshHash, refreshExpiresAt, NORMAL_SESSION_MODE, sessionId],
-  );
+  await authRepository.insertRefreshToken({
+    userId: user.id,
+    tokenHash: refreshHash,
+    expiresAt: refreshExpiresAt,
+    sessionMode: NORMAL_SESSION_MODE,
+    sessionId,
+  });
 
   const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
   const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
@@ -1037,16 +911,13 @@ export async function exchangeOTT(token: string) {
  * Đổi mật khẩu — verify mật khẩu cũ + set mật khẩu mới.
  */
 export async function changePassword(userId: string, currentPassword: string, newPassword: string) {
-  const result = await query<{ password_hash: string }>(
-    'SELECT password_hash FROM users WHERE id = $1',
-    [userId],
-  );
+  const stored = await authRepository.selectPasswordHash(userId);
 
-  if (result.rowCount === 0) {
+  if (!stored) {
     throw new AppError('User không tồn tại', 404);
   }
 
-  const valid = await comparePassword(currentPassword, result.rows[0].password_hash);
+  const valid = await comparePassword(currentPassword, stored.password_hash);
   if (!valid) {
     throw new AppError('Mật khẩu hiện tại không đúng', 403);
   }
@@ -1068,7 +939,7 @@ export async function changePassword(userId: string, currentPassword: string, ne
  */
 export async function replacePasswordAndEndSessions(userId: string, passwordHash: string) {
   await withDatabaseTransaction(async () => {
-    await query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+    await authRepository.updatePasswordHash(userId, passwordHash);
     await recordUserSessionRevocation(userId, 'password_changed');
   });
   await syncUserAccessRevocationCache(userId);
@@ -1095,33 +966,25 @@ export async function updateProfile(userId: string, input: {
     throw new AppError('Ảnh đại diện chỉ được thay bằng cách tải ảnh lên', 400);
   }
 
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const columns: Array<readonly [string, unknown]> = [];
 
   // Enum fields cần convert "" → null (PostgreSQL enum không chấp nhận "")
   const enumFields = new Set(['gender', 'level_of_education']);
 
   const allowed = ['full_name', 'phone', 'bio', 'avatar_url', 'gender', 'country', 'language', 'level_of_education', 'year_of_birth'] as const;
   for (const key of allowed) {
-    if ((input as any)[key] !== undefined) {
-      const val = (input as any)[key];
-      sets.push(`${key} = $${idx++}`);
-      params.push(enumFields.has(key) && val === '' ? null : val);
+    if (input[key] !== undefined) {
+      const val = input[key];
+      columns.push([key, enumFields.has(key) && val === '' ? null : val]);
     }
   }
 
-  if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
+  if (columns.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
-  params.push(userId);
-  const result = await query(
-    `UPDATE users SET ${sets.join(', ')} WHERE id = $${idx}
-     RETURNING id, username, email, full_name, phone, bio, avatar_url, gender, country, language, level_of_education, year_of_birth`,
-    params,
-  );
+  const profile = await authRepository.updateProfile(userId, columns);
 
-  if (result.rowCount === 0) throw new AppError('User không tồn tại', 404);
+  if (!profile) throw new AppError('User không tồn tại', 404);
   // Profile badges read these fields.
   await invalidateUserBadgeCaches([userId]);
-  return result.rows[0];
+  return profile;
 }

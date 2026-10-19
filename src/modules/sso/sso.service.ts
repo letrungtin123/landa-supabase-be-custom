@@ -17,6 +17,11 @@ import {
   assertLinkedIdentityUsable,
   isEmailExplicitlyUnverified,
 } from './sso-account-link.logic.js';
+import { createSsoRepository, type SsoDb, type SsoExistingUserRow } from './sso.repository.js';
+
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: SsoDb = { query };
+const ssoRepository = createSsoRepository(poolDb);
 
 /** Each outbound provider call (token, userinfo) is aborted after this long. */
 export const SSO_PROVIDER_TIMEOUT_MS = 15_000;
@@ -48,13 +53,6 @@ export interface SsoExchangeOutcome {
   provider: SsoProvider;
   providerLabel: string;
   linkedExistingAccount: boolean;
-}
-
-interface SsoExistingUserRow {
-  id: string;
-  tenant_id: string | null;
-  role: string;
-  is_active: boolean;
 }
 
 const PROVIDER_LABELS: Record<SsoProvider, string> = {
@@ -147,17 +145,10 @@ function toPublicProvider(row: SsoConfigRow): PublicSsoProvider | null {
 }
 
 export async function listConfigs(tenantId: string) {
-  const result = await query<SsoConfigRow>(
-    `SELECT id, tenant_id, provider, is_enabled, client_id, client_secret_enc,
-            issuer_url, authorization_url, token_url, userinfo_url, scopes,
-            extra_config, created_at, updated_at
-     FROM tenant_sso_configs
-     WHERE tenant_id = $1`,
-    [tenantId],
-  );
+  const rows = await ssoRepository.selectTenantConfigs(tenantId);
 
   const rowsByProvider = new Map<SsoProvider, SsoConfigRow>();
-  for (const row of result.rows) rowsByProvider.set(row.provider, row);
+  for (const row of rows) rowsByProvider.set(row.provider, row);
 
   return SSO_PROVIDERS.map((provider) => ({
     ...compactConfig(rowsByProvider.get(provider)),
@@ -168,24 +159,12 @@ export async function listConfigs(tenantId: string) {
 
 /** Safe audit snapshot: never return or log client IDs, encrypted secrets or URLs. */
 export async function getConfigAuditState(tenantId: string, provider: SsoProvider): Promise<{ is_enabled: boolean; has_secret: boolean }> {
-  const result = await query<{ is_enabled: boolean; client_secret_enc: string | null }>(
-    `SELECT is_enabled, client_secret_enc
-     FROM tenant_sso_configs
-     WHERE tenant_id = $1 AND provider = $2
-     LIMIT 1`,
-    [tenantId, provider],
-  );
-  const row = result.rows[0];
+  const row = await ssoRepository.selectConfigAuditState(tenantId, provider);
   return { is_enabled: row?.is_enabled === true, has_secret: Boolean(row?.client_secret_enc) };
 }
 
 export async function updateConfig(tenantId: string, provider: SsoProvider, input: UpdateSsoConfigInput) {
-  const existing = await query<SsoConfigRow>(
-    'SELECT * FROM tenant_sso_configs WHERE tenant_id = $1 AND provider = $2 LIMIT 1',
-    [tenantId, provider],
-  );
-
-  const current = existing.rows[0];
+  const current = await ssoRepository.selectConfig(tenantId, provider);
   let encryptedSecret = current?.client_secret_enc || null;
   if (input.clear_client_secret) encryptedSecret = null;
   if (input.client_secret && input.client_secret.trim()) encryptedSecret = encryptSecret(input.client_secret.trim());
@@ -199,49 +178,30 @@ export async function updateConfig(tenantId: string, provider: SsoProvider, inpu
     : {};
   const extraConfig = input.extra_config ? { ...currentExtraConfig, ...inputExtraConfig } : currentExtraConfig;
 
-  const result = await query<SsoConfigRow>(
-    `INSERT INTO tenant_sso_configs (
-       tenant_id, provider, is_enabled, client_id, client_secret_enc,
-       issuer_url, authorization_url, token_url, userinfo_url, scopes, extra_config
-     )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (tenant_id, provider) DO UPDATE SET
-       is_enabled = EXCLUDED.is_enabled,
-       client_id = EXCLUDED.client_id,
-       client_secret_enc = EXCLUDED.client_secret_enc,
-       issuer_url = EXCLUDED.issuer_url,
-       authorization_url = EXCLUDED.authorization_url,
-       token_url = EXCLUDED.token_url,
-       userinfo_url = EXCLUDED.userinfo_url,
-       scopes = EXCLUDED.scopes,
-       extra_config = EXCLUDED.extra_config,
-       updated_at = now()
-     RETURNING *`,
-    [
-      tenantId,
-      provider,
-      input.is_enabled ?? current?.is_enabled ?? false,
-      hasInputField(input, 'client_id') ? input.client_id : current?.client_id ?? null,
-      encryptedSecret,
-      hasInputField(input, 'issuer_url') ? input.issuer_url : current?.issuer_url ?? null,
-      hasInputField(input, 'authorization_url') ? input.authorization_url : current?.authorization_url ?? null,
-      hasInputField(input, 'token_url') ? input.token_url : current?.token_url ?? null,
-      hasInputField(input, 'userinfo_url') ? input.userinfo_url : current?.userinfo_url ?? null,
-      scopes,
-      JSON.stringify(extraConfig),
-    ],
-  );
+  const stored = await ssoRepository.upsertConfig({
+    tenantId,
+    provider,
+    isEnabled: input.is_enabled ?? current?.is_enabled ?? false,
+    clientId: hasInputField(input, 'client_id') ? input.client_id : current?.client_id ?? null,
+    clientSecretEnc: encryptedSecret,
+    issuerUrl: hasInputField(input, 'issuer_url') ? input.issuer_url : current?.issuer_url ?? null,
+    authorizationUrl: hasInputField(input, 'authorization_url') ? input.authorization_url : current?.authorization_url ?? null,
+    tokenUrl: hasInputField(input, 'token_url') ? input.token_url : current?.token_url ?? null,
+    userinfoUrl: hasInputField(input, 'userinfo_url') ? input.userinfo_url : current?.userinfo_url ?? null,
+    scopes,
+    extraConfigJson: JSON.stringify(extraConfig),
+  });
 
   await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
   return {
-    ...compactConfig(result.rows[0]),
+    ...compactConfig(stored),
     provider,
     label: PROVIDER_LABELS[provider],
   };
 }
 
 export async function deleteConfig(tenantId: string, provider: SsoProvider): Promise<void> {
-  await query('DELETE FROM tenant_sso_configs WHERE tenant_id = $1 AND provider = $2', [tenantId, provider]);
+  await ssoRepository.deleteConfig(tenantId, provider);
   await invalidateTenantPublicDomainCaches(tenantId, ['sso-public']);
 }
 
@@ -256,28 +216,15 @@ export async function getPublicConfigByDomain(domain: string): Promise<PublicSso
 }
 
 async function getPublicConfigByDomainFromDb(normalizedDomain: string): Promise<PublicSsoResponse> {
-  const tenantResult = await query<{ id: string; name: string }>(
-    `SELECT id, name FROM tenants
-     WHERE (
-       lower(regexp_replace(regexp_replace(regexp_replace(domain_learner, '^https?://', ''), '/.*$', ''), ':[0-9]+$', '')) = $1
-       OR lower(regexp_replace(regexp_replace(regexp_replace(domain_admin, '^https?://', ''), '/.*$', ''), ':[0-9]+$', '')) = $1
-     ) AND is_active = true
-     LIMIT 1`,
-    [normalizedDomain],
-  );
+  const tenant = await ssoRepository.selectActiveTenantByDomain(normalizedDomain);
 
-  if (tenantResult.rowCount === 0) {
+  if (!tenant) {
     return { tenant_id: null, tenant_name: null, providers: [] };
   }
 
-  const tenant = tenantResult.rows[0];
-  const configs = await query<SsoConfigRow>(
-    `SELECT * FROM tenant_sso_configs
-     WHERE tenant_id = $1 AND is_enabled = true`,
-    [tenant.id],
-  );
+  const configs = await ssoRepository.selectEnabledConfigs(tenant.id);
 
-  const providers = configs.rows
+  const providers = configs
     .map(toPublicProvider)
     .filter((item): item is PublicSsoProvider => !!item);
 
@@ -286,14 +233,9 @@ async function getPublicConfigByDomainFromDb(normalizedDomain: string): Promise<
 }
 
 async function getEnabledConfig(tenantId: string, provider: SsoProvider): Promise<SsoConfigRow> {
-  const result = await query<SsoConfigRow>(
-    `SELECT * FROM tenant_sso_configs
-     WHERE tenant_id = $1 AND provider = $2 AND is_enabled = true
-     LIMIT 1`,
-    [tenantId, provider],
-  );
-  if (result.rowCount === 0) throw new AppError('SSO provider chưa được bật cho tenant này', 403);
-  return result.rows[0];
+  const config = await ssoRepository.selectEnabledConfig(tenantId, provider);
+  if (!config) throw new AppError('SSO provider chưa được bật cho tenant này', 403);
+  return config;
 }
 
 /**
@@ -387,8 +329,7 @@ async function buildUniqueUsername(email: string): Promise<string> {
   for (let i = 0; i < 20; i += 1) {
     const suffix = i === 0 ? '' : `-${i}`;
     const username = `${base}${suffix}`.slice(0, 150);
-    const existing = await query('SELECT id FROM users WHERE username = $1 LIMIT 1', [username]);
-    if (existing.rowCount === 0) return username;
+    if (!(await ssoRepository.isUsernameTaken(username))) return username;
   }
   return `${base.slice(0, 140)}-${randomBytes(4).toString('hex')}`;
 }
@@ -408,26 +349,13 @@ function isUsernameUniqueViolation(err: unknown): boolean {
 }
 
 async function linkSsoIdentity(tenantId: string, userId: string, provider: SsoProvider, profile: ProviderProfile): Promise<void> {
-  const subjectIdentity = await query<{ user_id: string }>(
-    `SELECT user_id
-     FROM sso_user_identities
-     WHERE tenant_id = $1 AND provider = $2 AND provider_subject = $3
-     LIMIT 1`,
-    [tenantId, provider, profile.sub],
-  );
-  const linkedUserId = subjectIdentity.rows[0]?.user_id;
+  const linkedUserId = await ssoRepository.selectSubjectUserId(tenantId, provider, profile.sub);
   if (linkedUserId && linkedUserId !== userId) {
     throw new SsoLoginError('ALREADY_LINKED');
   }
 
   try {
-    await query(
-      `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (tenant_id, provider, user_id)
-       DO UPDATE SET provider_subject = EXCLUDED.provider_subject, email = EXCLUDED.email, updated_at = now()`,
-      [tenantId, userId, provider, profile.sub, profile.email],
-    );
+    await ssoRepository.upsertIdentityForUser({ tenantId, userId, provider, subject: profile.sub, email: profile.email });
   } catch (err) {
     if (isPgUniqueViolation(err)) {
       throw new SsoLoginError('ALREADY_LINKED');
@@ -453,25 +381,20 @@ async function createLearnerFromProfile(
 
     let userId: string;
     try {
-      const user = await query<{ id: string }>(
-        `INSERT INTO users (username, email, password_hash, full_name, phone, role, tenant_id, is_active)
-         VALUES ($1, $2, $3, $4, '', 'learner', $5, $6)
-         RETURNING id`,
-        [username, profile.email, passwordHash, fullName, tenantId, autoActivate],
-      );
-      userId = user.rows[0].id;
+      userId = await ssoRepository.insertLearner({
+        username,
+        email: profile.email,
+        passwordHash,
+        fullName,
+        tenantId,
+        isActive: autoActivate,
+      });
     } catch (err) {
       if (isUsernameUniqueViolation(err)) continue;
       throw err;
     }
 
-    await query(
-      `INSERT INTO sso_user_identities (tenant_id, user_id, provider, provider_subject, email)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (tenant_id, provider, provider_subject)
-       DO UPDATE SET user_id = EXCLUDED.user_id, email = EXCLUDED.email, updated_at = now()`,
-      [tenantId, userId, provider, profile.sub, profile.email],
-    );
+    await ssoRepository.upsertIdentityForSubject({ tenantId, userId, provider, subject: profile.sub, email: profile.email });
 
     if (!autoActivate) {
       throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
@@ -484,15 +407,7 @@ async function createLearnerFromProfile(
 }
 
 async function findUserByNormalizedEmail(normalizedEmail: string): Promise<SsoExistingUserRow | null> {
-  const user = await query<SsoExistingUserRow>(
-    `SELECT id, tenant_id, role, is_active
-     FROM users
-     WHERE btrim(email) <> ''
-       AND lower(btrim(email)) = $1
-     LIMIT 1`,
-    [normalizedEmail],
-  );
-  return user.rows[0] ?? null;
+  return ssoRepository.selectUserByNormalizedEmail(normalizedEmail);
 }
 
 async function resolveExistingSsoUserForProfile(
@@ -509,16 +424,8 @@ async function resolveExistingSsoUserForProfile(
 }
 
 async function resolveUserForProfile(tenantId: string, provider: SsoProvider, profile: ProviderProfile, config: SsoConfigRow): Promise<ResolvedSsoUser> {
-  const identity = await query<{ user_id: string; role: string; is_active: boolean; tenant_id: string | null }>(
-    `SELECT i.user_id, u.role, u.is_active, u.tenant_id
-     FROM sso_user_identities i
-     JOIN users u ON u.id = i.user_id
-     WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_subject = $3
-     LIMIT 1`,
-    [tenantId, provider, profile.sub],
-  );
-  const linked = identity.rows[0];
-  if (identity.rowCount && linked?.user_id) {
+  const linked = await ssoRepository.selectLinkedIdentity(tenantId, provider, profile.sub);
+  if (linked?.user_id) {
     // A link made earlier for an account of another tenant (e.g. through the
     // removed superadmin exemption) must not keep working.
     assertLinkedIdentityUsable(linked, tenantId);
@@ -544,13 +451,9 @@ async function inferSsoClientApp(tenantId: string, redirectUri: string): Promise
   const redirectHost = normalizeUrlHost(redirectUri);
   if (!redirectHost) return null;
 
-  const tenant = await query<{ domain_admin: string | null; domain_learner: string | null }>(
-    'SELECT domain_admin, domain_learner FROM tenants WHERE id = $1 LIMIT 1',
-    [tenantId],
-  );
-  if (tenant.rowCount === 0) return null;
+  const row = await ssoRepository.selectTenantDomains(tenantId);
+  if (!row) return null;
 
-  const row = tenant.rows[0];
   if (row.domain_admin && normalizeUrlHost(row.domain_admin) === redirectHost) return 'admin';
   if (row.domain_learner && normalizeUrlHost(row.domain_learner) === redirectHost) return 'learner';
   return null;
@@ -574,10 +477,7 @@ export async function exchangeSsoCode(provider: SsoProvider, input: ExchangeSsoC
 
   // learner_plus login admin via SSO: phải có ít nhất 1 permission group
   if (clientApp === 'admin' && user.role === 'learner_plus') {
-    const pgCheck = await query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM user_permission_groups WHERE user_id = $1`,
-      [user.userId],
-    );
+    const pgCheck = await ssoRepository.countUserPermissionGroups(user.userId);
     if (parseInt(pgCheck.rows[0].count) === 0) {
       throw new AppError('Tài khoản chưa được gán nhóm quyền để truy cập trang quản trị', 403);
     }
