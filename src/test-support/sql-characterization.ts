@@ -107,6 +107,9 @@ interface FakeResponse {
   redirect(...args: unknown[]): void;
   write(chunk: unknown): boolean;
   end(chunk?: unknown): FakeResponse;
+  on(): FakeResponse;
+  once(): FakeResponse;
+  off(): FakeResponse;
 }
 
 export type Handler = (req: Request, res: Response, next: NextFunction) => unknown;
@@ -162,6 +165,15 @@ export async function callHandler(handler: Handler, req: Record<string, unknown>
       if (chunk !== undefined) this.written.push(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk);
       return this;
     },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    off() {
+      return this;
+    },
   };
   let passed: unknown;
   await handler(req as unknown as Request, res as unknown as Response, (error?: unknown) => {
@@ -211,10 +223,13 @@ export interface CharacterizationOptions {
   sideRequests?: string[];
   /** Per-case mocks beyond the database. */
   setup?: (t: TestContext) => void;
+  /** Also records a random UUID inside a longer string (a Storage path, JSON text) as "<random-uuid>". */
+  scrubEmbeddedIds?: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BCRYPT = /^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/;
+const EMBEDDED_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 function plain(value: unknown): unknown {
   return value === undefined ? null : JSON.parse(JSON.stringify(value));
@@ -229,6 +244,9 @@ export function runCharacterization(options: CharacterizationOptions): void {
         if (typeof item !== 'string') return item;
         if (UUID.test(item) && !fixedIds.has(item)) return '<random-uuid>';
         if (BCRYPT.test(item)) return '<bcrypt-hash>';
+        if (options.scrubEmbeddedIds) {
+          return item.replace(EMBEDDED_UUID, id => (fixedIds.has(id) ? id : '<random-uuid>'));
+        }
         return item;
       }),
     );
