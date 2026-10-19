@@ -51,7 +51,9 @@ export function useFormBodyParser(app: Express): void {
  * or a huge sparse array in req.body. Our forms send flat names. Every multer
  * config spreads this into its `limits` (multer 2.4 options; the @types do not
  * list them yet). Over a limit multer fails the request with a MulterError:
- * LIMIT_FIELD_NESTING or LIMIT_FIELD_ARRAY_INDEX. File field names are not
- * checked by multer.
+ * LIMIT_FIELD_NESTING or LIMIT_FIELD_ARRAY_INDEX, which the global error
+ * handler answers with a 400 (UPLOAD_FIELD_NESTING_TOO_DEEP,
+ * UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE). File field names are not checked by
+ * multer.
  */
 export const MULTIPART_FIELD_NAME_LIMITS = Object.freeze({ fieldNestingDepth: 5, fieldArrayIndexLimit: 100 });

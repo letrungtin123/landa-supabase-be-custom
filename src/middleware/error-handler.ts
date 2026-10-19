@@ -84,6 +84,10 @@ export const UPLOAD_ERRORS: Readonly<Record<string, readonly [number, string, st
   LIMIT_FIELD_VALUE: [400, 'UPLOAD_FIELD_VALUE_TOO_LONG', 'Một mục gửi lên quá dài. Vui lòng gửi ít nội dung hơn.'],
   LIMIT_FIELD_COUNT: [400, 'UPLOAD_TOO_MANY_FIELDS', 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.'],
   MISSING_FIELD_NAME: [400, 'UPLOAD_FIELD_NAME_MISSING', 'Dữ liệu gửi lên thiếu tên mục. Vui lòng tải lại trang và thử lại.'],
+  // A text field name over MULTIPART_FIELD_NAME_LIMITS (middleware/body-limits.ts):
+  // more bracket levels than allowed, or an array index over the limit.
+  LIMIT_FIELD_NESTING: [400, 'UPLOAD_FIELD_NESTING_TOO_DEEP', 'Tên một mục gửi lên có quá nhiều cấp. Vui lòng tải lại trang và thử lại.'],
+  LIMIT_FIELD_ARRAY_INDEX: [400, 'UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE', 'Tên một mục gửi lên có số thứ tự quá lớn. Vui lòng tải lại trang và thử lại.'],
 });
 
 const MAX_LOGGED_PATH_LENGTH = 200;

@@ -3,10 +3,12 @@ import type { AddressInfo } from 'node:net';
 import test, { type TestContext } from 'node:test';
 import express from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from './body-limits.js';
 import { describeErrorResponse, errorHandler } from './error-handler.js';
 
 // A multipart upload multer refuses (file too large, too many files, parts or
-// fields, an unexpected file field) is a 413 or 400 with a stable code and a
+// fields, an unexpected file field, a field name nested too deep or with too
+// large an array index) is a 413 or 400 with a stable code and a
 // fixed message from the global handler, not a 500. About nine routes
 // (assignments, badges, branding, mentor logo, help docs, news, prompt
 // templates, user avatar, KB documents) hand multer's error to the global
@@ -31,6 +33,8 @@ const BAD_REQUEST_CASES = {
   UPLOAD_FIELD_VALUE_TOO_LONG: 'Một mục gửi lên quá dài. Vui lòng gửi ít nội dung hơn.',
   UPLOAD_TOO_MANY_FIELDS: 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.',
   UPLOAD_FIELD_NAME_MISSING: 'Dữ liệu gửi lên thiếu tên mục. Vui lòng tải lại trang và thử lại.',
+  UPLOAD_FIELD_NESTING_TOO_DEEP: 'Tên một mục gửi lên có quá nhiều cấp. Vui lòng tải lại trang và thử lại.',
+  UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE: 'Tên một mục gửi lên có số thứ tự quá lớn. Vui lòng tải lại trang và thử lại.',
 } as const;
 const TOO_LARGE_BODY = {
   success: false,
@@ -57,6 +61,8 @@ async function serve(): Promise<{ origin: string; close: () => Promise<void> }> 
   app.post('/api/field-key', memory({ fieldNameSize: 8 }).single('file'), ok);
   app.post('/api/field-value', memory({ fieldSize: 8 }).single('file'), ok);
   app.post('/api/fields', memory({ fields: 2 }).single('file'), ok);
+  app.post('/api/field-nesting', memory({ fields: 5, ...MULTIPART_FIELD_NAME_LIMITS }).single('file'), ok);
+  app.post('/api/field-array-index', memory({ fields: 5, ...MULTIPART_FIELD_NAME_LIMITS }).single('file'), ok);
   // Real route parsers: the learner assignment submission, and the bot avatar
   // (which answers a file over its limit itself and hands the rest on).
   app.post('/api/assignments/learner/a1/submit', submissionUpload.array('files', 5), ok);
@@ -185,6 +191,28 @@ test('a refused upload is a 413 or 400 with a fixed message, and nothing of the 
       badRequest('UPLOAD_TOO_MANY_FIELDS'),
       'LIMIT_FIELD_COUNT',
     ],
+    [
+      '/api/field-nesting',
+      () => {
+        const form = new FormData();
+        form.append(`${FAKE_FIELD}[a][b][c][d][e][f]`, FAKE_SECRET);
+        return form;
+      },
+      400,
+      badRequest('UPLOAD_FIELD_NESTING_TOO_DEEP'),
+      'LIMIT_FIELD_NESTING',
+    ],
+    [
+      '/api/field-array-index',
+      () => {
+        const form = new FormData();
+        form.append(`${FAKE_FIELD}[101]`, FAKE_SECRET);
+        return form;
+      },
+      400,
+      badRequest('UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE'),
+      'LIMIT_FIELD_ARRAY_INDEX',
+    ],
   ];
   try {
     for (const [path, form, status, body] of forms) {
@@ -233,6 +261,31 @@ test('a real route: an assignment submission over 25 MB is a 413, a sixth file a
   assert.equal(warnings.length, 2);
 });
 
+test('a real route: field names at the shared limits pass, one level or one index more is a 400', async t => {
+  const { warnings, errors } = captureConsole(t);
+  const server = await serve();
+  const url = `${server.origin}/api/assignments/learner/a1/submit`;
+  const field = (name: string) => {
+    const form = new FormData();
+    form.append(name, FAKE_SECRET);
+    return form;
+  };
+  try {
+    assert.equal((await post(url, field('note[a][b][c][d][e]'))).status, 200, 'five levels');
+    assert.equal((await post(url, field('items[100]'))).status, 200, 'array index 100');
+    const deep = await post(url, field('note[a][b][c][d][e][f]'));
+    assert.equal(deep.status, 400);
+    assert.deepEqual(JSON.parse(deep.text), badRequest('UPLOAD_FIELD_NESTING_TOO_DEEP'));
+    const index = await post(url, field('items[101]'));
+    assert.equal(index.status, 400);
+    assert.deepEqual(JSON.parse(index.text), badRequest('UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE'));
+  } finally {
+    await server.close();
+  }
+  assert.deepEqual(errors, []);
+  assert.equal(warnings.length, 2);
+});
+
 test('a route that answers multer itself keeps its answer: bot avatar over its limit', async t => {
   const { warnings, errors } = captureConsole(t);
   const server = await serve();
@@ -267,6 +320,8 @@ test('describeErrorResponse: every multer code, in production too; an unknown mu
     LIMIT_FIELD_VALUE: [400, badRequest('UPLOAD_FIELD_VALUE_TOO_LONG')],
     LIMIT_FIELD_COUNT: [400, badRequest('UPLOAD_TOO_MANY_FIELDS')],
     MISSING_FIELD_NAME: [400, badRequest('UPLOAD_FIELD_NAME_MISSING')],
+    LIMIT_FIELD_NESTING: [400, badRequest('UPLOAD_FIELD_NESTING_TOO_DEEP')],
+    LIMIT_FIELD_ARRAY_INDEX: [400, badRequest('UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE')],
   };
   for (const production of [false, true]) {
     for (const [multerCode, [status, body]] of Object.entries(expected)) {

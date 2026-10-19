@@ -80,6 +80,8 @@ None of these collides with a code or a prefix the frontends branch on
 | `UPLOAD_FIELD_VALUE_TOO_LONG` | 400 | A multipart text field over the limit. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_VALUE`) |
 | `UPLOAD_TOO_MANY_FIELDS` | 400 | More multipart text fields than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_COUNT`) |
 | `UPLOAD_FIELD_NAME_MISSING` | 400 | A multipart part without a field name. | `middleware/error-handler.ts` (multer `MISSING_FIELD_NAME`) |
+| `UPLOAD_FIELD_NESTING_TOO_DEEP` | 400 | A multipart text field name with more than 5 bracket levels (`MULTIPART_FIELD_NAME_LIMITS`, `middleware/body-limits.ts`). | `middleware/error-handler.ts` (multer `LIMIT_FIELD_NESTING`) |
+| `UPLOAD_FIELD_ARRAY_INDEX_TOO_LARGE` | 400 | A multipart text field name with an array index over 100 (same limits). | `middleware/error-handler.ts` (multer `LIMIT_FIELD_ARRAY_INDEX`) |
 | `TENANT_DATA_LIMIT_REACHED` | 409 | The tenant's data quota is used up (quota trigger SQLSTATE `LQ001`, or the storage check). | `middleware/error-handler.ts`, `utils/client-error.ts`, `tenants/tenant-data-quota.service.ts` |
 | `TENANT_DATA_QUOTA_RECONCILING` | 503 | The tenant's quota is being recounted (SQLSTATE `LQ002`); retry in a few minutes. | same as above |
 | `REQUEST_FAILED` | 500 | Unexpected error caught by a controller through `sendClientError`; fixed message in the request language, cause only in the log. | `utils/client-error.ts` |
