@@ -41,6 +41,7 @@
     "test:sso": "tsx --test src/modules/sso/sso.service.test.ts",
     "test:branding": "tsx --test src/modules/branding/branding-sql.characterization.test.ts",
     "test:help-docs": "tsx --test src/modules/help-docs/help-docs-sql.characterization.test.ts",
+    "test:prompt-templates": "tsx --test src/modules/prompt-templates/prompt-templates-sql.characterization.test.ts",
     "test:access-control": "tsx --test src/modules/branding/branding-permission.test.ts src/modules/enrollments/enrollments-tenant.test.ts src/modules/course-authoring/course-asset-reference-tenant.test.ts src/middleware/tenant-module-permission.test.ts src/modules/reports/report-learner-scope.test.ts src/modules/prompt-templates/prompt-templates-active.test.ts src/modules/ai-credits/ai-credit.access.test.ts",
     "test:client-errors": "tsx --test src/utils/client-error.test.ts src/modules/ai-chatbot/chat/chatbot-client-errors.test.ts src/utils/uuid.test.ts src/middleware/error-handler.test.ts src/utils/response.test.ts src/utils/errors.test.ts src/middleware/request-body-errors.test.ts src/middleware/upload-errors.test.ts src/app-error-codes.test.ts",
     "test:learner-answers": "tsx --test src/modules/learner/learner-answer-key.test.ts src/modules/learner/learner-popup-scope.test.ts src/modules/learner/learner-scope.test.ts src/modules/learner/learner-grading.characterization.test.ts src/modules/learner/learner-grading.logic.test.ts src/modules/learner/learner.validator.test.ts src/modules/learner/learner-request-errors.test.ts",
