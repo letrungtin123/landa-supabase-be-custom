@@ -33,3 +33,24 @@ export const assignGroupsSchema = z.object({
 
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
+
+// ── Query strings ──
+// The query string of GET /api/users, read the way listUsers always read it.
+// It never rejects and never coerces: every request accepted before is
+// accepted with the same values (a repeated parameter stays a list). Only the
+// keys the service reads are kept.
+
+/** The raw value, unchecked. */
+const rawQueryValue = z.unknown();
+
+/** GET /api/users */
+export const userListQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+  role: rawQueryValue,
+  is_active: rawQueryValue,
+  permission_group_id: rawQueryValue,
+  include_team_assignments: rawQueryValue,
+  current_team_id: rawQueryValue,
+});
