@@ -27,7 +27,7 @@
     "verify:tenant-data-quota:release": "set NODE_ENV=production&& npm run wait:tenant-data-quota-worker -- --timeout-seconds=720 && npm run verify:tenant-data-quota -- --mode=fast --require-worker-heartbeat",
     "worker:tenant-data-quota": "tsx src/workers/tenant-data-quota.worker.ts",
     "worker:news-assets-cleanup": "tsx src/workers/news-assets-cleanup.worker.ts",
-    "test:news": "tsx --test src/modules/news/news.logic.test.ts src/modules/news/news-html-output.test.ts",
+    "test:news": "tsx --test src/modules/news/news.logic.test.ts src/modules/news/news-html-output.test.ts src/modules/news/news-sql.characterization.test.ts",
     "worker:lesson-author-orchestration-v2": "node scripts/start-local-lesson-author-orchestration-v2-worker.mjs",
     "test:lesson-author-orchestration-v2": "node scripts/test-lesson-author-orchestration-v2.mjs",
     "test:tenant-data-quota": "tsx --test src/modules/tenants/tenant-data-quota.logic.test.ts src/modules/tenants/tenant-data-quota-ledger.logic.test.ts src/modules/tenants/tenant-data-quota-sql.characterization.test.ts",

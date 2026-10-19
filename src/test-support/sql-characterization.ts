@@ -247,16 +247,27 @@ export interface Suite {
   storage?: string[];
   /** Extra per-case setup (mocks), after the database double is installed. */
   beforeEach?: (t: TestContext) => void;
+  /** Also replace random UUIDs inside longer strings (file names, Storage paths). */
+  embeddedUuids?: boolean;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMBEDDED_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 export function registerCharacterization(suite: Suite): void {
   const fixed = new Set(suite.fixedIds.map(id => id.toLowerCase()));
+  const scrub = (item: string): string =>
+    suite.embeddedUuids
+      ? item.replace(EMBEDDED_UUID, id => (fixed.has(id.toLowerCase()) ? id : '<random-uuid>'))
+      : item;
   const stable = (value: unknown): unknown =>
     JSON.parse(
       JSON.stringify(value, (_key, item: unknown) =>
-        typeof item === 'string' && UUID.test(item) && !fixed.has(item.toLowerCase()) ? '<random-uuid>' : item,
+        typeof item !== 'string'
+          ? item
+          : UUID.test(item) && !fixed.has(item.toLowerCase())
+            ? '<random-uuid>'
+            : scrub(item),
       ),
     );
   const write = process.env[suite.writeEnv] === '1';
