@@ -648,19 +648,9 @@
       "count": 2
     }
   },
-  "src/modules/badges/badge-evaluation.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/badges/badges.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 6
-    }
-  },
-  "src/modules/badges/badges.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
     }
   },
   "src/modules/branding/branding-permission.test.ts": {
