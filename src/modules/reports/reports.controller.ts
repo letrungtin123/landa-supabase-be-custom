@@ -45,6 +45,7 @@ import {
   type ReportScope,
 } from './report-access.service.js';
 import {
+  isSingleQueryText,
   reportChartQuerySchema,
   reportCourseLearnersQuerySchema,
   reportCourseRankingQuerySchema,
@@ -60,6 +61,14 @@ import {
   type ReportPeriodQuery,
 } from './reports.validator.js';
 import type { StudyTimeGranularity } from '../enrollments/enrollments.service.js';
+
+/** A `search` sent more than once (a list): refused before any read, instead of a 500 on `.trim()`. */
+export const REPORT_SEARCH_INVALID_CODE = 'REPORT_SEARCH_INVALID';
+export const REPORT_SEARCH_INVALID_MESSAGE = 'Từ khóa tìm kiếm không hợp lệ. Vui lòng nhập một từ khóa và thử lại.';
+
+function refuseRepeatedSearch(res: Response): void {
+  sendError(res, REPORT_SEARCH_INVALID_MESSAGE, 400, REPORT_SEARCH_INVALID_CODE);
+}
 
 /** Level names of an Excel export: the tenant's labels, else the names the client sent, else the defaults. */
 async function getExportLabels(query: ReportExportQuery, tenantId: string, locale: ReportExcelLocale) {
@@ -285,6 +294,7 @@ export async function getCourseCompletionLearners(req: Request, res: Response) {
   const { page, search, month, year, status } = query;
   const pageSize = query.page_size;
   const dateRange = parseReportDateRange(query);
+  if (!isSingleQueryText(search)) return refuseRepeatedSearch(res);
 
   const scope = await enforceReportScope(req, query);
   if (scope.allowedGroupIds?.length === 0) {
@@ -387,6 +397,7 @@ export async function getLearners(req: Request, res: Response) {
   if (!query.status.present) {
     return sendError(res, 'Vui lòng chọn trạng thái học tập để xem danh sách học viên.', 400);
   }
+  if (!isSingleQueryText(search)) return refuseRepeatedSearch(res);
   const status = query.status.value;
 
   const scope = await enforceReportScope(req, query);
@@ -471,6 +482,7 @@ export async function getLearnerDetail(req: Request, res: Response) {
   if (dataScope === 'report_filter' && !dateRange) {
     return sendError(res, 'date_from và date_to là bắt buộc khi lọc theo bộ lọc báo cáo', 400);
   }
+  if (typeof search !== 'string') return refuseRepeatedSearch(res);
   const scope = await enforceReportScope(req, query);
   // learner_plus: only learners of their own groups (an out-of-scope learner looks unknown).
   if (scope.allowedGroupIds?.length === 0 || !await canReportOnLearner(reportActor(req), username)) {

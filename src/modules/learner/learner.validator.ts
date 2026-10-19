@@ -1,15 +1,21 @@
 // ═══════════════════════════════════════════════════════════════
 // Learner query schemas: the query string of the learner list routes, read
 // the way the controller always read it. They coerce and never reject:
-// every request accepted before is accepted with the same values (a page
-// that is not a number reads as NaN, a repeated parameter keeps its old
-// reading). Request bodies are still read by the controller as before.
+// every request accepted before is accepted with the same values (a
+// repeated parameter keeps its old reading), except a page that is not a
+// number: it reads as absent, so the service default applies (it read as
+// NaN and became a NaN OFFSET, a 500). Request bodies are read by the
+// controller.
 // ═══════════════════════════════════════════════════════════════
 
 import { z } from 'zod';
 
-/** `?page=2` -> 2; absent or empty -> undefined; not a number -> NaN (as before). */
-const optionalInt = z.unknown().transform(value => (value ? parseInt(value as string) : undefined));
+/** `?page=2` -> 2; absent, empty or not a number -> undefined (the service default). */
+const optionalInt = z.unknown().transform(value => {
+  if (!value) return undefined;
+  const parsed = parseInt(value as string);
+  return Number.isNaN(parsed) ? undefined : parsed;
+});
 /** The raw value as text, unchecked (a repeated parameter stays a list at run time, as before). */
 const rawText = z.unknown().transform(value => value as string | undefined);
 
