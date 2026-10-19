@@ -29,7 +29,6 @@ import { aiEnv } from './env/ai.js';
 import { aiIdEnv } from './env/ai-id.js';
 import { workersEnv } from './env/workers.js';
 import { reportsEnv } from './env/reports.js';
-import { optionalBoolean } from './env/helpers.js';
 
 export const env = {
   ...coreEnv,
@@ -42,20 +41,6 @@ export const env = {
   ...emailEnv,
   ...aiEnv,
   ...aiIdEnv,
-
-  // AI ID default-off rollout gates. They are defined here, not in
-  // env/ai-id.ts, because tests of src/modules/ai-chatbot read the text of
-  // this file to check that each gate stays off by default. They are read
-  // after every env/*.ts file.
-  // Read-only durable-job API. Does not enable enqueue or start any worker.
-  LESSON_AUTHOR_GENERATION_STATUS_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_STATUS_ENABLED', false),
-  // Reads only; does not enable workspace admission, generation, editing or Apply.
-  LESSON_AUTHOR_WORKSPACE_READ_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_READ_ENABLED', false),
-  // Save/Reset only. Requires reads too; never enables admission, workers or Apply.
-  LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false),
-  // Enables durable self-built-RAG Blueprint admission and its bounded worker.
-  LESSON_AUTHOR_GENERATION_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_ENABLED', false),
-
   ...workersEnv,
   ...reportsEnv,
 

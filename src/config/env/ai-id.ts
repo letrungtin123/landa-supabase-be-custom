@@ -1,13 +1,23 @@
 // Env: AI ID — lesson-author feature flags, orchestration V2, the IDM
 // pipeline, course publish governance and video transcription (part of `env`, see ../env.ts).
-// Four default-off gates are in ../env.ts itself (tests read that file):
-// LESSON_AUTHOR_GENERATION_STATUS_ENABLED, LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
-// LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED and LESSON_AUTHOR_GENERATION_ENABLED.
+// Tests of src/modules/ai-chatbot read the text of this file to check that the
+// rollout gates below stay off by default.
 
 import './load.js';
 import { optionalBoolean, optionalBoundedInt, optionalOneOf, optionalString, optionalUuidCsv } from './helpers.js';
 
 export const aiIdEnv = {
+  // AI ID default-off rollout gates.
+  // Read-only durable-job API. Does not enable enqueue or start any worker.
+  LESSON_AUTHOR_GENERATION_STATUS_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_STATUS_ENABLED', false),
+  // Reads only; does not enable workspace admission, generation, editing or Apply.
+  LESSON_AUTHOR_WORKSPACE_READ_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_READ_ENABLED', false),
+  // Save/Reset only. Requires reads too; never enables admission, workers or Apply.
+  LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false),
+  // Enables durable self-built-RAG Blueprint admission and its bounded worker.
+  LESSON_AUTHOR_GENERATION_ENABLED: optionalBoolean('LESSON_AUTHOR_GENERATION_ENABLED', false),
+
+
   // Authenticated metadata-only server push. It is separately gated from all
   // generation/edit/Apply behavior and requires the manual SQL notification
   // trigger to have been installed before production enablement.

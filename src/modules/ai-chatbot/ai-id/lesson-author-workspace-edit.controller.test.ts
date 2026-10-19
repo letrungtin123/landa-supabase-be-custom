@@ -190,6 +190,6 @@ test('runtime Save/Reset requires real persisted acceptance and separate default
   assert.match(routes, /router\.post\(`\$\{workspaceReadPath\}\/nodes\/:nodeId\/reset`, lessonAuthorSessionOwnerOnly\('conversationId', \{ courseParam: 'courseId' \}\), workspaceEdits\.reset\)/);
   assert.ok(routes.indexOf('router.use(authenticate)') < routes.indexOf('const workspaceEdits'));
   assert.ok(routes.indexOf('router.use(tenantContext)') < routes.indexOf('const workspaceEdits'));
-  const env = readFileSync(new URL('../../../config/env.ts', import.meta.url), 'utf8');
+  const env = readFileSync(new URL('../../../config/env/ai-id.ts', import.meta.url), 'utf8');
   assert.match(env, /LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: optionalBoolean\('LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED', false\)/);
 });

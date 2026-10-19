@@ -175,7 +175,7 @@ test('real Express HTTP status/events/graph/detail journey is read-only with inj
 
 test('production routes retain auth/tenant order, current courses permission and default-off read-only gate', () => {
   const routes = readFileSync(new URL('../ai-chatbot.routes.ts', import.meta.url), 'utf8');
-  const env = readFileSync(new URL('../../../config/env.ts', import.meta.url), 'utf8');
+  const env = readFileSync(new URL('../../../config/env/ai-id.ts', import.meta.url), 'utf8');
   const before = routes.slice(0, routes.indexOf('const workspaceReads'));
   assert.match(before, /router\.use\(authenticate\)/); assert.match(before, /router\.use\(tenantContext\)/);
   const wiring = routes.slice(routes.indexOf('const workspaceReads'), routes.indexOf('const workspaceEdits'));

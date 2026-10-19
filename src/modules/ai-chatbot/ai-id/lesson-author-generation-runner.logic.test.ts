@@ -105,7 +105,7 @@ test('production wiring keeps quota holds, acceptance, auth and default-off depl
   const service = readFileSync(new URL('./lesson-author-durable-blueprint.service.ts', import.meta.url), 'utf8');
   const chat = readChatServiceSource();
   const quota = readFileSync(new URL('../ai-platform/ai-token-quota.service.ts', import.meta.url), 'utf8');
-  const config = readFileSync(new URL('../../../config/env.ts', import.meta.url), 'utf8');
+  const config = readFileSync(new URL('../../../config/env/ai-id.ts', import.meta.url), 'utf8');
   assert.match(service, /await reconstruct\(current\)/);
   assert.match(service, /await verifyReservation\(current\)/);
   assert.match(service, /durableBlueprintRepository.succeed/);
