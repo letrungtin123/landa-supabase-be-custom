@@ -23,6 +23,11 @@ import {
 } from '../../config/storage.js';
 import { LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES, LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL } from '../../config/upload-limits.js';
 import { bestEffort, swallowAndLog } from '../../utils/best-effort.js';
+import {
+  libraryCategoriesQuerySchema,
+  libraryDocumentsQuerySchema,
+  libraryPublicImpactQuerySchema,
+} from './library.validator.js';
 
 function formatUploadSizeMb(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
@@ -42,7 +47,7 @@ async function cleanupTempUpload(file: Express.Multer.File): Promise<void> {
 export async function listCategoriesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const result = await libService.listDocCategories(tenantId, req.query as Record<string, unknown>);
+    const result = await libService.listDocCategories(tenantId, libraryCategoriesQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -89,7 +94,7 @@ export async function publicImpactCategoryController(req: Request, res: Response
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const { limit } = libraryPublicImpactQuerySchema.parse(req.query);
     sendSuccess(res, await libService.getDocCategoryPublicImpact(req.params.id, tenantId, limit));
   } catch (err) { next(err); }
 }
@@ -134,7 +139,7 @@ export async function bulkDeleteCategoriesController(req: Request, res: Response
 export async function listDocumentsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const result = await libService.listDocuments(tenantId, req.query as Record<string, unknown>);
+    const result = await libService.listDocuments(tenantId, libraryDocumentsQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
