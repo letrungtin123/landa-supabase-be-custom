@@ -11,6 +11,7 @@ import {
   createAssignmentSchema,
   feedbackAssignmentSchema,
   reorderAssignmentsSchema,
+  submissionListQuerySchema,
   submitAssignmentSchema,
   updateAssignmentSchema,
 } from './assignments.validator.js';
@@ -156,7 +157,7 @@ export async function listCourseSubmissions(req: Request, res: Response, next: N
     const result = await service.listCourseSubmissions(
       req.params.courseId,
       tenantId(req),
-      req.query as Record<string, unknown>,
+      submissionListQuerySchema.parse(req.query),
     );
     sendSuccess(res, result);
   } catch (err) { next(err); }

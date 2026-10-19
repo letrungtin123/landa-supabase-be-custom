@@ -72,7 +72,7 @@
     "test:courses": "tsx --test src/modules/courses/course-mentor-logo-ownership.logic.test.ts src/modules/courses/courses-sql.characterization.test.ts src/modules/courses/courses.validator.test.ts",
     "test:groups": "tsx --test src/modules/groups/groups-sql.characterization.test.ts src/modules/groups/groups.validator.test.ts",
     "test:library": "tsx --test src/modules/library/library-sql.characterization.test.ts src/modules/library/library.validator.test.ts",
-    "test:assignments": "tsx --test src/modules/assignments/assignments-sql.characterization.test.ts",
+    "test:assignments": "tsx --test src/modules/assignments/assignments-sql.characterization.test.ts src/modules/assignments/assignments.validator.test.ts",
     "test:enrollments": "tsx --test src/modules/enrollments/enrollments-sql.characterization.test.ts src/modules/enrollments/enrollments.validator.test.ts",
     "test:loadtest-kit": "node --test scripts/loadtest/loadtest.selftest.test.mjs",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",

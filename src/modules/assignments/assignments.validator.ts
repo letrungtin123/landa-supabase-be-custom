@@ -103,3 +103,21 @@ export type CreateAssignmentInput = z.infer<typeof createAssignmentSchema>;
 export type UpdateAssignmentInput = z.infer<typeof updateAssignmentSchema>;
 export type SubmitAssignmentInput = z.infer<typeof submitAssignmentSchema>;
 export type FeedbackAssignmentInput = z.infer<typeof feedbackAssignmentSchema>;
+
+// ── Query strings ──
+// The query string of the staff submission list, read the way the service
+// always read it. It never rejects and never coerces: every request accepted
+// before is accepted with the same values (a repeated parameter stays a
+// list). Only the keys the service reads are kept.
+
+/** The raw value, unchecked. */
+const rawQueryValue = z.unknown();
+
+/** GET /api/assignments/courses/:courseId/submissions */
+export const submissionListQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+  status: rawQueryValue,
+  assignment_id: rawQueryValue,
+});
