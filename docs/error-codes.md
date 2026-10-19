@@ -239,6 +239,12 @@ some of these codes with status 400 for invalid input.
 | `COURSE_PUBLISH_ASSIGNMENT_FORBIDDEN` | 403 (400) | Not allowed to assign reviewers (400: invalid assignment id). |
 | `COURSE_PUBLISH_ASSIGNMENT_TRANSITION_INVALID` | 409 | The reviewer assignment cannot move to that state. |
 
+### library (`modules/library`)
+
+| Code | Status | Meaning | Raised in |
+|---|---|---|---|
+| `LIBRARY_FILE_TOO_LARGE` | 413 | One uploaded file is over the per-file limit (`LIBRARY_DOCUMENT_MAX_UPLOAD_MB`). The upload answer stays 201 and lists the file in `errors` with a text that states the limit and the file's size. A request multer already refuses gets 413 `PAYLOAD_TOO_LARGE` from the route, with the limit in its message. | `library.controller.ts` (`libraryFileTooLargeError`) |
+
 ### Refused request bodies
 
 A body that is not a JSON object (no body, a list, text), a required text that

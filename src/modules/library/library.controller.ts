@@ -7,6 +7,7 @@ import type { Request, Response, NextFunction } from 'express';
 import * as libService from './library.service.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { clientErrorMessage, requestUiLocaleOf } from '../../utils/client-error.js';
+import { AppError } from '../../utils/errors.js';
 import {
   createTransactionalAuditEntry,
   runAuditedTransaction,
@@ -34,6 +35,18 @@ function formatUploadSizeMb(bytes: number): string {
 }
 
 /** AppError text as is; storage/database errors become a plain message (detail logged). */
+/** A file over the per-file upload limit (an item of the upload answer's `errors`). */
+export const LIBRARY_FILE_TOO_LARGE_CODE = 'LIBRARY_FILE_TOO_LARGE';
+
+/** The refusal of one file over the limit; its text names the limit and the file's size. */
+export function libraryFileTooLargeError(size: number): AppError {
+  return new AppError(
+    `vượt quá giới hạn tải lên ${LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL} mỗi tệp. Dung lượng tệp: ${formatUploadSizeMb(size)}.`,
+    413,
+    LIBRARY_FILE_TOO_LARGE_CODE,
+  );
+}
+
 function getErrorMessage(err: unknown, req: Request): string {
   return clientErrorMessage(err, requestUiLocaleOf(req), 'Library');
 }
@@ -294,7 +307,8 @@ export async function uploadDocumentController(req: Request, res: Response, next
 
       try {
         if (file.size > LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES) {
-          throw new Error(`quá giới hạn upload ${LIBRARY_DOCUMENT_MAX_UPLOAD_LABEL}. Dung lượng hiện tại: ${formatUploadSizeMb(file.size)}.`);
+          // An AppError: its text reaches the answer (a plain Error became the generic message).
+          throw libraryFileTooLargeError(file.size);
         }
 
         if (!file.path) {
