@@ -5,6 +5,7 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
@@ -29,7 +30,7 @@ import {
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 1 * 1024 * 1024 }, // 1MB max for avatars
+  limits: { fileSize: 1 * 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS }, // 1MB max for avatars
 });
 
 // ── Profile routes (any authenticated user, self-service) ──

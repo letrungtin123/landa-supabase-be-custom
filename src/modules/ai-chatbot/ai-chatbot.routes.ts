@@ -5,6 +5,7 @@
 import { assertAiCreditForAiIdRun } from '../ai-credits/ai-credit.service.js';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission, hasPermission } from '../../middleware/authorize.js';
@@ -108,7 +109,7 @@ const lessonAuthorVideoUpload = multer({
     },
     filename: (_req, file, callback) => callback(null, `${randomUUID()}${path.extname(file.originalname || '').toLowerCase()}`),
   }),
-  limits: { files: 1, fileSize: env.LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB * 1024 * 1024 },
+  limits: { files: 1, fileSize: env.LESSON_AUTHOR_VIDEO_MAX_UPLOAD_MB * 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS },
 });
 
 function clearTemporaryLessonAuthorVideo(req: Request): void {

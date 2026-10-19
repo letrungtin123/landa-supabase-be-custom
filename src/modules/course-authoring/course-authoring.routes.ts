@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
 import { checkPermission } from '../../middleware/authorize.js';
@@ -44,7 +45,7 @@ const upload = multer({
       cb(null, `${Date.now()}-${randomUUID()}${ext || '.upload'}`);
     },
   }),
-  limits: { fileSize: COURSE_ASSET_MAX_UPLOAD_BYTES },
+  limits: { fileSize: COURSE_ASSET_MAX_UPLOAD_BYTES, ...MULTIPART_FIELD_NAME_LIMITS },
 });
 
 function isClientUploadAbort(req: Request, err: unknown): boolean {

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../middleware/body-limits.js';
 
 // What the upload routes rely on from multer (>= 2.3.0): the MulterError codes
 // their error mapping reads (library, course assets, lesson-author video, bot
@@ -174,12 +176,17 @@ test('an upload the client aborts reaches the error callback as an abort and its
 });
 
 test('a field name the body cannot hold is a MulterError, not a RangeError from the parser', async () => {
+  // Without the shared field name limits (the routes refuse a[4294967294] earlier: LIMIT_FIELD_ARRAY_INDEX).
+  const unlimited = await serve(multer({ storage: multer.memoryStorage() }).none());
   const server = await serve(createKbTempUpload().none());
   try {
     const form = new FormData();
     form.append('a[4294967294]', 'x');
     form.append('a[]', 'y');
-    assert.deepEqual(await server.post(form), { status: 400, body: { multer: true, code: 'INVALID_FIELD_NAME', field: 'a[]' } });
+    assert.deepEqual(await unlimited.post(form), { status: 400, body: { multer: true, code: 'INVALID_FIELD_NAME', field: 'a[]' } });
+    assert.deepEqual(await server.post(form), {
+      status: 400, body: { multer: true, code: 'LIMIT_FIELD_ARRAY_INDEX', field: 'a[4294967294]' },
+    });
 
     const ordinary = new FormData();
     ordinary.append('title', 'Tài liệu');
@@ -190,7 +197,56 @@ test('a field name the body cannot hold is a MulterError, not a RangeError from 
       status: 200, body: { files: [], fields: { title: 'Tài liệu', tags: ['a', 'b'], meta: { lang: 'vi' } } },
     });
   } finally {
+    await unlimited.close();
     await server.close();
+  }
+});
+
+test('field names: 5 bracket levels and array index 100 pass; a 6th level or index 101 is refused', async () => {
+  assert.deepEqual({ ...MULTIPART_FIELD_NAME_LIMITS }, { fieldNestingDepth: 5, fieldArrayIndexLimit: 100 });
+  // The shared limits alone, and a real route config (the KB upload) that spreads them.
+  const shared = await serve(multer({ storage: multer.memoryStorage(), limits: { fieldSize: 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS } }).none());
+  const kb = await serve(createKbTempUpload().none());
+  try {
+    for (const server of [shared, kb]) {
+      const accepted = new FormData();
+      accepted.append('a[b][c][d][e][f]', 'deep');
+      accepted.append('list[100]', 'last');
+      accepted.append('n[100][b][c][d][e]', 'both');
+      const ok = await server.post(accepted);
+      assert.equal(ok.status, 200);
+      const fields = ok.body.fields as { a: unknown; list: unknown[]; n: unknown[] };
+      assert.deepEqual(fields.a, { b: { c: { d: { e: { f: 'deep' } } } } });
+      assert.equal(fields.list.length, 101);
+      assert.equal(fields.list[100], 'last');
+      assert.deepEqual(fields.n[100], { b: { c: { d: { e: 'both' } } } });
+
+      const tooDeep = new FormData();
+      tooDeep.append('a[b][c][d][e][f][g]', 'x');
+      assert.deepEqual(await server.post(tooDeep), {
+        status: 400, body: { multer: true, code: 'LIMIT_FIELD_NESTING', field: 'a[b][c][d][e][f][g]' },
+      });
+      const indexTooLarge = new FormData();
+      indexTooLarge.append('list[101]', 'x');
+      assert.deepEqual(await server.post(indexTooLarge), {
+        status: 400, body: { multer: true, code: 'LIMIT_FIELD_ARRAY_INDEX', field: 'list[101]' },
+      });
+    }
+  } finally {
+    await shared.close();
+    await kb.close();
+  }
+});
+
+test('every multer config under src/ spreads the shared field name limits', () => {
+  const src = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const configs = (readdirSync(src, { recursive: true }) as string[])
+    .filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
+    .map((file) => ({ file, text: readFileSync(path.join(src, file), 'utf8') }))
+    .filter(({ text }) => /\bmulter\(/.test(text));
+  assert.ok(configs.length >= 13, `multer configs found: ${configs.length}`);
+  for (const { file, text } of configs) {
+    assert.match(text, /\.\.\.MULTIPART_FIELD_NAME_LIMITS\b/, `${file} creates a multer upload without the shared field name limits`);
   }
 });
 

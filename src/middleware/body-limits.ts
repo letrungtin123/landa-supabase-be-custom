@@ -44,3 +44,14 @@ export function useJsonBodyParsers(app: Express): void {
 export function useFormBodyParser(app: Express): void {
   app.use(express.urlencoded({ extended: true }));
 }
+
+/**
+ * Multipart (multer) text field names: at most 5 bracket levels (`a[b][c]`
+ * has 2) and array index 100, so a crafted name cannot build a deep object
+ * or a huge sparse array in req.body. Our forms send flat names. Every multer
+ * config spreads this into its `limits` (multer 2.4 options; the @types do not
+ * list them yet). Over a limit multer fails the request with a MulterError:
+ * LIMIT_FIELD_NESTING or LIMIT_FIELD_ARRAY_INDEX. File field names are not
+ * checked by multer.
+ */
+export const MULTIPART_FIELD_NAME_LIMITS = Object.freeze({ fieldNestingDepth: 5, fieldArrayIndexLimit: 100 });

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
@@ -14,7 +15,7 @@ import {
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB for images
+  limits: { fileSize: 10 * 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS }, // 10MB for images
 });
 
 router.use(authenticate, tenantContext, authorize('staff', 'superuser', 'superadmin'));

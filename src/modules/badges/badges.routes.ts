@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import * as ctrl from './badges.controller.js';
 
@@ -11,7 +12,7 @@ router.use(authenticate);
 // Multer — memory storage cho upload ảnh badge
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  limits: { fileSize: 10 * 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS }, // 10MB max
 });
 
 // Admin / Superadmin quản lý badges theo tenant

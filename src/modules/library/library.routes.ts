@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize, checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
@@ -38,6 +39,7 @@ const upload = multer({
   limits: {
     fileSize: LIBRARY_DOCUMENT_MAX_UPLOAD_BYTES,
     files: LIBRARY_DOCUMENT_MAX_FILES_PER_UPLOAD,
+    ...MULTIPART_FIELD_NAME_LIMITS,
   },
 });
 

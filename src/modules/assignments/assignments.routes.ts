@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { checkPermission } from '../../middleware/authorize.js';
 import { tenantContext } from '../../middleware/tenant-context.js';
@@ -17,6 +18,7 @@ const router = Router();
 const ASSIGNMENT_UPLOAD_LIMITS = {
   fileSize: 25 * 1024 * 1024,
   files: 5,
+  ...MULTIPART_FIELD_NAME_LIMITS,
 };
 
 const upload = multer({

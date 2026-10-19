@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import type { Request, Response, NextFunction } from 'express';
 import { authorize, checkPermission, hasPermission } from '../../middleware/authorize.js';
@@ -9,7 +10,7 @@ import { sendError } from '../../utils/response.js';
 import * as controller from './news.controller.js';
 
 const router = Router();
-const imageUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+const imageUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, ...MULTIPART_FIELD_NAME_LIMITS } });
 const allAuthenticatedRoles = authorize('learner', 'learner_plus', 'staff', 'superuser', 'superadmin');
 const learnerFeatureGate = requireTenantModule('news');
 const managerFeatureGate = requireTenantModule('news', { superadminBypass: true });

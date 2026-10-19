@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Request, Response } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../../middleware/body-limits.js';
 import { removeTempUploadFiles } from '../../../utils/temp-upload-files.js';
 import { MAX_KB_FILE_SIZE } from './kb.validator.js';
 
@@ -27,7 +28,7 @@ const kbTempFileStorage = multer.diskStorage({
 
 /** Same per-file limit as the former memory upload (50 MB). */
 export function createKbTempUpload(limits: multer.Options['limits'] = {}): multer.Multer {
-  return multer({ storage: kbTempFileStorage, limits: { fileSize: MAX_KB_FILE_SIZE, ...limits } });
+  return multer({ storage: kbTempFileStorage, limits: { fileSize: MAX_KB_FILE_SIZE, ...limits, ...MULTIPART_FIELD_NAME_LIMITS } });
 }
 
 export function kbTempUploadsOf(req: Request): Express.Multer.File[] {

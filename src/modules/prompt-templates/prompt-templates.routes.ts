@@ -4,6 +4,7 @@
 
 import { Router } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../middleware/body-limits.js';
 import { authenticate } from '../../middleware/authenticate.js';
 import { authorize } from '../../middleware/authorize.js';
 import * as ctrl from './prompt-templates.controller.js';
@@ -11,7 +12,7 @@ import * as ctrl from './prompt-templates.controller.js';
 const router = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024, ...MULTIPART_FIELD_NAME_LIMITS }, // 5MB
 });
 
 // All routes require auth

@@ -10,6 +10,7 @@
 
 import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
+import { MULTIPART_FIELD_NAME_LIMITS } from '../../../middleware/body-limits.js';
 import { isUuid } from '../../../utils/uuid.js';
 import { sendError } from '../../../utils/response.js';
 
@@ -35,7 +36,7 @@ const announcedMimeTypes = new WeakMap<Request, string>();
 // refuse a file of exactly the limit): exactly 5 MB is still accepted.
 const avatarUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: BOT_AVATAR_MAX_BYTES },
+  limits: { fileSize: BOT_AVATAR_MAX_BYTES, ...MULTIPART_FIELD_NAME_LIMITS },
   fileFilter: (req, file, callback) => {
     announcedMimeTypes.set(req, file.mimetype);
     callback(null, true);
