@@ -779,11 +779,6 @@
       "count": 18
     }
   },
-  "src/modules/course-deletion/course-deletion.worker.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    }
-  },
   "src/modules/courses/courses.controller.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
