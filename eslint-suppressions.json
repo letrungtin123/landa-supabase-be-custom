@@ -551,9 +551,14 @@
       "count": 1
     }
   },
+  "src/modules/ai-chatbot/kb/kb.repository.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
   "src/modules/ai-chatbot/kb/kb.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 3
+      "count": 1
     }
   },
   "src/modules/ai-chatbot/kb/kb.validator.ts": {
