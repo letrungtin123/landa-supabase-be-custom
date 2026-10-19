@@ -1,4 +1,4 @@
-import { query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { cacheJson, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
@@ -379,22 +379,32 @@ async function createLearnerFromProfile(
     const passwordHash = await hashPassword(randomPassword);
     const fullName = (profile.name || profile.email.split('@')[0] || username).trim();
 
+    // The account and its SSO link commit together: a failed link write
+    // leaves no account behind (one short transaction, no outbound call).
     let userId: string;
     try {
-      userId = await ssoRepository.insertLearner({
-        username,
-        email: profile.email,
-        passwordHash,
-        fullName,
-        tenantId,
-        isActive: autoActivate,
+      userId = await withDatabaseTransaction(async () => {
+        const insertedId = await ssoRepository.insertLearner({
+          username,
+          email: profile.email,
+          passwordHash,
+          fullName,
+          tenantId,
+          isActive: autoActivate,
+        });
+        await ssoRepository.upsertIdentityForSubject({
+          tenantId,
+          userId: insertedId,
+          provider,
+          subject: profile.sub,
+          email: profile.email,
+        });
+        return insertedId;
       });
     } catch (err) {
       if (isUsernameUniqueViolation(err)) continue;
       throw err;
     }
-
-    await ssoRepository.upsertIdentityForSubject({ tenantId, userId, provider, subject: profile.sub, email: profile.email });
 
     if (!autoActivate) {
       throw new AppError('Tài khoản SSO đã được tạo và đang chờ staff/superuser duyệt', 403);
