@@ -265,6 +265,7 @@ earlier answer (for example `course_id và title là bắt buộc`).
 | `HELP_DOC_INPUT_INVALID` | `POST /api/help-docs/folders`, `PATCH /api/help-docs/folders/:id`, `POST /api/help-docs/pages`, `PATCH /api/help-docs/pages/:id` (title required on create; folder title 200, icon 100, page title 500 characters; folder id a UUID; content text; published a boolean), `PATCH /api/help-docs/folders/reorder`, `PATCH /api/help-docs/pages/reorder` (a JSON object; folder id and every `ordered_ids` item a UUID, at most 1000 ids; a missing folder or an `ordered_ids` that is not a list keeps its earlier answer) | `help-docs.validator.ts` |
 | `EMAIL_TEMPLATE_INPUT_INVALID` | `PUT /api/email-templates/:key` (a JSON object; each field keeps the service's own checks) | `email-templates.validator.ts` |
 | `TEAM_COURSE_CATEGORY_IDS_INVALID` | `POST /api/groups/teams/:teamId/course-categories` (a JSON object; every `category_ids` item a UUID, at most 500; a `category_ids` that is not a list keeps `category_ids phải là mảng`) | `groups.validator.ts` |
+| `TEAM_DOCUMENT_CATEGORY_IDS_INVALID` | `POST /api/groups/teams/:teamId/categories` (a JSON object; at most 500 `category_ids` items; every text item a UUID once trimmed, while an item that is not text or is blank is skipped as before; a `category_ids` that is not a list keeps `category_ids phải là mảng`) | `groups.validator.ts` |
 
 ### Other modules
 
