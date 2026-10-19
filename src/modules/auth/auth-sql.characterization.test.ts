@@ -14,7 +14,7 @@ import {
   settle,
   type Answer,
   type Case,
-} from '../../test-support/sql-characterization.js';
+} from '../../test-support/auth-sql-characterization.js';
 
 // Characterization of sign-in and sessions: login (every refusal and its
 // order), refresh rotation (reuse grace, family revoke, demo iframe modes,
@@ -23,7 +23,7 @@ import {
 // authenticate / optionalAuth middleware, the durable revocation with its
 // Redis mirror, the rate-limit keys and the /api/auth route table (where each
 // limiter stands). Each case records its SQL, Redis commands, bcrypt calls,
-// audit rows and answer (see test-support/sql-characterization.ts).
+// audit rows and answer (see test-support/auth-sql-characterization.ts).
 //
 // The golden file was written by the code before the auth repositories
 // existed. Rewrite it only for an intended change:

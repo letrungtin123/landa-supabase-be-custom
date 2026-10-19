@@ -4,6 +4,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import * as svc from './notifications.service.js';
+import { notificationListQuerySchema } from './notifications.validator.js';
 
 export async function send(req: Request, res: Response, next: NextFunction) {
   try {
@@ -57,7 +58,7 @@ export async function smtpStatus(req: Request, res: Response, next: NextFunction
 export async function list(req: Request, res: Response, next: NextFunction) {
   try {
     const tenantId = req.user!.tenantId!;
-    const result = await svc.getNotifications(tenantId, req.query as Record<string, unknown>);
+    const result = await svc.getNotifications(tenantId, notificationListQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) {
     next(err);

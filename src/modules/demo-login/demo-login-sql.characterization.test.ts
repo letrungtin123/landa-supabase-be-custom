@@ -9,7 +9,7 @@ import {
   settle,
   type Answer,
   type Case,
-} from '../../test-support/sql-characterization.js';
+} from '../../test-support/auth-sql-characterization.js';
 
 // Characterization of the demo QR login and the demo iframe: the admin routes
 // (config, eligible learners, account list replace/delete, iframe settings,
@@ -17,7 +17,7 @@ import {
 // public account list and claim (one-time token), the iframe bootstrap down
 // to the demo_iframe session, and the demo iframe helpers other modules call.
 // Each case records its SQL and answer (see
-// test-support/sql-characterization.ts).
+// test-support/auth-sql-characterization.ts).
 //
 // The golden file was written by the code before the demo-login repositories
 // existed. Rewrite it only for an intended change:

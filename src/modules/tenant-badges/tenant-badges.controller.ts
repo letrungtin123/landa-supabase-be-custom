@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { sendError, sendSuccess } from '../../utils/response.js';
 import * as service from './tenant-badges.service.js';
-import { updateTenantBadgeRuleSchema } from './tenant-badges.validator.js';
+import { selectableCoursesQuerySchema, updateTenantBadgeRuleSchema } from './tenant-badges.validator.js';
 
 function tenantIdFromReq(req: Request, res: Response): string | null {
   const tenantId = req.user?.tenantId;
@@ -32,7 +32,7 @@ export async function listCourses(req: Request, res: Response, next: NextFunctio
     if (!tenantId) return;
     sendSuccess(
       res,
-      await service.listSelectableCourses(tenantId, req.query, req.user?.role === 'superadmin'),
+      await service.listSelectableCourses(tenantId, selectableCoursesQuerySchema.parse(req.query), req.user?.role === 'superadmin'),
     );
   } catch (error) {
     next(error);

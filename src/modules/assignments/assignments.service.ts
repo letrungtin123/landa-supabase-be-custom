@@ -39,8 +39,26 @@ import {
 } from '../learner/progress-calculation.service.js';
 import { scheduleCourseProgressRecalculation } from '../learner/progress-recalculation-job.service.js';
 import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.service.js';
-import { learnerCourseAccessCondition } from '../courses/course-access.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  createAssignmentsRepository,
+  type AssignmentCourseRow,
+  type AssignmentRow,
+  type AssignmentUpdateColumn,
+  type AssignmentsDb,
+} from './assignments.repository.js';
+import { createAssignmentLearnerRepository } from './assignment-learner.repository.js';
+import {
+  createAssignmentSubmissionsRepository,
+  type SubmissionListRow,
+} from './assignment-submissions.repository.js';
+
+// query() joins the caller's current transaction when there is one; the
+// transaction blocks below use the repositories over their own client.
+const poolDb: AssignmentsDb = { query };
+const assignmentsRepository = createAssignmentsRepository(poolDb);
+const learnerRepository = createAssignmentLearnerRepository(poolDb);
+const submissionsRepository = createAssignmentSubmissionsRepository(poolDb);
 
 const MAX_ASSIGNMENT_FILES = 5;
 const MAX_ASSIGNMENT_FILE_SIZE_BYTES = 25 * 1024 * 1024;
@@ -50,13 +68,7 @@ const SUBMISSION_UNLOCK_MODES = ['after_content_complete', 'anytime'] as const;
 type AssignmentDeadlineMode = typeof DEADLINE_MODES[number];
 type AssignmentSubmissionUnlockMode = typeof SUBMISSION_UNLOCK_MODES[number];
 
-interface CourseRow {
-  id: string;
-  display_name: string;
-  tenant_id: string;
-  visible_to_staff_only: boolean;
-  is_public: boolean;
-}
+type CourseRow = AssignmentCourseRow;
 
 export interface AssignmentAuditSnapshot {
   id: string;
@@ -186,70 +198,25 @@ function normalizeDeadlineForWrite(input: {
   };
 }
 
-function effectiveDeadlineExpression(alias = 'ca', enrollmentAlias = 'e'): string {
-  return `CASE
-    WHEN COALESCE(${alias}.deadline_mode, CASE WHEN ${alias}.deadline_enabled THEN 'absolute' ELSE 'none' END) = 'absolute'
-      THEN ${alias}.deadline_at
-    WHEN COALESCE(${alias}.deadline_mode, CASE WHEN ${alias}.deadline_enabled THEN 'absolute' ELSE 'none' END) = 'relative_to_enrollment'
-      AND ${alias}.deadline_after_days IS NOT NULL
-      AND ${enrollmentAlias}.enrolled_at IS NOT NULL
-      THEN GREATEST(${enrollmentAlias}.enrolled_at, ${alias}.created_at) + (${alias}.deadline_after_days * INTERVAL '1 day')
-    ELSE NULL
-  END`;
-}
-
 async function ensureCourseForAdmin(courseId: string, tenantId: string): Promise<CourseRow> {
-  const result = await query<CourseRow>(
-    `SELECT id, display_name, tenant_id, COALESCE(visible_to_staff_only, false) AS visible_to_staff_only,
-            EXISTS (
-              SELECT 1
-              FROM course_category_courses ccc_public
-              JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-              WHERE ccc_public.course_id = courses.id
-                AND cc_public.tenant_id = courses.tenant_id
-                AND COALESCE(cc_public.is_public, false) = true
-            ) AS is_public
-     FROM courses
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
-  return result.rows[0];
+  const course = await assignmentsRepository.selectCourse(courseId, tenantId);
+  if (!course) throw new AppError('Course khong ton tai', 404);
+  return course;
 }
 
 async function hasCoursePermission(user: AuthUser): Promise<boolean> {
   if (user.role === 'superadmin' || user.role === 'superuser') return true;
   if (user.role !== 'staff' || !user.tenantId) return false;
-  const result = await query<{ allowed: boolean }>(
-    `SELECT bool_or(pgm.can_view OR pgm.can_edit) AS allowed
-     FROM user_permission_groups upg
-     JOIN permission_group_modules pgm
-       ON pgm.permission_group_id = upg.permission_group_id
-      AND pgm.tenant_id = upg.tenant_id
-     JOIN modules m ON m.id = pgm.module_id
-     JOIN permission_groups pg ON pg.id = upg.permission_group_id
-     WHERE upg.user_id = $1
-       AND upg.tenant_id = $2
-       AND m.code = 'courses'
-       AND pg.tenant_id = $2`,
-    [user.id, user.tenantId],
-  );
-  return result.rows[0]?.allowed === true;
+  return assignmentsRepository.staffHasCoursePermission(user.id, user.tenantId);
 }
 
 async function getAssignmentForAdmin(assignmentId: string, tenantId: string) {
-  const result = await query(
-    `SELECT ca.*, c.display_name AS course_name
-     FROM course_assignments ca
-     JOIN courses c ON c.id = ca.course_id
-     WHERE ca.id = $1 AND ca.tenant_id = $2 AND ca.deleted_at IS NULL`,
-    [assignmentId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
-  return result.rows[0];
+  const assignment = await assignmentsRepository.selectAssignment(assignmentId, tenantId);
+  if (!assignment) throw new AppError('Assignment khong ton tai', 404);
+  return assignment;
 }
 
-function toAssignmentAuditSnapshot(row: any, courseName?: string): AssignmentAuditSnapshot {
+function toAssignmentAuditSnapshot(row: AssignmentRow, courseName?: string): AssignmentAuditSnapshot {
   return {
     id: String(row.id),
     course_id: String(row.course_id),
@@ -379,51 +346,21 @@ async function insertAssignmentFileRows(
   kind: 'submission' | 'feedback',
   files: UploadedAssignmentFile[],
 ): Promise<void> {
-  for (const file of files) {
-    await client.query(
-      `INSERT INTO assignment_files (
-         id, tenant_id, course_id, assignment_id, submission_id, uploaded_by, kind,
-         storage_path, original_name, mime_type, size_bytes
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        file.id,
-        tenantId,
-        courseId,
-        assignmentId,
-        submissionId,
-        uploadedBy,
-        kind,
-        file.storage_path,
-        file.original_name,
-        file.mime_type,
-        file.size_bytes,
-      ],
-    );
-  }
+  await createAssignmentsRepository(client).insertAssignmentFiles(
+    tenantId,
+    courseId,
+    assignmentId,
+    submissionId,
+    uploadedBy,
+    kind,
+    files,
+  );
 }
 
 export async function listCourseAssignments(courseId: string, tenantId: string) {
   await ensureCourseForAdmin(courseId, tenantId);
-  const result = await query(
-    `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
-            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
-            ca.deadline_after_days,
-            ca.attachment_file,
-            ca.grading_enabled,
-            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
-            ca.created_at, ca.updated_at,
-            COUNT(s.id) FILTER (WHERE s.status = 'submitted')::int AS submitted_count,
-            COUNT(s.id) FILTER (WHERE s.status = 'feedback_given')::int AS feedback_count
-     FROM course_assignments ca
-     LEFT JOIN assignment_submissions s ON s.assignment_id = ca.id
-     WHERE ca.tenant_id = $1 AND ca.course_id = $2 AND ca.deleted_at IS NULL
-     GROUP BY ca.id
-     ORDER BY ca.sort_order ASC, ca.created_at ASC`,
-    [tenantId, courseId],
-  );
-  return result.rows.map((row: any) => normalizeAssignmentRow(row));
+  const rows = await assignmentsRepository.selectCourseAssignments(courseId, tenantId);
+  return rows.map(row => normalizeAssignmentRow(row));
 }
 
 export async function createAssignment(
@@ -435,16 +372,7 @@ export async function createAssignment(
   auditEntry?: (assignment: AssignmentAuditSnapshot) => TransactionalAuditEntry,
 ) {
   const course = await ensureCourseForAdmin(courseId, tenantId);
-  const existing = await query<{ id: string }>(
-    `SELECT id
-     FROM course_assignments
-     WHERE tenant_id = $1::uuid
-       AND course_id = $2::varchar
-       AND deleted_at IS NULL
-     LIMIT 1`,
-    [tenantId, courseId],
-  );
-  if ((existing.rowCount ?? 0) > 0) {
+  if (await assignmentsRepository.courseHasAssignment(tenantId, courseId)) {
     throw new AppError('Mỗi khóa học chỉ được có 1 bài tập', 409);
   }
 
@@ -458,50 +386,31 @@ export async function createAssignment(
 
   try {
     await client.query('BEGIN');
+    const tx = createAssignmentsRepository(client);
 
-    const result = await client.query(
-      `INSERT INTO course_assignments (
-         id, tenant_id, course_id, title, question, allow_resubmission,
-         deadline_enabled, deadline_mode, deadline_at, deadline_after_days,
-         submission_unlock_mode, grading_enabled, attachment_file, sort_order, created_by
-       )
-       VALUES (
-         $1::uuid, $2::uuid, $3::varchar, $4::varchar, $5::text, $6::boolean, $7::boolean,
-         $8::varchar, $9::timestamptz, $10::integer,
-         $11::varchar, $12::boolean, $13::jsonb,
-         COALESCE((SELECT MAX(sort_order) + 1 FROM course_assignments WHERE tenant_id = $2::uuid AND course_id = $3::varchar AND deleted_at IS NULL), 0),
-         $14::uuid
-       )
-       RETURNING *`,
-      [
-        assignmentId,
-        tenantId,
-        courseId,
-        input.title,
-        input.question,
-        input.allow_resubmission,
-        deadline.deadlineEnabled,
-        deadline.deadlineMode,
-        deadline.deadlineAt,
-        deadline.deadlineAfterDays,
-        submissionUnlockMode,
-        input.grading_enabled,
-        uploadedAttachment ? JSON.stringify(uploadedAttachment) : null,
-        userId,
-      ],
-    );
-    const assignment = result.rows[0];
+    const assignment = await tx.insertAssignment({
+      assignmentId,
+      tenantId,
+      courseId,
+      title: input.title,
+      question: input.question,
+      allowResubmission: input.allow_resubmission,
+      deadlineEnabled: deadline.deadlineEnabled,
+      deadlineMode: deadline.deadlineMode,
+      deadlineAt: deadline.deadlineAt,
+      deadlineAfterDays: deadline.deadlineAfterDays,
+      submissionUnlockMode,
+      gradingEnabled: input.grading_enabled,
+      attachmentFile: uploadedAttachment ? JSON.stringify(uploadedAttachment) : null,
+      createdBy: userId,
+    });
 
     if (!course.visible_to_staff_only) {
-      const notification = await client.query<{ id: string }>(
-        `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
-         VALUES ($1::uuid, $2::varchar, $3::varchar, $4::jsonb, $5::varchar, $6::text, $7::uuid, 0)
-         RETURNING id`,
-        [
-          tenantId,
-          courseId,
-          'assignment_created',
-          JSON.stringify({
+      const notificationId = await tx.insertCourseNotification({
+        tenantId,
+        courseId,
+        type: 'assignment_created',
+        metadata: JSON.stringify({
             assignment_id: assignment.id,
             course_id: course.id,
             course_name: course.display_name,
@@ -517,54 +426,16 @@ export async function createAssignment(
             created_at: assignment.created_at,
             recipient_rule: course.is_public ? 'all_active_learners' : 'course_assignments',
           }),
-          'Bài tập mới',
-          assignment.deadline_mode === 'relative_to_enrollment' && assignment.deadline_after_days
-            ? `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Hạn nộp sau ${assignment.deadline_after_days} ngày, tính từ lúc học viên ghi danh hoặc từ lúc bài tập được tạo nếu học viên đã ghi danh trước đó.`
-            : `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Bài tập này không có thời hạn nộp.`,
-          userId,
-        ],
-      );
-      const notificationId = notification.rows[0].id;
+        title: 'Bài tập mới',
+        message: assignment.deadline_mode === 'relative_to_enrollment' && assignment.deadline_after_days
+          ? `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Hạn nộp sau ${assignment.deadline_after_days} ngày, tính từ lúc học viên ghi danh hoặc từ lúc bài tập được tạo nếu học viên đã ghi danh trước đó.`
+          : `Khóa học "${course.display_name}" vừa có bài tập mới: "${assignment.title}". Bài tập này không có thời hạn nộp.`,
+        sentBy: userId,
+      });
 
-      const recipientResult = await client.query<{ recipient_count: number }>(
-        `WITH eligible_learners AS (
-           SELECT DISTINCT u.id AS user_id
-           FROM users u
-           LEFT JOIN team_members tm ON tm.user_id = u.id
-           WHERE u.tenant_id = $1::uuid
-             AND u.is_active = true
-             AND u.role IN ('learner'::user_role, 'learner_plus'::user_role)
-             AND (
-               $4::boolean = true
-               OR EXISTS (
-                 SELECT 1
-                 FROM team_courses tc
-                 WHERE tc.team_id = tm.team_id
-                   AND tc.course_id = $2::varchar
-                 UNION ALL
-                 SELECT 1
-                 FROM team_course_categories tcc
-                 JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-                 WHERE tcc.team_id = tm.team_id
-                   AND ccc.course_id = $2::varchar
-               )
-             )
-         ),
-         inserted AS (
-           INSERT INTO notification_recipients (notification_id, user_id)
-           SELECT $3::uuid, user_id
-           FROM eligible_learners
-           ON CONFLICT DO NOTHING
-           RETURNING user_id
-         )
-         UPDATE notifications
-         SET recipient_count = (SELECT COUNT(*)::int FROM inserted)
-         WHERE id = $3::uuid
-         RETURNING recipient_count`,
-        [tenantId, courseId, notificationId, course.is_public],
-      );
+      const recipients = await tx.addCourseLearnerRecipients(tenantId, courseId, notificationId, course.is_public);
 
-      const recipientCount = Number(recipientResult.rows[0]?.recipient_count || 0);
+      const recipientCount = Number(recipients?.recipient_count || 0);
       if (recipientCount > 0) {
         const emailJobCount = await enqueueCourseNotificationEmailJob(client, {
           tenantId,
@@ -573,7 +444,7 @@ export async function createAssignment(
         });
         assignmentCreatedEmailJobQueued = emailJobCount > 0;
       } else {
-        await client.query('DELETE FROM notifications WHERE id = $1::uuid', [notificationId]);
+        await tx.deleteNotification(notificationId);
       }
     }
 
@@ -665,37 +536,24 @@ export async function updateAssignment(
   const shouldChangeAttachment = Boolean(uploadedAttachment || input.remove_attachment);
   const oldAttachmentPath = shouldChangeAttachment ? attachmentStoragePath(current.attachment_file) : null;
 
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const sets: [AssignmentUpdateColumn, unknown][] = [];
 
-  if (input.title !== undefined) { sets.push(`title = $${idx++}::varchar`); params.push(input.title); }
-  if (input.question !== undefined) { sets.push(`question = $${idx++}::text`); params.push(input.question); }
-  if (input.allow_resubmission !== undefined) { sets.push(`allow_resubmission = $${idx++}::boolean`); params.push(input.allow_resubmission); }
+  if (input.title !== undefined) sets.push(['title = $n::varchar', input.title]);
+  if (input.question !== undefined) sets.push(['question = $n::text', input.question]);
+  if (input.allow_resubmission !== undefined) sets.push(['allow_resubmission = $n::boolean', input.allow_resubmission]);
   if (input.deadline_at !== undefined) {
-    sets.push(`deadline_at = $${idx++}::timestamptz`);
-    params.push(input.deadline_at);
+    sets.push(['deadline_at = $n::timestamptz', input.deadline_at]);
   }
-  if (input.submission_unlock_mode !== undefined) { sets.push(`submission_unlock_mode = $${idx++}::varchar`); params.push(input.submission_unlock_mode); }
+  if (input.submission_unlock_mode !== undefined) sets.push(['submission_unlock_mode = $n::varchar', input.submission_unlock_mode]);
   if (shouldChangeAttachment) {
-    sets.push(`attachment_file = $${idx++}::jsonb`);
-    params.push(uploadedAttachment ? JSON.stringify(uploadedAttachment) : null);
+    sets.push(['attachment_file = $n::jsonb', uploadedAttachment ? JSON.stringify(uploadedAttachment) : null]);
   }
   if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
   const client = await getClient();
   try {
     await client.query('BEGIN');
 
-    params.push(assignmentId, tenantId);
-    const result = await client.query(
-      `UPDATE course_assignments
-       SET ${sets.join(', ')}
-       WHERE id = $${idx++}::uuid AND tenant_id = $${idx}::uuid AND deleted_at IS NULL
-       RETURNING *`,
-      params,
-    );
-
-    const updated = result.rows[0];
+    const updated = await createAssignmentsRepository(client).updateAssignmentColumns(assignmentId, tenantId, sets);
     if (!updated) throw new AppError('Assignment khong ton tai', 404);
     if (auditEntry) {
       await appendAuditLog(
@@ -731,14 +589,9 @@ export async function deleteAssignment(
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const result = await client.query(
-      `UPDATE course_assignments
-       SET deleted_at = now()
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-       RETURNING id`,
-      [assignmentId, tenantId],
-    );
-    if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
+    if (!(await createAssignmentsRepository(client).softDeleteAssignment(assignmentId, tenantId))) {
+      throw new AppError('Assignment khong ton tai', 404);
+    }
     if (auditEntry) await appendAuditLog(client, auditEntry(toAssignmentAuditSnapshot(current)));
     await client.query('COMMIT');
   } catch (err) {
@@ -771,13 +624,7 @@ export async function reorderAssignments(
   auditEntry?: (course: CourseRow, affectedCount: number) => TransactionalAuditEntry | null,
 ) {
   const course = await ensureCourseForAdmin(courseId, tenantId);
-  const existing = await query<{ id: string }>(
-    `SELECT id
-     FROM course_assignments
-     WHERE tenant_id = $1 AND course_id = $2 AND deleted_at IS NULL`,
-    [tenantId, courseId],
-  );
-  const existingIds = new Set(existing.rows.map(row => row.id));
+  const existingIds = new Set(await assignmentsRepository.selectCourseAssignmentIds(tenantId, courseId));
   if (assignmentIds.some(id => !existingIds.has(id))) {
     throw new AppError('Danh sach assignment reorder khong hop le', 400);
   }
@@ -785,13 +632,9 @@ export async function reorderAssignments(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const tx = createAssignmentsRepository(client);
     for (let i = 0; i < assignmentIds.length; i += 1) {
-      await client.query(
-        `UPDATE course_assignments
-         SET sort_order = $1
-         WHERE id = $2 AND tenant_id = $3 AND course_id = $4`,
-        [i, assignmentIds[i], tenantId, courseId],
-      );
+      await tx.updateSortOrder(i, assignmentIds[i], tenantId, courseId);
     }
     if (auditEntry) {
       const entry = auditEntry(course, assignmentIds.length);
@@ -816,138 +659,27 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
     ? queryParams.status
     : undefined;
 
+  const filter = {
+    tenantId,
+    courseId,
+    assignmentId: typeof queryParams.assignment_id === 'string' && queryParams.assignment_id
+      ? queryParams.assignment_id
+      : undefined,
+    status,
+    search,
+  };
+  const withFiles = (row: SubmissionListRow) => ({
+    ...row,
+    files: normalizeFiles(row.files),
+    feedback_files: normalizeFiles(row.feedback_files),
+  });
+
   if (!status || status === 'not_submitted') {
-    const params: unknown[] = [tenantId, courseId, course.visible_to_staff_only, course.is_public];
-    const assignmentConditions = [
-      'ca.tenant_id = $1::uuid',
-      'ca.course_id = $2::varchar',
-      'ca.deleted_at IS NULL',
-    ];
-    const stateConditions: string[] = [];
+    const { countRow, rows } = await submissionsRepository.selectSubmissionStatePage(filter, course, pageSize, offset);
 
-    if (typeof queryParams.assignment_id === 'string' && queryParams.assignment_id) {
-      params.push(queryParams.assignment_id);
-      assignmentConditions.push(`ca.id = $${params.length}::uuid`);
-    }
-
-    if (status === 'not_submitted') {
-      stateConditions.push('state.submission_id IS NULL');
-    }
-
-    if (search) {
-      params.push(`%${search}%`);
-      stateConditions.push(`(
-        unaccent(COALESCE(state.learner_name, '')) ILIKE unaccent($${params.length})
-        OR unaccent(COALESCE(state.learner_username, '')) ILIKE unaccent($${params.length})
-        OR unaccent(COALESCE(state.learner_email, '')) ILIKE unaccent($${params.length})
-      )`);
-    }
-
-    const stateWhere = stateConditions.length ? `WHERE ${stateConditions.join(' AND ')}` : '';
-    const baseSql = `
-      WITH eligible_learners AS (
-        SELECT DISTINCT u.id, u.username, u.full_name, u.email, u.role::text AS learner_role
-        FROM users u
-        LEFT JOIN team_members tm ON tm.user_id = u.id
-        WHERE $3::boolean = false
-          AND u.tenant_id = $1::uuid
-          AND u.is_active = true
-          AND u.role IN ('learner'::user_role, 'learner_plus'::user_role)
-          AND (
-            $4::boolean = true
-            OR EXISTS (
-              SELECT 1
-              FROM team_courses tc
-              WHERE tc.team_id = tm.team_id
-                AND tc.course_id = $2::varchar
-              UNION ALL
-              SELECT 1
-              FROM team_course_categories tcc
-              JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-              WHERE tcc.team_id = tm.team_id
-                AND ccc.course_id = $2::varchar
-            )
-          )
-      ),
-      filtered_assignments AS (
-        SELECT ca.id, ca.title, ca.question, ca.deadline_enabled, ca.deadline_at,
-               COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
-               ca.deadline_after_days,
-               COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
-               ca.grading_enabled, ca.sort_order, ca.created_at
-        FROM course_assignments ca
-        WHERE ${assignmentConditions.join(' AND ')}
-      ),
-      state AS (
-        SELECT s.id AS submission_id,
-               COALESCE(s.id::text, fa.id::text || ':' || el.id::text || ':not_submitted') AS id,
-               fa.id AS assignment_id,
-               el.id AS learner_id,
-               COALESCE(s.answer_text, '') AS answer_text,
-               COALESCE(s.files, '[]'::jsonb) AS files,
-               COALESCE(s.status::text, 'not_submitted') AS status,
-               s.submitted_at,
-               COALESCE(s.submission_version, 0) AS submission_version,
-               s.score,
-               s.feedback_text,
-               COALESCE(s.feedback_files, '[]'::jsonb) AS feedback_files,
-               s.feedback_by,
-               s.feedback_at,
-               fa.title AS assignment_title,
-               fa.question AS assignment_question,
-               fa.deadline_enabled,
-               fa.deadline_mode,
-               fa.deadline_at,
-               fa.deadline_after_days,
-               fa.submission_unlock_mode,
-               fa.grading_enabled,
-               el.username AS learner_username,
-               el.full_name AS learner_name,
-               el.email AS learner_email,
-               el.learner_role,
-               fb.username AS feedback_by_username,
-               fb.full_name AS feedback_by_name,
-               fb.email AS feedback_by_email
-        FROM filtered_assignments fa
-        CROSS JOIN eligible_learners el
-        LEFT JOIN assignment_submissions s
-          ON s.assignment_id = fa.id
-         AND s.learner_id = el.id
-         AND s.tenant_id = $1::uuid
-        LEFT JOIN users fb ON fb.id = s.feedback_by
-      )`;
-
-    const [countResult, dataResult] = await Promise.all([
-      query<{ count: string }>(
-        `${baseSql}
-         SELECT COUNT(*) AS count
-         FROM state
-         ${stateWhere}`,
-        params,
-      ),
-      query(
-        `${baseSql}
-         SELECT state.*, $${params.length + 1}::text AS course_name
-         FROM state
-         ${stateWhere}
-         ORDER BY
-           CASE WHEN state.submitted_at IS NULL THEN 1 ELSE 0 END,
-           state.submitted_at DESC NULLS LAST,
-           state.assignment_title ASC,
-           COALESCE(NULLIF(state.learner_name, ''), state.learner_username, state.learner_email) ASC,
-           state.learner_id ASC
-         LIMIT $${params.length + 2} OFFSET $${params.length + 3}`,
-        [...params, course.display_name, pageSize, offset],
-      ),
-    ]);
-
-    const total = parseInt(countResult.rows[0]?.count || '0', 10);
+    const total = parseInt(countRow?.count || '0', 10);
     return {
-      data: dataResult.rows.map((row: any) => ({
-        ...row,
-        files: normalizeFiles(row.files),
-        feedback_files: normalizeFiles(row.feedback_files),
-      })),
+      data: rows.map(withFiles),
       total,
       page,
       pageSize,
@@ -955,69 +687,11 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
     };
   }
 
-  const params: unknown[] = [tenantId, courseId];
-  const conditions = ['s.tenant_id = $1', 's.course_id = $2', 'ca.deleted_at IS NULL'];
+  const { countRow, rows } = await submissionsRepository.selectSubmissionPage(filter, course.display_name, pageSize, offset);
 
-  if (typeof queryParams.assignment_id === 'string' && queryParams.assignment_id) {
-    params.push(queryParams.assignment_id);
-    conditions.push(`s.assignment_id = $${params.length}`);
-  }
-
-  if (status) {
-    params.push(status);
-    conditions.push(`s.status = $${params.length}`);
-  }
-
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(
-      unaccent(COALESCE(u.full_name, '')) ILIKE unaccent($${params.length})
-      OR unaccent(COALESCE(u.username, '')) ILIKE unaccent($${params.length})
-      OR unaccent(COALESCE(u.email, '')) ILIKE unaccent($${params.length})
-    )`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const [countResult, dataResult] = await Promise.all([
-    query<{ count: string }>(
-      `SELECT COUNT(*) AS count
-       FROM assignment_submissions s
-       JOIN users u ON u.id = s.learner_id
-       JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
-       ${where}`,
-      params,
-    ),
-    query(
-      `SELECT s.id, s.assignment_id, s.learner_id, s.answer_text, s.files, s.status,
-              s.submitted_at, s.submission_version, s.score, s.feedback_text, s.feedback_files,
-              s.feedback_by, s.feedback_at, ca.title AS assignment_title, ca.question AS assignment_question,
-              ca.deadline_enabled,
-              COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
-              ca.deadline_at, ca.deadline_after_days,
-              COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
-              ca.grading_enabled,
-              u.username AS learner_username, u.full_name AS learner_name, u.email AS learner_email,
-              u.role AS learner_role,
-              fb.username AS feedback_by_username, fb.full_name AS feedback_by_name, fb.email AS feedback_by_email,
-              $${params.length + 1}::text AS course_name
-       FROM assignment_submissions s
-       JOIN users u ON u.id = s.learner_id
-       JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
-       LEFT JOIN users fb ON fb.id = s.feedback_by
-       ${where}
-       ORDER BY s.submitted_at DESC, s.id DESC
-       LIMIT $${params.length + 2} OFFSET $${params.length + 3}`,
-      [...params, course.display_name, pageSize, offset],
-    ),
-  ]);
-
-  const total = parseInt(countResult.rows[0]?.count || '0', 10);
+  const total = parseInt(countRow?.count || '0', 10);
   return {
-    data: dataResult.rows.map((row: any) => ({
-      ...row,
-      files: normalizeFiles(row.files),
-      feedback_files: normalizeFiles(row.feedback_files),
-    })),
+    data: rows.map(withFiles),
     total,
     page,
     pageSize,
@@ -1027,65 +701,16 @@ export async function listCourseSubmissions(courseId: string, tenantId: string, 
 
 export async function listLearnerCourseAssignments(courseId: string, user: AuthUser) {
   if (!user.tenantId) throw new AppError('Thieu tenant', 400);
-  const learnerVisibilityFilter = isLearnerRole(user.role)
-    ? `AND ${learnerCourseAccessCondition('c', '$2')}`
-    : '';
+  const access = await learnerRepository.selectCourseAccess(courseId, user.id, user.tenantId, isLearnerRole(user.role));
+  if (!access) throw new AppError('Khong co quyen truy cap course', 403);
 
-  const access = await query<{ enrollment_id: string | null }>(
-    `SELECT e.id AS enrollment_id
-     FROM courses c
-     LEFT JOIN enrollments e
-       ON e.course_id = c.id
-      AND e.user_id = $2
-      AND e.tenant_id = c.tenant_id
-      AND e.is_active = true
-     WHERE c.id = $1
-       AND c.tenant_id = $3
-       AND c.deleted_at IS NULL
-       ${learnerVisibilityFilter}`,
-    [courseId, user.id, user.tenantId],
-  );
-  if (access.rowCount === 0) throw new AppError('Khong co quyen truy cap course', 403);
-
-  const enrollmentId = access.rows[0].enrollment_id;
+  const enrollmentId = access.enrollment_id;
   const contentCompletion = enrollmentId
     ? await getEnrollmentContentCompletion(enrollmentId, courseId)
     : { total: 0, completed: 0, is_complete: false };
-  const effectiveDeadlineSql = effectiveDeadlineExpression('ca', 'e');
-  const result = await query(
-    `SELECT ca.id, ca.tenant_id, ca.course_id, ca.title, ca.question, ca.sort_order,
-            ca.allow_resubmission, ca.deadline_enabled, ca.deadline_at,
-            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
-            ca.deadline_after_days,
-            ${effectiveDeadlineSql} AS effective_deadline_at,
-            ca.attachment_file,
-            ca.grading_enabled,
-            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
-            (${effectiveDeadlineSql} IS NOT NULL AND ${effectiveDeadlineSql} <= now()) AS is_deadline_expired,
-            COALESCE(s.status::text, 'not_submitted') AS status,
-            s.id AS submission_id, s.answer_text, s.files, s.submitted_at,
-            s.submission_version, s.score, s.feedback_text, s.feedback_files,
-            s.feedback_by, s.feedback_at,
-            fb.username AS feedback_by_username,
-            fb.full_name AS feedback_by_name,
-            fb.email AS feedback_by_email
-     FROM course_assignments ca
-     LEFT JOIN enrollments e
-       ON e.course_id = ca.course_id
-      AND e.user_id = $3
-      AND e.tenant_id = ca.tenant_id
-      AND e.is_active = true
-     LEFT JOIN assignment_submissions s
-       ON s.assignment_id = ca.id AND s.learner_id = $3
-     LEFT JOIN users fb ON fb.id = s.feedback_by
-     WHERE ca.course_id = $1
-       AND ca.tenant_id = $2
-       AND ca.deleted_at IS NULL
-     ORDER BY ca.sort_order ASC, ca.created_at ASC`,
-    [courseId, user.tenantId, user.id],
-  );
+  const rows = await learnerRepository.selectLearnerAssignments(courseId, user.tenantId, user.id);
 
-  return result.rows.map((row: any) => {
+  return rows.map(row => {
     const deadlineExpired = row.is_deadline_expired === true;
     const unlockMode = normalizeSubmissionUnlockMode(row.submission_unlock_mode);
     const unlockedByContent = unlockMode === 'anytime' || contentCompletion.is_complete;
@@ -1132,14 +757,9 @@ export async function listLearnerCourseAssignments(courseId: string, user: AuthU
 
 export async function getLearnerAssignment(assignmentId: string, user: AuthUser) {
   if (!user.tenantId) throw new AppError('Thieu tenant', 400);
-  const result = await query<{ course_id: string }>(
-    `SELECT course_id
-     FROM course_assignments
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [assignmentId, user.tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Assignment khong ton tai', 404);
-  const assignments = await listLearnerCourseAssignments(result.rows[0].course_id, user);
+  const courseId = await learnerRepository.selectAssignmentCourseId(assignmentId, user.tenantId);
+  if (courseId === null) throw new AppError('Assignment khong ton tai', 404);
+  const assignments = await listLearnerCourseAssignments(courseId, user);
   const assignment = assignments.find(item => item.id === assignmentId);
   if (!assignment) throw new AppError('Assignment khong ton tai', 404);
   return assignment;
@@ -1157,41 +777,9 @@ export async function submitAssignment(
     throw new AppError('Chỉ học viên mới có thể nộp bài tập', 403);
   }
 
-  const access = await query<{
-    assignment_id: string;
-    tenant_id: string;
-    course_id: string;
-    title: string;
-    allow_resubmission: boolean;
-    deadline_enabled: boolean;
-    deadline_at: string | Date | null;
-    deadline_mode: AssignmentDeadlineMode;
-    deadline_after_days: number | null;
-    effective_deadline_at: string | Date | null;
-    submission_unlock_mode: AssignmentSubmissionUnlockMode;
-    enrollment_id: string;
-  }>(
-    `SELECT ca.id AS assignment_id, ca.tenant_id, ca.course_id, ca.title, ca.allow_resubmission,
-            ca.deadline_enabled,
-            COALESCE(ca.deadline_mode, CASE WHEN ca.deadline_enabled THEN 'absolute' ELSE 'none' END) AS deadline_mode,
-            ca.deadline_at,
-            ca.deadline_after_days,
-            ${effectiveDeadlineExpression('ca', 'e')} AS effective_deadline_at,
-            COALESCE(ca.submission_unlock_mode, 'after_content_complete') AS submission_unlock_mode,
-            e.id AS enrollment_id
-     FROM course_assignments ca
-     JOIN courses c ON c.id = ca.course_id
-     JOIN enrollments e ON e.course_id = ca.course_id AND e.user_id = $3 AND e.tenant_id = ca.tenant_id AND e.is_active = true
-     WHERE ca.id = $1
-       AND ca.tenant_id = $2
-       AND ca.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-       AND ${learnerCourseAccessCondition('c', 'e.user_id')}`,
-    [assignmentId, user.tenantId, user.id],
-  );
-  if (access.rowCount === 0) throw new AppError('Assignment khong ton tai hoac khong co quyen', 404);
+  const ctx = await learnerRepository.selectSubmitAccess(assignmentId, user.tenantId, user.id);
+  if (!ctx) throw new AppError('Assignment khong ton tai hoac khong co quyen', 404);
 
-  const ctx = access.rows[0];
   if (ctx.submission_unlock_mode === 'after_content_complete') {
     const contentCompletion = await getEnrollmentContentCompletion(ctx.enrollment_id, ctx.course_id);
     if (!contentCompletion.is_complete) {
@@ -1202,24 +790,16 @@ export async function submitAssignment(
     throw new AppError('Đã hết thời hạn nộp bài tập', 403);
   }
 
-  const existing = await query<{
-    id: string;
-    status: 'submitted' | 'feedback_given';
-  }>(
-    `SELECT id, status
-     FROM assignment_submissions
-     WHERE assignment_id = $1 AND learner_id = $2`,
-    [assignmentId, user.id],
-  );
+  const existing = await learnerRepository.selectOwnSubmission(assignmentId, user.id);
 
-  if (existing.rows[0]?.status === 'feedback_given') {
+  if (existing?.status === 'feedback_given') {
     throw new AppError('Assignment da co feedback, khong the nop lai', 409);
   }
-  if (existing.rows[0]?.status === 'submitted' && !ctx.allow_resubmission) {
+  if (existing?.status === 'submitted' && !ctx.allow_resubmission) {
     throw new AppError('Assignment khong cho phep nop lai', 409);
   }
 
-  const submissionId = existing.rows[0]?.id || uuidv4();
+  const submissionId = existing?.id || uuidv4();
   const uploadedFiles = await uploadAssignmentFiles(
     files,
     ctx.tenant_id,
@@ -1235,48 +815,26 @@ export async function submitAssignment(
   try {
     await client.query('BEGIN');
 
-    if (existing.rows.length > 0) {
-      const oldFiles = await client.query<{ storage_path: string }>(
-        `DELETE FROM assignment_files
-         WHERE submission_id = $1 AND kind = 'submission'
-         RETURNING storage_path`,
-        [submissionId],
-      );
-      oldStoragePaths.push(...oldFiles.rows.map(row => row.storage_path));
+    const tx = createAssignmentLearnerRepository(client);
+    if (existing !== undefined) {
+      oldStoragePaths.push(...(await tx.deleteSubmissionFiles(submissionId)));
 
-      await client.query(
-        `UPDATE assignment_submissions
-         SET answer_text = $1,
-             files = $2,
-             status = 'submitted',
-             submitted_at = now(),
-             submission_version = submission_version + 1,
-             feedback_text = NULL,
-             feedback_files = '[]'::jsonb,
-             feedback_by = NULL,
-             feedback_at = NULL,
-             score = NULL
-         WHERE id = $3`,
-        [input.answer_text, JSON.stringify(uploadedFiles.map(({ storage_path, ...rest }) => rest)), submissionId],
+      await tx.resubmit(
+        input.answer_text,
+        JSON.stringify(uploadedFiles.map(({ storage_path, ...rest }) => rest)),
+        submissionId,
       );
     } else {
-      await client.query(
-        `INSERT INTO assignment_submissions (
-           id, tenant_id, course_id, assignment_id, learner_id, enrollment_id,
-           answer_text, files, status, submitted_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'submitted', now())`,
-        [
-          submissionId,
-          ctx.tenant_id,
-          ctx.course_id,
-          ctx.assignment_id,
-          user.id,
-          ctx.enrollment_id,
-          input.answer_text,
-          JSON.stringify(uploadedFiles.map(({ storage_path, ...rest }) => rest)),
-        ],
-      );
+      await tx.insertSubmission({
+        submissionId,
+        tenantId: ctx.tenant_id,
+        courseId: ctx.course_id,
+        assignmentId: ctx.assignment_id,
+        learnerId: user.id,
+        enrollmentId: ctx.enrollment_id,
+        answerText: input.answer_text,
+        files: JSON.stringify(uploadedFiles.map(({ storage_path, ...rest }) => rest)),
+      });
     }
 
     await insertAssignmentFileRows(
@@ -1308,25 +866,9 @@ export async function submitAssignment(
 }
 
 export async function getSubmissionAuditContext(submissionId: string, tenantId: string) {
-  const result = await query<{
-    id: string;
-    assignment_title: string;
-    course_name: string;
-    learner_name: string;
-  }>(
-    `SELECT s.id,
-            ca.title AS assignment_title,
-            c.display_name AS course_name,
-            COALESCE(NULLIF(u.full_name, ''), u.username, u.email, s.learner_id::text) AS learner_name
-     FROM assignment_submissions s
-     JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
-     JOIN courses c ON c.id = s.course_id
-     JOIN users u ON u.id = s.learner_id
-     WHERE s.id = $1 AND s.tenant_id = $2`,
-    [submissionId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
-  return result.rows[0];
+  const context = await submissionsRepository.selectSubmissionAuditContext(submissionId, tenantId);
+  if (!context) throw new AppError('Submission khong ton tai', 404);
+  return context;
 }
 export async function feedbackSubmission(
   submissionId: string,
@@ -1336,36 +878,8 @@ export async function feedbackSubmission(
   files?: Express.Multer.File[],
   auditEntry?: (context: AssignmentFeedbackAuditContext, beforeScore: number | null, afterScore: number | null) => TransactionalAuditEntry,
 ) {
-  const submission = await query<{
-    id: string;
-    tenant_id: string;
-    course_id: string;
-    assignment_id: string;
-    learner_id: string;
-    status: 'submitted' | 'feedback_given';
-    feedback_at: string | null;
-    course_name: string;
-    assignment_title: string;
-    assignment_question: string;
-    grading_enabled: boolean;
-    learner_name: string;
-    learner_email: string;
-  }>(
-    `SELECT s.id, s.tenant_id, s.course_id, s.assignment_id, s.learner_id,
-            s.status::text AS status, s.feedback_at,
-            c.display_name AS course_name, ca.title AS assignment_title, ca.question AS assignment_question,
-            ca.grading_enabled,
-            COALESCE(NULLIF(u.full_name, ''), u.username) AS learner_name,
-            u.email AS learner_email
-     FROM assignment_submissions s
-     JOIN course_assignments ca ON ca.id = s.assignment_id AND ca.tenant_id = s.tenant_id AND ca.course_id = s.course_id
-     JOIN courses c ON c.id = s.course_id
-     JOIN users u ON u.id = s.learner_id
-     WHERE s.id = $1 AND s.tenant_id = $2`,
-    [submissionId, tenantId],
-  );
-  if (submission.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
-  const ctx = submission.rows[0];
+  const ctx = await submissionsRepository.selectFeedbackContext(submissionId, tenantId);
+  if (!ctx) throw new AppError('Submission khong ton tai', 404);
   if (ctx.grading_enabled && input.score === undefined) {
     throw new AppError('Vui long nhap diem tu 0 den 100', 400);
   }
@@ -1373,16 +887,9 @@ export async function feedbackSubmission(
     throw new AppError('Bai tap nay khong bat cham diem', 400);
   }
 
-  const admin = await query<{ name: string; email: string | null }>(
-    `SELECT COALESCE(NULLIF(full_name, ''), username, email, 'Quản trị viên') AS name,
-            email
-     FROM users
-     WHERE id = $1::uuid
-     LIMIT 1`,
-    [adminId],
-  );
-  const feedbackByName = admin.rows[0]?.name || 'Quản trị viên';
-  const feedbackByEmail = admin.rows[0]?.email || null;
+  const admin = await submissionsRepository.selectFeedbackAuthor(adminId);
+  const feedbackByName = admin?.name || 'Quản trị viên';
+  const feedbackByEmail = admin?.email || null;
 
   const uploadedFiles = await uploadAssignmentFiles(
     files,
@@ -1398,47 +905,30 @@ export async function feedbackSubmission(
   try {
     await client.query('BEGIN');
 
-    const current = await client.query<{
-      status: 'submitted' | 'feedback_given';
-      feedback_at: string | null;
-      feedback_files: unknown;
-      score: number | null;
-    }>(
-      `SELECT status::text AS status, feedback_at, feedback_files, score
-       FROM assignment_submissions
-       WHERE id = $1 AND tenant_id = $2
-       FOR UPDATE`,
-      [submissionId, tenantId],
-    );
-    if (current.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
-    if (current.rows[0].status !== 'submitted' && current.rows[0].status !== 'feedback_given') {
+    const tx = createAssignmentSubmissionsRepository(client);
+    const current = await tx.lockSubmission(submissionId, tenantId);
+    if (!current) throw new AppError('Submission khong ton tai', 404);
+    if (current.status !== 'submitted' && current.status !== 'feedback_given') {
       throw new AppError('Submission chua san sang de feedback', 409);
     }
 
     const uploadedFeedbackFiles = uploadedFiles.map(({ storage_path, ...rest }) => rest);
     const nextFeedbackFiles = uploadedFeedbackFiles.length > 0
       ? uploadedFeedbackFiles
-      : normalizeFiles(current.rows[0].feedback_files);
+      : normalizeFiles(current.feedback_files);
     const score = ctx.grading_enabled ? input.score! : null;
 
-    const feedbackUpdate = await client.query<{ feedback_at: string }>(
-      `UPDATE assignment_submissions
-       SET status = 'feedback_given',
-           feedback_text = $1,
-           feedback_files = $2,
-           score = $3,
-           feedback_by = $4,
-           feedback_at = now()
-       WHERE id = $5
-         AND tenant_id = $6
-         AND status IN ('submitted', 'feedback_given')
-       RETURNING feedback_at`,
-      [input.feedback_text, JSON.stringify(nextFeedbackFiles), score, adminId, submissionId, tenantId],
-    );
-    if (feedbackUpdate.rowCount === 0) {
+    const feedbackAt = await tx.updateFeedback({
+      feedbackText: input.feedback_text,
+      feedbackFiles: JSON.stringify(nextFeedbackFiles),
+      score,
+      feedbackBy: adminId,
+      submissionId,
+      tenantId,
+    });
+    if (feedbackAt === null) {
       throw new AppError('Khong the cap nhat feedback cho submission nay', 409);
     }
-    const feedbackAt = feedbackUpdate.rows[0].feedback_at;
 
     await insertAssignmentFileRows(
       client,
@@ -1451,57 +941,40 @@ export async function feedbackSubmission(
       uploadedFiles,
     );
 
-    await client.query(
-      `INSERT INTO assignment_feedback_history (
-         tenant_id, course_id, assignment_id, submission_id, learner_id,
-         feedback_text, feedback_files, score, feedback_by, feedback_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        ctx.tenant_id,
-        ctx.course_id,
-        ctx.assignment_id,
-        ctx.id,
-        ctx.learner_id,
-        input.feedback_text,
-        JSON.stringify(nextFeedbackFiles),
-        score,
-        adminId,
-        feedbackAt,
-      ],
-    );
+    await tx.insertFeedbackHistory({
+      tenantId: ctx.tenant_id,
+      courseId: ctx.course_id,
+      assignmentId: ctx.assignment_id,
+      submissionId: ctx.id,
+      learnerId: ctx.learner_id,
+      feedbackText: input.feedback_text,
+      feedbackFiles: JSON.stringify(nextFeedbackFiles),
+      score,
+      feedbackBy: adminId,
+      feedbackAt,
+    });
 
-    const notification = await client.query<{ id: string }>(
-      `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 1)
-       RETURNING id`,
-      [
-        ctx.tenant_id,
-        ctx.course_id,
-        'assignment_feedback',
-        JSON.stringify({
-          assignment_id: ctx.assignment_id,
-          submission_id: ctx.id,
-          course_id: ctx.course_id,
-          course_name: ctx.course_name,
-          assignment_title: ctx.assignment_title,
-          assignment_question: ctx.assignment_question,
-          grading_enabled: ctx.grading_enabled,
-          feedback_by_name: feedbackByName,
-          feedback_by_email: feedbackByEmail,
-          feedback_at: feedbackAt,
-        }),
-        'Bài tập đã có feedback',
-        `Bài tập "${ctx.assignment_title}" trong khóa học "${ctx.course_name}" đã có feedback mới.`,
-        adminId,
-      ],
-    );
-    await client.query(
-      `INSERT INTO notification_recipients (notification_id, user_id)
-       VALUES ($1, $2)
-       ON CONFLICT DO NOTHING`,
-      [notification.rows[0].id, ctx.learner_id],
-    );
+    const notificationId = await tx.insertSingleRecipientNotification({
+      tenantId: ctx.tenant_id,
+      courseId: ctx.course_id,
+      type: 'assignment_feedback',
+      metadata: JSON.stringify({
+        assignment_id: ctx.assignment_id,
+        submission_id: ctx.id,
+        course_id: ctx.course_id,
+        course_name: ctx.course_name,
+        assignment_title: ctx.assignment_title,
+        assignment_question: ctx.assignment_question,
+        grading_enabled: ctx.grading_enabled,
+        feedback_by_name: feedbackByName,
+        feedback_by_email: feedbackByEmail,
+        feedback_at: feedbackAt,
+      }),
+      title: 'Bài tập đã có feedback',
+      message: `Bài tập "${ctx.assignment_title}" trong khóa học "${ctx.course_name}" đã có feedback mới.`,
+      sentBy: adminId,
+    });
+    await tx.insertNotificationRecipient(notificationId, ctx.learner_id);
 
     await enqueueFeedbackEmails(client, {
       tenantId: ctx.tenant_id,
@@ -1525,7 +998,7 @@ export async function feedbackSubmission(
         courseId: ctx.course_id,
         courseName: ctx.course_name,
         learnerName: ctx.learner_name,
-      }, current.rows[0].score, score));
+      }, current.score, score));
     }
 
     await client.query('COMMIT');
@@ -1545,30 +1018,13 @@ export async function feedbackSubmission(
 }
 
 export async function listSubmissionFeedbackHistory(submissionId: string, tenantId: string) {
-  const submission = await query<{ id: string }>(
-    `SELECT id
-     FROM assignment_submissions
-     WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-    [submissionId, tenantId],
-  );
-  if (submission.rowCount === 0) throw new AppError('Submission khong ton tai', 404);
+  if (!(await submissionsRepository.submissionExists(submissionId, tenantId))) {
+    throw new AppError('Submission khong ton tai', 404);
+  }
 
-  const result = await query(
-    `SELECT h.id, h.submission_id, h.assignment_id, h.learner_id,
-            h.feedback_text, h.feedback_files, h.score, h.feedback_by, h.feedback_at, h.created_at,
-            u.username AS feedback_by_username,
-            u.full_name AS feedback_by_name,
-            u.email AS feedback_by_email
-     FROM assignment_feedback_history h
-     LEFT JOIN users u ON u.id = h.feedback_by
-     WHERE h.submission_id = $1::uuid
-       AND h.tenant_id = $2::uuid
-     ORDER BY h.feedback_at DESC, h.id DESC
-     LIMIT 100`,
-    [submissionId, tenantId],
-  );
+  const rows = await submissionsRepository.selectFeedbackHistory(submissionId, tenantId);
 
-  return result.rows.map((row: any) => ({
+  return rows.map(row => ({
     ...row,
     feedback_files: normalizeFiles(row.feedback_files),
   }));
@@ -1612,44 +1068,16 @@ export async function getAssignmentFileForDownload(
   user: AuthUser,
   options: AssignmentFileDownloadOptions = {},
 ): Promise<AssignmentFileDownload> {
-  const attachment = await query<{
-    assignment_id: string;
-    tenant_id: string;
-    course_id: string;
-    storage_path: string | null;
-    original_name: string | null;
-    mime_type: string | null;
-  }>(
-    `SELECT ca.id AS assignment_id,
-            ca.tenant_id,
-            ca.course_id,
-            ca.attachment_file ->> 'storage_path' AS storage_path,
-            ca.attachment_file ->> 'original_name' AS original_name,
-            ca.attachment_file ->> 'mime_type' AS mime_type
-     FROM course_assignments ca
-     WHERE ca.attachment_file ->> 'id' = $1
-       AND ca.deleted_at IS NULL`,
-    [fileId],
-  );
+  const attachment = await learnerRepository.selectAttachmentDownload(fileId);
 
-  if ((attachment.rowCount ?? 0) > 0) {
-    const file = attachment.rows[0];
+  if (attachment) {
+    const file = attachment;
     const sameTenant = user.role === 'superadmin' || user.tenantId === file.tenant_id;
     const isAdmin = sameTenant && await hasCoursePermission(user);
     let learnerAllowed = false;
 
     if (sameTenant && user.tenantId && isLearnerRole(user.role)) {
-      const access = await query<{ allowed: boolean }>(
-        `SELECT true AS allowed
-         FROM courses c
-         WHERE c.id = $1::varchar
-           AND c.tenant_id = $2::uuid
-           AND c.deleted_at IS NULL
-           AND ${learnerCourseAccessCondition('c', '$3::uuid')}
-         LIMIT 1`,
-        [file.course_id, user.tenantId, user.id],
-      );
-      learnerAllowed = (access.rowCount ?? 0) > 0;
+      learnerAllowed = await learnerRepository.learnerCanOpenCourse(file.course_id, user.tenantId, user.id);
     }
 
     if ((!isAdmin && !learnerAllowed) || !sameTenant || !file.storage_path) {
@@ -1659,26 +1087,8 @@ export async function getAssignmentFileForDownload(
     return openAssignmentFile(file.storage_path, file.mime_type, file.original_name || 'file', options);
   }
 
-  const result = await query<{
-    id: string;
-    tenant_id: string;
-    learner_id: string;
-    uploaded_by: string | null;
-    kind: 'submission' | 'feedback';
-    feedback_files: unknown;
-    storage_path: string;
-    original_name: string;
-    mime_type: string;
-  }>(
-    `SELECT af.id, af.tenant_id, af.uploaded_by, af.kind, af.storage_path,
-            af.original_name, af.mime_type, s.learner_id, s.feedback_files
-     FROM assignment_files af
-     JOIN assignment_submissions s ON s.id = af.submission_id
-     WHERE af.id = $1`,
-    [fileId],
-  );
-  if (result.rowCount === 0) throw new AppError('File khong ton tai', 404);
-  const file = result.rows[0];
+  const file = await learnerRepository.selectAssignmentFileDownload(fileId);
+  if (!file) throw new AppError('File khong ton tai', 404);
 
   const sameTenant = user.role === 'superadmin' || user.tenantId === file.tenant_id;
   const isAdmin = sameTenant && await hasCoursePermission(user);

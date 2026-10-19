@@ -40,14 +40,6 @@
       "count": 1
     }
   },
-  "src/process-main.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    },
-    "@typescript-eslint/no-misused-promises": {
-      "count": 4
-    }
-  },
   "src/middleware/authorize.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
@@ -620,7 +612,7 @@
   },
   "src/modules/assignments/assignments.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 8
+      "count": 2
     }
   },
   "src/modules/assignments/email-outbox.service.ts": {
@@ -638,19 +630,9 @@
       "count": 19
     }
   },
-  "src/modules/badges/badge-evaluation.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/badges/badges.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 6
-    }
-  },
-  "src/modules/badges/badges.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
     }
   },
   "src/modules/branding/branding-permission.test.ts": {
@@ -832,11 +814,6 @@
       "count": 14
     }
   },
-  "src/modules/enrollments/enrollments.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/groups/groups.controller.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 10
@@ -958,11 +935,6 @@
       "count": 8
     }
   },
-  "src/modules/tenant-badges/tenant-badges.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/tenants/tenant-course-components.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
@@ -998,14 +970,17 @@
       "count": 25
     }
   },
-  "src/modules/users/users.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/welcome-init/welcome-init.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 3
+    }
+  },
+  "src/process-main.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 4
     }
   },
   "src/scripts/transfer-help-docs-between-supabase.ts": {

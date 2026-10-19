@@ -5,7 +5,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as usersService from './users.service.js';
 import * as permissionGroupsService from '../permissions/permissions.service.js';
-import { createUserSchema, updateUserSchema, assignGroupsSchema } from './users.validator.js';
+import { createUserSchema, updateUserSchema, assignGroupsSchema, userListQuerySchema } from './users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
@@ -55,7 +55,7 @@ function forwardUserWriteError(req: Request, res: Response, next: NextFunction, 
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const result = await usersService.listUsers(tenantId, req.query as Record<string, unknown>);
+    const result = await usersService.listUsers(tenantId, userListQuerySchema.parse(req.query));
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }

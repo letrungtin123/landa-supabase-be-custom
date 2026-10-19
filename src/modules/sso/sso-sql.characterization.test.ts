@@ -8,7 +8,7 @@ import {
   runCharacterization,
   type Answer,
   type Case,
-} from '../../test-support/sql-characterization.js';
+} from '../../test-support/auth-sql-characterization.js';
 
 // Characterization of SSO: the admin config routes (list, update, delete with
 // their audit rows), the public provider list by domain, and the code
@@ -16,7 +16,7 @@ import {
 // existing account by email, a new learner, the refusals, provider failures
 // and timeout, admin-site checks) down to the session it issues. Each case
 // records its SQL, outbound provider requests and answer (see
-// test-support/sql-characterization.ts).
+// test-support/auth-sql-characterization.ts).
 //
 // The golden file was written by the code before the SSO repository existed.
 // Rewrite it only for an intended change:

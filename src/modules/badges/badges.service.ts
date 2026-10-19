@@ -6,6 +6,12 @@ import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js'
 import { uploadFile, deleteFileByUrl, buildStoragePath } from '../../config/storage.js';
 import { AppError } from '../../utils/errors.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import { createBadgesRepository, type BadgeImageColumn, type BadgesDb } from './badges.repository.js';
+
+// query() joins the caller's current transaction when there is one; the
+// transaction blocks below use the repository over their own client.
+const poolDb: BadgesDb = { query };
+const badgesRepository = createBadgesRepository(poolDb);
 
 type TenantBadgeStatusUpdate = {
   badge_id: string;
@@ -16,12 +22,6 @@ type TenantBadgeStatusUpdate = {
   desc?: unknown;
   name_override?: unknown;
   description_override?: unknown;
-};
-
-type BadgeDefaults = {
-  id: string;
-  name: string;
-  description: string | null;
 };
 
 const MAX_BADGE_NAME_LENGTH = 200;
@@ -53,12 +53,7 @@ function normalizeBadgeTextOverride(
 }
 
 async function assertBadgeAccessibleToTenant(tenantId: string, badgeId: string): Promise<void> {
-  const result = await query<{ id: string }>(
-    `SELECT id FROM badge_definitions
-     WHERE id = $1 AND (tenant_id IS NULL OR tenant_id = $2)`,
-    [badgeId, tenantId],
-  );
-  if (result.rowCount === 0) {
+  if (!(await badgesRepository.badgeAccessibleToTenant(tenantId, badgeId))) {
     throw new AppError('Badge không tồn tại hoặc không thuộc tenant', 404);
   }
 }
@@ -73,37 +68,12 @@ export async function getTenantBadgeSettings(tenantId: string) {
 }
 
 async function getTenantBadgeSettingsFromDb(tenantId: string) {
-  const result = await query<any>(
-    `SELECT b.id,
-            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name,
-            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS title,
-            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS description,
-            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS desc,
-            b.name AS default_name,
-            b.description AS default_description,
-            tbs.name_override,
-            tbs.description_override,
-            b.image_key,
-            tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url,
-            COALESCE(tbs.is_active, true) AS is_active
-     FROM badge_definitions b
-     LEFT JOIN tenant_badge_settings tbs ON tbs.badge_id = b.id AND tbs.tenant_id = $1
-     WHERE b.tenant_id IS NULL OR b.tenant_id = $1
-     ORDER BY b.sort_order, b.id`,
-    [tenantId]
-  );
-  return result.rows;
+  return badgesRepository.selectTenantBadgeSettings(tenantId);
 }
 
 export async function updateTenantBadgeSetting(tenantId: string, badgeId: string, isActive: boolean) {
   await assertBadgeAccessibleToTenant(tenantId, badgeId);
-  await query(
-    `INSERT INTO tenant_badge_settings (tenant_id, badge_id, is_active)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (tenant_id, badge_id)
-     DO UPDATE SET is_active = $3, updated_at = now()`,
-    [tenantId, badgeId, isActive]
-  );
+  await badgesRepository.upsertBadgeStatus(tenantId, badgeId, isActive);
   await invalidateTenantBadgeCaches(tenantId);
 }
 
@@ -119,12 +89,8 @@ export async function updateAllTenantBadgeSettings(
     throw new AppError('Danh sach badge khong hop le', 400);
   }
 
-  const defaultsResult = await query<BadgeDefaults>(
-    `SELECT id, name, description FROM badge_definitions
-     WHERE id = ANY($1::varchar[]) AND (tenant_id IS NULL OR tenant_id = $2)`,
-    [badgeIds, tenantId],
-  );
-  const defaultMap = new Map(defaultsResult.rows.map((row) => [row.id, row]));
+  const defaults = await badgesRepository.selectBadgeDefaults(badgeIds, tenantId);
+  const defaultMap = new Map(defaults.map((row) => [row.id, row]));
   const missingBadgeIds = badgeIds.filter((id) => !defaultMap.has(id));
   if (missingBadgeIds.length > 0) {
     throw new AppError(`Badge khong ton tai: ${missingBadgeIds.join(', ')}`, 400);
@@ -133,6 +99,7 @@ export async function updateAllTenantBadgeSettings(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const tx = createBadgesRepository(client);
 
     for (const status of badgeStatuses) {
       if (typeof status.is_active !== 'boolean') {
@@ -153,32 +120,24 @@ export async function updateAllTenantBadgeSettings(
           ? status.desc
           : status.description;
 
-      const columns = ['tenant_id', 'badge_id', 'is_active'];
-      const placeholders = ['$1', '$2', '$3'];
-      const params: unknown[] = [tenantId, status.badge_id, status.is_active];
-      const updateSets = ['is_active = EXCLUDED.is_active'];
-
-      if (shouldUpdateName) {
-        params.push(normalizeBadgeTextOverride(nameInput, defaults.name, 'Ten badge', MAX_BADGE_NAME_LENGTH));
-        columns.push('name_override');
-        placeholders.push(`$${params.length}`);
-        updateSets.push('name_override = EXCLUDED.name_override');
-      }
-
-      if (shouldUpdateDescription) {
-        params.push(normalizeBadgeTextOverride(descriptionInput, defaults.description, 'Mo ta badge', MAX_BADGE_DESCRIPTION_LENGTH));
-        columns.push('description_override');
-        placeholders.push(`$${params.length}`);
-        updateSets.push('description_override = EXCLUDED.description_override');
-      }
-
-      await client.query(
-        `INSERT INTO tenant_badge_settings (${columns.join(', ')})
-         VALUES (${placeholders.join(', ')})
-         ON CONFLICT (tenant_id, badge_id)
-         DO UPDATE SET ${updateSets.join(', ')}, updated_at = now()`,
-        params,
-      );
+      await tx.upsertBadgeSetting({
+        tenantId,
+        badgeId: status.badge_id,
+        isActive: status.is_active,
+        ...(shouldUpdateName
+          ? { nameOverride: normalizeBadgeTextOverride(nameInput, defaults.name, 'Ten badge', MAX_BADGE_NAME_LENGTH) }
+          : {}),
+        ...(shouldUpdateDescription
+          ? {
+            descriptionOverride: normalizeBadgeTextOverride(
+              descriptionInput,
+              defaults.description,
+              'Mo ta badge',
+              MAX_BADGE_DESCRIPTION_LENGTH,
+            ),
+          }
+          : {}),
+      });
     }
 
     if (auditEntry) await appendAuditLog(client, auditEntry);
@@ -198,8 +157,6 @@ const BADGE_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/png': 'png',
   'image/webp': 'webp',
 };
-
-type BadgeImageColumn = 'card_image_url' | 'icon_image_url' | 'mobile_card_image_url';
 
 function getBadgeImageExtension(mimetype: string): string {
   const ext = BADGE_IMAGE_EXTENSIONS[mimetype];
@@ -230,25 +187,10 @@ async function uploadTenantBadgeImage(
   let oldPath: string | null = null;
   try {
     await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO tenant_badge_settings (tenant_id, badge_id)
-       VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [tenantId, badgeId],
-    );
-    const current = await client.query<{ image_url: string | null }>(
-      `SELECT ${column} AS image_url
-       FROM tenant_badge_settings
-       WHERE tenant_id = $1 AND badge_id = $2
-       FOR UPDATE`,
-      [tenantId, badgeId],
-    );
-    oldPath = current.rows[0]?.image_url ?? null;
-    await client.query(
-      `UPDATE tenant_badge_settings
-       SET ${column} = $1, updated_at = now()
-       WHERE tenant_id = $2 AND badge_id = $3`,
-      [storagePath, tenantId, badgeId],
-    );
+    const tx = createBadgesRepository(client);
+    await tx.ensureBadgeSettingRow(tenantId, badgeId);
+    oldPath = await tx.lockBadgeImage(tenantId, badgeId, column);
+    await tx.updateBadgeImage(tenantId, badgeId, column, storagePath);
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {

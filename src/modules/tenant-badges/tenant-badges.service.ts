@@ -11,6 +11,12 @@ import {
 } from '../badges/badge-criteria.js';
 import { isBadgeManagementModuleEnabled } from '../badges/badge-evaluation.service.js';
 import type { UpdateTenantBadgeRuleInput } from './tenant-badges.validator.js';
+import { createTenantBadgesRepository, type TenantBadgesDb } from './tenant-badges.repository.js';
+
+// query() joins the caller's current transaction when there is one; the
+// transaction block below uses the repository over its own client.
+const poolDb: TenantBadgesDb = { query };
+const tenantBadgesRepository = createTenantBadgesRepository(poolDb);
 
 type CourseMapping = {
   course_id: string | null;
@@ -43,50 +49,9 @@ async function assertModuleEnabled(tenantId: string, allowWhenDisabled = false):
 export async function listTenantBadges(tenantId: string, allowWhenDisabled = false) {
   const moduleEnabled = await assertModuleEnabled(tenantId, allowWhenDisabled);
 
-  const result = await query<any>(
-    `SELECT b.id,
-            COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name,
-            COALESCE(NULLIF(BTRIM(tbs.description_override), ''), b.description) AS description,
-            b.image_key,
-            tbs.card_image_url,
-            tbs.icon_image_url,
-            tbs.mobile_card_image_url,
-            b.sort_order,
-            b.criteria,
-            COALESCE(tbr.is_enabled, false) AS is_enabled,
-            tbr.updated_at,
-            COALESCE(
-              jsonb_agg(
-                jsonb_build_object(
-                  'course_id', CASE WHEN c.id IS NOT NULL THEN tbrc.course_id ELSE NULL END,
-                  'display_name', COALESCE(c.display_name, tbrc.course_name_snapshot, 'Khóa học đã bị xóa'),
-                  'is_deleted', c.id IS NULL
-                ) ORDER BY tbrc.assigned_at, tbrc.id
-              ) FILTER (WHERE tbrc.id IS NOT NULL),
-              '[]'::jsonb
-            ) AS courses
-     FROM badge_definitions b
-     LEFT JOIN tenant_badge_settings tbs
-       ON tbs.badge_id = b.id AND tbs.tenant_id = $1
-     LEFT JOIN tenant_badge_rules tbr
-       ON tbr.badge_id = b.id AND tbr.tenant_id = $1
-     LEFT JOIN tenant_badge_rule_courses tbrc
-       ON tbrc.badge_id = b.id AND tbrc.tenant_id = $1
-     LEFT JOIN courses c
-       ON c.id = tbrc.course_id
-      AND c.tenant_id = $1
-     WHERE b.is_active = true
-       AND (b.tenant_id IS NULL OR b.tenant_id = $1)
-       AND COALESCE(tbs.is_active, true) = true
-     GROUP BY b.id, b.name, b.description, b.image_key, b.sort_order, b.criteria,
-              tbs.name_override, tbs.description_override,
-              tbs.card_image_url, tbs.icon_image_url, tbs.mobile_card_image_url,
-              tbr.is_enabled, tbr.updated_at
-     ORDER BY b.sort_order, b.id`,
-    [tenantId],
-  );
+  const rows = await tenantBadgesRepository.selectTenantBadgeRules(tenantId);
 
-  return result.rows.map((row: any) => {
+  return rows.map((row) => {
     const criteria = parseBadgeCriteria(row.criteria);
     const courses = uniqueCourseMappings((Array.isArray(row.courses) ? row.courses : []) as CourseMapping[]);
     const validCourseCount = courses.filter((course) => course.course_id && !course.is_deleted).length;
@@ -126,30 +91,11 @@ export async function listSelectableCourses(
 
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [tenantId];
-  const conditions = ['tenant_id = $1', 'deleted_at IS NULL'];
-
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(display_name ILIKE $${params.length} OR id ILIKE $${params.length})`);
-  }
-
-  const where = conditions.join(' AND ');
-  const [countResult, dataResult] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses WHERE ${where}`, params),
-    query<{ id: string; display_name: string; visible_to_staff_only: boolean }>(
-      `SELECT id, display_name, visible_to_staff_only
-       FROM courses
-       WHERE ${where}
-       ORDER BY display_name ASC, id ASC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
-  ]);
-  const total = Number(countResult.rows[0]?.count || 0);
+  const { countRow, rows } = await tenantBadgesRepository.selectSelectableCoursePage(tenantId, search, pageSize, offset);
+  const total = Number(countRow?.count || 0);
 
   return {
-    data: dataResult.rows,
+    data: rows,
     total,
     page,
     page_size: pageSize,
@@ -158,24 +104,11 @@ export async function listSelectableCourses(
 }
 
 async function getCurrentCourseIds(tenantId: string, badgeId: string): Promise<string[]> {
-  const result = await query<{ course_id: string }>(
-    `SELECT course_id
-     FROM tenant_badge_rule_courses
-     WHERE tenant_id = $1 AND badge_id = $2 AND course_id IS NOT NULL
-     ORDER BY assigned_at, id`,
-    [tenantId, badgeId],
-  );
-  return uniqueCourseIds(result.rows.map((row) => row.course_id));
+  return uniqueCourseIds(await tenantBadgesRepository.selectRuleCourseIds(tenantId, badgeId));
 }
 
 async function getCurrentRuleState(tenantId: string, badgeId: string) {
-  const result = await query<{ is_enabled: boolean }>(
-    `SELECT is_enabled
-     FROM tenant_badge_rules
-     WHERE tenant_id = $1 AND badge_id = $2`,
-    [tenantId, badgeId],
-  );
-  return result.rows[0]?.is_enabled === true;
+  return tenantBadgesRepository.selectRuleEnabled(tenantId, badgeId);
 }
 
 export async function updateTenantBadgeRule(
@@ -188,20 +121,10 @@ export async function updateTenantBadgeRule(
 ) {
   await assertModuleEnabled(tenantId, allowWhenDisabled);
 
-  const badgeResult = await query<{ name: string; criteria: unknown }>(
-    `SELECT COALESCE(NULLIF(BTRIM(tbs.name_override), ''), b.name) AS name, b.criteria
-     FROM badge_definitions b
-     LEFT JOIN tenant_badge_settings tbs
-       ON tbs.badge_id = b.id AND tbs.tenant_id = $1
-     WHERE b.id = $2
-       AND b.is_active = true
-       AND (b.tenant_id IS NULL OR b.tenant_id = $1)
-       AND COALESCE(tbs.is_active, true) = true`,
-    [tenantId, badgeId],
-  );
-  if (badgeResult.rowCount === 0) throw new AppError('Huy hiệu không tồn tại hoặc đã bị superadmin tắt', 404);
+  const badge = await tenantBadgesRepository.selectActiveBadge(tenantId, badgeId);
+  if (!badge) throw new AppError('Huy hiệu không tồn tại hoặc đã bị superadmin tắt', 404);
 
-  const criteria = parseBadgeCriteria(badgeResult.rows[0].criteria);
+  const criteria = parseBadgeCriteria(badge.criteria);
   if (!criteria) throw new AppError('Rule huy hiệu chưa được hệ thống hỗ trợ', 409);
 
   const requiresCourses = criteriaRequiresCourses(criteria);
@@ -224,13 +147,7 @@ export async function updateTenantBadgeRule(
 
   let courses: Array<{ id: string; display_name: string }> = [];
   if (nextCourseIds.length > 0) {
-    const courseResult = await query<{ id: string; display_name: string }>(
-      `SELECT id, display_name
-       FROM courses
-       WHERE tenant_id = $1 AND deleted_at IS NULL AND id = ANY($2::varchar[])`,
-      [tenantId, nextCourseIds],
-    );
-    courses = courseResult.rows;
+    courses = await tenantBadgesRepository.selectTenantCourses(tenantId, nextCourseIds);
     if (courses.length !== nextCourseIds.length) {
       throw new AppError('Có khóa học không tồn tại, đã bị xóa hoặc không thuộc tenant', 400);
     }
@@ -239,37 +156,21 @@ export async function updateTenantBadgeRule(
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO tenant_badge_rules (
-         tenant_id, badge_id, is_enabled, created_by, updated_by, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $4, now(), now())
-       ON CONFLICT (tenant_id, badge_id) DO UPDATE SET
-         is_enabled = EXCLUDED.is_enabled,
-         updated_by = EXCLUDED.updated_by,
-         updated_at = now()`,
-      [tenantId, badgeId, input.is_enabled, actorId],
-    );
+    const tx = createTenantBadgesRepository(client);
+    await tx.upsertRule(tenantId, badgeId, input.is_enabled, actorId);
 
     if (input.course_ids !== undefined) {
-      await client.query(
-        'DELETE FROM tenant_badge_rule_courses WHERE tenant_id = $1 AND badge_id = $2',
-        [tenantId, badgeId],
-      );
+      await tx.deleteRuleCourses(tenantId, badgeId);
 
       const courseById = new Map(courses.map((course) => [course.id, course]));
       for (const courseId of nextCourseIds) {
         const course = courseById.get(courseId)!;
-        await client.query(
-          `INSERT INTO tenant_badge_rule_courses (
-             tenant_id, badge_id, course_id, course_name_snapshot, created_by
-           ) VALUES ($1, $2, $3, $4, $5)`,
-          [tenantId, badgeId, course.id, course.display_name, actorId],
-        );
+        await tx.insertRuleCourse(tenantId, badgeId, course, actorId);
       }
     }
 
     const auditEntry = createAuditEntry?.({
-      badgeName: badgeResult.rows[0].name,
+      badgeName: badge.name,
       previousEnabled,
       nextEnabled: input.is_enabled,
       courseCount: nextCourseIds.length,
@@ -292,7 +193,7 @@ export async function updateTenantBadgeRule(
     badge: updated,
     audit: {
       badge_id: badgeId,
-      badge_name: badgeResult.rows[0].name,
+      badge_name: badge.name,
       previous: { is_enabled: previousEnabled, course_ids: previousCourseIds },
       next: { is_enabled: input.is_enabled, course_ids: nextCourseIds },
     },
