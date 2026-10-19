@@ -37,7 +37,7 @@
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",
     "test:badges": "tsx --test src/modules/badges/badge-criteria.test.ts src/modules/badges/badge-evaluation.logic.test.ts src/modules/badges/badge-overview.test.ts src/modules/badges/badges-sql.characterization.test.ts",
     "test:users": "tsx --test src/modules/users/user-authority.logic.test.ts src/modules/users/users-authority.service.test.ts src/modules/users/user-profile-scope.test.ts src/modules/users/users-sql.characterization.test.ts src/modules/users/users.validator.test.ts src/modules/users/user-deletion-sql.characterization.test.ts",
-    "test:auth-sessions": "tsx --test src/modules/auth/session-revocation.test.ts src/modules/auth/logout.test.ts src/modules/auth/auth-revocation-redis.test.ts src/modules/auth/auth-refresh-handoff.test.ts",
+    "test:auth-sessions": "tsx --test src/modules/auth/auth-ott-exchange.test.ts src/modules/auth/session-revocation.test.ts src/modules/auth/logout.test.ts src/modules/auth/auth-revocation-redis.test.ts src/modules/auth/auth-refresh-handoff.test.ts",
     "test:sso": "tsx --test src/modules/sso/sso.service.test.ts",
     "test:branding": "tsx --test src/modules/branding/branding-sql.characterization.test.ts",
     "test:help-docs": "tsx --test src/modules/help-docs/help-docs-sql.characterization.test.ts",

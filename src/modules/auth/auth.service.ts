@@ -849,66 +849,10 @@ export async function exchangeOTT(token: string) {
     throw new AppError('Token đã hết hạn', 401);
   }
 
-  // Lấy user từ DB (giống getMe nhưng tạo token pair)
-  const user = await authRepository.selectSessionUser(entry.userId);
-
-  if (!user) throw new AppError('User không tồn tại', 404);
-  if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
-
-  // Tạo token pair (giống login)
-  const accessToken = signAccessToken({
-    sub: user.id,
-    tid: user.tenant_id,
-    role: user.role,
-    username: user.username,
-    session_mode: NORMAL_SESSION_MODE,
-  });
-
-  const refreshToken = uuidv4();
-  const refreshHash = hashToken(refreshToken);
-  const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
-  const sessionId = user.role === 'superadmin' ? uuidv4() : null;
-
-  await authRepository.insertRefreshToken({
-    userId: user.id,
-    tokenHash: refreshHash,
-    expiresAt: refreshExpiresAt,
-    sessionMode: NORMAL_SESSION_MODE,
-    sessionId,
-  });
-
-  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
-    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
-    : [];
-  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
-  const tenantModules = await resolveTenantModules(tenantContextId);
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    tenantContextId,
-  );
-
-  return {
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
-    session_mode: NORMAL_SESSION_MODE,
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      full_name: user.full_name,
-      phone: user.phone,
-      avatar_url: user.avatar_url,
-      role: user.role,
-      tenant_id: user.tenant_id,
-      tenant_name: user.tenant_name,
-    },
-    permissions,
-    tenant_modules: tenantModules,
-    managed_tenants: managedTenants,
-    role_labels: roleLabels,
-    group_labels: groupLabels,
-  };
+  // The same checks and session context as the other sign-ins of a known
+  // user (tenant active, the demo iframe learner lock, member_groups); no
+  // last_login_at write, as before.
+  return issueSessionForUserId(entry.userId, { updateLastLogin: false });
 }
 
 /**
