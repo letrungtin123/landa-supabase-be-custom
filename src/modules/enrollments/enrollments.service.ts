@@ -13,33 +13,20 @@ import {
 } from '../demo-login/demo-iframe.service.js';
 import { recalculateEnrollmentProgress } from '../learner/progress-calculation.service.js';
 import { scheduleCourseProgressRecalculation } from '../learner/progress-recalculation-job.service.js';
+import {
+  createEnrollmentsRepository,
+  type EnrollmentWithCourse,
+  type EnrollmentWithUser,
+  type EnrollmentsDb,
+} from './enrollments.repository.js';
+
+export type { Enrollment, EnrollmentWithCourse, EnrollmentWithUser } from './enrollments.repository.js';
+
+// query() joins the caller's current transaction (runAuditedTransaction) when there is one.
+const poolDb: EnrollmentsDb = { query };
+const enrollmentsRepository = createEnrollmentsRepository(poolDb);
 
 // ── Types ──
-
-export interface Enrollment {
-  id: string;
-  user_id: string;
-  course_id: string;
-  tenant_id: string;
-  enrolled_at: string;
-  is_active: boolean;
-  progress: number;
-  is_completed: boolean;
-  completed_at: string | null;
-  last_activity_at: string | null;
-}
-
-export interface EnrollmentWithUser extends Enrollment {
-  username: string;
-  email: string;
-  full_name: string;
-  avatar_url: string | null;
-}
-
-export interface EnrollmentWithCourse extends Enrollment {
-  course_name: string;
-  course_image: string | null;
-}
 
 export type StudyTimeGranularity = 'day' | 'month' | 'year';
 
@@ -159,49 +146,22 @@ function normalizeStudyTimeOptions(options: StudyTimeSeriesOptions = {}): StudyT
 }
 
 export async function getEnrollmentAuditContext(userId: string, courseId: string, tenantId: string) {
-  const result = await query<{
-    username: string;
-    course_name: string;
-  }>(
-    `SELECT COALESCE(NULLIF(u.full_name, ''), u.username, u.email, u.id::text) AS username,
-            c.display_name AS course_name
-     FROM users u
-     JOIN courses c ON c.id = $2 AND c.tenant_id = $3 AND c.deleted_at IS NULL
-     WHERE u.id = $1 AND u.tenant_id = $3`,
-    [userId, courseId, tenantId],
-  );
+  const row = await enrollmentsRepository.selectAuditContext(userId, courseId, tenantId);
   return {
-    username: result.rows[0]?.username || userId,
-    course_name: result.rows[0]?.course_name || courseId,
+    username: row?.username || userId,
+    course_name: row?.course_name || courseId,
   };
 }
 
 export async function getCourseAuditName(courseId: string, tenantId: string): Promise<string> {
-  const result = await query<{ display_name: string }>(
-    `SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  return result.rows[0]?.display_name || courseId;
+  const row = await enrollmentsRepository.selectCourseName(courseId, tenantId);
+  return row?.display_name || courseId;
 }
 // ── Enroll / Unenroll ──
 
-/** Only learner accounts of the course's own tenant can be enrolled (`u` = users). */
-function enrollableLearnerSql(tenantParam: '$2' | '$3'): string {
-  return `u.tenant_id = ${tenantParam}::uuid
-         AND u.role IN ('learner', 'learner_plus')
-         AND u.deletion_requested_at IS NULL`;
-}
-
 async function assertEnrollableLearner(userId: string, tenantId: string): Promise<void> {
-  const result = await query(
-    `SELECT 1
-     FROM users u
-     WHERE u.id = $1::uuid
-       AND ${enrollableLearnerSql('$2')}`,
-    [userId, tenantId],
-  );
   // Another tenant's user (or a staff account) is reported as not found.
-  if (result.rowCount === 0) throw new AppError('Không tìm thấy học viên này trong doanh nghiệp.', 404);
+  if (!(await enrollmentsRepository.isEnrollableLearner(userId, tenantId))) throw new AppError('Không tìm thấy học viên này trong doanh nghiệp.', 404);
 }
 
 export async function enrollUser(
@@ -216,18 +176,11 @@ export async function enrollUser(
   await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
   // Check if already enrolled
-  const existing = await query<{ id: string; is_active: boolean }>(
-    `SELECT id, is_active FROM enrollments WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3`,
-    [userId, courseId, tenantId],
-  );
+  const enrollment = await enrollmentsRepository.selectEnrollment(userId, courseId, tenantId);
 
-  if (existing.rowCount && existing.rowCount > 0) {
-    const enrollment = existing.rows[0];
+  if (enrollment) {
     if (!enrollment.is_active) {
-      await query(
-        `UPDATE enrollments SET is_active = true WHERE id = $1 AND is_active = false`,
-        [enrollment.id],
-      );
+      await enrollmentsRepository.reactivateEnrollment(enrollment.id);
       await recalculateEnrollmentProgress(enrollment.id, courseId);
       await invalidateUserCourseProgressCache(userId, courseId);
       await invalidateUserBadgeCaches([userId]);
@@ -236,19 +189,9 @@ export async function enrollUser(
   }
 
   // Create enrollment + progress record in transaction
-  const result = await query<{ id: string }>(
-    `WITH new_enrollment AS (
-       INSERT INTO enrollments (user_id, course_id, tenant_id)
-       VALUES ($1, $2, $3)
-       RETURNING id
-     )
-     INSERT INTO course_progress (enrollment_id)
-     SELECT id FROM new_enrollment
-     RETURNING (SELECT id FROM new_enrollment) AS id`,
-    [userId, courseId, tenantId],
-  );
+  const enrollmentId = await enrollmentsRepository.insertEnrollmentWithProgress(userId, courseId, tenantId);
 
-  return { enrollment_id: result.rows[0].id, already_enrolled: false };
+  return { enrollment_id: enrollmentId, already_enrolled: false };
 }
 
 export async function bulkEnroll(
@@ -265,51 +208,10 @@ export async function bulkEnroll(
   // Guard: course must exist, not be soft-deleted and belong to the tenant
   await assertCourseBelongsToTenant(courseId, tenantId, 'Course not found');
 
-  const result = await query<{ inserted_count: number; reactivated_count: number }>(
-    `WITH requested_users AS (
-       -- Users of another tenant and non-learner accounts are skipped.
-       SELECT DISTINCT r.uid
-       FROM unnest($1::uuid[]) AS r(uid)
-       JOIN users u ON u.id = r.uid
-       WHERE ${enrollableLearnerSql('$3')}
-     ),
-     reactivated AS (
-       UPDATE enrollments e
-       SET is_active = true
-       FROM requested_users ru
-       WHERE e.user_id = ru.uid
-         AND e.course_id = $2
-         AND e.tenant_id = $3
-         AND e.is_active = false
-       RETURNING e.id
-     ),
-     to_enroll AS (
-       INSERT INTO enrollments (user_id, course_id, tenant_id)
-       SELECT ru.uid, $2, $3
-       FROM requested_users ru
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM enrollments e
-         WHERE e.user_id = ru.uid
-           AND e.course_id = $2
-           AND e.tenant_id = $3
-       )
-       RETURNING id
-     ),
-     inserted_progress AS (
-       INSERT INTO course_progress (enrollment_id)
-       SELECT id FROM to_enroll
-       ON CONFLICT (enrollment_id) DO NOTHING
-       RETURNING enrollment_id
-     )
-     SELECT
-       (SELECT COUNT(*)::int FROM to_enroll) AS inserted_count,
-       (SELECT COUNT(*)::int FROM reactivated) AS reactivated_count`,
-    [userIds, courseId, tenantId],
-  );
+  const counts = await enrollmentsRepository.bulkEnroll(userIds, courseId, tenantId);
 
-  const inserted = Number(result.rows[0]?.inserted_count ?? 0);
-  const reactivated = Number(result.rows[0]?.reactivated_count ?? 0);
+  const inserted = Number(counts?.inserted_count ?? 0);
+  const reactivated = Number(counts?.reactivated_count ?? 0);
   if (reactivated > 0) {
     await scheduleCourseProgressRecalculation({
       tenantId,
@@ -326,13 +228,7 @@ export async function bulkEnroll(
 export async function unenrollUser(userId: string, courseId: string, tenantId: string): Promise<boolean> {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể hủy ghi danh learner demo iframe đang hoạt động');
 
-  const result = await query(
-    `UPDATE enrollments
-     SET is_active = false
-     WHERE user_id = $1 AND course_id = $2 AND tenant_id = $3::uuid AND is_active = true`,
-    [userId, courseId, tenantId],
-  );
-  return (result.rowCount ?? 0) > 0;
+  return (await enrollmentsRepository.deactivateEnrollment(userId, courseId, tenantId)) > 0;
 }
 
 // ── Progress ──
@@ -347,35 +243,20 @@ export async function updateProgress(
 
   const isCompleted = progress >= 100;
 
-  const current = await query<{ progress: number }>(
-    `SELECT cp.progress
-     FROM course_progress cp
-     JOIN enrollments e ON e.id = cp.enrollment_id
-     WHERE e.user_id = $1 AND e.course_id = $2 AND e.tenant_id = $3::uuid AND e.is_active = true
-     FOR UPDATE OF cp`,
-    [userId, courseId, tenantId],
-  );
+  const current = await enrollmentsRepository.lockProgress(userId, courseId, tenantId);
 
-  const result = await query<{ progress: number }>(
-    `UPDATE course_progress cp SET
-       progress = $4,
-       is_completed = $5,
-       completed_at = CASE WHEN $5 AND cp.completed_at IS NULL THEN now() ELSE cp.completed_at END,
-       last_activity_at = now()
-     FROM enrollments e
-     WHERE cp.enrollment_id = e.id
-       AND e.user_id = $1
-       AND e.course_id = $2
-       AND e.tenant_id = $3::uuid
-       AND e.is_active = true
-     RETURNING cp.progress`,
-    [userId, courseId, tenantId, Math.min(100, Math.max(0, progress)), isCompleted],
+  const result = await enrollmentsRepository.updateProgress(
+    userId,
+    courseId,
+    tenantId,
+    Math.min(100, Math.max(0, progress)),
+    isCompleted,
   );
   // Inside the caller's audited transaction the bump waits for the commit.
-  if ((result.rowCount ?? 0) > 0) await invalidateUserBadgeCaches([userId]);
+  if (result.rowCount > 0) await invalidateUserBadgeCaches([userId]);
   return {
-    previousProgress: current.rows[0]?.progress ?? null,
-    progress: result.rows[0]?.progress ?? null,
+    previousProgress: current?.progress ?? null,
+    progress: result.row?.progress ?? null,
   };
 }
 
@@ -396,14 +277,7 @@ export async function recordStudySession(
   const studyDate = vnDate.toISOString().slice(0, 10); // yyyy-MM-dd theo VN
   const endedAt = new Date(start.getTime() + durationMinutes * 60 * 1000);
 
-  await query(
-    `INSERT INTO study_sessions (user_id, course_id, tenant_id, started_at, ended_at, study_date)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (user_id, study_date)
-     DO UPDATE SET
-       ended_at = GREATEST(study_sessions.ended_at, EXCLUDED.ended_at)`,
-    [userId, courseId, tenantId, start, endedAt, studyDate],
-  );
+  await enrollmentsRepository.upsertStudySession(userId, courseId, tenantId, start, endedAt, studyDate);
 }
 
 export async function recordStudySessionEntries(
@@ -425,41 +299,9 @@ export async function recordStudySessionEntries(
 
   for (const entry of normalized) assertIsoDate(entry.study_date, 'date');
 
-  const result = await query<{ synced: string }>(
-    `WITH input AS (
-       SELECT x.study_date::DATE AS study_date,
-              GREATEST(0, LEAST(1440, x.minutes))::INT AS duration_minutes,
-              NULLIF(x.course_id, '')::VARCHAR AS course_id
-       FROM jsonb_to_recordset($3::jsonb) AS x(study_date DATE, minutes INT, course_id TEXT)
-       WHERE x.study_date IS NOT NULL AND x.minutes > 0
-     ),
-     normalized AS (
-       SELECT $1::UUID AS user_id,
-              $2::UUID AS tenant_id,
-              course_id,
-              study_date,
-              (study_date::TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh') AS started_at,
-              (study_date::TIMESTAMP AT TIME ZONE 'Asia/Ho_Chi_Minh')
-                + (duration_minutes || ' minutes')::INTERVAL AS ended_at
-       FROM input
-     ),
-     upserted AS (
-       INSERT INTO study_sessions (user_id, course_id, tenant_id, started_at, ended_at, study_date)
-       SELECT user_id, course_id, tenant_id, started_at, ended_at, study_date
-       FROM normalized
-       ON CONFLICT (user_id, study_date)
-       DO UPDATE SET
-         tenant_id = EXCLUDED.tenant_id,
-         course_id = COALESCE(EXCLUDED.course_id, study_sessions.course_id),
-         started_at = LEAST(study_sessions.started_at, EXCLUDED.started_at),
-         ended_at = GREATEST(COALESCE(study_sessions.ended_at, EXCLUDED.ended_at), EXCLUDED.ended_at)
-       RETURNING 1
-     )
-     SELECT COUNT(*)::TEXT AS synced FROM upserted`,
-    [userId, tenantId, JSON.stringify(normalized)],
-  );
+  const row = await enrollmentsRepository.upsertStudySessionEntries(userId, tenantId, normalized);
 
-  return { synced: parseInt(result.rows[0]?.synced ?? '0', 10) };
+  return { synced: parseInt(row?.synced ?? '0', 10) };
 }
 
 /**
@@ -483,92 +325,27 @@ export async function getStudyTimeSeries(
   const params = [userId, meta.from, meta.to, tenantId];
 
   if (meta.granularity === 'month') {
-    const result = await query<{ date: string; minutes: string }>(
-      `WITH bounds AS (
-         SELECT $2::DATE AS from_date, $3::DATE AS to_date
-       ),
-       months AS (
-         SELECT generate_series(
-           date_trunc('month', from_date)::DATE,
-           date_trunc('month', to_date)::DATE,
-           '1 month'
-         )::DATE AS bucket
-         FROM bounds
-       )
-       SELECT months.bucket::TEXT AS date,
-              COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
-       FROM months
-       LEFT JOIN study_sessions ss
-         ON ss.user_id = $1
-        AND ss.tenant_id = $4
-        AND ss.study_date >= months.bucket
-        AND ss.study_date < (months.bucket + INTERVAL '1 month')
-        AND ss.study_date >= (SELECT from_date FROM bounds)
-        AND ss.study_date <= (SELECT to_date FROM bounds)
-       GROUP BY months.bucket
-       ORDER BY months.bucket`,
-      params,
-    );
+    const rows = await enrollmentsRepository.selectStudyMinutesByMonth(params);
 
     return {
-      entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
+      entries: rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
       meta,
     };
   }
 
   if (meta.granularity === 'year') {
-    const result = await query<{ date: string; minutes: string }>(
-      `WITH bounds AS (
-         SELECT $2::DATE AS from_date, $3::DATE AS to_date
-       ),
-       years AS (
-         SELECT generate_series(
-           date_trunc('year', from_date)::DATE,
-           date_trunc('year', to_date)::DATE,
-           '1 year'
-         )::DATE AS bucket
-         FROM bounds
-       )
-       SELECT years.bucket::TEXT AS date,
-              COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
-       FROM years
-       LEFT JOIN study_sessions ss
-         ON ss.user_id = $1
-        AND ss.tenant_id = $4
-        AND ss.study_date >= years.bucket
-        AND ss.study_date < (years.bucket + INTERVAL '1 year')
-        AND ss.study_date >= (SELECT from_date FROM bounds)
-        AND ss.study_date <= (SELECT to_date FROM bounds)
-       GROUP BY years.bucket
-       ORDER BY years.bucket`,
-      params,
-    );
+    const rows = await enrollmentsRepository.selectStudyMinutesByYear(params);
 
     return {
-      entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
+      entries: rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes, 10) || 0 })),
       meta,
     };
   }
 
-  // Cast ::TEXT tránh pg driver serialize DATE thành JS Date (bị lệch timezone)
-  const result = await query<{ date: string; minutes: string }>(
-    `WITH bounds AS (
-       SELECT $2::DATE AS from_date, $3::DATE AS to_date
-     )
-     SELECT g::DATE::TEXT AS date,
-            COALESCE(SUM(ss.duration_minutes), 0)::TEXT AS minutes
-     FROM bounds, generate_series(bounds.from_date, bounds.to_date, '1 day') AS g
-     LEFT JOIN study_sessions ss
-       ON ss.study_date = g::DATE
-      AND ss.user_id = $1
-      AND ss.tenant_id = $4
-     GROUP BY g
-     ORDER BY g`,
-    params,
-  );
+  const rows = await enrollmentsRepository.selectStudyMinutesByDay(params);
 
   return {
-    entries: result.rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes) })),
+    entries: rows.map(r => ({ date: r.date, minutes: parseInt(r.minutes) })),
     meta,
   };
 }
@@ -583,36 +360,11 @@ export async function getUserEnrollments(
   search = '',
 ): Promise<{ data: EnrollmentWithCourse[]; total: number }> {
   const offset = (page - 1) * pageSize;
-  const searchFilter = search ? `AND c.display_name ILIKE '%' || $5 || '%'` : '';
-  const params: any[] = [userId, tenantId, pageSize, offset];
-  if (search) params.push(search);
-
-  const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id AND c.deleted_at IS NULL
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}`,
-    params.slice(0, search ? 5 : 4).filter((_, i) => i < 2 || i === 4),
-  );
-
-  const dataResult = await query<EnrollmentWithCourse>(
-    `SELECT e.id, e.user_id, e.course_id, e.tenant_id, e.enrolled_at, e.is_active,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at, cp.last_activity_at,
-            c.display_name AS course_name, c.image_url AS course_image
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id AND c.deleted_at IS NULL
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE e.user_id = $1 AND e.tenant_id = $2 AND e.is_active = true ${searchFilter}
-     ORDER BY e.enrolled_at DESC
-     LIMIT $3 OFFSET $4`,
-    params,
-  );
+  const { countRow, rows } = await enrollmentsRepository.selectUserEnrollmentPage(userId, tenantId, pageSize, offset, search);
 
   return {
-    data: dataResult.rows,
-    total: parseInt(countResult.rows[0]?.count ?? '0'),
+    data: rows,
+    total: parseInt(countRow?.count ?? '0'),
   };
 }
 
@@ -627,65 +379,17 @@ export async function getCourseEnrollments(
   status?: 'all' | 'not_started' | 'learning' | 'completed',
 ): Promise<{ data: EnrollmentWithUser[]; total: number }> {
   const offset = (page - 1) * pageSize;
-  const conditions: string[] = [
-    'e.course_id = $1',
-    'e.tenant_id = $2',
-    // Older rows may point at a user of another tenant; never list them.
-    'u.tenant_id = $2',
-    'e.is_active = true',
-    'c.deleted_at IS NULL',
-  ];
-  const params: any[] = [courseId, tenantId];
-  let paramIdx = 3;
-
-  if (search) {
-    conditions.push(`(u.username ILIKE '%' || $${paramIdx} || '%' OR u.email ILIKE '%' || $${paramIdx} || '%' OR u.full_name ILIKE '%' || $${paramIdx} || '%')`);
-    params.push(search);
-    paramIdx++;
-  }
-
-  if (status && status !== 'all') {
-    if (status === 'completed') {
-      conditions.push('cp.is_completed = true');
-    } else if (status === 'learning') {
-      conditions.push('cp.is_completed = false AND cp.progress > 0');
-    } else if (status === 'not_started') {
-      conditions.push('(cp.progress IS NULL OR cp.progress = 0)');
-    }
-  }
-
-  const whereClause = conditions.join(' AND ');
-
-  const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     JOIN users u ON u.id = e.user_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE ${whereClause}`,
-    params,
-  );
-
-  params.push(pageSize, offset);
-
-  const dataResult = await query<EnrollmentWithUser>(
-    `SELECT e.id, e.user_id, e.course_id, e.tenant_id, e.enrolled_at, e.is_active,
-            COALESCE(cp.progress, 0) AS progress,
-            COALESCE(cp.is_completed, false) AS is_completed,
-            cp.completed_at, cp.last_activity_at,
-            u.username, u.email, u.full_name, u.avatar_url
-     FROM enrollments e
-     JOIN courses c ON c.id = e.course_id
-     JOIN users u ON u.id = e.user_id
-     LEFT JOIN course_progress cp ON cp.enrollment_id = e.id
-     WHERE ${whereClause}
-     ORDER BY e.enrolled_at DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
-    params,
+  const { countRow, rows } = await enrollmentsRepository.selectCourseEnrollmentPage(
+    courseId,
+    tenantId,
+    pageSize,
+    offset,
+    search,
+    status,
   );
 
   return {
-    data: dataResult.rows,
-    total: parseInt(countResult.rows[0]?.count ?? '0'),
+    data: rows,
+    total: parseInt(countRow?.count ?? '0'),
   };
 }
