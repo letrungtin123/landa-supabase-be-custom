@@ -293,3 +293,8 @@ export function sanitizeGeminiError(err: any): Error {
 export function logLessonAuthorFlow(stage: string, details: Record<string, unknown> = {}): void {
   console.log(`[LessonAuthorFlow] ${stage}`, details);
 }
+
+// Moved from chat.service.ts (used by the chat turn prompt and stream stages).
+export function logChatCourseFlow(stage: string, details: Record<string, unknown> = {}): void {
+  console.log(`[ChatCourseFlow] ${stage}`, details);
+}
