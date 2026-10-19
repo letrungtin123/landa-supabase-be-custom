@@ -53,6 +53,6 @@ test('CMS reads, browser writes, transfers, exports and chat prompts cannot expo
   assert.match(service, /export async function getCourseAuthorNotes\(courseId: string, tenantId: string\)/);
   assert.match(service, /FROM courses WHERE id = \$1 AND tenant_id = \$2::uuid AND deleted_at IS NULL/);
   assert.match(transfer, /THEN source\.metadata - '\$\{COURSE_AUTHOR_NOTES_KEY\}' ELSE COALESCE\(source\.metadata, '\{\}'::jsonb\) END/);
-  assert.match(courses, /buildCourseMarkdown\(courseResult\.rows\[0\], blocksResult\.rows\.map\(withoutAuthorOnlyBlockMetadata\)\)/);
+  assert.match(courses, /buildCourseMarkdown\(course, blocks\.map\(withoutAuthorOnlyBlockMetadata\)\)/);
   assert.match(chat, /const promptMetadata = withoutAuthorOnlyMetadata\(metadata\);/);
 });
