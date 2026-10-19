@@ -610,7 +610,7 @@
       "count": 22
     }
   },
-  "src/modules/assignments/assignments.service.ts": {
+  "src/modules/assignments/assignment-rules.logic.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
     }
