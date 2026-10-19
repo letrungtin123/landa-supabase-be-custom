@@ -606,7 +606,7 @@
       "count": 1
     },
     "no-useless-catch": {
-      "count": 2
+      "count": 1
     }
   },
   "src/modules/audit-logs/audit-logs.routes.ts": {

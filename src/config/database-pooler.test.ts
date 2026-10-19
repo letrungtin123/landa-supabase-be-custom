@@ -78,7 +78,7 @@ const KNOWN_SESSION_USERS = [
   'modules/ai-chatbot/kb/kb-operation.worker.ts',
   'modules/ai-chatbot/ai-id/lesson-author-source-stream.service.ts',
   'modules/ai-chatbot/ai-id/lesson-author-workspace-stream.service.ts',
-  'modules/assignments/email-outbox.service.ts',
+  'modules/assignments/email-outbox.repository.ts',
   'workers/tenant-data-quota.worker.ts',
 ];
 
