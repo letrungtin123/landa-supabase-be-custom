@@ -6,6 +6,8 @@ import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { getClientIp } from '../../../middleware/audit-log.js';
 import { isDemoIframeSession } from '../../demo-login/demo-iframe.service.js';
+import { isAiCreditMonthExhausted } from '../../ai-credits/ai-credit.service.js';
+import { AI_CREDIT_LIMIT_REACHED_MESSAGE } from '../ai-platform/ai-token-quota.service.js';
 import { normalizeReportPdfLocale, type ReportPdfLocale } from './report-pdf-i18n.js';
 import {
   getReportPdfExportError,
@@ -34,7 +36,15 @@ export const REPORT_PDF_ERRORS: Record<ReportPdfExportErrorCode, readonly [numbe
   REPORT_PDF_AUDIT_FAILED: [503, 'Không thể ghi nhật ký xuất báo cáo nên chưa thể tải PDF. Vui lòng thử lại.', 'The export could not be recorded in the audit log, so the PDF was not delivered. Please try again.'],
   REPORT_PDF_EXPORT_FAILED: [500, 'Không thể xuất PDF báo cáo.', 'The report PDF could not be exported.'],
   REPORT_PDF_DEMO_SESSION: [403, 'Phiên demo không thể xuất báo cáo.', 'Demo sessions cannot export reports.'],
+  // Same words as every other AI points refusal (EN as the admin app shows it, aiCredits.errors.limitReached).
+  AI_CREDIT_LIMIT_REACHED: [429, AI_CREDIT_LIMIT_REACHED_MESSAGE, "This month's AI points are used up. Contact your administrator to buy more points."],
 };
+
+/** Read-only check of the tenant's current AI points month (injected by the tests). */
+export interface ReportPdfCreditGate {
+  exhausted(tenantId: string): Promise<boolean>;
+}
+const defaultCreditGate: ReportPdfCreditGate = { exhausted: isAiCreditMonthExhausted };
 
 const Uuid = z.string().uuid();
 const StartBodySchema = z.object({
@@ -57,7 +67,7 @@ function sendPdf(res: Response, pdf: Buffer, fileName: string): void {
   res.send(pdf);
 }
 
-export function createReportPdfHandlers(service: () => ReportPdfExportApi = getReportPdfExportService) {
+export function createReportPdfHandlers(service: () => ReportPdfExportApi = getReportPdfExportService, credit: ReportPdfCreditGate = defaultCreditGate) {
   function handler(operation: Operation, work: (req: Request, res: Response, context: { requestId: string; actor: { userId: string; tenantId: string; role: NonNullable<Request['user']>['role'] } }) => Promise<void>) {
     return async (req: Request, res: Response): Promise<void> => {
       const started = Date.now();
@@ -101,15 +111,23 @@ export function createReportPdfHandlers(service: () => ReportPdfExportApi = getR
     return { assistantMessageId: query.data.assistant_message_id, jobId: req.params.jobId };
   };
   const auditContext = (req: Request, requestId: string) => ({ requestId, ipAddress: getClientIp(req), username: req.user?.username });
+  // Owner: no new PDF export while the tenant's AI points of the month are spent (Excel export stays open).
+  // Checked before any job is queued or render starts; a finished job's status and download stay open.
+  // The refusal is logged by the request line above with its code only.
+  const assertAiPointsLeft = async (tenantId: string) => {
+    if (await credit.exhausted(tenantId)) throw new ReportPdfExportError('AI points used up', 429, 'AI_CREDIT_LIMIT_REACHED');
+  };
 
   return {
     exportReportPdf: handler('export', async (req, res, { requestId, actor }) => {
       const input = parseStart(req);
+      await assertAiPointsLeft(actor.tenantId);
       const result = await service().exportNow({ ...actor, conversationId: req.params.id, ...input, audit: auditContext(req, requestId) });
       sendPdf(res, result.pdf, result.fileName);
     }),
     startReportPdfJob: handler('start', async (req, res, { requestId, actor }) => {
       const input = parseStart(req);
+      await assertAiPointsLeft(actor.tenantId);
       const job = await service().start({ ...actor, conversationId: req.params.id, ...input });
       res.status(202).json({ success: true, data: job, request_id: requestId });
     }),

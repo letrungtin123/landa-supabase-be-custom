@@ -16,6 +16,7 @@ import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from './ai-sett
 
 /** The tenant's AI points of the month are spent (new work is blocked; running AI ID runs finish). */
 export const AI_CREDIT_LIMIT_REACHED_CODE = 'AI_CREDIT_LIMIT_REACHED';
+export const AI_CREDIT_LIMIT_REACHED_MESSAGE = 'Đã dùng hết điểm AI của tháng này. Liên hệ quản trị viên để mua thêm điểm.';
 
 interface ReservationBudget {
   inputTokens?: number;
@@ -119,11 +120,7 @@ export function normalizeAiUsage(input: Partial<AiUsage> | null | undefined): Ai
 }
 
 function creditLimitError(): AppError {
-  return new AppError(
-    'Đã dùng hết điểm AI của tháng này. Liên hệ quản trị viên để mua thêm điểm.',
-    429,
-    AI_CREDIT_LIMIT_REACHED_CODE,
-  );
+  return new AppError(AI_CREDIT_LIMIT_REACHED_MESSAGE, 429, AI_CREDIT_LIMIT_REACHED_CODE);
 }
 
 function reservationBounds(input: ReservationInput): { minimumTokens: number; maximumTokens: number } {

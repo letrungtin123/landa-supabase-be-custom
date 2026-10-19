@@ -86,7 +86,9 @@ export type ReportPdfExportErrorCode = 'REPORT_PDF_PERMISSION_DENIED' | 'REPORT_
   | 'REPORT_PDF_SNAPSHOT_UNAVAILABLE' | 'REPORT_PDF_INVALID_REQUEST' | 'REPORT_PDF_JOB_NOT_FOUND' | 'REPORT_PDF_NOT_READY'
   | 'REPORT_PDF_QUEUE_FULL' | 'REPORT_PDF_RATE_LIMITED' | 'REPORT_PDF_ARTIFACT_TOO_LARGE' | 'REPORT_PDF_EXPORT_EXPIRED'
   | 'REPORT_PDF_RENDERER_UNAVAILABLE' | 'REPORT_PDF_RENDER_TIMEOUT' | 'REPORT_PDF_RENDER_BUSY' | 'REPORT_PDF_STORAGE_FAILED'
-  | 'REPORT_PDF_AUDIT_FAILED' | 'REPORT_PDF_EXPORT_FAILED' | 'REPORT_PDF_DEMO_SESSION';
+  | 'REPORT_PDF_AUDIT_FAILED' | 'REPORT_PDF_EXPORT_FAILED' | 'REPORT_PDF_DEMO_SESSION'
+  // The tenant's AI points of the month are spent: a new export is refused (report-pdf.controller).
+  | 'AI_CREDIT_LIMIT_REACHED';
 
 export class ReportPdfExportError extends Error {
   constructor(message: string, public readonly statusCode: number, public readonly code: ReportPdfExportErrorCode, public readonly retryAfterSeconds?: number) {

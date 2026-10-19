@@ -118,6 +118,24 @@ export async function assertAiCreditForAiIdRun(tenantId: string): Promise<void> 
     AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE);
 }
 
+/**
+ * True when the tenant's current credit month is spent, by the rule of
+ * aiCreditState (used + reserved >= budget). An unlimited or unvalued month,
+ * or a month without a credit row yet, is not. Read-only: no row is created
+ * and nothing is reserved (owner: report PDF export is refused while spent).
+ */
+export async function isAiCreditMonthExhausted(tenantId: string): Promise<boolean> {
+  const settings = await query<{ token_timezone: string | null }>(
+    'SELECT token_timezone FROM tenant_ai_settings WHERE tenant_id = $1', [tenantId]);
+  const periodStart = currentAiUsagePeriodStart(settings.rows[0]?.token_timezone || DEFAULT_TIMEZONE);
+  const month = await loadCreditMonth(tenantId, periodStart);
+  if (!month) return false;
+  return aiCreditState({
+    isUnlimited: month.is_unlimited, pointValueUsd: nullableNum(month.point_value_usd), budgetUsd: nullableNum(month.budget_usd),
+    usedUsd: num(month.used_usd), reservedUsd: num(month.reserved_usd),
+  }).state === 'exhausted';
+}
+
 // --- Tenant usage view ---------------------------------------------------------------------------
 
 export interface AiUsageUser {
