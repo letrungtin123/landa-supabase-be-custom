@@ -4,6 +4,7 @@ import { withLessonAuthorConversationLock } from '../chat/chat.service.js';
 import { LessonAuthorSessionError, parseLessonAuthorSessionScope } from './lesson-author-session-access.logic.js';
 import { sendLessonAuthorSessionError } from './lesson-author-session-access.controller.js';
 import {
+  assertLessonAuthorSessionManageable,
   getLessonAuthorSessionDeleteImpact,
   getLessonAuthorSessionDeletionStatus,
   listLessonAuthorSessions,
@@ -73,8 +74,12 @@ export const deleteLessonAuthorSessionController = run(async (req, res) => {
   try {
     // Uses the same cross-instance Redis lock as generation admission, closing
     // the create/delete race before the durable database tombstone is written.
+    // Who may delete is checked before the lock: a session of another tenant
+    // or course, or one the caller may not manage, gets the same answer whether
+    // or not it is generating (never ACTIVE).
     result = await withLessonAuthorConversationLock(req.params.conversationId,
-      () => requestLessonAuthorSessionDeletion(owner(req), req.params.conversationId));
+      () => requestLessonAuthorSessionDeletion(owner(req), req.params.conversationId),
+      { check: () => assertLessonAuthorSessionManageable(owner(req), req.params.conversationId) });
   } catch (error) {
     if (error instanceof GenerationJobError && error.code === 'GENERATION_ALREADY_ACTIVE') {
       throw new LessonAuthorSessionError('ACTIVE');

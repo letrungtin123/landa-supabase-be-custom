@@ -85,7 +85,7 @@ export async function tryEnqueueDurableBlueprint(
       correlation_id: result.job.correlation_id, conversation_id: conversationId,
       max_output_tokens: result.job.max_output_tokens, max_attempts: result.job.max_attempts });
     return generationJobStatusView(result.job);
-  });
+  }, { userId, tenantId });
 }
 
 async function reconstruct(job: GenerationJobRow): Promise<Prepared> {

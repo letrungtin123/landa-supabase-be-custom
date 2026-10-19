@@ -25,7 +25,7 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean; 
   let runId: string | null = null;
   let events = 0;
   const state = { filters: 0, accepted: 0, admissions: 0, prepares: 0, replayContexts: [] as unknown[], sql: [] as string[],
-    inserts: [] as unknown[][], briefs: [] as unknown[], idm: options.idm !== false };
+    inserts: [] as unknown[][], briefs: [] as unknown[], idm: options.idm !== false, lockAccess: [] as unknown[] };
   const prepared = (brief: unknown) => ({
     identity: { tenantId: user.tenantId!, userId: user.id, conversationId: input.conversationId,
       courseId: input.courseId, botId: uuid(6), kbId: uuid(7), requestHash: requestHashOf(brief),
@@ -73,7 +73,7 @@ function fixture(options: { failAdmission?: boolean; legacyWorkspace?: boolean; 
       state.prepares++; state.briefs.push(options.launchBrief);
       state.replayContexts.push(replay); return prepared(options.launchBrief) as any;
     }) as any,
-    withLessonAuthorConversationLock: async (_conversation, work) => work(),
+    withLessonAuthorConversationLock: async (_conversation, work, access) => { state.lockAccess.push(access); return work(); },
     admit: async () => {
       state.admissions++;
       if (options.failAdmission) throw Object.assign(new Error('ADMISSION_FAILED'), { code: 'ORCHESTRATION_V2_ADMISSION_CONFLICT' });
@@ -96,6 +96,8 @@ test('one public Create atomically creates a workspace shell and exactly one V2 
     correlation_id: uuid(9), content_locale: 'vi', status: 'designing', launch_brief: designBrief, replayed: false });
   assert.deepEqual({ filters: f.state.filters, accepted: f.state.accepted, admissions: f.state.admissions },
     { filters: 1, accepted: 1, admissions: 1 });
+  // The lock first checks that the conversation is the caller's own (404 like a missing one, busy or not).
+  assert.deepEqual(f.state.lockAccess, [{ userId: user.id, tenantId: user.tenantId }]);
   const inserted = f.state.sql.findIndex(sql => sql.includes('INSERT INTO lesson_author_workspaces'));
   const designing = f.state.sql.findIndex(sql => sql.includes("UPDATE lesson_author_workspaces SET status='designing'"));
   const started = f.state.sql.findIndex(sql => sql.includes("'architecture_started'"));

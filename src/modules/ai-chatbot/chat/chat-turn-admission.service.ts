@@ -38,7 +38,7 @@ export async function admitChatTurn(
   if (trimmed.length > MAX_USER_MESSAGE_LENGTH) { onError(new Error(`Tin nhắn tối đa ${MAX_USER_MESSAGE_LENGTH} ký tự`)); return null; }
 
   // ── Rate limit ──
-  try { checkRateLimit(userId); } catch (err: any) { onError(err); return null; }
+  try { await checkRateLimit(userId); } catch (err: any) { onError(err); return null; }
 
   // ── Ownership and target, before the locks: another user's conversation is
   // answered exactly like a missing one (never "already processing") ──

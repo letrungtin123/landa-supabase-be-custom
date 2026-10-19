@@ -18,6 +18,7 @@ import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 import { recordUserSessionRevocation, syncUserAccessRevocationCache } from './auth-revocation.service.js';
 import { createOneTimeTokenStore } from './auth-one-time-token.store.js';
+import { createOriginTenantCache } from './auth-origin-tenant-cache.js';
 import { createRefreshHandoffStore } from './auth-refresh-handoff.store.js';
 import { processRolePlan } from '../../config/process-role.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
@@ -766,29 +767,32 @@ async function resolveMemberGroups(userId: string): Promise<{ id: string; name: 
  * Resolve tenant từ origin (window.location.origin).
  * So sánh origin với domain_learner / domain_admin trong bảng tenants.
  * Trả null nếu origin không match tenant nào (ví dụ: localhost dev mode).
+ * The origin comes from the client: the cache is bounded, forgets "no tenant"
+ * after ORIGIN_CACHE_MISS_TTL and keeps no long or malformed origin
+ * (auth-origin-tenant-cache.ts).
  */
-const originTenantCache = new Map<string, { id: string; expires: number } | null>();
 const ORIGIN_CACHE_TTL = 60_000; // 60s
+const ORIGIN_CACHE_MISS_TTL = 60_000; // 60s: a domain set on a tenant later applies without a restart
+const ORIGIN_CACHE_MAX_ENTRIES = 1_000;
+const originTenantCache = createOriginTenantCache({
+  maxEntries: ORIGIN_CACHE_MAX_ENTRIES,
+  hitTtlMs: ORIGIN_CACHE_TTL,
+  missTtlMs: ORIGIN_CACHE_MISS_TTL,
+});
 
 async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | null> {
   // Normalize: bỏ trailing slash
   const normalizedOrigin = origin.replace(/\/+$/, '');
 
   const cached = originTenantCache.get(normalizedOrigin);
-  if (cached !== undefined && (cached === null || cached.expires > Date.now())) {
+  if (cached !== undefined) {
     return cached;
   }
 
   // So sánh trực tiếp origin với domain_learner / domain_admin
   // Domain trong DB có thể có hoặc không có trailing slash, protocol khác nhau
   const found = await authRepository.selectActiveTenantIdByOrigin(normalizedOrigin);
-
-  if (!found) {
-    originTenantCache.set(normalizedOrigin, null);
-    return null;
-  }
-
-  const tenant = { id: found.id, expires: Date.now() + ORIGIN_CACHE_TTL };
+  const tenant = found ? { id: found.id } : null;
   originTenantCache.set(normalizedOrigin, tenant);
   return tenant;
 }
@@ -845,66 +849,10 @@ export async function exchangeOTT(token: string) {
     throw new AppError('Token đã hết hạn', 401);
   }
 
-  // Lấy user từ DB (giống getMe nhưng tạo token pair)
-  const user = await authRepository.selectSessionUser(entry.userId);
-
-  if (!user) throw new AppError('User không tồn tại', 404);
-  if (!user.is_active) throw new AppError('Tài khoản đã bị vô hiệu hóa', 403);
-
-  // Tạo token pair (giống login)
-  const accessToken = signAccessToken({
-    sub: user.id,
-    tid: user.tenant_id,
-    role: user.role,
-    username: user.username,
-    session_mode: NORMAL_SESSION_MODE,
-  });
-
-  const refreshToken = uuidv4();
-  const refreshHash = hashToken(refreshToken);
-  const refreshExpiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_REFRESH_EXPIRES_IN));
-  const sessionId = user.role === 'superadmin' ? uuidv4() : null;
-
-  await authRepository.insertRefreshToken({
-    userId: user.id,
-    tokenHash: refreshHash,
-    expiresAt: refreshExpiresAt,
-    sessionMode: NORMAL_SESSION_MODE,
-    sessionId,
-  });
-
-  const permissions = await resolvePermissions(user.id, user.role, user.tenant_id);
-  const managedTenants = (user.role === 'superuser' || user.role === 'superadmin')
-    ? await resolveManagedTenants(user.id, user.tenant_id, user.role)
-    : [];
-  const tenantContextId = resolveRoleLabelTenantId(user.role, user.tenant_id, managedTenants);
-  const tenantModules = await resolveTenantModules(tenantContextId);
-  const { roleLabels, groupLabels } = await getDisplayLabelsForTenant(
-    tenantContextId,
-  );
-
-  return {
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    expires_in: Math.floor(parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) / 1000),
-    session_mode: NORMAL_SESSION_MODE,
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      full_name: user.full_name,
-      phone: user.phone,
-      avatar_url: user.avatar_url,
-      role: user.role,
-      tenant_id: user.tenant_id,
-      tenant_name: user.tenant_name,
-    },
-    permissions,
-    tenant_modules: tenantModules,
-    managed_tenants: managedTenants,
-    role_labels: roleLabels,
-    group_labels: groupLabels,
-  };
+  // The same checks and session context as the other sign-ins of a known
+  // user (tenant active, the demo iframe learner lock, member_groups); no
+  // last_login_at write, as before.
+  return issueSessionForUserId(entry.userId, { updateLastLogin: false });
 }
 
 /**

@@ -211,6 +211,6 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       report({ event: 'workspace_v2_launch_admitted', workspace_id: result.workspace_id,
         correlation_id: result.correlation_id, run_id: admittedRunId, replayed: result.replayed });
       return result;
-    });
+    }, { userId: user.id, tenantId });
   };
 }

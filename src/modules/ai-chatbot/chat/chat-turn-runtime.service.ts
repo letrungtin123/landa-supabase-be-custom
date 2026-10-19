@@ -1,12 +1,14 @@
 // Chat turn runtime shared by chat.service.ts and the AI ID legacy code (ai-id/legacy/):
-// per-process rate limit and stream locks, Gemini File Search store names,
+// the per-user rate limit (chat-rate-limit.ts), stream locks, Gemini File Search store names,
 // active KB lookups, conversation context and provider error text. The timer
 // that sweeps rateLimitMap stays in chat.service.ts.
 import { query } from '../../../config/database.js';
 import { cacheJson, getCacheVersion } from '../../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../../config/cache-keys.js';
 import { clusterBus } from '../../../config/cluster-bus.js';
+import { processRolePlan } from '../../../config/process-role.js';
 import { chatStreamLocks, type DistributedStreamLock } from './chat-stream-lock.js';
+import { createChatRateLimiter } from './chat-rate-limit.js';
 import { AppError } from '../../../middleware/error-handler.js';
 import {
   getOptionalGeminiApiKeyFingerprint,
@@ -22,17 +24,21 @@ import type { KbAssignment, ConversationContext } from './chat.types.js';
 // ── UUID validation ──
 export function isValidUUID(s: string): boolean { return UUID_PATTERN.test(s); }
 
-// ── In-memory rate limiter (per-user) ──
+// ── Rate limiter (per-user): this process's Map, and Redis with several API processes (chat-rate-limit.ts) ──
 export const rateLimitMap = new Map<string, number>();
+const chatRateLimiter = createChatRateLimiter({
+  windowMs: RATE_LIMIT_MS,
+  shared: processRolePlan.severalApiInstances,
+  local: rateLimitMap,
+});
 
-export function checkRateLimit(userId: string): void {
-  const lastSent = rateLimitMap.get(userId);
-  if (lastSent && Date.now() - lastSent < RATE_LIMIT_MS) {
-    throw new AppError('Bạn gửi tin nhắn quá nhanh. Vui lòng đợi vài giây.', 429);
-  }
+/** Rejects with the 429 "too fast" AppError when the user's last accepted message is within RATE_LIMIT_MS. */
+export function checkRateLimit(userId: string): Promise<void> {
+  return chatRateLimiter.check(userId);
 }
+/** Marks an accepted message. The local Map is updated at once; the Redis write never delays or fails the turn. */
 export function markRateLimit(userId: string): void {
-  rateLimitMap.set(userId, Date.now());
+  void chatRateLimiter.mark(userId);
 }
 
 // ── In-memory concurrency lock (per-conversation) ──

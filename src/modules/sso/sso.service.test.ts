@@ -24,6 +24,8 @@ interface FakeDb {
   identities: IdentityRow[];
   extraConfig: Record<string, unknown>;
   calls: Call[];
+  /** Makes the SSO link write (INSERT INTO sso_user_identities) fail. */
+  failLinkWrite?: Error;
 }
 
 function user(id: string, role: Role, tenant: string | null, username: string, isActive = true): UserRow {
@@ -77,6 +79,7 @@ async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
       return match ? one({ id: match.id, tenant_id: match.tenant_id, role: match.role, is_active: match.is_active }) : empty;
     }
     if (/^\s*INSERT INTO sso_user_identities/.test(sql)) {
+      if (db.failLinkWrite) throw db.failLinkWrite;
       db.identities.push({ tenant_id: String(params[0]), user_id: String(params[1]), provider: String(params[2]), provider_subject: String(params[3]) });
       return one({});
     }
@@ -245,6 +248,34 @@ test('(c) new learners follow the tenant auto-registration setting; a missing em
     const insert = db.calls.find((call) => /^\s*INSERT INTO users/.test(call.sql))!;
     assert.deepEqual([insert.params[4], insert.params[5]], [TENANT_B, false]);
     assert.equal(sessionWrites(db).length, 0);
+  }
+});
+
+test('a new learner and its SSO link are written in one transaction: a failing link write leaves no account', async (t) => {
+  const steps = (db: FakeDb) => db.calls
+    .map((call) => call.sql.trim().split(/\s+/).slice(0, 3).join(' '))
+    .filter((sql) => /^(BEGIN|COMMIT|ROLLBACK|INSERT INTO users|INSERT INTO sso_user_identities)/.test(sql));
+  {
+    const db = fakeDb({ failLinkWrite: Object.assign(new Error('connection lost'), { code: '08006' }) });
+    await installFakeDb(t, db);
+    installProvider(t, { sub: 'kc-broken-link', email: 'broken@example.test', email_verified: true });
+    const { exchangeSsoCode } = await import('./sso.service.js');
+    await assert.rejects(exchangeSsoCode('keycloak', exchangeInput(TENANT_B)), { message: 'connection lost' });
+    assert.deepEqual(steps(db), ['BEGIN', 'INSERT INTO users', 'INSERT INTO sso_user_identities', 'ROLLBACK']);
+    assert.equal(sessionWrites(db).length, 0);
+    t.mock.restoreAll();
+  }
+  for (const extraConfig of [{ auto_register_enabled: true }, {}]) {
+    // Created and linked together; an account waiting for approval is still committed before its 403.
+    const db = fakeDb({ extraConfig });
+    await installFakeDb(t, db);
+    installProvider(t, { sub: 'kc-together', email: 'together@example.test', email_verified: true });
+    const { exchangeSsoCode } = await import('./sso.service.js');
+    await exchangeSsoCode('keycloak', exchangeInput(TENANT_B)).catch((error: { statusCode?: number }) => {
+      assert.equal(error.statusCode, 403);
+    });
+    assert.deepEqual(steps(db), ['BEGIN', 'INSERT INTO users', 'INSERT INTO sso_user_identities', 'COMMIT']);
+    t.mock.restoreAll();
   }
 });
 
