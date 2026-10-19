@@ -4,10 +4,13 @@
 import { query } from '../../config/database.js';
 import { AppError } from '../../utils/errors.js';
 import { currentAiUsagePeriodStart, getTenantAiRuntimeSettings } from '../ai-chatbot/ai-platform/ai-settings.service.js';
-import { aiCreditState, availableMonths, buildUsageBreakdown, monthKey, monthStart, nextMonthStart, pointsFromUsd } from './ai-credit.logic.js';
+import {
+  AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE, aiCreditState, availableMonths, buildUsageBreakdown, monthKey, monthStart, nextMonthStart, pointsFromUsd,
+} from './ai-credit.logic.js';
 import { AI_CREDIT_DEFAULT_PLAN_CODE, ensureCreditMonth, recomputeCreditMonth } from './ai-credit.repository.js';
 
-export const AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE = 'AI_CREDIT_INSUFFICIENT_FOR_RUN';
+// Defined in the logic file so the AI ID launch controller can name it without loading the database.
+export { AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE };
 /** A past month without a credit row: it is not created from today's plan to answer a request. */
 export const AI_CREDIT_MONTH_NOT_FOUND_CODE = 'AI_CREDIT_MONTH_NOT_FOUND';
 

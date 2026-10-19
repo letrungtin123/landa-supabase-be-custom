@@ -3,6 +3,9 @@
 // is worth in provider USD, so the margin holds whatever features a tenant
 // uses (plan AI_CREDIT_LIMIT_PLAN_2026-10-17.md §4, §8-§9).
 
+/** A new AI ID run refused (429) because the points left do not cover its estimated cost. */
+export const AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE = 'AI_CREDIT_INSUFFICIENT_FOR_RUN';
+
 export interface AiCreditPlanPricing {
   monthlyPriceVnd: number;
   monthlyPoints: number;

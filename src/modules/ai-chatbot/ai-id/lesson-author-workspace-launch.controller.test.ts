@@ -6,6 +6,8 @@ import type { AuthUser } from '../../../types/express.js';
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { createWorkspaceLaunchHandlers, type WorkspaceLaunchInput, type WorkspaceLaunchResult } from './lesson-author-workspace-launch.controller.js';
 import { LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError } from './lesson-author-launch-brief.logic.js';
+import { AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE } from '../../ai-credits/ai-credit.logic.js';
+import { AppError } from '../../../utils/errors.js';
 
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const user:AuthUser={id:id(1),tenantId:id(2),role:'staff',username:'fixture',sessionMode:'normal'};
@@ -191,5 +193,47 @@ test('QLT-6: a service-level brief rejection keeps its 400 code; a malformed sto
     f.state.storedBrief=stored;const r=await f.invoke('latest');
     assert.equal(r.status,503);assert.equal(r.payload.code,'WORKSPACE_RUNTIME_UNAVAILABLE');
     assert.equal(f.logs.at(-1)?.internal_failure_code,'LESSON_AUTHOR_LAUNCH_BRIEF_STORED_INVALID');
+  }
+});
+
+// --- AI points: a run the points left cannot cover --------------------------------------------------------
+test('AI points: the "not enough AI points" refusal keeps its 429, code and message; other errors keep their mapping',async()=>{
+  const creditMessage='Không đủ điểm AI để tạo khoá học. Liên hệ quản trị viên để mua thêm điểm.';
+  let thrown:unknown=null;const logs:Record<string,unknown>[]=[];
+  const handlers=createWorkspaceLaunchHandlers({readEnabled:()=>true,executionReady:()=>true,
+    db:{async transaction(work){return work({query:async()=>({rows:[],rowCount:0})} as GenerationJobSql);}},
+    report:e=>{logs.push(e);},create:async()=>{throw thrown;}});
+  async function create(ui:'en'|'vi'){
+    let status=0,payload:Record<string,unknown>={};
+    await handlers.create({user,params,body,query:{ui_locale:ui}} as unknown as Request,
+      {setHeader(){},status(n:number){status=n;return this;},json(v:Record<string,unknown>){payload=v;return this;}} as unknown as Response);
+    return{status,payload};
+  }
+  for(const ui of ['en','vi'] as const){
+    thrown=new AppError(creditMessage,429,AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE);
+    const r=await create(ui);
+    assert.equal(r.status,429);assert.equal(r.payload.success,false);
+    assert.equal(r.payload.code,'AI_CREDIT_INSUFFICIENT_FOR_RUN');assert.equal(r.payload.message,creditMessage);
+    assert.match(String(r.payload.request_id),/^[0-9a-f-]{36}$/);
+    assert.equal(logs.at(-1)?.http_status,429);assert.equal(logs.at(-1)?.internal_failure_code,'AI_CREDIT_INSUFFICIENT_FOR_RUN');
+  }
+  // The same code on an error that was not raised for the client is still an unconfirmed runtime failure.
+  thrown=Object.assign(new Error('PRIVATE PROVIDER BODY'),{code:AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE});
+  const plain=await create('en');
+  assert.equal(plain.status,503);assert.equal(plain.payload.code,'WORKSPACE_RUNTIME_UNAVAILABLE');
+  assert.doesNotMatch(JSON.stringify(plain.payload),/PRIVATE/);
+  // Every other mapping is unchanged.
+  const cases:[unknown,number,string][]=[
+    [new AppError('x',403,'WORKSPACE_RUNTIME_FORBIDDEN'),403,'WORKSPACE_READ_FORBIDDEN'],
+    [new AppError('x',409,'WORKSPACE_CREATE_CONFLICT'),409,'WORKSPACE_CREATE_CONFLICT'],
+    [new AppError('x',409,'WORKSPACE_ALREADY_ACTIVE'),409,'WORKSPACE_ALREADY_ACTIVE'],
+    [new AppError('x',400,'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'),400,'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'],
+    [new AppError('Đã dùng hết điểm AI của tháng này.',429,'AI_CREDIT_LIMIT_REACHED'),503,'WORKSPACE_RUNTIME_UNAVAILABLE'],
+    [new AppError('x',400,'GENERATION_INPUT_REJECTED'),503,'WORKSPACE_RUNTIME_UNAVAILABLE'],
+    [new Error('boom'),503,'WORKSPACE_RUNTIME_UNAVAILABLE'],
+  ];
+  for(const [error,status,code] of cases){
+    thrown=error;const r=await create('en');
+    assert.equal(r.status,status,code);assert.equal(r.payload.code,code);assert.notEqual(r.payload.message,'x');
   }
 });

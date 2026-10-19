@@ -9,6 +9,8 @@ import {
 } from './lesson-author-launch-brief.logic.js';
 import { UUID_PATTERN, isUuid } from '../../../utils/uuid.js';
 import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
+import { AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE } from '../../ai-credits/ai-credit.logic.js';
+import { AppError } from '../../../utils/errors.js';
 
 const states=['queued','designing','drafting','ready','needs_action','failed','canceled'];
 const BASE_CREATE_KEYS='content_locale,operation_id,source_document_ids';
@@ -30,14 +32,14 @@ export function createWorkspaceLaunchHandlers(deps:{
       const start=performance.now(),requestId=randomUUID(),locale=req.query.ui_locale==='en'?'en':'vi';
       res.setHeader('Cache-Control','no-store');res.setHeader('X-Request-ID',requestId);
       let root:string|null=null,workspaceId:string|null=null;
-      const failure=(status:number,external:string,internal=external)=>{
+      const failure=(status:number,external:string,internal=external,message?:string)=>{
         try{deps.report({event:'workspace_launch_failed',action,request_id:requestId,correlation_id:root,workspace_id:workspaceId,
           failure_stage:`workspace_${action}`,internal_failure_code:internal,external_failure_code:external,http_status:status,duration_ms:Math.round(performance.now()-start)});}catch{/* telemetry never changes the response */}
         // QLT-6: a launch brief problem is the author's to fix, so it says exactly what to change.
         const brief=isLaunchBriefErrorCode(external)?LAUNCH_BRIEF_ERROR_MESSAGES[external]:null;
-        res.status(status).json({success:false,code:external,request_id:requestId,message:brief?brief[locale==='en'?1:0]:locale==='en'
+        res.status(status).json({success:false,code:external,request_id:requestId,message:message??(brief?brief[locale==='en'?1:0]:locale==='en'
           ? 'The workspace operation could not be confirmed. Refresh the state before trying again.'
-          : 'Chưa thể xác nhận thao tác bản thảo. Hãy tải lại trạng thái trước khi thử lại.'});
+          : 'Chưa thể xác nhận thao tác bản thảo. Hãy tải lại trạng thái trước khi thử lại.')});
       };
       const user=req.user,courseId=req.params.courseId;
       if(!user){failure(401,'AUTH_REQUIRED');return;}
@@ -94,6 +96,9 @@ export function createWorkspaceLaunchHandlers(deps:{
         const c=error&&typeof error==='object'?(error as {code?:unknown}).code:undefined;
         const internal=typeof c==='string'&&/^[A-Z][A-Z0-9_]{0,99}$/.test(c)?c:'WORKSPACE_RUNTIME_UNAVAILABLE';
         if(isLaunchBriefErrorCode(internal)){failure(400,internal);return;}
+        // AI points: the run is refused before anything is created, so it goes out as raised (its 429, code and
+        // plain message), not as a runtime failure that tells the author to reload and try again.
+        if(internal===AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE&&error instanceof AppError){failure(error.statusCode,internal,internal,error.message);return;}
         const denied=internal.includes('FORBIDDEN'),conflict=internal.includes('CONFLICT')||internal==='WORKSPACE_ALREADY_ACTIVE';
         failure(denied?403:conflict?409:503,denied?'WORKSPACE_READ_FORBIDDEN':conflict?internal:'WORKSPACE_RUNTIME_UNAVAILABLE',internal);
       }
