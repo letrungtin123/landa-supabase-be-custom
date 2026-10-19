@@ -14,7 +14,6 @@ import {
   buildAssignmentCreatedOwnerEmail,
   buildOwnerFeedbackDigestEmail,
   getEmailBranding,
-  learnerDeadlineLabel,
   ownerFeedbackItemHtml,
   ownerFeedbackItemText,
   renderAssignmentCreatedEmail,
@@ -29,6 +28,7 @@ import {
   type RecipientSummaryItem,
   type TeamMemberAddedEmailContext,
 } from './email-outbox-templates.service.js';
+import { learnerDeadlineLabel } from './email-outbox-html.logic.js';
 import { createEmailOutboxEnqueueRepository, type OutboxEmailInput } from './email-outbox-enqueue.repository.js';
 
 async function insertOutboxEmail(client: PoolClient, input: OutboxEmailInput): Promise<void> {

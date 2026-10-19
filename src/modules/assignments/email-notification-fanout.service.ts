@@ -13,7 +13,6 @@ import { swallowAndLog } from '../../utils/best-effort.js';
 import {
   buildAssignmentCreatedOwnerEmail,
   getEmailBranding,
-  learnerDeadlineLabel,
   renderAssignmentCreatedEmail,
   renderCourseNotificationEmail,
   type AssignmentCreatedEmailContext,
@@ -22,6 +21,7 @@ import {
   type RecipientSummary,
   type SubmissionUnlockMode,
 } from './email-outbox-templates.service.js';
+import { learnerDeadlineLabel } from './email-outbox-html.logic.js';
 import { normalizeRecipients } from './email-outbox-enqueue.service.js';
 import { createEmailOutboxEnqueueRepository } from './email-outbox-enqueue.repository.js';
 
