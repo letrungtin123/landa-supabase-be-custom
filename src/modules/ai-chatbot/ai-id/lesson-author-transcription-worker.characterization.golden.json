@@ -1,0 +1,16 @@
+{
+ "a tick after the worker was disabled drains nothing": "d6df2b115447b847a77205161ce056949d0971dc16cc31fe3452368e73e8beba",
+ "claim fails": "1a7c02f5cf532e4a5bfbc9eca2ca2dbcbe2b2ad71f792b23e4c0f6cf62f6ab9f",
+ "expired job card is synced": "822bc94ebc786ac0b34e08e0fba1b1ed0a14f0a85a5c312be5388dad2636f257",
+ "failed job syncs its chat card": "a1cbf0072afef00dfc09bab44ce53e1418dd4d3e47e31b54b2191a0e52494b4a",
+ "failed mark fails": "ff6ba92276404d4ec8173b7a32af6bb13713751b837e1390f200fcbdfdfcb7d4",
+ "failed mark matches no row": "92b758e1f398ba4c691926d05cec7192c8b4503c301b57f0b2038d6cfda48b60",
+ "job without a lease token": "04dc44f6269c5ea0ad6b8dfa42f703f10136a6774ad990b2edf31da7f6a909bb",
+ "job without a source fails": "92b758e1f398ba4c691926d05cec7192c8b4503c301b57f0b2038d6cfda48b60",
+ "poller drains on its interval and skips a tick while a drain runs": "ddb3b5a4c6217915d743d92f72cb0169e34d00f09bee7a35e0d223f8933a1848",
+ "start disabled": "73c647954dab08dab9130d8f6d5817fb735dc7ba7be7c4b0bf2dcf1574d4d8fd",
+ "start drain fails": "9f2a12c7bfdbff084df30de327e740f1cd81c87c7fe72cc87462cf8a38c41649",
+ "start with nothing due": "b3ddcdd65b5248371abe523da6db3a6b06c2c6f2b41e51270c85725d4493bf9b",
+ "the temp sweep runs every six hours": "a5a698a8ea123a9540a02fff3808334f36d42b63d3401bb32aa2de8e861ed52c",
+ "three jobs run in batches of two": "ad12fb95bb1abed46ca00d54a948c406566343ce21f2ad448db903f8b87f45cc"
+}
