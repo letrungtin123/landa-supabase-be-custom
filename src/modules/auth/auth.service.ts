@@ -18,6 +18,7 @@ import { isLearnerRole } from '../../types/index.js';
 import { getTenantRoleLabels } from '../tenants/tenant-role-labels.service.js';
 import { recordUserSessionRevocation, syncUserAccessRevocationCache } from './auth-revocation.service.js';
 import { createOneTimeTokenStore } from './auth-one-time-token.store.js';
+import { createOriginTenantCache } from './auth-origin-tenant-cache.js';
 import { createRefreshHandoffStore } from './auth-refresh-handoff.store.js';
 import { processRolePlan } from '../../config/process-role.js';
 import { getTenantGroupLabels } from '../tenants/tenant-group-labels.service.js';
@@ -766,29 +767,32 @@ async function resolveMemberGroups(userId: string): Promise<{ id: string; name: 
  * Resolve tenant từ origin (window.location.origin).
  * So sánh origin với domain_learner / domain_admin trong bảng tenants.
  * Trả null nếu origin không match tenant nào (ví dụ: localhost dev mode).
+ * The origin comes from the client: the cache is bounded, forgets "no tenant"
+ * after ORIGIN_CACHE_MISS_TTL and keeps no long or malformed origin
+ * (auth-origin-tenant-cache.ts).
  */
-const originTenantCache = new Map<string, { id: string; expires: number } | null>();
 const ORIGIN_CACHE_TTL = 60_000; // 60s
+const ORIGIN_CACHE_MISS_TTL = 60_000; // 60s: a domain set on a tenant later applies without a restart
+const ORIGIN_CACHE_MAX_ENTRIES = 1_000;
+const originTenantCache = createOriginTenantCache({
+  maxEntries: ORIGIN_CACHE_MAX_ENTRIES,
+  hitTtlMs: ORIGIN_CACHE_TTL,
+  missTtlMs: ORIGIN_CACHE_MISS_TTL,
+});
 
 async function resolveTenantByOrigin(origin: string): Promise<{ id: string } | null> {
   // Normalize: bỏ trailing slash
   const normalizedOrigin = origin.replace(/\/+$/, '');
 
   const cached = originTenantCache.get(normalizedOrigin);
-  if (cached !== undefined && (cached === null || cached.expires > Date.now())) {
+  if (cached !== undefined) {
     return cached;
   }
 
   // So sánh trực tiếp origin với domain_learner / domain_admin
   // Domain trong DB có thể có hoặc không có trailing slash, protocol khác nhau
   const found = await authRepository.selectActiveTenantIdByOrigin(normalizedOrigin);
-
-  if (!found) {
-    originTenantCache.set(normalizedOrigin, null);
-    return null;
-  }
-
-  const tenant = { id: found.id, expires: Date.now() + ORIGIN_CACHE_TTL };
+  const tenant = found ? { id: found.id } : null;
   originTenantCache.set(normalizedOrigin, tenant);
   return tenant;
 }
