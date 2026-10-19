@@ -15,7 +15,8 @@ import {
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../utils/errors.js';
 import { assertTenantCanAddCourseComponent } from '../tenants/tenant-course-components.service.js';
-import { normalizeDiagramData } from './diagram-data.logic.js';
+import { DiagramDataValidationError, normalizeDiagramData } from './diagram-data.logic.js';
+import { courseBlockDataInvalid } from './course-block-input.logic.js';
 import { withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import { type CourseComponentLocale } from './course-authoring-problem-defaults.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
@@ -222,6 +223,20 @@ export async function getUnitChildren(unitId: string, tenantId?: string | null):
 
 // ── Studio Submit (custom XBlock data) ──
 
+/**
+ * Diagram data from the studio editor. Data the normalizer refuses is a client
+ * error (400 COURSE_BLOCK_DATA_INVALID, the normalizer's message); AI ID keeps
+ * its own handling of DiagramDataValidationError.
+ */
+function normalizeStudioDiagramData(raw: unknown): ReturnType<typeof normalizeDiagramData> {
+  try {
+    return normalizeDiagramData(raw);
+  } catch (error) {
+    if (error instanceof DiagramDataValidationError) throw courseBlockDataInvalid(error.message);
+    throw error;
+  }
+}
+
 function normalizeCrosswordData(raw: unknown): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
 
@@ -293,7 +308,7 @@ export async function studioSubmit(
     }
     case 'la_diagram': {
       const diagramRaw = restData.diagram_data;
-      const diagramData = normalizeDiagramData(diagramRaw);
+      const diagramData = normalizeStudioDiagramData(diagramRaw);
       updatePayload = {
         metadata: { ...block.metadata, diagram_data: diagramData },
         data: { ...restData, diagram_data: diagramData },
