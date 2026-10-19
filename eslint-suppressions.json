@@ -604,9 +604,6 @@
   "src/modules/assignments/email-outbox.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
-    },
-    "no-useless-catch": {
-      "count": 1
     }
   },
   "src/modules/audit-logs/audit-logs.routes.ts": {
