@@ -179,6 +179,44 @@ test('a Super Admin updates a user without a tenant; anyone else is refused, and
   client.release();
 });
 
+test('a Super Admin deletes an account without a tenant; anyone else is refused, and a tenant account stays tenant-owned', async t => {
+  const params = { id: TARGET };
+  const newJob = noRowsWhen(/FROM user_deletion_jobs\s+WHERE user_id = \$1::uuid\s+AND status IN/);
+  const tenantless = (role: string): Answer => text =>
+    /FROM users/.test(text) && !/COUNT\(\*\)/.test(text) ? { rows: [{ ...ROW, role, tenant_id: null }] } : undefined;
+
+  // Another Super Admin (not the last active one) and an account of another role, both without a tenant.
+  for (const role of ['superadmin', 'staff']) {
+    for (const actor of [SUPERADMIN_NO_TENANT, SUPERADMIN_IN_TENANT]) {
+      const deleted = await run(t, users.deleteController, actor, {}, params, answers(newJob, tenantless(role)));
+      assert.equal(deleted.outcome.status, 202, `${role} ${actor.tenantId}: ${JSON.stringify(deleted.outcome).slice(0, 200)}`);
+      assert.deepEqual(auditRow(deleted.statements), [null, true, 'superadmin_only']);
+      assert.ok(committed(deleted.statements));
+      t.mock.restoreAll();
+    }
+  }
+
+  const tenantTarget = await run(t, users.deleteController, SUPERADMIN_NO_TENANT, {}, params, newJob);
+  assert.equal(tenantTarget.outcome.status, 202);
+  assert.equal(auditRow(tenantTarget.statements)?.[0], TENANT);
+  assert.equal(auditRow(tenantTarget.statements)?.[1], false);
+  t.mock.restoreAll();
+
+  // A Super User never reaches the audit: the authority policy refuses an account outside its tenant first.
+  for (const [actor, code] of [
+    [{ role: 'superuser', tenantId: TENANT }, 'USER_AUTHORITY_CROSS_TENANT'],
+    [{ role: 'superuser', tenantId: null }, 'USER_AUTHORITY_TENANT_REQUIRED'],
+  ] as Array<[Actor, string]>) {
+    const refused = await run(t, users.deleteController, actor, {}, params, answers(newJob, tenantless('staff')));
+    assert.equal(refused.outcome.status, 403);
+    assert.equal((refused.outcome as { body?: { code?: string } }).body?.code, code);
+    assert.equal(auditRow(refused.statements), null);
+    assert.ok(!committed(refused.statements));
+    assert.ok(rolledBack(refused.statements));
+    t.mock.restoreAll();
+  }
+});
+
 test('a Super Admin creates and updates modules with or without a tenant selected', async t => {
   const body = { code: 'faq', name: 'FAQ' };
   const created = await run(t, modules.createController, SUPERADMIN_NO_TENANT, body, {});

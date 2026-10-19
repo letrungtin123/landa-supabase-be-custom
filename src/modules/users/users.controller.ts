@@ -167,7 +167,8 @@ export async function deleteController(req: Request, res: Response, next: NextFu
     const { jobId } = await requestUserDeletion(
       req.params.id,
       adminActor(req),
-      (jobId, targetTenantId, target) => ({
+      // An account without a tenant (a Super Admin's) is audited as a platform event.
+      (jobId, targetTenantId, target) => platformScopeForSuperadmin(req, {
         ...createTransactionalAuditEntry(
           req,
           'DELETE',
