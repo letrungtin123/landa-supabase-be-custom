@@ -58,3 +58,36 @@ test('learner_plus study time and learner detail of another group answer like an
   const detail = await call(ctrl.getLearnerDetail, 'learner_plus', 'other-group');
   assert.deepEqual(detail, { username: 'other-group', groups: [], results: [], total_count: 0, total_pages: 0, current_page: 1 });
 });
+
+test('learner_plus report groups are the groups of their teams in their own tenant only', async (t) => {
+  const OTHER_TENANT = '22222222-2222-4222-8222-222222222222';
+  // Memberships of the learner_plus user, one of them (a stray row) in a team of another tenant.
+  const memberGroups = [
+    { id: GROUP_OWN, name: 'Phòng A', subgroup_count: 1, tenant_id: TENANT },
+    { id: '55555555-5555-4555-8555-555555555555', name: 'Other tenant', subgroup_count: 2, tenant_id: OTHER_TENANT },
+  ];
+  const statements: Array<{ text: string; params: unknown[] }> = [];
+  const pg = await import('pg');
+  t.mock.method(pg.default.Pool.prototype, 'query', async (text: string, params: unknown[] = []) => {
+    statements.push({ text, params });
+    if (!text.includes('FROM team_members tm')) return { rows: [], rowCount: 0 };
+    // What Postgres would answer: the tenant condition, when the statement has one, filters on its parameter.
+    const tenantFilter = /og\.tenant_id = \$(\d+)/.exec(text);
+    const rows = memberGroups
+      .filter(() => params[0] === LP)
+      .filter(row => !tenantFilter || row.tenant_id === params[Number(tenantFilter[1]) - 1])
+      .map(({ tenant_id: _tenant, ...row }) => row);
+    return { rows, rowCount: rows.length };
+  });
+  const { getReportGroups } = await import('./reports.controller.js');
+  let body: { data?: { groups: Array<{ id: string }>; total: number } } | undefined;
+  const res = {
+    status() { return this; },
+    json(value: unknown) { body = value as typeof body; return this; },
+  } as unknown as Response;
+  await getReportGroups({ user: { id: LP, tenantId: TENANT, role: 'learner_plus' }, query: {} } as unknown as Request, res);
+  assert.deepEqual(body?.data?.groups.map(group => group.id), [GROUP_OWN]);
+  assert.equal(body?.data?.total, 1);
+  assert.equal(statements.length, 1);
+  assert.deepEqual(statements[0].params, [LP, TENANT]);
+});
