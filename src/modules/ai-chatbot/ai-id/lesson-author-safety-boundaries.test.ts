@@ -10,7 +10,7 @@ const routeSource = readFileSync(fileURLToPath(new URL('../ai-chatbot.routes.ts'
 const chatControllerSource = readFileSync(fileURLToPath(new URL('../chat/chat.controller.ts', import.meta.url)), 'utf8');
 const aiRagClientSource = readFileSync(fileURLToPath(new URL('../ai-platform/ai-rag-client.service.ts', import.meta.url)), 'utf8');
 const courseAuthoringServiceSource = readFileSync(
-  fileURLToPath(new URL('../../course-authoring/course-authoring.service.ts', import.meta.url)),
+  fileURLToPath(new URL('../../course-authoring/course-lesson-author-apply.service.ts', import.meta.url)),
   'utf8',
 );
 
