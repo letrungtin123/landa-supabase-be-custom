@@ -1,0 +1,859 @@
+{
+  "format": 1,
+  "hash": "md5(btrim(replace(prosrc, chr(13), ''), E' \\n\\t'))",
+  "functions": {
+    "assert_course_publish_candidate_commit()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "15223f87b59b03ec022cc8506c997271",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "15223f87b59b03ec022cc8506c997271"
+        }
+      ]
+    },
+    "assert_course_publish_commit()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "579d92f89589f630fa6762374d22d31f",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "579d92f89589f630fa6762374d22d31f"
+        }
+      ]
+    },
+    "assert_lesson_author_chapter_publication()": {
+      "latest": {
+        "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+        "md5": "4c85f460d5145eaa28b4db1935c16e4b",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+          "md5": "4c85f460d5145eaa28b4db1935c16e4b"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_apply_commit()": {
+      "latest": {
+        "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+        "md5": "c4a6c31eae1e43ae73981521fe1ede0d",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "c4a6c31eae1e43ae73981521fe1ede0d"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_event_commit()": {
+      "latest": {
+        "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+        "md5": "0d7b7272ddd07a776ef77f8da2256fef",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "0d7b7272ddd07a776ef77f8da2256fef"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_quality_commit()": {
+      "latest": {
+        "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+        "md5": "959e5b9037a13c97b3fd23a13229ab71",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+          "md5": "959e5b9037a13c97b3fd23a13229ab71"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_run_commit()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "4f218179c17e8a1503104f3490e6dd18",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "d53eb1132071f5805c6d595ef5130c1e"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "4f218179c17e8a1503104f3490e6dd18"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_unit_commit()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "2dd603d20d5c19c4678468479ddecae9",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "12071f0db2cc3362ab83f4f9079ebce7"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "2dd603d20d5c19c4678468479ddecae9"
+        }
+      ]
+    },
+    "assert_lesson_author_workspace_v2_completion_commit()": {
+      "latest": {
+        "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
+        "md5": "c15968c86517171607deaa74e04a672d",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "397e0d0394703136479379d064739faf"
+        },
+        {
+          "file": "20261001_1700_lesson_author_orchestration_v2_completion_guard_hotfix.sql",
+          "md5": "397e0d0394703136479379d064739faf"
+        },
+        {
+          "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
+          "md5": "c15968c86517171607deaa74e04a672d"
+        }
+      ]
+    },
+    "begin_course_publish_candidate(uuid,uuid,character varying,uuid,uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "82bca74f6a131ab74d10b47a4a96e470",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "82bca74f6a131ab74d10b47a4a96e470"
+        }
+      ]
+    },
+    "capture_lesson_author_workspace_v2_task_attempt()": {
+      "latest": {
+        "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
+        "md5": "9e7ea4a3cd98ea3552944b4f0551edd5",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+          "md5": "e7dc15abe0ae09309b8d79dbb49776a1"
+        },
+        {
+          "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
+          "md5": "9e7ea4a3cd98ea3552944b4f0551edd5"
+        }
+      ]
+    },
+    "course_publish_actor_has_permission(uuid,uuid,character varying)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "2fee62201e5713dc9c8b82bf39dae393",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "2fee62201e5713dc9c8b82bf39dae393"
+        }
+      ]
+    },
+    "course_publish_actor_has_permission_locked(uuid,uuid,character varying)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "977dcd2d0e0912053f03c4dfe7a6eff6",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "977dcd2d0e0912053f03c4dfe7a6eff6"
+        }
+      ]
+    },
+    "course_publish_actor_is_policy_admin(uuid,uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "0868dfb99592f1474422576f105c6bf2",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "0868dfb99592f1474422576f105c6bf2"
+        }
+      ]
+    },
+    "course_publish_asset_hash(uuid,character varying,uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "2daf61994c5e1869c374d69db56fc1df",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "2daf61994c5e1869c374d69db56fc1df"
+        }
+      ]
+    },
+    "course_publish_block_draft_hash(uuid,character varying,uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "8201899a07a59fb0edcfa5cf19cccaa6",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "8201899a07a59fb0edcfa5cf19cccaa6"
+        }
+      ]
+    },
+    "course_publish_candidate_snapshot_matches(uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "124a9c7761711d5c8e68590e0b2a0ade",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "124a9c7761711d5c8e68590e0b2a0ade"
+        }
+      ]
+    },
+    "fence_course_publish_evidence_mutation()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "d308e04dfca22b6252a6476cd03a037a",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "d308e04dfca22b6252a6476cd03a037a"
+        }
+      ]
+    },
+    "fence_course_publish_mutation()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "56870786e889ae1f92f7b4165a474899",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "56870786e889ae1f92f7b4165a474899"
+        }
+      ]
+    },
+    "fence_lesson_author_workspace_baseline()": {
+      "latest": {
+        "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
+        "md5": "2849f826f369316db05ec64a4b17cf76",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "288b45fb8ed3c2846bf75b8e013af463"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "2b205d3775d979a1728088dc850e4b90"
+        },
+        {
+          "file": "20261005_1149_lesson_author_v2_fallback_baseline_fence.sql",
+          "md5": "56a4bd1e8ab5bc88288e9b3ec187ade4"
+        },
+        {
+          "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
+          "md5": "2849f826f369316db05ec64a4b17cf76"
+        }
+      ]
+    },
+    "finish_course_publish_candidate(uuid,uuid)": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "2ea7b0c0aa9db725410c026d58bf3943",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "2ea7b0c0aa9db725410c026d58bf3943"
+        }
+      ]
+    },
+    "guard_course_publish_approval()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "cbf4e8ce995350a1e72351c158a86a1f",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "cbf4e8ce995350a1e72351c158a86a1f"
+        }
+      ]
+    },
+    "guard_course_publish_candidate()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "8b504f658d60b3e21d2f2d6eba5f12f2",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "8b504f658d60b3e21d2f2d6eba5f12f2"
+        }
+      ]
+    },
+    "guard_course_publish_candidate_child()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "e5e4b72573879d159bb105876ac519a2",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "e5e4b72573879d159bb105876ac519a2"
+        }
+      ]
+    },
+    "guard_course_publish_policy()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "9b430b208239a6135b702b53f33d9612",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "9b430b208239a6135b702b53f33d9612"
+        }
+      ]
+    },
+    "guard_course_publish_receipt()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "0445b536fa14002c653ce13657a5058b",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "0445b536fa14002c653ce13657a5058b"
+        }
+      ]
+    },
+    "guard_course_publish_reviewer_assignment()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "1b89211daac17ab08d8aa27f2d6859a9",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "1b89211daac17ab08d8aa27f2d6859a9"
+        }
+      ]
+    },
+    "guard_course_publish_revision_ledger()": {
+      "latest": {
+        "file": "20261006_0900_course_publish_governance_cp5.sql",
+        "md5": "eb39f86d1d551f613c249dcc04c62ef6",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261006_0900_course_publish_governance_cp5.sql",
+          "md5": "eb39f86d1d551f613c249dcc04c62ef6"
+        }
+      ]
+    },
+    "guard_lesson_author_chapter_attempt()": {
+      "latest": {
+        "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+        "md5": "021fd62f7a4468d045a8b602e0318aaf",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+          "md5": "021fd62f7a4468d045a8b602e0318aaf"
+        }
+      ]
+    },
+    "guard_lesson_author_chapter_draft()": {
+      "latest": {
+        "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+        "md5": "0f37e2654c7de6d98e73db91d62cf2ed",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+          "md5": "0f37e2654c7de6d98e73db91d62cf2ed"
+        }
+      ]
+    },
+    "guard_lesson_author_chapter_unit()": {
+      "latest": {
+        "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+        "md5": "58a9367dd10beee849fa807f86c22119",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260926_0237_lesson_author_chapter_checkpoints.sql",
+          "md5": "58a9367dd10beee849fa807f86c22119"
+        }
+      ]
+    },
+    "guard_lesson_author_generation_state()": {
+      "latest": {
+        "file": "20260925_1926_lesson_author_generation_enqueue_reservation.sql",
+        "md5": "4770750161a360a49be0defcd3be4207",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260925_1839_lesson_author_generation_jobs.sql",
+          "md5": "3e81cb74ca3ae47126babdf65ebfda6b"
+        },
+        {
+          "file": "20260925_1926_lesson_author_generation_enqueue_reservation.sql",
+          "md5": "4770750161a360a49be0defcd3be4207"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "4d8a8428162110c8b60b64e39788771f",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "70ec47651eed22e29f4d617177b89654"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "4d8a8428162110c8b60b64e39788771f"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_apply_mapping()": {
+      "latest": {
+        "file": "20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql",
+        "md5": "77e599cef9767b9fa14ba9aa21c66132",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "77e599cef9767b9fa14ba9aa21c66132"
+        },
+        {
+          "file": "20261002_2045_lesson_author_apply_mapping_enum_hotfix.sql",
+          "md5": "77e599cef9767b9fa14ba9aa21c66132"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_apply_quality_v2()": {
+      "latest": {
+        "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+        "md5": "5f83d38c95906246ed4b184bef2642ac",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+          "md5": "5f83d38c95906246ed4b184bef2642ac"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_apply_receipt()": {
+      "latest": {
+        "file": "20261002_2230_lesson_author_four_level_apply_scope.sql",
+        "md5": "fd5e31a98980789f8632b6c7e0fc51f2",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "8c86e411a7b06ab569b3bb2a145db903"
+        },
+        {
+          "file": "20261002_1915_lesson_author_v2_apply_receipt_runtime_binding.sql",
+          "md5": "48f0d0279f1c5966af29d48cfccee601"
+        },
+        {
+          "file": "20261002_2015_lesson_author_apply_receipt_alias_hotfix.sql",
+          "md5": "a5c5c40ebf67a3d825d2e4a03412cc1e"
+        },
+        {
+          "file": "20261002_2230_lesson_author_four_level_apply_scope.sql",
+          "md5": "fd5e31a98980789f8632b6c7e0fc51f2"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_event()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "3e03bacb3ee2ac53749286fa133a4e1e",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "653878921d8950a4752e3b6da2d97064"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "3e03bacb3ee2ac53749286fa133a4e1e"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_node()": {
+      "latest": {
+        "file": "20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql",
+        "md5": "3e6fecf88368b46c1ee93b112056f026",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "a755658ee7cbce51504a039cbea4f4dc"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "de68aa84684d9bfefcad7e04cdcf3eed"
+        },
+        {
+          "file": "20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql",
+          "md5": "3e6fecf88368b46c1ee93b112056f026"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_quality_receipt()": {
+      "latest": {
+        "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+        "md5": "5bc4b48ab7aeb9ca73f9083edf6b3e62",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+          "md5": "5bc4b48ab7aeb9ca73f9083edf6b3e62"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_revision()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "b13f1a1a13b37e1e62e31b69ebf92e52",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "342f131e155ee6ee525b6241201015a5"
+        },
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "b13f1a1a13b37e1e62e31b69ebf92e52"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_run()": {
+      "latest": {
+        "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+        "md5": "899ce32d811fb652ba75559671913494",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "899ce32d811fb652ba75559671913494"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_source_fact_v2()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "6e1aa7fd21af9c229bebc7388718cbfd",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "6e1aa7fd21af9c229bebc7388718cbfd"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_source_snapshot_v2()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "9c7df8552236baa01eb3fe517e2d145a",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "9c7df8552236baa01eb3fe517e2d145a"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_artifact()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "4cf67dccee7c7e00c87041b4ae5a2bbe",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "4cf67dccee7c7e00c87041b4ae5a2bbe"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_assessment_obligation()": {
+      "latest": {
+        "file": "20261006_1330_lesson_author_v2_assessment_authority_backpressure_hotfix.sql",
+        "md5": "2a6558622c93fbab24922ab945ea702c",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
+          "md5": "3aaf49ced403a83e5dce26830ceb1886"
+        },
+        {
+          "file": "20261006_1330_lesson_author_v2_assessment_authority_backpressure_hotfix.sql",
+          "md5": "2a6558622c93fbab24922ab945ea702c"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_attempt_event()": {
+      "latest": {
+        "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
+        "md5": "ab88535c99e05e44e48710752cdb27ac",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1800_lesson_author_cp1_quality_evidence.sql",
+          "md5": "41828578b15ac7d743b40c13f2fc6d38"
+        },
+        {
+          "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
+          "md5": "ab88535c99e05e44e48710752cdb27ac"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_completion()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "07e3c89e9b76064e92c259c9aa06077f",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "07e3c89e9b76064e92c259c9aa06077f"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_dependency()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "dd347f4d6cb80814bb57d87e136f9c3e",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "dd347f4d6cb80814bb57d87e136f9c3e"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_outbox()": {
+      "latest": {
+        "file": "20261006_1500_lesson_author_v2_work_conserving_capacity_wake.sql",
+        "md5": "e4fde4589943cd935ba9099582311fc8",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "183be9ec3e0f3b848b82ec15a90aae0a"
+        },
+        {
+          "file": "20261006_1045_lesson_author_v2_outbox_recovery_hotfix.sql",
+          "md5": "5d6df34f7362db9b4bc40bdcce5d088c"
+        },
+        {
+          "file": "20261006_1105_lesson_author_v2_outbox_guard_schema_only.sql",
+          "md5": "5d6df34f7362db9b4bc40bdcce5d088c"
+        },
+        {
+          "file": "20261006_1330_lesson_author_v2_assessment_authority_backpressure_hotfix.sql",
+          "md5": "5d11bfd0893fba481e83c6d8b6c0d69b"
+        },
+        {
+          "file": "20261006_1500_lesson_author_v2_work_conserving_capacity_wake.sql",
+          "md5": "e4fde4589943cd935ba9099582311fc8"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_review_receipt()": {
+      "latest": {
+        "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
+        "md5": "203201138945fe9913fc82cf7bbd9aea",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
+          "md5": "203201138945fe9913fc82cf7bbd9aea"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_run()": {
+      "latest": {
+        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+        "md5": "5d4828cdad69bded21a4a55f4c2bb124",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "5d4828cdad69bded21a4a55f4c2bb124"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_task()": {
+      "latest": {
+        "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
+        "md5": "41929858fa2887bbe83d36d2555acf55",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261001_1100_lesson_author_orchestration_v2.sql",
+          "md5": "fcda3a219402c20c4ae1e2cd875ebd9a"
+        },
+        {
+          "file": "20261001_1445_lesson_author_orchestration_v2_running_task_guard.sql",
+          "md5": "fcda3a219402c20c4ae1e2cd875ebd9a"
+        },
+        {
+          "file": "20261001_1715_lesson_author_orchestration_v2_outcome_replay_guard.sql",
+          "md5": "22ed2b31cb88939fb9b5c55addfce85a"
+        },
+        {
+          "file": "20261002_2355_lesson_author_orchestration_v2_fallback_success_guard.sql",
+          "md5": "22b6946da0d57898ecc7a28915c7cc94"
+        },
+        {
+          "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
+          "md5": "41929858fa2887bbe83d36d2555acf55"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_work_item()": {
+      "latest": {
+        "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+        "md5": "353bb642e394cbcde94a743b80d6ca7f",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "353bb642e394cbcde94a743b80d6ca7f"
+        }
+      ]
+    },
+    "publish_lesson_author_workspace_created()": {
+      "latest": {
+        "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+        "md5": "a4c4f8ff24044b4ba84e2e5ed60bb863",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "a4c4f8ff24044b4ba84e2e5ed60bb863"
+        }
+      ]
+    },
+    "publish_lesson_author_workspace_revision()": {
+      "latest": {
+        "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+        "md5": "4089f0939f48230b55922b0bcd9a78e7",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1611_lesson_author_workspace_foundation.sql",
+          "md5": "4089f0939f48230b55922b0bcd9a78e7"
+        }
+      ]
+    },
+    "publish_lesson_author_workspace_unit(uuid,uuid,uuid,jsonb,text,text,boolean,jsonb)": {
+      "latest": {
+        "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+        "md5": "30e992300082162a74bce2aeb3042f77",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "30e992300082162a74bce2aeb3042f77"
+        }
+      ]
+    },
+    "workspace_course_block_hash(uuid,character varying,uuid)": {
+      "latest": {
+        "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+        "md5": "58831cfc046f9f2d76d081be873a36a6",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20260929_1833_lesson_author_workspace_execution_apply.sql",
+          "md5": "58831cfc046f9f2d76d081be873a36a6"
+        }
+      ]
+    }
+  }
+}

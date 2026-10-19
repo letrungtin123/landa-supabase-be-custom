@@ -21,10 +21,12 @@
 !/scripts/pm2-rolling-restart.test.mjs
 !/scripts/lesson-author-orchestration-v2-test-files.mjs
 !/scripts/test-lesson-author-orchestration-v2.mjs
+!/scripts/schema-manifest.mjs
 !/scripts/codemods/
 !/src/
 /src/*
 !/src/test-support/
+!/src/platform/
 !/src/config/
 /src/config/*
 !/src/config/pm2-ecosystem.test.ts
