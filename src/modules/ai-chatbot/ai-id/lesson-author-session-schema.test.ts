@@ -35,7 +35,9 @@ test('worker deletes only the owned conversation while preserving applied course
   assert.match(service, /lease_expires_at/);
   assert.match(service, /requeueLessonAuthorSessionDeletionJobs/);
   assert.match(service, /assertLessonAuthorSessionDeletionSchema/);
-  assert.ok(worker.indexOf('assertLessonAuthorSessionDeletionSchema()') < worker.indexOf('consume(QUEUES.LESSON_AUTHOR_SESSION_DELETE'));
+  // The schema gate runs before the { jobId } consumer starts (platform/job-runner consumeJobWakeUps).
+  const consumerAt = worker.search(/consumeJobWakeUps\(\{\s+queue: QUEUES\.LESSON_AUTHOR_SESSION_DELETE,/);
+  assert.ok(consumerAt > 0 && worker.indexOf('assertLessonAuthorSessionDeletionSchema()') < consumerAt);
   assert.match(service, /ORDER BY c\.updated_at DESC,c\.id DESC/);
   assert.match(service, /\(c\.updated_at,c\.id\)<\(\$4::timestamptz,\$5::uuid\)/);
   assert.match(service, /c\.updated_at::text AS updated_at/);
