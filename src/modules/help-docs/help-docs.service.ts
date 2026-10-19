@@ -5,6 +5,9 @@
 import { query } from '../../config/database.js';
 import { extractStoragePath } from '../../config/storage.js';
 import { AppError } from '../../utils/errors.js';
+import { createHelpDocsRepository, type HelpDocsDb } from './help-docs.repository.js';
+
+const helpDocsRepository = createHelpDocsRepository({ query } satisfies HelpDocsDb);
 
 interface HelpDocMutationResult {
   id: string;
@@ -71,16 +74,10 @@ function extractHelpDocImagePaths(html: string | null | undefined, tenantId: str
 }
 
 async function getReferencedHelpDocImagePaths(tenantId: string): Promise<Set<string>> {
-  const result = await query<{ content: string | null }>(
-    `SELECT hp.content
-     FROM help_pages hp
-     JOIN help_folders hf ON hf.id = hp.folder_id
-     WHERE hf.tenant_id = $1`,
-    [tenantId],
-  );
+  const rows = await helpDocsRepository.selectTenantPageContents(tenantId);
 
   const referenced = new Set<string>();
-  for (const row of result.rows) {
+  for (const row of rows) {
     for (const path of extractHelpDocImagePaths(row.content, tenantId)) {
       referenced.add(path);
     }
@@ -99,56 +96,35 @@ async function getUnreferencedHelpDocImagePaths(tenantId: string, candidatePaths
 // ═══ Folders ═══
 
 export async function listFolders(tenantId: string) {
-  const result = await query(
-    `SELECT hf.*, (SELECT COUNT(*) FROM help_pages hp WHERE hp.folder_id = hf.id) AS page_count
-     FROM help_folders hf
-     WHERE hf.tenant_id = $1
-     ORDER BY hf.sort_order, hf.title`,
-    [tenantId],
-  );
+  const result = await helpDocsRepository.selectFolders(tenantId);
   return { folders: result.rows, total: result.rowCount || 0 };
 }
 
 export async function createFolder(tenantId: string, input: { title: string; icon?: string }) {
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const result = await query(
-    'INSERT INTO help_folders (tenant_id, title, slug, icon) VALUES ($1, $2, $3, $4) RETURNING id, slug',
-    [tenantId, input.title, slug, input.icon || 'BookOpen'],
-  );
-  return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
+  const created = await helpDocsRepository.insertFolder(tenantId, input.title, slug, input.icon || 'BookOpen');
+  return { success: true, id: created.id, slug: created.slug, title: input.title };
 }
 
 export async function updateFolder(folderId: string, tenantId: string, input: { title?: string; icon?: string }) {
-  const current = await query<{ id: string; title: string }>(
-    `SELECT id, title FROM help_folders WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
-    [folderId, tenantId],
-  );
+  const current = await helpDocsRepository.lockFolder(folderId, tenantId);
   if (current.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
-  const sets: string[] = ['updated_at = NOW()'];
-  const params: unknown[] = [];
-  let idx = 1;
-  if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); sets.push(`slug = $${idx++}`); params.push(input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }
-  if (input.icon !== undefined) { sets.push(`icon = $${idx++}`); params.push(input.icon); }
-  params.push(folderId, tenantId);
-  const result = await query(`UPDATE help_folders SET ${sets.join(', ')} WHERE id = $${idx++} AND tenant_id = $${idx} RETURNING id, title`, params);
+  const columns: Array<[string, unknown]> = [];
+  if (input.title !== undefined) { columns.push(['title', input.title], ['slug', input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')]); }
+  if (input.icon !== undefined) { columns.push(['icon', input.icon]); }
+  const result = await helpDocsRepository.updateFolder(folderId, tenantId, columns);
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
   return { ...result.rows[0], previousTitle: current.rows[0].title };
 }
 
 export async function deleteFolder(folderId: string, tenantId: string): Promise<HelpDocMutationResult> {
-  const folder = await query<{ id: string; title: string }>(
-    'SELECT id, title FROM help_folders WHERE id = $1 AND tenant_id = $2',
-    [folderId, tenantId],
-  );
+  const folder = await helpDocsRepository.selectFolder(folderId, tenantId);
   if (folder.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
 
-  const pages = await query<{ content: string | null }>(
-    'SELECT content FROM help_pages WHERE folder_id = $1',
-    [folderId],
-  );
-  const candidatePaths = pages.rows.flatMap((row) => extractHelpDocImagePaths(row.content, tenantId));
+  const pages = await helpDocsRepository.selectFolderPageContents(folderId);
+  const candidatePaths = pages.flatMap((row) => extractHelpDocImagePaths(row.content, tenantId));
 
-  await query('DELETE FROM help_folders WHERE id = $1 AND tenant_id = $2', [folderId, tenantId]);
+  await helpDocsRepository.deleteFolder(folderId, tenantId);
 
   return {
     ...folder.rows[0],
@@ -159,71 +135,38 @@ export async function deleteFolder(folderId: string, tenantId: string): Promise<
 export async function reorderFolders(tenantId: string, orderedIds: string[]) {
   if (orderedIds.length === 0) return { success: true };
 
-  const eligible = await query<{ count: string }>(
-    'SELECT COUNT(*)::int AS count FROM help_folders WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
-    [tenantId, orderedIds],
-  );
-  if (Number(eligible.rows[0]?.count || 0) !== orderedIds.length) {
+  const eligible = await helpDocsRepository.countTenantFolders(tenantId, orderedIds);
+  if (Number(eligible || 0) !== orderedIds.length) {
     throw new AppError('Một hoặc nhiều folder không thuộc tenant hiện tại', 404);
   }
 
-  await query(
-    `UPDATE help_folders hf
-     SET sort_order = (ordered.sort_order - 1)::int, updated_at = NOW()
-     FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id, sort_order)
-     WHERE hf.id = ordered.id
-       AND hf.tenant_id = $1`,
-    [tenantId, orderedIds],
-  );
+  await helpDocsRepository.reorderFolders(tenantId, orderedIds);
   return { success: true };
 }
 
 // ═══ Pages ═══
 
 export async function listPages(tenantId: string, folderId?: string) {
-  const params: unknown[] = [tenantId];
-  const conditions = ['hf.tenant_id = $1'];
-  if (folderId) { params.push(folderId); conditions.push(`hp.folder_id = $${params.length}`); }
-
-  const result = await query(
-    `SELECT hp.id, hp.folder_id, hf.title AS folder_title, hp.title, hp.slug,
-            hp.sort_order, hp.is_published, hp.created_at, hp.updated_at
-     FROM help_pages hp
-     JOIN help_folders hf ON hf.id = hp.folder_id
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY hp.sort_order, hp.title`,
-    params,
-  );
+  const result = await helpDocsRepository.selectPages(tenantId, folderId);
   return { pages: result.rows, total: result.rowCount || 0 };
 }
 
 export async function getPage(pageId: string, tenantId: string) {
-  const result = await query(
-    `SELECT hp.*, hf.title AS folder_title,
-            cu.username AS created_by, uu.username AS updated_by
-     FROM help_pages hp
-     JOIN help_folders hf ON hf.id = hp.folder_id
-     LEFT JOIN users cu ON cu.id = hp.created_by
-     LEFT JOIN users uu ON uu.id = hp.updated_by
-     WHERE hp.id = $1
-       AND hf.tenant_id = $2`,
-    [pageId, tenantId],
-  );
+  const result = await helpDocsRepository.selectPage(pageId, tenantId);
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
   return result.rows[0];
 }
 
 export async function createPage(tenantId: string, input: { folder_id: string; title: string; content?: string }, userId: string) {
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  const result = await query<{ id: string; slug: string }>(
-    `INSERT INTO help_pages (folder_id, title, slug, content, created_by, updated_by)
-     SELECT hf.id, $3, $4, $5, $6, $6
-     FROM help_folders hf
-     WHERE hf.id = $2
-       AND hf.tenant_id = $1
-     RETURNING id, slug`,
-    [tenantId, input.folder_id, input.title, slug, input.content ?? '', userId],
-  );
+  const result = await helpDocsRepository.insertPage({
+    tenantId,
+    folderId: input.folder_id,
+    title: input.title,
+    slug,
+    content: input.content ?? '',
+    userId,
+  });
   if (result.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
   return { success: true, id: result.rows[0].id, slug: result.rows[0].slug, title: input.title };
 }
@@ -234,34 +177,15 @@ export async function updatePage(
   input: { title?: string; content?: string; is_published?: boolean },
   userId: string,
 ): Promise<HelpDocMutationResult> {
-  const current = await query<{ id: string; title: string; content: string | null; is_published: boolean }>(
-    `SELECT hp.id, hp.title, hp.content, hp.is_published
-     FROM help_pages hp
-     JOIN help_folders hf ON hf.id = hp.folder_id
-     WHERE hp.id = $1 AND hf.tenant_id = $2
-     FOR UPDATE OF hp`,
-    [pageId, tenantId],
-  );
+  const current = await helpDocsRepository.lockPage(pageId, tenantId);
   if (current.rowCount === 0) throw new AppError('Page không tồn tại', 404);
 
-  const sets: string[] = ['updated_at = NOW()', 'updated_by = $1'];
-  const params: unknown[] = [userId];
-  let idx = 2;
-  if (input.title !== undefined) { sets.push(`title = $${idx++}`); params.push(input.title); sets.push(`slug = $${idx++}`); params.push(input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')); }
-  if (input.content !== undefined) { sets.push(`content = $${idx++}`); params.push(input.content); }
-  if (input.is_published !== undefined) { sets.push(`is_published = $${idx++}`); params.push(input.is_published); }
-  params.push(pageId, tenantId);
+  const columns: Array<[string, unknown]> = [];
+  if (input.title !== undefined) { columns.push(['title', input.title], ['slug', input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')]); }
+  if (input.content !== undefined) { columns.push(['content', input.content]); }
+  if (input.is_published !== undefined) { columns.push(['is_published', input.is_published]); }
 
-  const result = await query<{ id: string; title: string }>(
-    `UPDATE help_pages hp
-     SET ${sets.join(', ')}
-     FROM help_folders hf
-     WHERE hp.folder_id = hf.id
-       AND hp.id = $${idx++}
-       AND hf.tenant_id = $${idx}
-     RETURNING hp.id, hp.title`,
-    params,
-  );
+  const result = await helpDocsRepository.updatePage(pageId, tenantId, userId, columns);
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
 
   const removedPaths = input.content === undefined
@@ -278,15 +202,7 @@ export async function updatePage(
 }
 
 export async function deletePage(pageId: string, tenantId: string): Promise<HelpDocMutationResult> {
-  const result = await query<{ id: string; title: string; content: string | null }>(
-    `DELETE FROM help_pages hp
-     USING help_folders hf
-     WHERE hp.folder_id = hf.id
-       AND hp.id = $1
-       AND hf.tenant_id = $2
-     RETURNING hp.id, hp.title, hp.content`,
-    [pageId, tenantId],
-  );
+  const result = await helpDocsRepository.deletePage(pageId, tenantId);
   if (result.rowCount === 0) throw new AppError('Page không tồn tại', 404);
 
   const candidatePaths = extractHelpDocImagePaths(result.rows[0].content, tenantId);
@@ -309,28 +225,14 @@ export async function deleteImage(tenantId: string, rawPath: string): Promise<He
 }
 
 export async function reorderPages(tenantId: string, folderId: string, orderedIds: string[]) {
-  const folder = await query<{ id: string }>(
-    'SELECT id FROM help_folders WHERE id = $1 AND tenant_id = $2',
-    [folderId, tenantId],
-  );
-  if (folder.rowCount === 0) throw new AppError('Folder không tồn tại', 404);
+  if (!await helpDocsRepository.folderExists(folderId, tenantId)) throw new AppError('Folder không tồn tại', 404);
   if (orderedIds.length === 0) return { success: true };
 
-  const eligible = await query<{ count: string }>(
-    'SELECT COUNT(*)::int AS count FROM help_pages WHERE folder_id = $1 AND id = ANY($2::uuid[])',
-    [folderId, orderedIds],
-  );
-  if (Number(eligible.rows[0]?.count || 0) !== orderedIds.length) {
+  const eligible = await helpDocsRepository.countFolderPages(folderId, orderedIds);
+  if (Number(eligible || 0) !== orderedIds.length) {
     throw new AppError('Một hoặc nhiều trang không thuộc folder hiện tại', 404);
   }
 
-  await query(
-    `UPDATE help_pages hp
-     SET sort_order = (ordered.sort_order - 1)::int, updated_at = NOW()
-     FROM unnest($2::uuid[]) WITH ORDINALITY AS ordered(id, sort_order)
-     WHERE hp.id = ordered.id
-       AND hp.folder_id = $1`,
-    [folderId, orderedIds],
-  );
+  await helpDocsRepository.reorderPages(folderId, orderedIds);
   return { success: true };
 }
