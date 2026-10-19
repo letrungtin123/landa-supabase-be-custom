@@ -7,6 +7,15 @@ import { AppError } from '../../utils/errors.js';
 import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import { RFC_UUID_PATTERN, isRfcUuid } from '../../utils/uuid.js';
+import {
+  AUDIT_LOG_PUBLIC_SELECT_COLUMNS,
+  createAuditLogsRepository,
+  type AuditLogsDb,
+} from './audit-logs.repository.js';
+
+export { AUDIT_LOG_PUBLIC_SELECT_COLUMNS };
+
+const auditLogsRepository = createAuditLogsRepository({ query } satisfies AuditLogsDb);
 
 export const AUDIT_LOG_RETENTION_DAYS = 30;
 /**
@@ -37,12 +46,6 @@ export function parseAuditLogPageSize(rawPageSize: unknown): AuditLogPageSize {
 
   return Number(rawPageSize) as AuditLogPageSize;
 }
-
-// Keep the persisted response-audience marker server-internal. API consumers
-// receive only the established audit DTO fields.
-export const AUDIT_LOG_PUBLIC_SELECT_COLUMNS = `a.id, a.actor_username, a.action, a.entity_type,
-  a.entity_id, a.entity_name, a.details, a.ip_address, a.created_at,
-  a.event_code, a.event_metadata, a.changes`;
 
 interface CursorPayload {
   v: number;
@@ -245,21 +248,15 @@ async function listLegacyAuditLogs(
   const offset = calcOffset(page, pageSize);
   assertLegacyAuditOffset(offset);
   const { params, conditions } = addBaseFilters(tenantId, viewerRole, queryParams);
-  const where = `WHERE ${conditions.join(' AND ')}`;
+  const filter = { conditions, params };
 
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM audit_logs a ${where}`, params),
-    query(
-      `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS}
-       FROM audit_logs a ${where}
-       ORDER BY a.created_at DESC, a.id DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const [count, rows] = await Promise.all([
+    auditLogsRepository.countAuditLogs(filter),
+    auditLogsRepository.selectAuditLogPage(filter, pageSize, offset),
   ]);
-  const total = parseInt(countR.rows[0].count, 10);
+  const total = parseInt(count, 10);
   return {
-    results: dataR.rows,
+    results: rows,
     total,
     page,
     page_size: pageSize,
@@ -282,30 +279,10 @@ async function listCursorAuditLogs(
     conditions.push(`(a.created_at, a.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`);
   }
 
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const data = await query<{
-    id: string;
-    actor_username: string | null;
-    action: string;
-    entity_type: string;
-    entity_id: string | null;
-    entity_name: string | null;
-    details: string | null;
-    ip_address: string | null;
-    created_at: string;
-    event_code: string | null;
-    event_metadata: Record<string, unknown> | null;
-    changes: unknown[] | null;
-  }>(
-    `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS}
-     FROM audit_logs a ${where}
-     ORDER BY a.created_at DESC, a.id DESC
-     LIMIT $${params.length + 1}`,
-    [...params, pageSize + 1],
-  );
+  const rows = await auditLogsRepository.selectAuditLogCursorPage({ conditions, params }, pageSize + 1);
 
-  const hasMore = data.rows.length > pageSize;
-  const results = hasMore ? data.rows.slice(0, pageSize) : data.rows;
+  const hasMore = rows.length > pageSize;
+  const results = hasMore ? rows.slice(0, pageSize) : rows;
   const finalRow = results.at(-1);
   return {
     results,
@@ -344,39 +321,7 @@ export async function getAuditLogDetail(
   params.push(auditLogId);
   conditions.push(`a.id = $${params.length}::uuid`);
 
-  const result = await query<{
-    id: string;
-    actor_username: string | null;
-    actor_display_name: string | null;
-    actor_email: string | null;
-    subject_display_name: string | null;
-    subject_username: string | null;
-    subject_email: string | null;
-    subject_role: string | null;
-    action: string;
-    entity_type: string;
-    entity_id: string | null;
-    entity_name: string | null;
-    details: string | null;
-    ip_address: string | null;
-    created_at: string;
-    event_code: string | null;
-    event_metadata: Record<string, unknown> | null;
-    changes: unknown[] | null;
-  }>(
-    `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS},
-            COALESCE(NULLIF(a.actor_display_name, ''), NULLIF(actor.full_name, ''), a.actor_username) AS actor_display_name,
-            ${piiProjection.columns},
-            a.subject_display_name,
-            a.subject_username,
-            a.subject_role
-     FROM audit_logs a
-     LEFT JOIN users actor ON actor.id = a.actor_id
-     ${piiProjection.viewerJoin}
-     WHERE ${conditions.join(' AND ')}
-     LIMIT 1`,
-    params,
-  );
+  const result = await auditLogsRepository.selectAuditLogDetail({ conditions, params }, piiProjection);
   if (result.rowCount === 0) throw new AppError('Không tìm thấy nhật ký hoạt động', 404);
   return result.rows[0];
 }
