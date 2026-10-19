@@ -953,11 +953,6 @@
       "count": 8
     }
   },
-  "src/modules/tenant-badges/tenant-badges.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/tenants/tenant-course-components.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
