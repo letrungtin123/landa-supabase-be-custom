@@ -2078,7 +2078,7 @@
     "params": [
      "a1000004-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003052,
+     0.007532,
      false
     ]
    },
@@ -2094,14 +2094,14 @@
      "gemini-chat-golden",
      "chat",
      "2026-10-01",
-     8299,
+     10091,
      8034,
-     256,
+     2048,
      9,
-     256,
+     2048,
      "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
      600,
-     0.003052,
+     0.007532,
      false
     ]
    },
@@ -2110,7 +2110,7 @@
     "params": [
      "a1000004-0000-4000-8000-000000000001",
      "2026-10-01",
-     8299
+     10091
     ]
    },
    {
@@ -2226,7 +2226,7 @@
      40,
      8,
      248,
-     "8299",
+     "10091",
      0,
      0.000161,
      0
@@ -2237,7 +2237,7 @@
     "params": [
      "a1000004-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003052,
+     0.007532,
      0.000161
     ]
    },
@@ -2260,7 +2260,7 @@
      248,
      0,
      "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-     "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":8299}}",
+     "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":10091}}",
      "{\"version\":2,\"currency\":\"USD\",\"calculated_at\":\"2026-10-15T03:00:00.000Z\",\"priced_at\":\"2026-10-15T03:…<921 chars #a53c87ff5ce5>",
      "estimated",
      0.000161,
@@ -2276,7 +2276,7 @@
   "quota": [
    {
     "op": "hold",
-    "usd": 0.003052,
+    "usd": 0.007532,
     "held": true
    },
    {
@@ -2286,13 +2286,13 @@
     "engine": "self_built_rag",
     "model": "gemini-chat-golden",
     "operation": "chat",
-    "tokens": 8299,
+    "tokens": 10091,
     "input": 8034,
-    "output": 256,
+    "output": 2048,
     "embedding": 9,
-    "max_output_tokens": 256,
+    "max_output_tokens": 2048,
     "metadata": "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
-    "usd": 0.003052
+    "usd": 0.007532
    },
    {
     "op": "finalize",
@@ -2307,7 +2307,7 @@
     "id": "f0000000-0000-4000-8000-000000000001",
     "cost_usd": 0.000161,
     "source": "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-    "metadata": "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":8299}}",
+    "metadata": "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":10091}}",
     "feature": "chat"
    }
   ],
@@ -2352,7 +2352,7 @@
      "conversation_id": "a3000004-0000-4000-8000-000000000001",
      "target": "learner",
      "model": "gemini-chat-golden",
-     "max_output_tokens": 256,
+     "max_output_tokens": 2048,
      "embedding_model": "gemini-embedding-001",
      "embedding_dimensions": 768,
      "system_prompt": "Bạn là trợ lý học tập của doanh nghiệp.\n\nFINAL RESPONSE VISIBILITY RULES:\n- Perform routing, source …<416 chars #ff0ae61b258c>",
@@ -2450,9 +2450,9 @@
      "operation": "chat",
      "model": "gemini-chat-golden",
      "minimum_tokens": 8299,
-     "reserved_tokens": 8299,
-     "maximum_tokens": 8299,
-     "max_output_tokens": 256,
+     "reserved_tokens": 10091,
+     "maximum_tokens": 10091,
+     "max_output_tokens": 2048,
      "max_generation_attempts": 1,
      "partial_grant": false
     }
@@ -3309,7 +3309,7 @@
     "params": [
      "a1000007-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003049,
+     0.007529,
      false
     ]
    },
@@ -3325,14 +3325,14 @@
      "gemini-chat-golden",
      "chat",
      "2026-10-01",
-     8291,
+     10083,
      8024,
-     256,
+     2048,
      11,
-     256,
+     2048,
      "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
      600,
-     0.003049,
+     0.007529,
      false
     ]
    },
@@ -3341,7 +3341,7 @@
     "params": [
      "a1000007-0000-4000-8000-000000000001",
      "2026-10-01",
-     8291
+     10083
     ]
    },
    {
@@ -3587,7 +3587,7 @@
      33,
      0,
      57,
-     "8291",
+     "10083",
      0,
      0.00009,
      0
@@ -3598,7 +3598,7 @@
     "params": [
      "a1000007-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003049,
+     0.007529,
      0.00009
     ]
    },
@@ -3621,7 +3621,7 @@
      57,
      0,
      "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-     "{\"report_chat\":true,\"report_stage\":\"filter_request\",\"quota\":{\"reserved_tokens\":8291}}",
+     "{\"report_chat\":true,\"report_stage\":\"filter_request\",\"quota\":{\"reserved_tokens\":10083}}",
      "{\"version\":2,\"currency\":\"USD\",\"calculated_at\":\"2026-10-15T03:00:00.000Z\",\"priced_at\":\"2026-10-15T03:…<586 chars #14b1b88e0b59>",
      "estimated",
      0.00009,
@@ -3637,7 +3637,7 @@
   "quota": [
    {
     "op": "hold",
-    "usd": 0.003049,
+    "usd": 0.007529,
     "held": true
    },
    {
@@ -3647,13 +3647,13 @@
     "engine": "self_built_rag",
     "model": "gemini-chat-golden",
     "operation": "chat",
-    "tokens": 8291,
+    "tokens": 10083,
     "input": 8024,
-    "output": 256,
+    "output": 2048,
     "embedding": 11,
-    "max_output_tokens": 256,
+    "max_output_tokens": 2048,
     "metadata": "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
-    "usd": 0.003049
+    "usd": 0.007529
    },
    {
     "op": "hold",
@@ -3692,7 +3692,7 @@
     "id": "f0000000-0000-4000-8000-000000000001",
     "cost_usd": 0.00009,
     "source": "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-    "metadata": "{\"report_chat\":true,\"report_stage\":\"filter_request\",\"quota\":{\"reserved_tokens\":8291}}",
+    "metadata": "{\"report_chat\":true,\"report_stage\":\"filter_request\",\"quota\":{\"reserved_tokens\":10083}}",
     "feature": "chat"
    }
   ],
@@ -3908,9 +3908,9 @@
      "operation": "chat",
      "model": "gemini-chat-golden",
      "minimum_tokens": 8291,
-     "reserved_tokens": 8291,
-     "maximum_tokens": 8291,
-     "max_output_tokens": 256,
+     "reserved_tokens": 10083,
+     "maximum_tokens": 10083,
+     "max_output_tokens": 2048,
      "max_generation_attempts": 1,
      "partial_grant": false
     }
@@ -5632,7 +5632,7 @@
     "params": [
      "a100000a-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003053,
+     0.007533,
      false
     ]
    },
@@ -5648,14 +5648,14 @@
      "gemini-chat-golden",
      "chat",
      "2026-10-01",
-     8306,
+     10098,
      8038,
-     256,
+     2048,
      12,
-     256,
+     2048,
      "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
      600,
-     0.003053,
+     0.007533,
      false
     ]
    },
@@ -5664,7 +5664,7 @@
     "params": [
      "a100000a-0000-4000-8000-000000000001",
      "2026-10-01",
-     8306
+     10098
     ]
    },
    {
@@ -5780,7 +5780,7 @@
      40,
      8,
      248,
-     "8306",
+     "10098",
      0,
      0.000161,
      0
@@ -5791,7 +5791,7 @@
     "params": [
      "a100000a-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003053,
+     0.007533,
      0.000161
     ]
    },
@@ -5814,7 +5814,7 @@
      248,
      0,
      "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-     "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":8306}}",
+     "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":10098}}",
      "{\"version\":2,\"currency\":\"USD\",\"calculated_at\":\"2026-10-15T03:00:00.000Z\",\"priced_at\":\"2026-10-15T03:…<921 chars #a53c87ff5ce5>",
      "estimated",
      0.000161,
@@ -5830,7 +5830,7 @@
   "quota": [
    {
     "op": "hold",
-    "usd": 0.003053,
+    "usd": 0.007533,
     "held": true
    },
    {
@@ -5840,13 +5840,13 @@
     "engine": "self_built_rag",
     "model": "gemini-chat-golden",
     "operation": "chat",
-    "tokens": 8306,
+    "tokens": 10098,
     "input": 8038,
-    "output": 256,
+    "output": 2048,
     "embedding": 12,
-    "max_output_tokens": 256,
+    "max_output_tokens": 2048,
     "metadata": "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
-    "usd": 0.003053
+    "usd": 0.007533
    },
    {
     "op": "finalize",
@@ -5861,7 +5861,7 @@
     "id": "f0000000-0000-4000-8000-000000000001",
     "cost_usd": 0.000161,
     "source": "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-    "metadata": "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":8306}}",
+    "metadata": "{\"source_document_count\":0,\"has_course_context\":true,\"rag_source_count\":1,\"rag_retrieval\":{\"retrieved_count\":3,\"returned_source_count\":1,\"top_score\":0.82,\"methods\":[\"dense\"],\"reason\":null},\"quota\":{\"reserved_tokens\":10098}}",
     "feature": "chat"
    }
   ],
@@ -5906,7 +5906,7 @@
      "conversation_id": "a300000a-0000-4000-8000-000000000001",
      "target": "lesson_author",
      "model": "gemini-chat-golden",
-     "max_output_tokens": 256,
+     "max_output_tokens": 2048,
      "embedding_model": "gemini-embedding-001",
      "embedding_dimensions": 768,
      "system_prompt": "Bạn là trợ lý học tập của doanh nghiệp.\n\nFINAL RESPONSE VISIBILITY RULES:\n- Perform routing, source …<1131 chars #11082303e013>",
@@ -6004,9 +6004,9 @@
      "operation": "chat",
      "model": "gemini-chat-golden",
      "minimum_tokens": 8306,
-     "reserved_tokens": 8306,
-     "maximum_tokens": 8306,
-     "max_output_tokens": 256,
+     "reserved_tokens": 10098,
+     "maximum_tokens": 10098,
+     "max_output_tokens": 2048,
      "max_generation_attempts": 1,
      "partial_grant": false
     }
@@ -7488,7 +7488,7 @@
     "params": [
      "a100001c-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003053,
+     0.007533,
      false
     ]
    },
@@ -7504,14 +7504,14 @@
      "gemini-chat-golden",
      "chat",
      "2026-10-01",
-     8304,
+     10096,
      8037,
-     256,
+     2048,
      11,
-     256,
+     2048,
      "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
      600,
-     0.003053,
+     0.007533,
      false
     ]
    },
@@ -7520,7 +7520,7 @@
     "params": [
      "a100001c-0000-4000-8000-000000000001",
      "2026-10-01",
-     8304
+     10096
     ]
    },
    {
@@ -7625,7 +7625,7 @@
      46,
      0,
      70,
-     "8304",
+     "10096",
      0,
      0.000122,
      0
@@ -7636,7 +7636,7 @@
     "params": [
      "a100001c-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003053,
+     0.007533,
      0.000122
     ]
    },
@@ -7659,7 +7659,7 @@
      70,
      0,
      "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-     "{\"lesson_author_intent\":\"clarify\",\"quota\":{\"reserved_tokens\":8304}}",
+     "{\"lesson_author_intent\":\"clarify\",\"quota\":{\"reserved_tokens\":10096}}",
      "{\"version\":2,\"currency\":\"USD\",\"calculated_at\":\"2026-10-15T03:00:00.000Z\",\"priced_at\":\"2026-10-15T03:…<586 chars #14b1b88e0b59>",
      "estimated",
      0.000122,
@@ -7675,7 +7675,7 @@
   "quota": [
    {
     "op": "hold",
-    "usd": 0.003053,
+    "usd": 0.007533,
     "held": true
    },
    {
@@ -7685,13 +7685,13 @@
     "engine": "self_built_rag",
     "model": "gemini-chat-golden",
     "operation": "chat",
-    "tokens": 8304,
+    "tokens": 10096,
     "input": 8037,
-    "output": 256,
+    "output": 2048,
     "embedding": 11,
-    "max_output_tokens": 256,
+    "max_output_tokens": 2048,
     "metadata": "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
-    "usd": 0.003053
+    "usd": 0.007533
    },
    {
     "op": "finalize",
@@ -7706,7 +7706,7 @@
     "id": "f0000000-0000-4000-8000-000000000001",
     "cost_usd": 0.000122,
     "source": "{\"service\":\"self_built_rag\",\"operation\":\"chat\"}",
-    "metadata": "{\"lesson_author_intent\":\"clarify\",\"quota\":{\"reserved_tokens\":8304}}",
+    "metadata": "{\"lesson_author_intent\":\"clarify\",\"quota\":{\"reserved_tokens\":10096}}",
     "feature": "chat"
    }
   ],
@@ -7846,9 +7846,9 @@
      "operation": "chat",
      "model": "gemini-chat-golden",
      "minimum_tokens": 8304,
-     "reserved_tokens": 8304,
-     "maximum_tokens": 8304,
-     "max_output_tokens": 256,
+     "reserved_tokens": 10096,
+     "maximum_tokens": 10096,
+     "max_output_tokens": 2048,
      "max_generation_attempts": 1,
      "partial_grant": false
     }
@@ -11928,7 +11928,7 @@
     "params": [
      "a1000014-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003052,
+     0.007532,
      false
     ]
    },
@@ -11944,14 +11944,14 @@
      "gemini-chat-golden",
      "chat",
      "2026-10-01",
-     8299,
+     10091,
      8034,
-     256,
+     2048,
      9,
-     256,
+     2048,
      "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
      600,
-     0.003052,
+     0.007532,
      false
     ]
    },
@@ -11960,7 +11960,7 @@
     "params": [
      "a1000014-0000-4000-8000-000000000001",
      "2026-10-01",
-     8299
+     10091
     ]
    },
    {
@@ -12034,7 +12034,7 @@
     "params": [
      "a1000014-0000-4000-8000-000000000001",
      "2026-10-01",
-     "8299"
+     "10091"
     ]
    },
    {
@@ -12042,7 +12042,7 @@
     "params": [
      "a1000014-0000-4000-8000-000000000001",
      "2026-10-01",
-     0.003052
+     0.007532
     ]
    },
    {
@@ -12053,7 +12053,7 @@
   "quota": [
    {
     "op": "hold",
-    "usd": 0.003052,
+    "usd": 0.007532,
     "held": true
    },
    {
@@ -12063,13 +12063,13 @@
     "engine": "self_built_rag",
     "model": "gemini-chat-golden",
     "operation": "chat",
-    "tokens": 8299,
+    "tokens": 10091,
     "input": 8034,
-    "output": 256,
+    "output": 2048,
     "embedding": 9,
-    "max_output_tokens": 256,
+    "max_output_tokens": 2048,
     "metadata": "{\"budget_version\":2,\"operation\":\"chat\",\"engine\":\"self_built_rag\"}",
-    "usd": 0.003052
+    "usd": 0.007532
    },
    {
     "op": "release",
@@ -12094,7 +12094,7 @@
      "conversation_id": "a3000014-0000-4000-8000-000000000001",
      "target": "learner",
      "model": "gemini-chat-golden",
-     "max_output_tokens": 256,
+     "max_output_tokens": 2048,
      "embedding_model": "gemini-embedding-001",
      "embedding_dimensions": 768,
      "system_prompt": "Bạn là trợ lý học tập của doanh nghiệp.\n\nFINAL RESPONSE VISIBILITY RULES:\n- Perform routing, source …<416 chars #ff0ae61b258c>",
@@ -12192,9 +12192,9 @@
      "operation": "chat",
      "model": "gemini-chat-golden",
      "minimum_tokens": 8299,
-     "reserved_tokens": 8299,
-     "maximum_tokens": 8299,
-     "max_output_tokens": 256,
+     "reserved_tokens": 10091,
+     "maximum_tokens": 10091,
+     "max_output_tokens": 2048,
      "max_generation_attempts": 1,
      "partial_grant": false
     }

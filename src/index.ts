@@ -6,6 +6,7 @@ import { processLifecycle, stopOnShutdown } from './config/process-lifecycle.js'
 import { cleanupExpiredTokens, startOneTimeTokenSweeper } from './modules/auth/auth.service.js';
 import { startBlacklistSweeper } from './middleware/authenticate.js';
 import { startChatCacheSweepers } from './modules/ai-chatbot/chat/chat.service.js';
+import { chatReserveEstimateWarning } from './modules/ai-chatbot/chat/chat-turn.logic.js';
 import { ensureBucket } from './config/storage.js';
 import { endSessionPool, getSessionClient, pool, query } from './config/database.js';
 import { endReportsPool } from './config/reports-database.js';
@@ -344,6 +345,9 @@ function listen(): Promise<void> {
 async function bootstrap() {
   console.log('[RuntimeTenantFence]', JSON.stringify(runtimeTenantDiagnostics()));
   console.log(`[Process] role=${processRolePlan.role} api_instances=${processRolePlan.apiInstances}`);
+  // Once per process: a chat estimate too low for a RAG chat answer (it still bounds Gemini chat answers).
+  const chatReserveWarning = chatReserveEstimateWarning(env.AI_CHAT_TOKEN_RESERVE_ESTIMATE);
+  if (chatReserveWarning) console.warn('[AiChatBudget]', chatReserveWarning);
   // Once per process, in the background: a warning when its pools may not fit under max_connections.
   void logDatabaseConnectionHeadroom(`${processRolePlan.role}:${process.pid}`, ownDirectConnectionMax({ readsReports: processRolePlan.servesHttp }));
   await startProcess(processRolePlan, {

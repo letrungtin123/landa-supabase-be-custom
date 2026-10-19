@@ -361,8 +361,9 @@ Object.assign(env as unknown as Record<string, unknown>, {
   LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED: false,
   AI_CHAT_ANSWER_DEADLINE_MS: 180_000,
   AI_TOKEN_RESERVATION_SECONDS: 600,
-  // The values of .env.example: they bound the reservation of a turn (and so
-  // the output tokens of a self-built RAG chat answer).
+  // They bound the reservation of a turn. 8 000 (the old .env.example value)
+  // is below the retrieval context plus a full RAG chat answer: RAG chat
+  // answers still get their full answer, Gemini chat answers stay bounded.
   AI_CHAT_TOKEN_RESERVE_ESTIMATE: 8_000,
   AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE: 250_000,
 });

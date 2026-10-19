@@ -100,12 +100,19 @@ export function buildAiTurnTokenBudget(input: {
   const configuredMaximum = isLessonAuthor
     ? env.AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE
     : env.AI_CHAT_TOKEN_RESERVE_ESTIMATE;
+  // A self-built RAG chat answer always reserves its retrieval context plus a
+  // full answer (the output a Gemini chat answer gets): an estimate below that
+  // would leave only the minimum answer. Nearly spent AI points still shorten
+  // it (reserveTenantAiTokens falls back to the minimum hold).
+  const chatMaximum = input.engine === 'self_built_rag' && !isLessonAuthor
+    ? Math.max(configuredMaximum, fixedInputTokens + embeddingTokens + targetOutputTokens)
+    : configuredMaximum;
   // A Blueprint is the whole-course design contract. Do not split the
   // provider's supported output window because of a server-side estimate;
   // tenant quota remains the authoritative capacity control.
   const maximumTokens = isCourseBlueprint
     ? modelBudget
-    : Math.max(minimumTokens, Math.min(configuredMaximum, modelBudget));
+    : Math.max(minimumTokens, Math.min(chatMaximum, modelBudget));
   return {
     fixedInputTokens,
     embeddingTokens,
@@ -134,4 +141,20 @@ export function grantedOutputTokenLimit(
     budget.minimumOutputTokens,
     Math.min(budget.targetOutputTokens, availableForOutput),
   );
+}
+
+/**
+ * The startup warning (one JSON line) when AI_CHAT_TOKEN_RESERVE_ESTIMATE is
+ * below the RAG retrieval context plus a full chat answer, else null. Such an
+ * estimate no longer shortens a self-built RAG chat answer (see
+ * buildAiTurnTokenBudget), but it still bounds Gemini chat answers.
+ */
+export function chatReserveEstimateWarning(configuredTokens: number): string | null {
+  const ragFloorTokens = RAG_RETRIEVAL_CONTEXT_TOKEN_BUDGET + RAG_CHAT_MAX_OUTPUT_TOKENS;
+  if (configuredTokens >= ragFloorTokens) return null;
+  return JSON.stringify({
+    event: 'ai_chat_reserve_estimate_below_rag_floor',
+    configured_tokens: configuredTokens,
+    rag_floor_tokens: ragFloorTokens,
+  });
 }
