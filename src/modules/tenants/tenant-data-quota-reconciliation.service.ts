@@ -7,7 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { randomUUID } from 'crypto';
-import { getClient, query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { TENANT_STORAGE_BUCKETS } from '../../config/storage.js';
 import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
@@ -225,9 +225,7 @@ async function writeStoragePage(
   const sizes = objects.map((object) => parseStorageSize(object.size_bytes, object.name));
   const lastObject = objects[objects.length - 1];
   const cursor = encodeStorageCursor(lastObject.bucket_id, lastObject.name);
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  await withDatabaseTransaction(async (client) => {
     const transaction = createTenantDataQuotaReconciliationRepository(client);
     await transaction.upsertObjectSizes(tenantId, storagePaths, sizes);
     const renewed = await transaction.renewLease({
@@ -238,13 +236,7 @@ async function writeStoragePage(
       leaseSeconds,
     });
     if (renewed !== 1) throw new ReconciliationClaimLostError(tenantId);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 async function releaseClaim(tenantId: string, claimToken: string): Promise<void> {
@@ -279,9 +271,7 @@ async function finishReconciliation(
   // attempted and the tenant remains safely reconciling.
   await repository.prepareFinalization(tenantId, claimToken, finalizationLeaseSeconds);
 
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  await withDatabaseTransaction(async (client) => {
     const transaction = createTenantDataQuotaReconciliationRepository(client);
     // The application pool stays at a short timeout for HTTP traffic. Only the
     // exact, fenced database baseline gets this longer transaction-local budget.
@@ -289,13 +279,7 @@ async function finishReconciliation(
     // exactly the unfolded deltas its per-relation snapshots already contain.
     await transaction.setLocalStatementTimeout(databaseSnapshotTimeoutMs);
     await transaction.finish(tenantId, claimToken, minimumFinalizationWindowSeconds);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 /**

@@ -2,7 +2,7 @@
 // Course Categories Service — CRUD + assign courses to categories
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { query, withDatabaseTransaction } from '../../config/database.js';
 import { invalidateCourseReadCaches, invalidateTenantCourseCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
@@ -101,9 +101,7 @@ export async function updateCourseCategory(
     removedAssignments: number,
   ) => TransactionalAuditEntry,
 ) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const result = await withDatabaseTransaction(async (client) => {
     const tx = createCourseCategoriesRepository(client);
 
     const current = await tx.lockCategory(catId, tenantId);
@@ -129,15 +127,10 @@ export async function updateCourseCategory(
     if (!updated) throw new AppError('Danh mục khóa học không tồn tại', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(current, updated, removedAssignments));
 
-    await client.query('COMMIT');
-    await invalidateTenantCourseCaches(tenantId);
     return { ...updated, removed_assignments: removedAssignments };
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
+  await invalidateTenantCourseCaches(tenantId);
+  return result;
 }
 
 export async function deleteCourseCategory(catId: string, tenantId: string) {

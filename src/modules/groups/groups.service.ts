@@ -3,7 +3,7 @@
 // Tenant-scoped, optimized for millions of users
 // ═══════════════════════════════════════════════════════════════
 
-import { query, getClient } from '../../config/database.js';
+import { query, getClient, withDatabaseTransaction } from '../../config/database.js';
 import {
   invalidateTenantCourseCaches,
   invalidateTenantLibraryCaches,
@@ -306,23 +306,19 @@ export async function addTeamMembers(
     };
   }
 
-  const client = await getClient();
-  let notificationId: string | null = null;
-  let added = 0;
-  let emailQueued = 0;
-  let teamName = teamId;
-  try {
-    await client.query('BEGIN');
+  const { notificationId, added, emailQueued, teamName } = await withDatabaseTransaction(async (client) => {
+    let notificationId: string | null = null;
+    let emailQueued = 0;
     const repository = createGroupAssignmentsRepository(client);
 
     const team = await repository.lockTeamWithParents(teamId, options.tenantId);
     if (!team) {
       throw new AppError(`${labels.team} không tồn tại hoặc không thuộc tenant hiện tại.`, 404);
     }
-    teamName = team.team_name;
+    const teamName = team.team_name;
 
     const insertedUserIds = await repository.insertEligibleTeamMembers(teamId, normalizedUserIds, options.tenantId);
-    added = insertedUserIds.length;
+    const added = insertedUserIds.length;
 
     if (added > 0) {
       const categoryRows = await repository.selectTeamCourseCategorySummaries(teamId, options.tenantId);
@@ -368,13 +364,8 @@ export async function addTeamMembers(
       if (entry) await appendAuditLog(client, entry);
     }
 
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { notificationId, added, emailQueued, teamName };
+  });
 
   if (emailQueued > 0) {
     wakeEmailOutboxWorker('team-member-added');

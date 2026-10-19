@@ -3,7 +3,7 @@
 // Only superadmin can manage. Max 6 active globally.
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage.js';
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
@@ -175,23 +175,18 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
 }
 
 export async function deleteTemplate(id: string, auditEntry?: TransactionalAuditEntry): Promise<boolean> {
-  const client = await getClient();
-  let removed: Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'> | null = null;
-  try {
-    await client.query('BEGIN');
+  // found false: no such template; the transaction that found none still commits.
+  const outcome = await withDatabaseTransaction(async (client) => {
     const repository = createPromptTemplatesRepository(client);
     const current = await repository.lockImages(id);
-    if (current.rowCount === 0) { await client.query('COMMIT'); return false; }
-    removed = current.rows[0];
+    if (current.rowCount === 0) return { found: false as const };
+    const removed: Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'> | null = current.rows[0];
     await repository.delete(id);
     if (auditEntry) await appendAuditLog(client, auditEntry);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+    return { found: true as const, removed };
+  });
+  if (!outcome.found) return false;
+  const { removed } = outcome;
   if (removed?.avatar_url) await deleteFileByUrl(removed.avatar_url).catch(swallowAndLog('prompt_templates.image_cleanup'));
   if (removed?.fullbody_url) await deleteFileByUrl(removed.fullbody_url).catch(swallowAndLog('prompt_templates.image_cleanup'));
   return true;

@@ -2,7 +2,7 @@
 // Courses Service — CRUD courses + modal configs
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import {
   invalidateCourseReadCaches,
@@ -296,10 +296,7 @@ async function updateCourseFromDb(
     throw new AppError('Chỉ được bật Công khai truy cập ở danh mục khóa học', 400);
   }
 
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
-
+  return withDatabaseTransaction(async (client) => {
     const repository = createCoursesRepository(client);
     const current = await repository.lockCourseSnapshot(courseId, tenantId);
     if (!current) throw new AppError('Course không tồn tại', 404);
@@ -308,14 +305,8 @@ async function updateCourseFromDb(
     if (!updated) throw new AppError('Course không tồn tại', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(current, updated));
 
-    await client.query('COMMIT');
     return updated;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function bulkCourseAction(ids: string[], action: string, tenantId: string) {
@@ -367,12 +358,9 @@ export async function updateCourseMentor(
   assignedBy: string,
   createAuditEntry?: (context: { courseName: string; mentorName: string | null }) => TransactionalAuditEntry,
 ): Promise<CourseMentor | null> {
-  const client = await getClient();
-  let mentorRow: MentorUserRow | null = null;
-  let changed = false;
-
-  try {
-    await client.query('BEGIN');
+  const { mentorRow, changed } = await withDatabaseTransaction(async (client) => {
+    let mentorRow: MentorUserRow | null = null;
+    let changed = false;
     const repository = createCoursesRepository(client);
 
     const course = await repository.lockCourseMentor(courseId, tenantId);
@@ -403,13 +391,8 @@ export async function updateCourseMentor(
         mentorName: mentorRow ? (mentorRow.full_name?.trim() || mentorRow.username) : course.mentor_name,
       }));
     }
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { mentorRow, changed };
+  });
 
   if (changed) await invalidateCourseReadCaches(courseId, tenantId);
   if (!mentorRow) return null;
@@ -570,25 +553,18 @@ export async function deleteCourseMentorSectionLogo(
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
-  const client = await getClient();
-  let oldPath: string | null = null;
-  let section: CourseMentorSectionRow | undefined;
-  try {
-    await client.query('BEGIN');
+  // null: no mentor section row; the transaction that found none still commits.
+  const cleared = await withDatabaseTransaction(async (client) => {
     const repository = createCourseMentorSectionRepository(client);
     const current = await repository.lockLogoPath(courseId, tenantId, logoColumn);
-    if (!current) { await client.query('COMMIT'); return null; }
-    oldPath = current.logo_path;
+    if (!current) return null;
 
-    section = await repository.clearLogoPath(courseId, tenantId, logoColumn, userId);
+    const section = await repository.clearLogoPath(courseId, tenantId, logoColumn, userId);
     if (auditEntry) await appendAuditLog(client, auditEntry);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+    return { oldPath: current.logo_path, section };
+  });
+  if (!cleared) return null;
+  const { oldPath, section } = cleared;
 
   if (oldPath) {
     const ownership = classifyCourseMentorLogoOwnership(oldPath, tenantId, courseId);

@@ -1,5 +1,5 @@
 import type { PoolClient } from 'pg';
-import { afterCommit, getClient, query } from '../../config/database.js';
+import { afterCommit, getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { env } from '../../config/env.js';
 import { AppError } from '../../utils/errors.js';
@@ -170,21 +170,13 @@ export async function markUserDeletionJobRetryable(jobId: string, error: unknown
 }
 
 async function markJobSucceeded(jobId: string, stats: Record<string, number>): Promise<void> {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  await withDatabaseTransaction(async (client) => {
     const tx = createUserDeletionRepository(client);
     // Successful user jobs must not retain a user-id-bearing storage path.
     await tx.deleteManifestItems(jobId);
     await tx.deleteScanCursors(jobId);
     await tx.markSucceeded(jobId, JSON.stringify(stats));
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 async function deleteInBatches(batch: PurgeBatch, userId: string): Promise<number> {

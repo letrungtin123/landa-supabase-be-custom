@@ -4,7 +4,7 @@
 // Ảnh upload vào Supabase Storage: {tenantId}/branding/{key}.ext
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../../config/cache-keys.js';
@@ -182,10 +182,8 @@ export async function deleteBrandingImage(
   auditEntry?: TransactionalAuditEntry,
 ): Promise<void> {
   const isCarousel = imageKey.startsWith('carousel_');
-  const client = await getClient();
-  let pathsToDelete: string[] = [];
-  try {
-    await client.query('BEGIN');
+  const pathsToDelete = await withDatabaseTransaction(async (client) => {
+    const paths: string[] = [];
     const repository = createBrandingRepository(client);
     const tenant = await repository.lockSettings(tenantId);
     if (tenant.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
@@ -194,24 +192,19 @@ export async function deleteBrandingImage(
     if (isCarousel) {
       const carousels = [...(branding.carousels || [])];
       const idx = parseInt(imageKey.split('_')[1]) - 1;
-      if (carousels[idx]) pathsToDelete.push(carousels[idx]);
+      if (carousels[idx]) paths.push(carousels[idx]);
       carousels.splice(idx, 1);
       branding.carousels = carousels;
     } else {
       const path = branding[imageKey];
-      if (typeof path === 'string' && path) pathsToDelete.push(path);
+      if (typeof path === 'string' && path) paths.push(path);
       delete branding[imageKey];
     }
 
     await repository.updateBranding(tenantId, JSON.stringify(branding));
     if (auditEntry) await appendAuditLog(client, auditEntry);
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw error;
-  } finally {
-    client.release();
-  }
+    return paths;
+  });
 
   await Promise.allSettled(pathsToDelete.map((path) => deleteFile(path)));
   await Promise.all([
