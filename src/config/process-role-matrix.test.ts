@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// What one process of src/index.ts starts, per LANDA_PROCESS_ROLE: the real
+// What one process of src/index.ts (process-main.ts) starts, per LANDA_PROCESS_ROLE: the real
 // bootstrap runs in a child process under test-support/process-boot-harness.mjs
 // (no database, RabbitMQ or Redis: pg answers no rows, amqplib is in memory,
 // REDIS_URL is empty, every other URL is a closed port). The child signals
@@ -131,16 +131,16 @@ const QUEUE_WORKERS = [
   'modules/learner/progress-recalculation.worker.ts every 60000 ms',
   'modules/users/user-deletion.worker.ts every 30000 ms',
 ];
-/** Sweepers and maintenance timers of index.ts (tokens, deletion jobs, revocations, audit logs) and the AI reservation sweeper. */
+/** Sweepers and maintenance timers of process-main.ts (tokens, deletion jobs, revocations, audit logs) and the AI reservation sweeper. */
 const MAINTENANCE = [
-  'index.ts every 21600000 ms',
-  'index.ts every 21600000 ms',
-  'index.ts every 86400000 ms',
-  'index.ts every 86400000 ms',
+  'process-main.ts every 21600000 ms',
+  'process-main.ts every 21600000 ms',
+  'process-main.ts every 86400000 ms',
+  'process-main.ts every 86400000 ms',
   'modules/ai-chatbot/ai-platform/ai-token-quota.service.ts every 30000 ms',
 ];
 /** Course asset temp residue sweep (only when other processes share the temp directory). */
-const COURSE_ASSET_TEMP_SWEEP = ['index.ts every 21600000 ms'];
+const COURSE_ASSET_TEMP_SWEEP = ['process-main.ts every 21600000 ms'];
 const INLINE_EMAIL_OUTBOX = ['modules/assignments/email-outbox.service.ts every 15000 ms'];
 /**
  * Added after the matrix was pinned, the one intended change (wave 2, BE-S14):

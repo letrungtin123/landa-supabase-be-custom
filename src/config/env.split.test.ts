@@ -433,6 +433,8 @@ type OldEnv = {
   readonly RUNTIME_GLOBAL_MAINTENANCE_ENABLED: boolean;
   readonly LANDA_PROCESS_ROLE: 'all' | 'api' | 'background';
   readonly LANDA_API_INSTANCES: number;
+  readonly LANDA_INAPP_CLUSTER_WORKERS: number;
+  readonly LANDA_INAPP_CLUSTER_SLOT: string;
   readonly BIND_HOST: string;
   readonly TRUST_PROXY_HOPS: number;
   readonly TRUSTED_PROXY_CIDRS: string[];

@@ -23,6 +23,7 @@ const EXIT_DEADLINE_MS = 60_000;
 /** Entry points (they start their work on purpose) and test code are not imported. */
 const NOT_IMPORTED = new Set([
   'index.ts',
+  'process-main.ts',
   // A worker_threads entry: it reads workerData at its top level.
   'modules/ai-chatbot/kb/kb-faq-sheet.worker.ts',
 ]);

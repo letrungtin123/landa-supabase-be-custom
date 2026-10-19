@@ -31,6 +31,15 @@ export const coreEnv = {
   // value it uses for `instances`). Above 1, request limits and short-lived
   // request state are shared through Redis.
   LANDA_API_INSTANCES: optionalBoundedInt('LANDA_API_INSTANCES', 1, 1, 64),
+  // In-app cluster (config/inapp-cluster.logic.ts). 0 (default) = off: the
+  // process runs its role itself. n > 0 = an API process started by PM2 in
+  // fork mode becomes a cluster primary with n workers that get connections
+  // round-robin (on Windows too). Only with LANDA_PROCESS_ROLE=api, and at
+  // most LANDA_API_INSTANCES (which must count every API process).
+  LANDA_INAPP_CLUSTER_WORKERS: optionalBoundedInt('LANDA_INAPP_CLUSTER_WORKERS', 0, 0, 64),
+  // Set by the in-app cluster primary on the workers it forks (their slot,
+  // 0..n-1); empty everywhere else. Never set it by hand.
+  LANDA_INAPP_CLUSTER_SLOT: process.env.LANDA_INAPP_CLUSTER_SLOT?.trim() || '',
   // Existing direct deployments retain the default. Behind Nginx, bind to
   // 127.0.0.1 so the API cannot bypass the gateway on a LAN/public interface.
   BIND_HOST: optionalString('BIND_HOST', '0.0.0.0'),

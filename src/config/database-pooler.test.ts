@@ -74,7 +74,7 @@ test('behind the pooler only the session pool counts, and the start check reads 
 const SESSION_BOUND = /LISTEN \$\{|pg_advisory_lock(?:_shared)?\b|pg_try_advisory_lock\(/;
 const KNOWN_SESSION_USERS = [
   'config/cluster-bus.ts',
-  'index.ts',
+  'process-main.ts',
   'modules/ai-chatbot/kb/kb-operation.worker.ts',
   'modules/ai-chatbot/ai-id/lesson-author-source-stream.service.ts',
   'modules/ai-chatbot/ai-id/lesson-author-workspace-stream.service.ts',
