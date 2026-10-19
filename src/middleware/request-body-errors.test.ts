@@ -17,7 +17,9 @@ const SECRET_FRAGMENT = /FAKE-SEC/;
 
 async function serve(): Promise<{ port: number; close: () => Promise<void> }> {
   const app = express();
+  // The body parsers of app.ts, in its order.
   useJsonBodyParsers(app);
+  app.use(express.urlencoded({ extended: true }));
   app.use((req, res) => {
     res.json({ received: true });
   });
@@ -174,4 +176,47 @@ test('a body over its limit stays a 413 PAYLOAD_TOO_LARGE and is logged by type 
   }
   assert.doesNotMatch(lines.join('\n'), /FAKE-SEC|too large/i);
   assert.equal(lines.filter(line => line.includes('"type":"entity.too.large"')).length, 1);
+});
+
+test('a form body with too many fields or nested too deep is a 413 or 400, logged by type only (W2-05)', async t => {
+  const lines = captureConsole(t);
+  const server = await serve();
+  const form = { 'Content-Type': 'application/x-www-form-urlencoded' };
+  const tooMany = Array.from({ length: 1001 }, (_, i) => `f${i}=${FAKE_SECRET}`).join('&');
+  const tooDeep = `a${'[b]'.repeat(40)}=${FAKE_SECRET}`;
+  try {
+    const many = await rawPost(
+      server.port,
+      '/api/courses',
+      { ...form, 'Content-Length': String(tooMany.length) },
+      tooMany,
+    );
+    assert.equal(many.status, 413);
+    assert.deepEqual(JSON.parse(many.text), {
+      success: false,
+      message: 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.',
+      code: 'TOO_MANY_PARAMETERS',
+    });
+    const deep = await rawPost(
+      server.port,
+      '/api/courses',
+      { ...form, 'Content-Length': String(tooDeep.length) },
+      tooDeep,
+    );
+    assert.equal(deep.status, 400);
+    assert.deepEqual(JSON.parse(deep.text), {
+      success: false,
+      message: 'Dữ liệu gửi lên không đúng định dạng. Vui lòng kiểm tra lại và thử lại.',
+      code: 'INVALID_FORM_BODY',
+    });
+    assert.doesNotMatch(many.text + deep.text, /FAKE-SEC|parameters|depth/);
+  } finally {
+    await server.close();
+  }
+  const logged = lines.join('\n');
+  assert.doesNotMatch(logged, /FAKE-SEC|too many parameters|exceeded the depth|\bat .*:\d+:\d+/);
+  const types = lines
+    .filter(line => line.includes('request_body_refused'))
+    .map(line => (JSON.parse(line.replace(/^\[RequestBody\] /, '')) as { type: string }).type);
+  assert.deepEqual(types, ['parameters.too.many', 'querystring.parse.rangeError']);
 });

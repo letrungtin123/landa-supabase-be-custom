@@ -70,6 +70,9 @@ None of these collides with a code or a prefix the frontends branch on
 | `PAYLOAD_TOO_LARGE` | 413 | The JSON body is over its route limit (`middleware/body-limits.ts`), or an uploaded file is over its multer limit. | `middleware/error-handler.ts` (`entity.too.large`, multer `LIMIT_FILE_SIZE`) |
 | `UNSUPPORTED_ENCODING` | 415 | The body uses an unsupported content encoding or charset. | `middleware/error-handler.ts` (`encoding.unsupported`, `charset.unsupported`) |
 | `REQUEST_ABORTED` | 400 | The client stopped sending the body before it was complete. | `middleware/error-handler.ts` (`request.aborted`) |
+| `TOO_MANY_PARAMETERS` | 413 | A form (urlencoded) body with more than 1000 fields. Logged by type only. | `middleware/error-handler.ts` (`parameters.too.many`) |
+| `INVALID_FORM_BODY` | 400 | A form (urlencoded) body nested deeper than 32 levels. Logged by type only. | `middleware/error-handler.ts` (`querystring.parse.rangeError`) |
+| `REQUEST_SIZE_INVALID` | 400 | The body is shorter or longer than its `Content-Length`. Logged by type only. | `middleware/error-handler.ts` (`request.size.invalid`) |
 | `UPLOAD_TOO_MANY_FILES` | 400 | More files than the route's multer `files` limit. | `middleware/error-handler.ts` (multer `LIMIT_FILE_COUNT`) |
 | `UPLOAD_UNEXPECTED_FILE` | 400 | A file in a field the route does not read, or more files than its `array(name, max)`. | `middleware/error-handler.ts` (multer `LIMIT_UNEXPECTED_FILE`) |
 | `UPLOAD_TOO_MANY_PARTS` | 400 | More multipart parts than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_PART_COUNT`) |

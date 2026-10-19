@@ -37,12 +37,18 @@ export const UNSUPPORTED_ENCODING_CODE = 'UNSUPPORTED_ENCODING';
 export const UNSUPPORTED_ENCODING_MESSAGE = 'Dữ liệu gửi lên có định dạng chưa được hỗ trợ. Vui lòng thử lại.';
 export const REQUEST_ABORTED_CODE = 'REQUEST_ABORTED';
 export const REQUEST_ABORTED_MESSAGE = 'Yêu cầu bị gián đoạn trước khi gửi xong. Vui lòng thử lại.';
+export const TOO_MANY_PARAMETERS_CODE = 'TOO_MANY_PARAMETERS';
+export const TOO_MANY_PARAMETERS_MESSAGE = 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.';
+export const INVALID_FORM_BODY_CODE = 'INVALID_FORM_BODY';
+export const REQUEST_SIZE_INVALID_CODE = 'REQUEST_SIZE_INVALID';
+export const REQUEST_SIZE_INVALID_MESSAGE = 'Dữ liệu gửi lên không đầy đủ hoặc bị sai kích thước. Vui lòng thử lại.';
 
 /**
- * Request bodies the body parser (express.json, middleware/body-limits.ts)
- * refuses, by the `type` it sets on the error: [status, code, message].
- * The error's message and `body` can quote the request body (a password on
- * the sign-in route), so neither is ever sent or logged.
+ * Request bodies the body parsers (express.json, middleware/body-limits.ts,
+ * and express.urlencoded in app.ts) refuse, by the `type` they set on the
+ * error: [status, code, message]. The error's message and `body` can quote
+ * the request body (a password on the sign-in route), so neither is ever
+ * sent or logged.
  */
 export const REQUEST_BODY_ERRORS: Readonly<Record<string, readonly [number, string, string]>> = Object.freeze({
   'entity.parse.failed': [400, INVALID_JSON_CODE, INVALID_JSON_MESSAGE],
@@ -50,6 +56,11 @@ export const REQUEST_BODY_ERRORS: Readonly<Record<string, readonly [number, stri
   'encoding.unsupported': [415, UNSUPPORTED_ENCODING_CODE, UNSUPPORTED_ENCODING_MESSAGE],
   'charset.unsupported': [415, UNSUPPORTED_ENCODING_CODE, UNSUPPORTED_ENCODING_MESSAGE],
   'request.aborted': [400, REQUEST_ABORTED_CODE, REQUEST_ABORTED_MESSAGE],
+  // A form body (urlencoded) with more than 1000 fields, or nested deeper than 32 levels.
+  'parameters.too.many': [413, TOO_MANY_PARAMETERS_CODE, TOO_MANY_PARAMETERS_MESSAGE],
+  'querystring.parse.rangeError': [400, INVALID_FORM_BODY_CODE, INVALID_JSON_MESSAGE],
+  // A body shorter or longer than its Content-Length.
+  'request.size.invalid': [400, REQUEST_SIZE_INVALID_CODE, REQUEST_SIZE_INVALID_MESSAGE],
 });
 
 /**
