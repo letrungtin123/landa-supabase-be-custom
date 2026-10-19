@@ -265,6 +265,18 @@ async function publishSessionDelete(jobId: string): Promise<void> {
 }
 
 /**
+ * Who may delete the session (the checks requestLessonAuthorSessionDeletion
+ * makes first, without the row lock): run before the conversation lock, so a
+ * session of another tenant or course is NOT_FOUND and one the caller may not
+ * manage is MANAGE_FORBIDDEN, whether or not it is generating.
+ */
+export async function assertLessonAuthorSessionManageable(owner: LessonAuthorSessionOwner, conversationId: string): Promise<void> {
+  assertOwner(owner);
+  if (!UUID_PATTERN.test(conversationId)) throw new LessonAuthorSessionError('INPUT_INVALID');
+  assertCanManage(owner, await sessionCreator(owner, conversationId));
+}
+
+/**
  * The deletion job records the REQUESTER (`requested_by`); the worker deletes
  * the session of its creator. One active job per conversation regardless of
  * who asked: the conversation row lock serializes concurrent requests.

@@ -264,7 +264,7 @@ async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;
       return{workspace_id:id,conversation_id:input.conversationId,correlation_id:root,content_locale:input.locale,status:'designing',launch_brief:input.brief,replayed:false};
     });
     if(!result.replayed)prepared.markAccepted();log({event:'workspace_created',...result});return result;
-  });
+  },{userId:user.id,tenantId});
 }
 
 async function prepareRun(t:WorkspaceAdmissionTarget){

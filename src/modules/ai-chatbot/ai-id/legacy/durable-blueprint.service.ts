@@ -42,11 +42,13 @@ import {
   HISTORY_CONTEXT_LIMIT,
   HISTORY_MESSAGE_MAX_CHARS,
   RAG_LESSON_AUTHOR_BLUEPRINT_MAX_OUTPUT_TOKENS,
+  LESSON_AUTHOR_TARGET,
 } from '../../chat/chat.constants.js';
 import type { ChatStreamOptions } from '../../chat/chat.types.js';
 import {
   streamLocks,
   acquireDistributedStreamLock,
+  assertChatConversationOwner,
   checkRateLimit,
   loadConversationContext,
   getActiveKbAssignmentFresh,
@@ -84,8 +86,24 @@ import { formatBlueprintPreview } from './preview.logic.js';
 import { classifyLessonAuthorIntentV2 } from './intent-classifier.logic.js';
 import { createLessonAuthorBlueprint, formatBlueprintDraftContext } from './blueprint-store.service.js';
 
+/**
+ * Who may take the conversation lock, checked BEFORE the lock (as the chat
+ * stream does since a9eaef3): a conversation the caller may not use gets the
+ * same answer whether or not it is busy, never "already active".
+ * - `{ userId, tenantId }`: the caller's own lesson-author conversation
+ *   (assertChatConversationOwner: the 404 of a missing conversation);
+ * - `{ check }`: another rule (session deletion: who may manage the session).
+ */
+export type LessonAuthorConversationAccess =
+  | { userId: string; tenantId: string }
+  | { check: () => Promise<void> };
+
 /** Short admission lock shared with old chat; never held during queued generation. */
-export async function withLessonAuthorConversationLock<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
+export async function withLessonAuthorConversationLock<T>(
+  conversationId: string, work: () => Promise<T>, access: LessonAuthorConversationAccess,
+): Promise<T> {
+  if ('check' in access) await access.check();
+  else await assertChatConversationOwner(conversationId, access.userId, access.tenantId, LESSON_AUTHOR_TARGET);
   if (streamLocks.has(conversationId)) throw new GenerationJobError('GENERATION_ALREADY_ACTIVE');
   streamLocks.add(conversationId);
   let lock: DistributedStreamLock | null = null;
