@@ -76,6 +76,7 @@
     "test:tenant-badges": "tsx --test src/modules/tenant-badges/tenant-badges-sql.characterization.test.ts src/modules/tenant-badges/tenant-badges.validator.test.ts",
     "test:notifications": "tsx --test src/modules/notifications/notifications-sql.characterization.test.ts src/modules/notifications/notifications.validator.test.ts",
     "test:course-categories": "tsx --test src/modules/course-categories/course-categories-sql.characterization.test.ts src/modules/course-categories/course-categories.validator.test.ts",
+    "test:welcome-init": "tsx --test src/modules/welcome-init/welcome-init-sql.characterization.test.ts",
     "test:enrollments": "tsx --test src/modules/enrollments/enrollments-sql.characterization.test.ts src/modules/enrollments/enrollments.validator.test.ts",
     "test:loadtest-kit": "node --test scripts/loadtest/loadtest.selftest.test.mjs",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
