@@ -647,7 +647,9 @@ export async function reorderAssignments(
   } finally {
     client.release();
   }
-  return { ...(await listCourseAssignments(courseId, tenantId)), course_name: course.display_name };
+  // The course's assignments in their new order, as the list route answers
+  // them (the dashboard's reorderCourseAssignments reads an array).
+  return listCourseAssignments(courseId, tenantId);
 }
 
 export async function listCourseSubmissions(courseId: string, tenantId: string, queryParams: Record<string, unknown>) {
