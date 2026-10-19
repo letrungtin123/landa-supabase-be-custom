@@ -1,0 +1,16 @@
+{
+ "last retry failed mark fails": "532607ded89a8f62e9b0d073679563bc2ac9bd41b1b7788de9bbbddf25373d1b",
+ "last retry with a lock held by another token": "a2b7bf2e5a3190a78476553f8befb6a1f7789b3be89316d119e5590422dfeaf6",
+ "last retry with an invalid payload": "ab03dce0a5b67d71b5b6497f3c81c69e9abaa22486c4f25cdb6260626c7fb111",
+ "last retry without a lock": "8d46cbf56407c13bc3fd8934656ee028bc8084368969719f23f15dfffd52e967",
+ "message restore fails and is retried": "d5b307ea3878240a15a6b7d80c80ecd7452dfc4dbf17cad6ae2af3f822485a98",
+ "message restore fails on the last retry": "cd65a32843b7e15bb9f05099f35aec25cf7652d5f2fb016ba547f7f6c52dfbbf",
+ "message that is not json": "bc804b9c4b6b7923f83747d4d382b1bfc9837588d2ecc460304a60bf3496a675",
+ "message with an invalid payload": "d79902e7ceac30a0b1107a505a0b99a9786aa28caf6788d70309fdf35f797de5",
+ "poller failure is logged and the next tick runs": "429210872e392bd317c98da4bdc5b0a13ebfa818edbc51ad0621c0e15f6ada66",
+ "poller runs on its interval": "0f8bf75bf517ee5522b20f88d2d6ffd17641106714cfb09503689c2a48aaf1d5",
+ "start recovers lost restores": "7b51101aee7f1072579f55b319c2b7dbfb2d9d90ad8018f065f1f7dca8b36a80",
+ "start recovery dispatch is not confirmed": "d41dd19f14d27aa9c1374ee3c87b44a509325c68d2c115636cd7d332bab250c7",
+ "start recovery fails": "2bd94f86554e3bab218e9abfc628e5ce4587a2db5125f25cf197228f15a6c63a",
+ "start with nothing to recover": "b92cde51cf610201cb98b8f73452dac9ca9068ae060b006c2c4eb927f7ce5e00"
+}

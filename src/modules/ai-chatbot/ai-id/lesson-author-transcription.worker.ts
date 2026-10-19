@@ -27,13 +27,12 @@ import {
   LESSON_AUTHOR_TRANSCRIPT_MIME_TYPE,
   normalizeTranscriptText,
 } from './lesson-author-transcription.logic.js';
-import { stopOnShutdown } from '../../../config/process-lifecycle.js';
 import { swallowAndLog } from '../../../utils/best-effort.js';
+import { createSingleFlight, startJobPoller } from '../../../platform/job-runner/index.js';
 
 const execFile = promisify(execFileCallback);
 const FFMPEG_TIMEOUT_MS = 30 * 60_000;
 const TEMP_ARTIFACT_MAX_AGE_MS = 12 * 60 * 60_000;
-let drainInFlight = false;
 
 type MediaProbe = {
   format?: { duration?: string };
@@ -207,9 +206,9 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
   }
 }
 
-async function drain(): Promise<void> {
-  if (drainInFlight || !env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED) return;
-  drainInFlight = true;
+/** One expiry, claim and run pass; a poll tick that finds the previous pass still running skips its turn. */
+const drain = createSingleFlight(async () => {
+  if (!env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED) return;
   try {
     await expireLessonAuthorTranscriptionJobs();
     const jobs = await claimDueLessonAuthorTranscriptionJobs();
@@ -218,10 +217,8 @@ async function drain(): Promise<void> {
     }
   } catch (error) {
     console.error('[LessonAuthorTranscription] worker drain failed', safeWorkerError(error));
-  } finally {
-    drainInFlight = false;
   }
-}
+});
 
 export async function startLessonAuthorTranscriptionWorker(): Promise<void> {
   if (!env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED) {
@@ -230,7 +227,11 @@ export async function startLessonAuthorTranscriptionWorker(): Promise<void> {
   }
   await cleanupStaleTempArtifacts();
   await drain();
-  stopOnShutdown(setInterval(() => { void drain(); }, env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS).unref());
-  stopOnShutdown(setInterval(() => { void cleanupStaleTempArtifacts(); }, 6 * 60 * 60_000).unref());
+  // Unreachable onError: the drain and the sweep catch their own failures. A rejection stays unhandled, as before.
+  const unhandled = (error: unknown) => {
+    throw error;
+  };
+  startJobPoller({ intervalMs: env.LESSON_AUTHOR_TRANSCRIPTION_WORKER_POLL_INTERVAL_MS, tick: drain, onError: unhandled });
+  startJobPoller({ intervalMs: 6 * 60 * 60_000, tick: cleanupStaleTempArtifacts, onError: unhandled });
   console.log('[LessonAuthorTranscription] durable worker started');
 }

@@ -724,9 +724,14 @@
       "count": 1
     }
   },
-  "src/modules/course-authoring/course-outline-transfer.service.ts": {
+  "src/modules/course-authoring/course-outline-transfer-job.service.ts": {
     "@typescript-eslint/no-unused-vars": {
-      "count": 3
+      "count": 2
+    }
+  },
+  "src/modules/course-authoring/course-outline-transfer.types.ts": {
+    "@typescript-eslint/no-unused-vars": {
+      "count": 1
     }
   },
   "src/modules/course-authoring/course-outline.controller.ts": {
@@ -772,11 +777,6 @@
   "src/modules/course-categories/course-categories.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 18
-    }
-  },
-  "src/modules/course-deletion/course-deletion.worker.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
     }
   },
   "src/modules/courses/courses.controller.ts": {

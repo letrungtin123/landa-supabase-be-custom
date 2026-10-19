@@ -28,8 +28,13 @@ import {
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
 import { indexRagDocument } from './ai-rag-client.service.js';
-import { stopOnShutdown } from '../../../config/process-lifecycle.js';
 import { swallowAndLog } from '../../../utils/best-effort.js';
+import {
+  cappedExponentialBackoffSeconds,
+  createSingleFlight,
+  startJobPoller,
+  startLeaseHeartbeat,
+} from '../../../platform/job-runner/index.js';
 
 interface AiEngineTransitionJob {
   id: string;
@@ -52,8 +57,6 @@ interface TransitionDocumentRow {
   file_path: string | null;
   source_info: Record<string, unknown> | null;
 }
-
-let drainInFlight = false;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -154,9 +157,10 @@ async function failTransitionJob(job: AiEngineTransitionJob, error: unknown): Pr
   if (!job.lease_token) return;
   const terminal = job.attempt_count >= env.AI_ENGINE_TRANSITION_WORKER_MAX_ATTEMPTS;
   const reason = errorMessage(error).slice(0, 1000);
-  const backoffSeconds = Math.min(
+  const backoffSeconds = cappedExponentialBackoffSeconds(
+    job.attempt_count,
+    env.AI_ENGINE_TRANSITION_WORKER_RETRY_BASE_SECONDS,
     env.AI_ENGINE_TRANSITION_WORKER_RETRY_MAX_SECONDS,
-    env.AI_ENGINE_TRANSITION_WORKER_RETRY_BASE_SECONDS * (2 ** Math.min(Math.max(job.attempt_count - 1, 0), 10)),
   );
   await query(
     `UPDATE ai_engine_transition_jobs
@@ -616,13 +620,10 @@ async function completeTransitionJob(job: AiEngineTransitionJob): Promise<void> 
 }
 
 async function runTransitionJob(job: AiEngineTransitionJob): Promise<void> {
-  let leaseLost = false;
-  const heartbeat = setInterval(() => {
-    renewTransitionLease(job)
-      .then((renewed) => { if (!renewed) leaseLost = true; })
-      .catch(() => { leaseLost = true; });
-  }, Math.max(1_000, Math.floor((env.AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS * 1000) / 3)));
-  heartbeat.unref();
+  const heartbeat = startLeaseHeartbeat({
+    leaseSeconds: env.AI_ENGINE_TRANSITION_WORKER_LEASE_SECONDS,
+    renew: () => renewTransitionLease(job),
+  });
 
   try {
     await initializeTransition(job);
@@ -664,7 +665,7 @@ async function runTransitionJob(job: AiEngineTransitionJob): Promise<void> {
         return;
       }
     }
-    if (leaseLost) throw new Error(`AI engine transition lease lost before completion: ${job.id}`);
+    if (heartbeat.lost) throw new Error(`AI engine transition lease lost before completion: ${job.id}`);
     await completeTransitionJob(job);
   } catch (error) {
     await failTransitionJob(job, error).catch((failError) => {
@@ -672,13 +673,12 @@ async function runTransitionJob(job: AiEngineTransitionJob): Promise<void> {
     });
     console.error(`[AiEngineTransitionWorker] Job ${job.id} failed: ${errorMessage(error)}`);
   } finally {
-    clearInterval(heartbeat);
+    heartbeat.stop();
   }
 }
 
-async function drainDueTransitions(): Promise<void> {
-  if (drainInFlight) return;
-  drainInFlight = true;
+/** One claim-and-run pass; a poll tick that finds the previous pass still running skips its turn. */
+const drainDueTransitions = createSingleFlight(async () => {
   try {
     const jobs = await claimDueAiEngineTransitionJobs();
     for (const job of jobs) {
@@ -686,10 +686,8 @@ async function drainDueTransitions(): Promise<void> {
     }
   } catch (error) {
     console.error('[AiEngineTransitionWorker] Failed to claim due jobs:', errorMessage(error));
-  } finally {
-    drainInFlight = false;
   }
-}
+});
 
 export async function startAiEngineTransitionWorker(): Promise<void> {
   if (!env.AI_ENGINE_TRANSITION_WORKER_ENABLED) {
@@ -697,8 +695,13 @@ export async function startAiEngineTransitionWorker(): Promise<void> {
     return;
   }
   await drainDueTransitions();
-  stopOnShutdown(setInterval(() => {
-    void drainDueTransitions();
-  }, env.AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS).unref());
+  startJobPoller({
+    intervalMs: env.AI_ENGINE_TRANSITION_WORKER_POLL_INTERVAL_MS,
+    tick: drainDueTransitions,
+    // Unreachable: the drain logs its own failures. A rejection stays unhandled, as before.
+    onError: (error) => {
+      throw error;
+    },
+  });
   console.log('[AiEngineTransitionWorker] Durable AI engine transition worker started');
 }
