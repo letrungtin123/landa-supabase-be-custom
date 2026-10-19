@@ -49,6 +49,13 @@ const WORKSPACE_FLAGS = [
   'LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED',
 ];
 
+/** No AI features on 226 yet: its background process starts no AI worker. */
+const AI_WORKER_FLAGS = [
+  'KB_OPERATION_WORKER_ENABLED',
+  'AI_ENGINE_TRANSITION_WORKER_ENABLED',
+  'LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED',
+];
+
 /** The environments PM2 can start an app with: `env`, and `env` + `env_production` (--env production). */
 function environments(app: Pm2App): Array<[label: string, env: Record<string, string>]> {
   const env = app.env ?? {};
@@ -78,6 +85,7 @@ test('prod 226 runs no AI ID: every workspace flag is off and publish governance
       assert.equal('COURSE_PUBLISH_GOVERNANCE_ENABLED' in env, false, `${label}: COURSE_PUBLISH_GOVERNANCE_ENABLED`);
       if (app.script === MAIN_SCRIPT) {
         for (const flag of WORKSPACE_FLAGS) assert.equal(env[flag], 'false', `${label}: ${flag}`);
+        for (const flag of AI_WORKER_FLAGS) assert.equal(env[flag], 'false', `${label}: ${flag}`);
         assert.equal(env.EMAIL_OUTBOX_INLINE_WORKER_ENABLED, 'false', `${label}: EMAIL_OUTBOX_INLINE_WORKER_ENABLED`);
       }
     }
