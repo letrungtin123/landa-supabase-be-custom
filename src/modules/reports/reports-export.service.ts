@@ -12,441 +12,52 @@ import { loadReportPeriodOverviews, type ReportPeriodRange } from './report-peri
 import {
   createReportsExportRepository,
   type CourseLearnerRow,
-  type HierarchyTrendRow,
   type ReportExportInput,
   type ScopeNames,
 } from './reports-export.repository.js';
-import type { ReportDateRange, ReportSummary } from './reports.service.js';
+import type { ReportSummary } from './reports.service.js';
+import {
+  type ExportScope,
+  type ReportExcelExportOptions,
+  type CourseLearnerExcelExportOptions,
+  type ReportExcelLocale,
+  getReportExcelCopy,
+} from './reports-export-copy.logic.js';
+import {
+  type ColumnDef,
+  COLORS,
+  thinBorder,
+  getMonthRange,
+  getExportPeriodRange,
+  getExportPeriodLabel,
+  dateTimeNumberFormat,
+  formatHierarchyPeriodLabel,
+  toNumber,
+  roundPercent,
+  statusText,
+  statusColor,
+  lowerLabel,
+  addStyledRow,
+  addWorksheetChrome,
+  SplitWorksheetWriter,
+} from './reports-export-sheet.js';
+// The export wording and the workbook building blocks live in their own files; these names stay importable here.
+export {
+  normalizeReportExcelLocale,
+  getReportExcelCopy,
+  resolveReportExcelLabels,
+  buildReportExcelFileName,
+  buildCourseLearnerExcelFileName,
+} from './reports-export-copy.logic.js';
+export type {
+  ReportExcelExportOptions,
+  CourseLearnerExcelExportOptions,
+  ReportExcelLocale,
+} from './reports-export-copy.logic.js';
 
 // Every read joins the export's snapshot (withReportsSnapshot) through reportsQuery.
 const repository = createReportsExportRepository({ query: reportsQuery, forEachCursorBatch: forEachReportsCursorBatch });
-
-type ExportScope = {
-  groupId?: string;
-  subgroupId?: string;
-  teamId?: string;
-};
-
-type ExportLabels = {
-  group: string;
-  subgroup: string;
-  team: string;
-};
-
-export type ReportExcelExportOptions = {
-  stream: Writable;
-  tenantId: string;
-  year: number;
-  month?: number;
-  dateRange?: ReportDateRange;
-  scope: ExportScope;
-  labels: ExportLabels;
-  exporterName: string;
-  locale: ReportExcelLocale;
-  /** Aborted when the client goes away: the export stops reading and writing. */
-  signal?: AbortSignal;
-};
-
-export type CourseLearnerExcelExportOptions = ReportExcelExportOptions & {
-  courseId: string;
-  courseName: string;
-};
-
-export type ReportExcelLocale = 'vi' | 'en';
-
-type ColumnDef = {
-  header: string;
-  key: string;
-  width: number;
-};
-
-type ReportExcelCopy = {
-  all: string;
-  dateRangeSeparator: string;
-  year: string;
-  dataPeriod: string;
-  aggregationPeriod: string;
-  aggregationYear: string;
-  exportedBy: string;
-  exportedAt: string;
-  notes: string;
-  notesValue: string;
-  item: string;
-  value: string;
-  information: string;
-  reportFileInformation: string;
-  dateRange: string;
-  month: string;
-  totalLearners: string;
-  activeLearners: string;
-  periodEnrollments: string;
-  enrollments: string;
-  completed: string;
-  incomplete: string;
-  averageCompletionRate: string;
-  overviewForPeriod: string;
-  overviewByDateRange: string;
-  monthlyOverview: string;
-  monthlyOverviewTitle: string;
-  totalPeriodEnrollments: string;
-  totalYearEnrollments: string;
-  completedInYear: string;
-  incompleteInYear: string;
-  averageCompletionRateInYear: string;
-  trendBy: string;
-  teamBreakdown: string;
-  /** Header of the member count, naming the team level with its label (lowercased). */
-  currentTeamMembers: (team: string) => string;
-  averageProgress: string;
-  rank: string;
-  course: string;
-  courseRanking: string;
-  courseCompletionRanking: string;
-  username: string;
-  fullName: string;
-  learnerList: string;
-  learnerListInScope: string;
-  latestCompletion: string;
-  courseLearnerDetail: string;
-  courseEnrollmentDetail: string;
-  status: string;
-  progress: string;
-  completedInPeriod: string;
-  enrolledAt: string;
-  completedAt: string;
-  yes: string;
-  no: string;
-  statuses: Record<'completed' | 'learning' | 'not_started', string>;
-  months: string[];
-};
-
-const REPORT_EXCEL_COPY: Record<ReportExcelLocale, ReportExcelCopy> = {
-  vi: {
-    all: 'Tất cả', dateRangeSeparator: 'đến', year: 'Năm', dataPeriod: 'Kỳ dữ liệu', aggregationPeriod: 'Khoảng tổng hợp', aggregationYear: 'Năm tổng hợp', exportedBy: 'Người xuất', exportedAt: 'Thời gian xuất', notes: 'Ghi chú', notesValue: 'Dữ liệu được tính theo tenant và bộ lọc phân quyền hiện tại.', item: 'Mục', value: 'Giá trị', information: 'Thông tin', reportFileInformation: 'Thông tin file báo cáo', dateRange: 'Khoảng ngày', month: 'Tháng', totalLearners: 'Tổng học viên đã tạo', activeLearners: 'Học viên có hoạt động học', periodEnrollments: 'Lượt ghi danh trong kỳ', enrollments: 'Lượt ghi danh', completed: 'Đã hoàn thành', incomplete: 'Chưa hoàn thành', averageCompletionRate: 'Tỷ lệ hoàn thành trung bình của học viên', overviewForPeriod: 'Tổng quan kỳ', overviewByDateRange: 'Tổng quan theo khoảng ngày', monthlyOverview: 'Tổng quan tháng', monthlyOverviewTitle: 'Tổng quan theo tháng - năm', totalPeriodEnrollments: 'Tổng lượt ghi danh trong khoảng', totalYearEnrollments: 'Tổng lượt ghi danh trong năm', completedInYear: 'Đã hoàn thành trong năm', incompleteInYear: 'Chưa hoàn thành trong năm', averageCompletionRateInYear: 'Tỷ lệ hoàn thành trung bình của học viên trong năm', trendBy: 'Xu hướng theo', teamBreakdown: 'Chi tiết', currentTeamMembers: (team) => `Học viên hiện thuộc ${team}`, averageProgress: 'Tiến độ trung bình', rank: 'Hạng', course: 'Khóa học', courseRanking: 'Xếp hạng khóa học', courseCompletionRanking: 'Bảng xếp hạng tỉ lệ hoàn thành từng khóa học', username: 'Username', fullName: 'Họ tên', learnerList: 'Danh sách học viên', learnerListInScope: 'Danh sách học viên trong phạm vi đang lọc', latestCompletion: 'Hoàn thành gần nhất', courseLearnerDetail: 'Chi tiết khóa-học viên', courseEnrollmentDetail: 'Chi tiết lượt ghi danh theo từng khóa học', status: 'Trạng thái', progress: 'Tiến độ', completedInPeriod: 'Hoàn thành trong kỳ', enrolledAt: 'Ngày ghi danh', completedAt: 'Ngày hoàn thành', yes: 'Có', no: 'Chưa', statuses: { completed: 'Đã học', learning: 'Đang học', not_started: 'Chưa học' }, months: ['', 'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6', 'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'],
-  },
-  en: {
-    all: 'All', dateRangeSeparator: 'to', year: 'Year', dataPeriod: 'Data period', aggregationPeriod: 'Aggregation period', aggregationYear: 'Aggregation year', exportedBy: 'Exported by', exportedAt: 'Exported at', notes: 'Notes', notesValue: 'Data is calculated using the current tenant and authorized report filters.', item: 'Item', value: 'Value', information: 'Information', reportFileInformation: 'Report file information', dateRange: 'Date range', month: 'Month', totalLearners: 'Total learners created', activeLearners: 'Learners with learning activity', periodEnrollments: 'Period enrollments', enrollments: 'Enrollments', completed: 'Completed', incomplete: 'Incomplete', averageCompletionRate: 'Average learner completion rate', overviewForPeriod: 'Period overview', overviewByDateRange: 'Overview by date range', monthlyOverview: 'Monthly overview', monthlyOverviewTitle: 'Monthly overview - year', totalPeriodEnrollments: 'Total enrollments in range', totalYearEnrollments: 'Total enrollments in year', completedInYear: 'Completed in year', incompleteInYear: 'Incomplete in year', averageCompletionRateInYear: 'Average learner completion rate in year', trendBy: 'Trend by', teamBreakdown: 'Breakdown', currentTeamMembers: (team) => `Current ${team} members`, averageProgress: 'Average progress', rank: 'Rank', course: 'Course', courseRanking: 'Course ranking', courseCompletionRanking: 'Course completion ranking', username: 'Username', fullName: 'Full name', learnerList: 'Learner list', learnerListInScope: 'Learners in the selected scope', latestCompletion: 'Latest completion', courseLearnerDetail: 'Course-learner detail', courseEnrollmentDetail: 'Course enrollment detail', status: 'Status', progress: 'Progress', completedInPeriod: 'Completed in period', enrolledAt: 'Enrolled at', completedAt: 'Completed at', yes: 'Yes', no: 'No', statuses: { completed: 'Completed', learning: 'In progress', not_started: 'Not started' }, months: ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'],
-  },
-};
-
-export function normalizeReportExcelLocale(value: unknown): ReportExcelLocale {
-  return value === 'en' ? 'en' : 'vi';
-}
-
-export function getReportExcelCopy(locale: ReportExcelLocale): ReportExcelCopy {
-  return REPORT_EXCEL_COPY[locale];
-}
-
-/** Localized default level names, as the dashboard shows them without tenant labels. */
-const DEFAULT_EXCEL_LEVEL_LABELS: Record<ReportExcelLocale, ExportLabels> = {
-  vi: { group: 'Công ty', subgroup: 'Chi nhánh', team: 'Phòng ban' },
-  en: { group: 'Company', subgroup: 'Branch', team: 'Department' },
-};
-
-/**
- * Level names of the Excel export: the tenant's configured label (the name
- * every screen shows) first, then the name the client sent, then the
- * localized default.
- */
-export function resolveReportExcelLabels(
-  tenantLabels: Partial<Record<keyof ExportLabels, string>>,
-  requested: Partial<Record<keyof ExportLabels, unknown>>,
-  locale: ReportExcelLocale,
-): ExportLabels {
-  const pick = (key: keyof ExportLabels): string => {
-    const configured = tenantLabels[key]?.trim();
-    if (configured) return configured;
-    const sent = requested[key];
-    return (typeof sent === 'string' && sent.trim()) || DEFAULT_EXCEL_LEVEL_LABELS[locale][key];
-  };
-  return { group: pick('group'), subgroup: pick('subgroup'), team: pick('team') };
-}
-
-export function buildReportExcelFileName(
-  locale: ReportExcelLocale,
-  dateRange: ReportDateRange | undefined,
-  month: number | undefined,
-  year: number,
-): string {
-  const prefix = locale === 'en' ? 'learning-report' : 'bao-cao-tong-hop';
-  if (dateRange) return `${prefix}-${dateRange.dateFrom}-${locale === 'en' ? 'to' : 'den'}-${dateRange.dateTo}.xlsx`;
-  return `${prefix}-${month ? `${month}-` : ''}${year}.xlsx`;
-}
-
-function courseNameSlug(courseName: string): string {
-  const slug = courseName
-    .replace(/[Đđ]/g, character => character === 'Đ' ? 'D' : 'd')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80)
-    .replace(/-+$/g, '');
-  return slug || 'khoa-hoc';
-}
-
-export function buildCourseLearnerExcelFileName(
-  locale: ReportExcelLocale,
-  courseName: string,
-  dateRange: ReportDateRange | undefined,
-  month: number | undefined,
-  year: number,
-): string {
-  const prefix = locale === 'en' ? 'course-learners' : 'chi-tiet-hoc-vien';
-  const period = dateRange
-    ? `${dateRange.dateFrom}-${locale === 'en' ? 'to' : 'den'}-${dateRange.dateTo}`
-    : `${month ? `${month}-` : ''}${year}`;
-  return `${prefix}-${courseNameSlug(courseName)}-${period}.xlsx`;
-}
-
-const EXCEL_MAX_ROWS = 1_048_576;
 const STREAM_BATCH_SIZE = 5_000;
-
-const COLORS = {
-  navy: 'FF0F172A',
-  blue: 'FF2563EB',
-  blueSoft: 'FFEFF6FF',
-  indigo: 'FF4F46E5',
-  emerald: 'FF059669',
-  emeraldSoft: 'FFE8FFF6',
-  amber: 'FFD97706',
-  amberSoft: 'FFFFF7E6',
-  slate: 'FF64748B',
-  slateSoft: 'FFF8FAFC',
-  red: 'FFDC2626',
-  white: 'FFFFFFFF',
-  border: 'FFD8E1EE',
-  headerBg: 'FF1E293B',
-};
-
-const thinBorder: Partial<ExcelJS.Borders> = {
-  top: { style: 'thin', color: { argb: COLORS.border } },
-  left: { style: 'thin', color: { argb: COLORS.border } },
-  bottom: { style: 'thin', color: { argb: COLORS.border } },
-  right: { style: 'thin', color: { argb: COLORS.border } },
-};
-
-function getMonthRange(year: number, month: number): { startDate: Date; endDate: Date } {
-  return {
-    startDate: new Date(year, month - 1, 1),
-    endDate: new Date(year, month, 0, 23, 59, 59, 999),
-  };
-}
-
-function getPeriodRange(year: number, month?: number): { startDate: Date; endDate: Date } {
-  if (month) return getMonthRange(year, month);
-  return {
-    startDate: new Date(year, 0, 1),
-    endDate: new Date(year, 11, 31, 23, 59, 59, 999),
-  };
-}
-
-
-
-function getExportPeriodRange(options: ReportExcelExportOptions): { startDate: Date; endDate: Date } {
-  if (options.dateRange) return options.dateRange;
-  return getPeriodRange(options.year, options.month);
-}
-
-
-
-function getExportPeriodLabel(options: ReportExcelExportOptions): string {
-  const copy = getReportExcelCopy(options.locale);
-  if (options.dateRange) {
-    return `${formatExportDate(options.dateRange.dateFrom, options.locale)} ${copy.dateRangeSeparator} ${formatExportDate(options.dateRange.dateTo, options.locale)}`;
-  }
-  return options.month ? `${copy.months[options.month]}/${options.year}` : `${copy.year} ${options.year}`;
-}
-
-function formatExportDate(value: string, locale: ReportExcelLocale): string {
-  const [year, month, day] = value.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return new Intl.DateTimeFormat(locale === 'en' ? 'en-GB' : 'vi-VN', {
-    day: '2-digit',
-    month: locale === 'en' ? 'short' : '2-digit',
-    year: 'numeric',
-    timeZone: 'UTC',
-  }).format(date);
-}
-
-function dateTimeNumberFormat(locale: ReportExcelLocale): string {
-  return locale === 'en' ? 'dd mmm yyyy hh:mm' : 'dd/mm/yyyy hh:mm';
-}
-
-function formatHierarchyPeriodLabel(item: HierarchyTrendRow, locale: ReportExcelLocale): string {
-  const copy = getReportExcelCopy(locale);
-  const month = Number(item.period_month);
-  const year = Number(item.period_year);
-  if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year)) return '';
-  return locale === 'en' ? `${copy.months[month]} ${year}` : `${copy.months[month]}/${year}`;
-}
-
-function toNumber(value: unknown): number {
-  const numeric = Number(value ?? 0);
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function roundPercent(value: unknown): number {
-  return Math.round(Math.min(Math.max(toNumber(value), 0), 100) * 100) / 100;
-}
-
-function statusText(status: string, locale: ReportExcelLocale): string {
-  const statuses = getReportExcelCopy(locale).statuses;
-  if (status === 'completed') return statuses.completed;
-  if (status === 'learning') return statuses.learning;
-  return statuses.not_started;
-}
-
-function statusColor(status: string): string {
-  if (status === 'completed') return COLORS.emerald;
-  if (status === 'learning') return COLORS.amber;
-  return COLORS.slate;
-}
-
-function safeSheetName(baseName: string, index?: number): string {
-  const suffix = index && index > 1 ? ` ${index}` : '';
-  return `${baseName}${suffix}`.replace(/[\\/*?:[\]]/g, ' ').slice(0, 31);
-}
-
-function lowerLabel(label: string, locale: ReportExcelLocale): string {
-  return label.trim().toLocaleLowerCase(locale === 'en' ? 'en-US' : 'vi-VN');
-}
-
-function addStyledRow(
-  worksheet: ExcelJS.Worksheet,
-  values: unknown[],
-  colCount: number,
-  style: 'title' | 'subtitle' | 'header' | 'summary' | 'data' | 'spacer',
-  dataIndex = 0,
-): ExcelJS.Row {
-  const padded = [...values, ...Array(Math.max(colCount - values.length, 0)).fill('')];
-  const row = worksheet.addRow(padded);
-
-  if (style === 'spacer') {
-    row.height = 8;
-    row.commit();
-    return row;
-  }
-
-  row.height = style === 'title' ? 30 : style === 'header' ? 28 : 22;
-  for (let i = 1; i <= colCount; i++) {
-    const cell = row.getCell(i);
-    cell.border = style === 'title' || style === 'subtitle' ? {} : thinBorder;
-    cell.alignment = {
-      vertical: 'middle',
-      horizontal: style === 'header' ? 'center' : 'left',
-      wrapText: style === 'header',
-    };
-
-    if (style === 'title') {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.navy } };
-      cell.font = { name: 'Arial', size: i === 1 ? 15 : 11, bold: true, color: { argb: COLORS.white } };
-    } else if (style === 'subtitle') {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.blueSoft } };
-      cell.font = { name: 'Arial', size: 10, italic: i === 1, color: { argb: COLORS.slate } };
-    } else if (style === 'header') {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.headerBg } };
-      cell.font = { name: 'Arial', size: 10, bold: true, color: { argb: COLORS.white } };
-    } else if (style === 'summary') {
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COLORS.blueSoft } };
-      cell.font = { name: 'Arial', size: 10, bold: i === 1, color: { argb: i === 1 ? COLORS.navy : COLORS.slate } };
-    } else {
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: dataIndex % 2 === 0 ? COLORS.white : COLORS.slateSoft },
-      };
-      cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy } };
-    }
-  }
-
-  row.commit();
-  return row;
-}
-
-function addWorksheetChrome(
-  workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-  name: string,
-  title: string,
-  subtitle: string,
-  columns: ColumnDef[],
-): ExcelJS.Worksheet {
-  const worksheet = workbook.addWorksheet(safeSheetName(name), {
-    views: [{ state: 'frozen', ySplit: 4 }],
-    properties: { defaultRowHeight: 20 },
-  });
-  worksheet.columns = columns.map(col => ({ key: col.key, width: col.width }));
-
-  addStyledRow(worksheet, [title], columns.length, 'title');
-  addStyledRow(worksheet, [subtitle], columns.length, 'subtitle');
-  addStyledRow(worksheet, [], columns.length, 'spacer');
-  addStyledRow(worksheet, columns.map(col => col.header), columns.length, 'header');
-  worksheet.autoFilter = {
-    from: { row: 4, column: 1 },
-    to: { row: 4, column: columns.length },
-  };
-
-  return worksheet;
-}
-
-class SplitWorksheetWriter {
-  private worksheet: ExcelJS.Worksheet | null = null;
-  private sheetIndex = 0;
-  private currentRowCount = 0;
-  private dataRowCount = 0;
-
-  constructor(
-    private readonly workbook: ExcelJS.stream.xlsx.WorkbookWriter,
-    private readonly baseName: string,
-    private readonly title: string,
-    private readonly subtitle: string,
-    private readonly columns: ColumnDef[],
-  ) {
-    this.openNextSheet();
-  }
-
-  addRow(values: unknown[], customize?: (row: ExcelJS.Row) => void): void {
-    if (!this.worksheet) this.openNextSheet();
-    if (this.currentRowCount >= EXCEL_MAX_ROWS - 1) this.openNextSheet();
-
-    const row = this.worksheet!.addRow(values);
-    row.height = 22;
-    for (let i = 1; i <= this.columns.length; i++) {
-      const cell = row.getCell(i);
-      cell.border = thinBorder;
-      cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: false };
-      cell.fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: this.dataRowCount % 2 === 0 ? COLORS.white : COLORS.slateSoft },
-      };
-      cell.font = { name: 'Arial', size: 10, color: { argb: COLORS.navy } };
-    }
-    customize?.(row);
-    row.commit();
-    this.currentRowCount++;
-    this.dataRowCount++;
-  }
-
-  finish(): void {
-    this.worksheet?.commit();
-    this.worksheet = null;
-  }
-
-  private openNextSheet(): void {
-    this.worksheet?.commit();
-    this.sheetIndex++;
-    this.currentRowCount = 4;
-    this.worksheet = addWorksheetChrome(
-      this.workbook,
-      safeSheetName(this.baseName, this.sheetIndex),
-      this.title,
-      this.subtitle,
-      this.columns,
-    );
-  }
-}
 
 async function resolveScopeNames(tenantId: string, scope: ExportScope, locale: ReportExcelLocale): Promise<ScopeNames> {
   const all = getReportExcelCopy(locale).all;
