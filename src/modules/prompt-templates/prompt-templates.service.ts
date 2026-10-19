@@ -9,24 +9,17 @@ import { uploadFile, buildFileName, deleteFileByUrl } from '../../config/storage
 import type { CreateTemplateInput, UpdateTemplateInput } from './prompt-templates.validator.js';
 import { AppError } from '../../utils/errors.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  createPromptTemplatesRepository,
+  type PromptTemplateRow,
+  type PromptTemplatesDb,
+} from './prompt-templates.repository.js';
 
 const MAX_ACTIVE = 6;
 
-export interface PromptTemplate {
-  id: string;
-  name: string;
-  description: string;
-  prompt: string;
-  voice_prompt: string | null;
-  avatar_url: string | null;
-  fullbody_url: string | null;
-  is_active: boolean;
-  is_lesson_author: boolean;
-  sort_order: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type PromptTemplate = PromptTemplateRow;
+
+const templatesRepository = createPromptTemplatesRepository({ query } satisfies PromptTemplatesDb);
 
 // ── Default mascot avatars (indexed by sort_order % 6) ──
 // SVG data-URIs so every template has a unique placeholder when no image is uploaded
@@ -71,27 +64,15 @@ export function getDefaultFullbody(name: string, index: number): string {
 // ── CRUD ──
 
 export async function listTemplates(): Promise<PromptTemplate[]> {
-  const result = await query<PromptTemplate>(
-    `SELECT * FROM system_prompt_templates ORDER BY sort_order ASC, created_at ASC`,
-  );
-  return result.rows;
+  return templatesRepository.selectAll();
 }
 
 export async function getTemplate(id: string): Promise<PromptTemplate | null> {
-  const result = await query<PromptTemplate>(
-    `SELECT * FROM system_prompt_templates WHERE id = $1`,
-    [id],
-  );
-  return result.rows[0] || null;
+  return (await templatesRepository.selectById(id)) || null;
 }
 
 export async function getActiveCount(): Promise<number> {
-  const r = await query<{ cnt: string }>(
-    `SELECT COUNT(*)::text AS cnt
-     FROM system_prompt_templates
-     WHERE is_active = true AND is_lesson_author = false`,
-  );
-  return parseInt(r.rows[0]?.cnt || '0');
+  return parseInt((await templatesRepository.countActive()) || '0');
 }
 
 /** What any signed-in user may see of an active mascot (no prompts). */
@@ -100,24 +81,11 @@ export type PromptTemplateCard = Pick<PromptTemplate, 'id' | 'name' | 'descripti
 /** Active mascots for the bot persona picker: display fields only — the
  * system prompts stay with the superadmin endpoints. */
 export async function listActiveTemplates(): Promise<PromptTemplateCard[]> {
-  const result = await query<PromptTemplateCard>(
-    `SELECT id, name, description, avatar_url, fullbody_url, sort_order
-     FROM system_prompt_templates
-     WHERE is_active = true AND is_lesson_author = false
-     ORDER BY sort_order ASC, created_at ASC
-     LIMIT ${MAX_ACTIVE}`,
-  );
-  return result.rows;
+  return templatesRepository.selectActiveCards(MAX_ACTIVE);
 }
 
 export async function getActiveLessonAuthorTemplate(): Promise<PromptTemplate | null> {
-  const result = await query<PromptTemplate>(
-    `SELECT *
-     FROM system_prompt_templates
-     WHERE is_lesson_author = true
-     LIMIT 1`,
-  );
-  return result.rows[0] || null;
+  return (await templatesRepository.selectLessonAuthor()) || null;
 }
 
 async function setLessonAuthorTemplate(id: string, enabled: boolean): Promise<PromptTemplate | null> {
@@ -125,36 +93,19 @@ async function setLessonAuthorTemplate(id: string, enabled: boolean): Promise<Pr
   // A transaction-scoped advisory lock serializes the singleton even when no
   // current lesson-author row exists; the partial unique index remains the
   // database backstop.
-  await query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['system_prompt_templates:lesson_author']);
-  const existing = await query<PromptTemplate>(
-    `SELECT * FROM system_prompt_templates WHERE id = $1 FOR UPDATE`,
-    [id],
-  );
-  if (!existing.rows[0]) return null;
+  await templatesRepository.advisoryLock('system_prompt_templates:lesson_author');
+  const existing = await templatesRepository.lockById(id);
+  if (!existing) return null;
 
   if (enabled) {
-    await query(
-      `UPDATE system_prompt_templates
-       SET is_lesson_author = false, updated_at = now()
-       WHERE is_lesson_author = true AND id <> $1`,
-      [id],
-    );
+    await templatesRepository.clearOtherLessonAuthors(id);
   }
 
-  const updated = await query<PromptTemplate>(
-    `UPDATE system_prompt_templates
-     SET is_lesson_author = $2,
-         is_active = CASE WHEN $2 = true THEN false ELSE is_active END,
-         updated_at = now()
-     WHERE id = $1
-     RETURNING *`,
-    [id, enabled],
-  );
-  return updated.rows[0] || null;
+  return (await templatesRepository.setLessonAuthor(id, enabled)) || null;
 }
 
 async function lockPromptTemplateCapacity(): Promise<void> {
-  await query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['system_prompt_templates:capacity']);
+  await templatesRepository.advisoryLock('system_prompt_templates:capacity');
 }
 
 export async function createTemplate(input: CreateTemplateInput, userId: string): Promise<PromptTemplate> {
@@ -167,21 +118,15 @@ export async function createTemplate(input: CreateTemplateInput, userId: string)
     }
   }
 
-  const result = await query<PromptTemplate>(
-    `INSERT INTO system_prompt_templates (name, description, prompt, voice_prompt, is_active, sort_order, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING *`,
-    [
-      input.name,
-      input.description || '',
-      input.prompt,
-      input.voice_prompt?.trim() || null,
-      input.is_lesson_author ? false : (input.is_active || false),
-      input.sort_order || 0,
-      userId,
-    ],
-  );
-  const created = result.rows[0];
+  const created = await templatesRepository.insert({
+    name: input.name,
+    description: input.description || '',
+    prompt: input.prompt,
+    voicePrompt: input.voice_prompt?.trim() || null,
+    isActive: input.is_lesson_author ? false : (input.is_active || false),
+    sortOrder: input.sort_order || 0,
+    createdBy: userId,
+  });
   if (input.is_lesson_author) {
     const lessonAuthorTemplate = await setLessonAuthorTemplate(created.id, true);
     return lessonAuthorTemplate || created;
@@ -210,24 +155,16 @@ export async function updateTemplate(id: string, input: UpdateTemplateInput): Pr
     }
   }
 
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const columns: Array<[string, unknown]> = [];
+  if (input.name !== undefined) { columns.push(['name', input.name]); }
+  if (input.description !== undefined) { columns.push(['description', input.description]); }
+  if (input.prompt !== undefined) { columns.push(['prompt', input.prompt]); }
+  if (input.voice_prompt !== undefined) { columns.push(['voice_prompt', input.voice_prompt?.trim() || null]); }
+  if (input.is_active !== undefined) { columns.push(['is_active', input.is_active]); }
+  if (input.sort_order !== undefined) { columns.push(['sort_order', input.sort_order]); }
 
-  if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
-  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-  if (input.prompt !== undefined) { sets.push(`prompt = $${idx++}`); params.push(input.prompt); }
-  if (input.voice_prompt !== undefined) { sets.push(`voice_prompt = $${idx++}`); params.push(input.voice_prompt?.trim() || null); }
-  if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
-  if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
-  sets.push('updated_at = now()');
-
-  if (sets.length > 1) {
-    params.push(id);
-    await query<PromptTemplate>(
-      `UPDATE system_prompt_templates SET ${sets.join(', ')} WHERE id = $${idx++} RETURNING *`,
-      params,
-    );
+  if (columns.length > 0) {
+    await templatesRepository.update(id, columns);
   }
 
   if (input.is_lesson_author !== undefined) {
@@ -242,13 +179,11 @@ export async function deleteTemplate(id: string, auditEntry?: TransactionalAudit
   let removed: Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'> | null = null;
   try {
     await client.query('BEGIN');
-    const current = await client.query<Pick<PromptTemplate, 'avatar_url' | 'fullbody_url'>>(
-      'SELECT avatar_url, fullbody_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
-      [id],
-    );
+    const repository = createPromptTemplatesRepository(client);
+    const current = await repository.lockImages(id);
     if (current.rowCount === 0) { await client.query('COMMIT'); return false; }
     removed = current.rows[0];
-    await client.query('DELETE FROM system_prompt_templates WHERE id = $1', [id]);
+    await repository.delete(id);
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
@@ -290,17 +225,11 @@ export async function uploadAvatar(
   let updated: PromptTemplate | null = null;
   try {
     await client.query('BEGIN');
-    const current = await client.query<{ avatar_url: string | null }>(
-      'SELECT avatar_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
-      [id],
-    );
+    const repository = createPromptTemplatesRepository(client);
+    const current = await repository.lockImage(id, 'avatar_url');
     if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup')); return null; }
     oldPath = current.rows[0].avatar_url;
-    const result = await client.query<PromptTemplate>(
-      `UPDATE system_prompt_templates SET avatar_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
-      [storagePath, id],
-    );
-    updated = result.rows[0] || null;
+    updated = (await repository.setImage(id, 'avatar_url', storagePath)) || null;
     if (!updated) throw new AppError('Không thể cập nhật ảnh đại diện', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
@@ -329,17 +258,11 @@ export async function uploadFullbody(
   let updated: PromptTemplate | null = null;
   try {
     await client.query('BEGIN');
-    const current = await client.query<{ fullbody_url: string | null }>(
-      'SELECT fullbody_url FROM system_prompt_templates WHERE id = $1 FOR UPDATE',
-      [id],
-    );
+    const repository = createPromptTemplatesRepository(client);
+    const current = await repository.lockImage(id, 'fullbody_url');
     if (current.rowCount === 0) { await client.query('ROLLBACK'); await deleteFileByUrl(storagePath).catch(swallowAndLog('prompt_templates.image_cleanup')); return null; }
     oldPath = current.rows[0].fullbody_url;
-    const result = await client.query<PromptTemplate>(
-      `UPDATE system_prompt_templates SET fullbody_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
-      [storagePath, id],
-    );
-    updated = result.rows[0] || null;
+    updated = (await repository.setImage(id, 'fullbody_url', storagePath)) || null;
     if (!updated) throw new AppError('Không thể cập nhật ảnh toàn thân', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(updated));
     await client.query('COMMIT');
