@@ -9,6 +9,7 @@ import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import { isShuttingDown } from './config/process-lifecycle.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { errorBody } from './utils/errors.js';
 import { authenticatedUserOrIpRateLimitKey } from './middleware/rate-limit-key.js';
 import { apiLimiter } from './middleware/auth-rate-limit.js';
 import { SharedRateLimitStore } from './middleware/rate-limit-store.js';
@@ -113,7 +114,7 @@ const demoLoginLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 120,
   ...sharedLimiterStore('demo-login'),
-  message: { success: false, message: 'Quá nhiều request demo login, vui lòng thử lại sau' },
+  message: errorBody(429, 'Quá nhiều request demo login, vui lòng thử lại sau', 'DEMO_LOGIN_RATE_LIMITED'),
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -159,7 +160,7 @@ const studySessionLimiter = rateLimit({
   max: 30,                    // 30 requests/phút — FE gửi max 7 entries khi đóng tab
   keyGenerator: authenticatedUserOrIpRateLimitKey,
   ...sharedLimiterStore('study-session'),
-  message: { success: false, message: 'Quá nhiều request study session' },
+  message: errorBody(429, 'Quá nhiều request study session', 'STUDY_SESSION_RATE_LIMITED'),
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -192,7 +193,7 @@ app.use('/api/sso', ssoRoutes);
 
 // ── 404 Handler ──
 app.use(function notFoundHandler(_req, res) {
-  res.status(404).json({ success: false, message: 'Endpoint không tồn tại' });
+  res.status(404).json(errorBody(404, 'Endpoint không tồn tại', 'ROUTE_NOT_FOUND'));
 });
 
 // ── Global Error Handler (phải đặt cuối cùng) ──

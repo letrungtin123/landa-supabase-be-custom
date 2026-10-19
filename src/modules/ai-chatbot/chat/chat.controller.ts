@@ -20,6 +20,7 @@ import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../m
 import { query } from '../../../config/database.js';
 import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../../config/cache-invalidation.js';
 import { AppError } from '../../../middleware/error-handler.js';
+import { errorBody } from '../../../utils/errors.js';
 import { hasPermission } from '../../../middleware/authorize.js';
 import { sendSuccess, sendError } from '../../../utils/response.js';
 import { isIsoTimestamp, sendClientError } from '../../../utils/client-error.js';
@@ -75,11 +76,8 @@ function sendReportChatError(res: Response, code: ReportChatErrorCode, locale: '
 
 function sendLessonAuthorApplyError(res: Response, error: unknown): void {
   if (error instanceof AppError) {
-    res.status(error.statusCode).json({
-      success: false,
-      message: error.message,
-      ...(error.code ? { code: error.code } : {}),
-    });
+    // An AppError without a code of its own gets the code of its status.
+    res.status(error.statusCode).json(errorBody(error.statusCode, error.message, error.code));
     return;
   }
 

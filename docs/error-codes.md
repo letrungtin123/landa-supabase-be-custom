@@ -86,6 +86,9 @@ None of these collides with a code or a prefix the frontends branch on
 | `PERMISSION_DENIED` | 403 | The permission group does not allow this action on the module. | `middleware/authorize.ts` (`checkPermission`) |
 | `MODULE_DISABLED` | 403 | The feature is turned off for the tenant. Also sent as `error` by `requireTenantModule`. | `middleware/authorize.ts`, `middleware/require-tenant-module.ts` |
 | `TENANT_REQUIRED` | 403 | The user belongs to no tenant. Also sent as `error`. | `middleware/require-tenant-module.ts` |
+| `ROUTE_NOT_FOUND` | 404 | No endpoint at this path ("Endpoint không tồn tại"). | `app.ts` (404 handler) |
+| `DEMO_LOGIN_RATE_LIMITED` | 429 | More than 120 demo-login requests a minute. | `app.ts` (`demoLoginLimiter`) |
+| `STUDY_SESSION_RATE_LIMITED` | 429 | More than 30 study-session requests a minute. | `app.ts` (`studySessionLimiter`) |
 | `LOGIN_RATE_LIMITED` | 429 | Too many failed sign-ins for the account or the IP. | `middleware/auth-rate-limit.ts` |
 | `REFRESH_RATE_LIMITED` | 429 | Too many session refreshes for the token or the IP. | `middleware/auth-rate-limit.ts` |
 | `PASSWORD_CHANGE_RATE_LIMITED` | 429 | Too many password change attempts. | `middleware/auth-rate-limit.ts` |
@@ -260,9 +263,13 @@ JSON).
 `modules/ai-chatbot`, `modules/reports` and `modules/learner` are being moved
 or refactored in parallel lanes; their codes are not reviewed here. Through
 the shared layers above, every error body they send through the global
-handler, `sendError` or `sendClientError` already carries a code. Their own
-hand-written bodies, and the 404 and rate-limit answers in `src/app.ts`, are
-not covered yet (see the follow-ups of BE-S8).
+handler, `sendError` or `sendClientError` already carries a code. Their
+hand-written HTTP error bodies carry one too: the lesson author apply refusal
+(`chat.controller.ts`) gets the code of its status when its AppError has none,
+and the last plain-object throw (`ai-report/report-date.logic.ts`, an invalid
+comparison range) is a `ReportRequestError` (400, same message, no code of its
+own, so `BAD_REQUEST`). The chat stream's SSE `error` events are events, not
+error bodies, and are unchanged (a `code` only when the error has one).
 
 Inventory from an AST scan of `src` (2026-10-19): codes raised with a status
 (`new AppError`, a `[status, vi, en]` table, a `{ code }` body). Keys of three
