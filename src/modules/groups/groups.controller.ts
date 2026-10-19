@@ -4,7 +4,14 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './groups.service.js';
-import { createOrgGroupSchema, createSubGroupSchema, createTeamSchema } from './groups.validator.js';
+import {
+  createOrgGroupSchema,
+  createSubGroupSchema,
+  createTeamSchema,
+  groupAuditLogsQuerySchema,
+  groupPageQuerySchema,
+  groupSearchQuerySchema,
+} from './groups.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import {
   createTransactionalAuditEntry,
@@ -19,7 +26,7 @@ import { invalidateReportOrgUnitCatalog } from '../ai-chatbot/ai-report/report-o
 export async function listOrgGroupsController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    sendSuccess(res, await svc.listOrgGroups(tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listOrgGroups(tenantId, groupPageQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -30,7 +37,7 @@ export async function createOrgGroupController(req: Request, res: Response, next
     const parsed = createOrgGroupSchema.safeParse(req.body);
     if (!parsed.success) { sendError(res, parsed.error.errors[0].message, 400); return; }
     const group = await runAuditedTransaction(
-      () => svc.createOrgGroup(tenantId, req.body),
+      () => svc.createOrgGroup(tenantId, parsed.data),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'org_group', { code: 'group.org.created' }, created.id, created.name),
     );
     await invalidateReportOrgUnitCatalog(tenantId);
@@ -82,7 +89,7 @@ export async function listSubGroupsController(req: Request, res: Response, next:
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    sendSuccess(res, await svc.listSubGroups(req.params.groupId, tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listSubGroups(req.params.groupId, tenantId, groupSearchQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -93,7 +100,7 @@ export async function createSubGroupController(req: Request, res: Response, next
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const sg = await runAuditedTransaction(
-      () => svc.createSubGroup(req.params.groupId, tenantId, req.body),
+      () => svc.createSubGroup(req.params.groupId, tenantId, parsed.data),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'sub_group', { code: 'group.sub.created' }, created.id, created.name),
     );
     await invalidateReportOrgUnitCatalog(tenantId);
@@ -153,7 +160,7 @@ export async function listTeamsController(req: Request, res: Response, next: Nex
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    sendSuccess(res, await svc.listTeams(req.params.subgroupId, tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listTeams(req.params.subgroupId, tenantId, groupSearchQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -164,7 +171,7 @@ export async function createTeamController(req: Request, res: Response, next: Ne
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
     const team = await runAuditedTransaction(
-      () => svc.createTeam(req.params.subgroupId, tenantId, req.body),
+      () => svc.createTeam(req.params.subgroupId, tenantId, parsed.data),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'team', { code: 'group.team.created' }, created.id, created.name),
     );
     await invalidateReportOrgUnitCatalog(tenantId);
@@ -184,7 +191,7 @@ export async function listTeamMembersController(req: Request, res: Response, nex
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    sendSuccess(res, await svc.listTeamMembers(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listTeamMembers(req.params.teamId, tenantId, groupPageQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -192,7 +199,7 @@ export async function listTeamDocCategoriesController(req: Request, res: Respons
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    sendSuccess(res, await svc.listTeamDocCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listTeamDocCategories(req.params.teamId, tenantId, groupPageQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -200,7 +207,7 @@ export async function listTeamCourseCategoriesController(req: Request, res: Resp
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    sendSuccess(res, await svc.listTeamCourseCategories(req.params.teamId, tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listTeamCourseCategories(req.params.teamId, tenantId, groupPageQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -443,6 +450,6 @@ export async function groupAuditLogsController(req: Request, res: Response, next
   try {
     const tenantId = req.user!.tenantId;
     res.setHeader('Cache-Control', 'private, no-store');
-    sendSuccess(res, await svc.getGroupAuditLogs(tenantId, req.user!.role, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.getGroupAuditLogs(tenantId, req.user!.role, groupAuditLogsQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }

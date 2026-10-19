@@ -12,11 +12,6 @@ import {
 } from '../../config/cache-invalidation.js';
 import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
-import {
-  appendAuditLogViewerScopeFilter,
-  AUDIT_LOG_PUBLIC_SELECT_COLUMNS,
-  AUDIT_LOG_RETENTION_DAYS,
-} from '../audit-logs/audit-logs.service.js';
 import type { UserRole } from '../../types/index.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
@@ -33,6 +28,15 @@ import {
   assertUserNotActiveDemoIframeAccount,
   getActiveDemoIframeUserIds,
 } from '../demo-login/demo-iframe.service.js';
+import { createGroupsRepository, type GroupsDb } from './groups.repository.js';
+import { createGroupAssignmentsRepository } from './group-assignments.repository.js';
+import { createGroupAuditLogsRepository } from './group-audit-logs.repository.js';
+
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: GroupsDb = { query };
+const groupsRepository = createGroupsRepository(poolDb);
+const assignmentsRepository = createGroupAssignmentsRepository(poolDb);
+const auditLogsRepository = createGroupAuditLogsRepository(poolDb);
 
 interface AddTeamMembersOptions {
   tenantId: string;
@@ -46,15 +50,7 @@ interface CourseCategorySummary {
 }
 
 async function getTeamTenantId(teamId: string): Promise<string | null> {
-  const result = await query<{ tenant_id: string }>(
-    `SELECT og.tenant_id
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $1`,
-    [teamId],
-  );
-  return result.rows[0]?.tenant_id ?? null;
+  return groupsRepository.selectTeamTenantId(teamId);
 }
 
 async function assertTeamInTenant(teamId: string, tenantId: string): Promise<void> {
@@ -69,237 +65,111 @@ async function assertTeamInTenant(teamId: string, tenantId: string): Promise<voi
 export async function listOrgGroups(tenantId: string | null, queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [];
-  const conditions: string[] = [];
-
-  if (tenantId) { params.push(tenantId); conditions.push(`og.tenant_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conditions.push(`og.name ILIKE $${params.length}`); }
-
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM org_groups og ${where}`, params),
-    query(
-      `SELECT og.*, (SELECT COUNT(*) FROM sub_groups sg WHERE sg.org_group_id = og.id) AS subgroup_count
-       FROM org_groups og ${where}
-       ORDER BY og.created_at DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { tenantId, search };
+  const [countR, rows] = await Promise.all([
+    groupsRepository.countOrgGroups(filter),
+    groupsRepository.selectOrgGroupPage(filter, pageSize, offset),
   ]);
-  const total = parseInt(countR.rows[0].count, 10);
-  return { groups: dataR.rows, total, page, page_size: pageSize };
+  const total = parseInt(countR.count, 10);
+  return { groups: rows, total, page, page_size: pageSize };
 }
 
 export async function createOrgGroup(tenantId: string, input: { name: string; description?: string }) {
-  const result = await query(
-    'INSERT INTO org_groups (tenant_id, name, description) VALUES ($1, $2, $3) RETURNING id, name',
-    [tenantId, input.name, input.description || ''],
-  );
-  return result.rows[0];
+  return groupsRepository.insertOrgGroup(tenantId, input.name, input.description || '');
 }
 
 export async function updateOrgGroup(id: string, tenantId: string, input: { name?: string; description?: string }) {
-  const before = await query<{ name: string }>(
-    'SELECT name FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE',
-    [id, tenantId],
-  );
-  if (before.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
-  if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
-  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-  if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
-  params.push(id, tenantId);
-  const result = await query(
-    `UPDATE org_groups SET ${sets.join(', ')} WHERE id = $${idx} AND tenant_id = $${idx + 1}::uuid RETURNING id, name`,
-    params,
-  );
-  if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
-  return { ...result.rows[0], previousName: before.rows[0].name };
+  const before = await groupsRepository.lockOrgGroupName(id, tenantId);
+  if (!before) throw new AppError('Nhóm không tồn tại', 404);
+  if (input.name === undefined && input.description === undefined) throw new AppError('Không có dữ liệu', 400);
+  const updated = await groupsRepository.updateOrgGroupFields(id, tenantId, input);
+  if (!updated) throw new AppError('Nhóm không tồn tại', 404);
+  return { ...updated, previousName: before.name };
 }
 
 export async function deleteOrgGroup(id: string, tenantId: string) {
-  const result = await query(
-    'DELETE FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid RETURNING id, name',
-    [id, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại', 404);
-  return result.rows[0];
+  const deleted = await groupsRepository.deleteOrgGroup(id, tenantId);
+  if (!deleted) throw new AppError('Nhóm không tồn tại', 404);
+  return deleted;
 }
 
 // ═══ Sub Groups (level 2) ═══
 
 export async function listSubGroups(orgGroupId: string, tenantId: string, queryParams: Record<string, unknown>) {
   const search = queryParams.search as string;
-  const params: unknown[] = [orgGroupId, tenantId];
-  let searchWhere = '';
-  if (search) { params.push(`%${search}%`); searchWhere = ` AND sg.name ILIKE $3`; }
 
   // A group of another tenant yields an empty list, never its subgroups.
-  const result = await query(
-    `SELECT sg.*, (SELECT COUNT(*) FROM teams t WHERE t.sub_group_id = sg.id) AS team_count
-     FROM sub_groups sg
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE sg.org_group_id = $1 AND og.tenant_id = $2::uuid${searchWhere}
-     ORDER BY sg.name`,
-    params,
-  );
-  return { subgroups: result.rows, total: result.rowCount || 0 };
+  const result = await groupsRepository.selectSubGroups(orgGroupId, tenantId, search);
+  return { subgroups: result.rows, total: result.rowCount };
 }
 
 export async function createSubGroup(orgGroupId: string, tenantId: string, input: { name: string }) {
-  const result = await query(
-    `INSERT INTO sub_groups (org_group_id, name)
-     SELECT id, $3 FROM org_groups WHERE id = $1 AND tenant_id = $2::uuid
-     RETURNING id, name`,
-    [orgGroupId, tenantId, input.name],
-  );
-  if (result.rowCount === 0) throw new AppError('Nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
-  return result.rows[0];
+  const created = await groupsRepository.insertSubGroup(orgGroupId, tenantId, input.name);
+  if (!created) throw new AppError('Nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
+  return created;
 }
 
 export async function getSubGroupDetail(sgId: string, tenantId: string) {
   // Tenant check first: nothing below is read for another tenant's subgroup.
-  const sgR = await query(
-    `SELECT sg.*, og.name AS org_group_name, og.id AS org_group_id
-     FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE sg.id = $1 AND og.tenant_id = $2::uuid`,
-    [sgId, tenantId],
-  );
-  if (sgR.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
+  const subGroup = await groupsRepository.selectSubGroup(sgId, tenantId);
+  if (!subGroup) throw new AppError('Phân nhóm không tồn tại', 404);
 
   const [teamsR, membersR, coursesR, categoriesR, courseCatsR] = await Promise.all([
-    query('SELECT t.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id = t.id) AS member_count FROM teams t WHERE t.sub_group_id = $1 ORDER BY t.name', [sgId]),
-    query(
-      `SELECT DISTINCT u.id, u.username, u.email, u.avatar_url AS avatar, tm.added_at
-       FROM team_members tm JOIN teams t ON t.id = tm.team_id JOIN users u ON u.id = tm.user_id
-       WHERE t.sub_group_id = $1 ORDER BY tm.added_at DESC`,
-      [sgId],
-    ),
-    query(
-      `SELECT DISTINCT tc.course_id, c.display_name, tc.assigned_at
-       FROM team_courses tc JOIN teams t ON t.id = tc.team_id JOIN courses c ON c.id = tc.course_id
-       WHERE t.sub_group_id = $1`,
-      [sgId],
-    ),
-    query(
-      `SELECT DISTINCT tdc.category_id, dc.name, tdc.assigned_at
-       FROM team_doc_categories tdc JOIN teams t ON t.id = tdc.team_id JOIN document_categories dc ON dc.id = tdc.category_id
-       WHERE t.sub_group_id = $1`,
-      [sgId],
-    ),
-    query(
-      `SELECT DISTINCT tcc.category_id, cc.name, cc.slug, tcc.assigned_at
-       FROM team_course_categories tcc JOIN teams t ON t.id = tcc.team_id JOIN course_categories cc ON cc.id = tcc.category_id
-       WHERE t.sub_group_id = $1`,
-      [sgId],
-    ),
+    groupsRepository.selectSubGroupTeams(sgId),
+    groupsRepository.selectSubGroupMembers(sgId),
+    groupsRepository.selectSubGroupCourses(sgId),
+    groupsRepository.selectSubGroupDocCategories(sgId),
+    groupsRepository.selectSubGroupCourseCategories(sgId),
   ]);
 
   return {
-    ...sgR.rows[0],
-    team_count: teamsR.rowCount || 0,
+    ...subGroup,
+    team_count: teamsR.rowCount,
     teams: teamsR.rows,
-    member_count: membersR.rowCount || 0,
+    member_count: membersR.rowCount,
     members: membersR.rows,
-    course_count: coursesR.rowCount || 0,
+    course_count: coursesR.rowCount,
     courses: coursesR.rows,
-    category_count: categoriesR.rowCount || 0,
+    category_count: categoriesR.rowCount,
     categories: categoriesR.rows,
-    course_category_count: courseCatsR.rowCount || 0,
+    course_category_count: courseCatsR.rowCount,
     course_categories: courseCatsR.rows,
   };
 }
 
 export async function updateSubGroup(id: string, tenantId: string, input: { name: string }) {
-  const before = await query<{ name: string }>(
-    `SELECT sg.name
-     FROM sub_groups sg JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE sg.id = $1 AND og.tenant_id = $2::uuid FOR UPDATE OF sg`,
-    [id, tenantId],
-  );
-  if (before.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
-  const result = await query(
-    `UPDATE sub_groups sg SET name = $1
-     FROM org_groups og
-     WHERE sg.id = $2 AND sg.org_group_id = og.id AND og.tenant_id = $3::uuid
-     RETURNING sg.id, sg.name`,
-    [input.name, id, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
-  return { ...result.rows[0], previousName: before.rows[0].name };
+  const before = await groupsRepository.lockSubGroupName(id, tenantId);
+  if (!before) throw new AppError('Phân nhóm không tồn tại', 404);
+  const updated = await groupsRepository.updateSubGroupName(id, tenantId, input.name);
+  if (!updated) throw new AppError('Phân nhóm không tồn tại', 404);
+  return { ...updated, previousName: before.name };
 }
 
 export async function deleteSubGroup(id: string, tenantId: string) {
-  const result = await query(
-    `DELETE FROM sub_groups sg
-     USING org_groups og
-     WHERE sg.id = $1 AND sg.org_group_id = og.id AND og.tenant_id = $2::uuid
-     RETURNING sg.id, sg.name`,
-    [id, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại', 404);
-  return result.rows[0];
+  const deleted = await groupsRepository.deleteSubGroup(id, tenantId);
+  if (!deleted) throw new AppError('Phân nhóm không tồn tại', 404);
+  return deleted;
 }
 
 // ═══ Teams (level 3) ═══
 
 export async function listTeams(subgroupId: string, tenantId: string, queryParams: Record<string, unknown>) {
   const search = queryParams.search as string;
-  const params: unknown[] = [subgroupId, tenantId];
-  let searchWhere = '';
-  if (search) { params.push(`%${search}%`); searchWhere = ` AND t.name ILIKE $3`; }
 
-  const result = await query(
-    `SELECT t.*,
-            (SELECT COUNT(*) FROM team_members tm WHERE tm.team_id = t.id) AS member_count,
-            (SELECT COUNT(*) FROM team_courses tc WHERE tc.team_id = t.id) AS course_count,
-            (SELECT COUNT(*) FROM team_course_categories tcc WHERE tcc.team_id = t.id) AS course_category_count
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.sub_group_id = $1 AND og.tenant_id = $2::uuid${searchWhere}
-     ORDER BY t.name`,
-    params,
-  );
-  return { teams: result.rows, total: result.rowCount || 0 };
+  const result = await groupsRepository.selectTeams(subgroupId, tenantId, search);
+  return { teams: result.rows, total: result.rowCount };
 }
 
 export async function createTeam(subgroupId: string, tenantId: string, input: { name: string }) {
-  const result = await query(
-    `INSERT INTO teams (sub_group_id, name)
-     SELECT sg.id, $3
-     FROM sub_groups sg
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE sg.id = $1 AND og.tenant_id = $2::uuid
-     RETURNING id, name`,
-    [subgroupId, tenantId, input.name],
-  );
-  if (result.rowCount === 0) throw new AppError('Phân nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
-  return result.rows[0];
+  const created = await groupsRepository.insertTeam(subgroupId, tenantId, input.name);
+  if (!created) throw new AppError('Phân nhóm không tồn tại hoặc không thuộc tenant hiện tại', 404);
+  return created;
 }
 
 export async function getTeamDetail(teamId: string, tenantId: string) {
-  const teamR = await query(
-    `SELECT t.*,
-            sg.name AS subgroup_name,
-            og.id AS org_group_id,
-            og.name AS org_group_name,
-            (SELECT COUNT(*)::int FROM team_members tm WHERE tm.team_id = t.id) AS member_count,
-            (SELECT COUNT(*)::int FROM team_courses tc WHERE tc.team_id = t.id) AS course_count,
-            (SELECT COUNT(*)::int FROM team_doc_categories tdc WHERE tdc.team_id = t.id) AS category_count,
-            (SELECT COUNT(*)::int FROM team_course_categories tcc WHERE tcc.team_id = t.id) AS course_category_count
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $1 AND og.tenant_id = $2::uuid`,
-    [teamId, tenantId],
-  );
+  const team = await groupsRepository.selectTeamDetail(teamId, tenantId);
+  if (!team) throw new AppError('Team không tồn tại', 404);
 
-  if (teamR.rowCount === 0) throw new AppError('Team không tồn tại', 404);
-
-  const team = teamR.rows[0];
   return {
     ...team,
     member_count: Number(team.member_count || 0),
@@ -320,47 +190,14 @@ export async function listTeamMembers(
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [teamId];
-  const conditions = ['tm.team_id = $1::uuid'];
-
-  params.push(tenantId);
-  conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(
-      u.username ILIKE $${params.length}
-      OR u.email ILIKE $${params.length}
-      OR u.full_name ILIKE $${params.length}
-    )`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const from = `FROM team_members tm
-    JOIN teams t ON t.id = tm.team_id
-    JOIN sub_groups sg ON sg.id = t.sub_group_id
-    JOIN org_groups og ON og.id = sg.org_group_id
-    JOIN users u ON u.id = tm.user_id`;
-
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
-    query(
-      `SELECT u.id,
-              u.username,
-              u.email,
-              u.full_name,
-              u.avatar_url AS avatar,
-              tm.added_at
-       ${from}
-       ${where}
-       ORDER BY tm.added_at DESC, u.id
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { teamId, tenantId, search };
+  const [total, rows] = await Promise.all([
+    groupsRepository.countTeamMembers(filter),
+    groupsRepository.selectTeamMemberPage(filter, pageSize, offset),
   ]);
 
-  const total = parseInt(countR.rows[0]?.count || '0', 10);
   return {
-    data: dataR.rows,
+    data: rows,
     total,
     page,
     pageSize,
@@ -375,40 +212,14 @@ export async function listTeamDocCategories(
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [teamId];
-  const conditions = ['tdc.team_id = $1::uuid'];
-
-  params.push(tenantId);
-  conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`unaccent(dc.name) ILIKE unaccent($${params.length})`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const from = `FROM team_doc_categories tdc
-    JOIN teams t ON t.id = tdc.team_id
-    JOIN sub_groups sg ON sg.id = t.sub_group_id
-    JOIN org_groups og ON og.id = sg.org_group_id
-    JOIN document_categories dc ON dc.id = tdc.category_id`;
-
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
-    query(
-      `SELECT tdc.category_id,
-              dc.name,
-              tdc.assigned_at
-       ${from}
-       ${where}
-       ORDER BY tdc.assigned_at DESC, dc.name
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { teamId, tenantId, search };
+  const [total, rows] = await Promise.all([
+    groupsRepository.countTeamDocCategories(filter),
+    groupsRepository.selectTeamDocCategoryPage(filter, pageSize, offset),
   ]);
 
-  const total = parseInt(countR.rows[0]?.count || '0', 10);
   return {
-    data: dataR.rows,
+    data: rows,
     total,
     page,
     pageSize,
@@ -423,41 +234,14 @@ export async function listTeamCourseCategories(
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [teamId];
-  const conditions = ['tcc.team_id = $1::uuid'];
-
-  params.push(tenantId);
-  conditions.push(`og.tenant_id = $${params.length}::uuid`);
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`unaccent(cc.name) ILIKE unaccent($${params.length})`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const from = `FROM team_course_categories tcc
-    JOIN teams t ON t.id = tcc.team_id
-    JOIN sub_groups sg ON sg.id = t.sub_group_id
-    JOIN org_groups og ON og.id = sg.org_group_id
-    JOIN course_categories cc ON cc.id = tcc.category_id`;
-
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count ${from} ${where}`, params),
-    query(
-      `SELECT tcc.category_id,
-              cc.name,
-              cc.slug,
-              tcc.assigned_at
-       ${from}
-       ${where}
-       ORDER BY tcc.assigned_at DESC, cc.name
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { teamId, tenantId, search };
+  const [total, rows] = await Promise.all([
+    groupsRepository.countTeamCourseCategories(filter),
+    groupsRepository.selectTeamCourseCategoryPage(filter, pageSize, offset),
   ]);
 
-  const total = parseInt(countR.rows[0]?.count || '0', 10);
   return {
-    data: dataR.rows,
+    data: rows,
     total,
     page,
     pageSize,
@@ -466,40 +250,17 @@ export async function listTeamCourseCategories(
 }
 
 export async function updateTeam(id: string, tenantId: string, input: { name: string }) {
-  const before = await query<{ name: string }>(
-    `SELECT t.name
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $1 AND og.tenant_id = $2::uuid FOR UPDATE OF t`,
-    [id, tenantId],
-  );
-  if (before.rowCount === 0) throw new AppError('Team không tồn tại', 404);
-  const result = await query(
-    `UPDATE teams t SET name = $1
-     FROM sub_groups sg
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $2 AND t.sub_group_id = sg.id AND og.tenant_id = $3::uuid
-     RETURNING t.id, t.name`,
-    [input.name, id, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Team không tồn tại', 404);
-  return { ...result.rows[0], previousName: before.rows[0].name };
+  const before = await groupsRepository.lockTeamName(id, tenantId);
+  if (!before) throw new AppError('Team không tồn tại', 404);
+  const updated = await groupsRepository.updateTeamName(id, tenantId, input.name);
+  if (!updated) throw new AppError('Team không tồn tại', 404);
+  return { ...updated, previousName: before.name };
 }
 
 export async function deleteTeam(id: string, tenantId: string) {
-  const result = await query(
-    `DELETE FROM teams t
-     USING sub_groups sg, org_groups og
-     WHERE t.id = $1
-       AND t.sub_group_id = sg.id
-       AND sg.org_group_id = og.id
-       AND og.tenant_id = $2::uuid
-     RETURNING t.id, t.name`,
-    [id, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Team không tồn tại', 404);
-  return result.rows[0];
+  const deleted = await groupsRepository.deleteTeam(id, tenantId);
+  if (!deleted) throw new AppError('Team không tồn tại', 404);
+  return deleted;
 }
 
 // ═══ Team Members ═══
@@ -552,130 +313,42 @@ export async function addTeamMembers(
   let teamName = teamId;
   try {
     await client.query('BEGIN');
+    const repository = createGroupAssignmentsRepository(client);
 
-    const teamResult = await client.query<{
-      id: string;
-      team_name: string;
-      subgroup_name: string;
-      org_group_name: string;
-    }>(
-      `SELECT t.id,
-              t.name AS team_name,
-              sg.name AS subgroup_name,
-              og.name AS org_group_name
-       FROM teams t
-       JOIN sub_groups sg ON sg.id = t.sub_group_id
-       JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE t.id = $1::uuid
-         AND og.tenant_id = $2::uuid
-       FOR SHARE`,
-      [teamId, options.tenantId],
-    );
-
-    const team = teamResult.rows[0];
+    const team = await repository.lockTeamWithParents(teamId, options.tenantId);
     if (!team) {
       throw new AppError(`${labels.team} không tồn tại hoặc không thuộc tenant hiện tại.`, 404);
     }
     teamName = team.team_name;
 
-    const insertResult = await client.query<{ user_id: string }>(
-      `WITH input_users AS (
-         SELECT DISTINCT unnest($2::uuid[]) AS user_id
-       ),
-       eligible_users AS (
-         SELECT iu.user_id
-         FROM input_users iu
-         JOIN users u
-           ON u.id = iu.user_id
-          AND u.tenant_id = $3::uuid
-         WHERE u.role IN ('learner', 'learner_plus')
-           AND u.is_active = true
-       )
-       INSERT INTO team_members (team_id, user_id)
-       SELECT $1::uuid, user_id
-       FROM eligible_users
-       ON CONFLICT DO NOTHING
-       RETURNING user_id`,
-      [teamId, normalizedUserIds, options.tenantId],
-    );
-
-    const insertedUserIds = insertResult.rows.map(row => row.user_id);
+    const insertedUserIds = await repository.insertEligibleTeamMembers(teamId, normalizedUserIds, options.tenantId);
     added = insertedUserIds.length;
 
     if (added > 0) {
-      const categoryResult = await client.query<{
-        name: string;
-        course_count: string;
-      }>(
-        `SELECT cc.name,
-                COUNT(DISTINCT c.id)::int AS course_count
-         FROM team_course_categories tcc
-         JOIN course_categories cc
-           ON cc.id = tcc.category_id
-         LEFT JOIN course_category_courses ccc
-           ON ccc.category_id = tcc.category_id
-         LEFT JOIN courses c
-           ON c.id = ccc.course_id
-          AND c.tenant_id = $2::uuid
-          AND c.deleted_at IS NULL
-          AND c.visible_to_staff_only = false
-         WHERE tcc.team_id = $1::uuid
-         GROUP BY cc.id, cc.name
-         ORDER BY cc.name`,
-        [teamId, options.tenantId],
-      );
-      const courseCategories: CourseCategorySummary[] = categoryResult.rows.map(row => ({
+      const categoryRows = await repository.selectTeamCourseCategorySummaries(teamId, options.tenantId);
+      const courseCategories: CourseCategorySummary[] = categoryRows.map(row => ({
         name: row.name,
         courseCount: Number(row.course_count || 0),
       }));
       const title = `Bạn đã được thêm vào ${teamLabelLower} ${team.team_name}`;
       const message = `Bạn vừa được thêm vào ${teamLabelLower} ${team.team_name} thuộc ${subgroupLabelLower} ${team.subgroup_name} - ${groupLabelLower} ${team.org_group_name}.`;
 
-      const notification = await client.query<{ id: string }>(
-        `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
-         VALUES (
-           $1::uuid,
-           NULL,
-           'team_member_added',
-           jsonb_build_object(
-             'send_email', $6::boolean,
-             'recipient_rule', 'team_members_added',
-             'team_id', $2::uuid,
-             'team_name', $3::text,
-             'subgroup_name', $4::text,
-             'org_group_name', $5::text,
-             'group_labels', $12::jsonb,
-             'course_categories', $7::jsonb
-           ),
-           $8::varchar,
-           $9::text,
-           $10::uuid,
-           $11::int
-         )
-         RETURNING id`,
-        [
-          options.tenantId,
-          teamId,
-          team.team_name,
-          team.subgroup_name,
-          team.org_group_name,
-          sendEmail,
-          JSON.stringify(courseCategories),
-          title,
-          message,
-          options.actorUserId,
-          added,
-          JSON.stringify(labels),
-        ],
-      );
-      notificationId = notification.rows[0].id;
+      notificationId = await repository.insertTeamMemberNotification({
+        tenantId: options.tenantId,
+        teamId,
+        teamName: team.team_name,
+        subgroupName: team.subgroup_name,
+        orgGroupName: team.org_group_name,
+        sendEmail,
+        courseCategoriesJson: JSON.stringify(courseCategories),
+        title,
+        message,
+        actorUserId: options.actorUserId,
+        recipientCount: added,
+        groupLabelsJson: JSON.stringify(labels),
+      });
 
-      await client.query(
-        `INSERT INTO notification_recipients (notification_id, user_id)
-         SELECT $1::uuid, unnest($2::uuid[])
-         ON CONFLICT DO NOTHING`,
-        [notificationId, insertedUserIds],
-      );
+      await repository.insertNotificationRecipients(notificationId, insertedUserIds);
 
       if (sendEmail) {
         emailQueued = await enqueueTeamMemberAddedEmails(client, {
@@ -723,36 +396,19 @@ export async function addTeamMembers(
 
 export async function removeTeamMember(teamId: string, userId: string, tenantId: string) {
   await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật team membership cho learner demo iframe đang hoạt động');
-  const context = await query<{ team_name: string; username: string }>(
-    `SELECT t.name AS team_name, u.username
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     JOIN users u ON u.id = $2
-     WHERE t.id = $1 AND og.tenant_id = $3::uuid`,
-    [teamId, userId, tenantId],
-  );
+  const context = await assignmentsRepository.selectTeamMemberContext(teamId, userId, tenantId);
   const result = await removeTeamMemberFromDb(teamId, userId, tenantId);
   await invalidateUserMembershipCaches([userId]);
   return {
     ...result,
-    teamName: context.rows[0]?.team_name || teamId,
-    username: context.rows[0]?.username || userId,
+    teamName: context?.team_name || teamId,
+    username: context?.username || userId,
   };
 }
 
 async function removeTeamMemberFromDb(teamId: string, userId: string, tenantId: string) {
-  const r = await query(
-    `DELETE FROM team_members tm
-     USING teams t, sub_groups sg, org_groups og
-     WHERE tm.team_id = t.id
-       AND t.sub_group_id = sg.id
-       AND sg.org_group_id = og.id
-       AND tm.team_id = $1 AND tm.user_id = $2 AND og.tenant_id = $3::uuid
-     RETURNING tm.user_id`,
-    [teamId, userId, tenantId],
-  );
-  if (r.rowCount === 0) throw new AppError('Thành viên không thuộc team', 404);
+  const removed = await assignmentsRepository.deleteTeamMember(teamId, userId, tenantId);
+  if (removed === 0) throw new AppError('Thành viên không thuộc team', 404);
   return { success: true };
 }
 
@@ -766,39 +422,19 @@ export async function assignTeamCourses(teamId: string, courseIds: string[], ten
 
 export async function revokeTeamCourse(teamId: string, courseId: string, tenantId: string) {
   await assertTeamInTenant(teamId, tenantId);
-  const context = await query<{ team_name: string; course_name: string | null }>(
-    `SELECT t.name AS team_name, c.display_name AS course_name
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     LEFT JOIN courses c ON c.id = $2 AND c.tenant_id = $3::uuid
-     WHERE t.id = $1::uuid
-       AND og.tenant_id = $3::uuid`,
-    [teamId, courseId, tenantId],
-  );
+  const context = await assignmentsRepository.selectTeamCourseContext(teamId, courseId, tenantId);
   const result = await revokeTeamCourseFromDb(teamId, courseId, tenantId);
   await invalidateTenantCourseCaches(tenantId);
   return {
     ...result,
-    teamName: context.rows[0]?.team_name || teamId,
-    courseName: context.rows[0]?.course_name || courseId,
+    teamName: context?.team_name || teamId,
+    courseName: context?.course_name || courseId,
   };
 }
 
 async function revokeTeamCourseFromDb(teamId: string, courseId: string, tenantId: string) {
-  const r = await query(
-    `DELETE FROM team_courses tc
-     USING teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE tc.team_id = t.id
-       AND tc.team_id = $1::uuid
-       AND tc.course_id = $2
-       AND og.tenant_id = $3::uuid
-     RETURNING tc.course_id`,
-    [teamId, courseId, tenantId],
-  );
-  if (r.rowCount === 0) throw new AppError('Khóa học không thuộc team', 404);
+  const removed = await assignmentsRepository.deleteTeamCourse(teamId, courseId, tenantId);
+  if (removed === 0) throw new AppError('Khóa học không thuộc team', 404);
   return { success: true };
 }
 
@@ -823,22 +459,14 @@ export async function assignTeamDocCategories(
   let teamName = teamId;
   try {
     await client.query('BEGIN');
+    const repository = createGroupAssignmentsRepository(client);
 
-    const teamResult = await client.query<{ name: string }>('SELECT name FROM teams WHERE id = $1::uuid', [teamId]);
-    teamName = teamResult.rows[0]?.name || teamId;
+    const team = await repository.selectTeamName(teamId);
+    teamName = team?.name || teamId;
 
     for (const cid of normalizedCategoryIds) {
-      const r = await client.query(
-        `INSERT INTO team_doc_categories (team_id, category_id)
-         SELECT $1::uuid, dc.id
-         FROM document_categories dc
-         WHERE dc.id = $2::uuid
-           AND dc.tenant_id = $3::uuid
-           AND COALESCE(dc.is_public, false) = false
-         ON CONFLICT DO NOTHING`,
-        [teamId, cid, tenantId],
-      );
-      if (r.rowCount! > 0) assigned++; else skipped++;
+      const inserted = await repository.insertTeamDocCategory(teamId, cid, tenantId);
+      if (inserted! > 0) assigned++; else skipped++;
     }
 
     if (assigned > 0 && auditEntry) {
@@ -859,41 +487,19 @@ export async function assignTeamDocCategories(
 }
 export async function revokeTeamDocCategory(teamId: string, categoryId: string, tenantId: string) {
   await assertTeamInTenant(teamId, tenantId);
-  const context = await query<{ team_name: string; category_name: string | null }>(
-    `SELECT t.name AS team_name, dc.name AS category_name
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     LEFT JOIN document_categories dc ON dc.id = $2::uuid AND dc.tenant_id = $3::uuid
-     WHERE t.id = $1::uuid
-       AND og.tenant_id = $3::uuid`,
-    [teamId, categoryId, tenantId],
-  );
+  const context = await assignmentsRepository.selectTeamDocCategoryContext(teamId, categoryId, tenantId);
   const result = await revokeTeamDocCategoryFromDb(teamId, categoryId, tenantId);
   await invalidateTenantLibraryCaches(tenantId);
   return {
     ...result,
-    teamName: context.rows[0]?.team_name || teamId,
-    categoryName: context.rows[0]?.category_name || categoryId,
+    teamName: context?.team_name || teamId,
+    categoryName: context?.category_name || categoryId,
   };
 }
 
 async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string, tenantId: string) {
-  const r = await query(
-    `DELETE FROM team_doc_categories tdc
-     USING teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     JOIN document_categories dc ON dc.id = tdc.category_id
-     WHERE tdc.team_id = t.id
-       AND tdc.team_id = $1::uuid
-       AND tdc.category_id = $2::uuid
-       AND og.tenant_id = $3::uuid
-       AND dc.tenant_id = $3::uuid
-     RETURNING tdc.category_id`,
-    [teamId, categoryId, tenantId],
-  );
-  if (r.rowCount === 0) throw new AppError('Danh mục tài liệu không thuộc team', 404);
+  const removed = await assignmentsRepository.deleteTeamDocCategory(teamId, categoryId, tenantId);
+  if (removed === 0) throw new AppError('Danh mục tài liệu không thuộc team', 404);
   return { success: true };
 }
 
@@ -901,28 +507,12 @@ async function revokeTeamDocCategoryFromDb(teamId: string, categoryId: string, t
 
 export async function assignTeamCourseCategories(teamId: string, categoryIds: string[], tenantId: string) {
   await assertTeamInTenant(teamId, tenantId);
-  const teamResult = await query<{ name: string }>(
-    `SELECT t.name
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     WHERE t.id = $1::uuid AND og.tenant_id = $2::uuid`,
-    [teamId, tenantId],
-  );
-  const teamName = teamResult.rows[0]?.name || teamId;
+  const team = await assignmentsRepository.selectTenantTeamName(teamId, tenantId);
+  const teamName = team?.name || teamId;
   let assigned = 0, skipped = 0;
   for (const cid of categoryIds) {
-    const r = await query(
-      `INSERT INTO team_course_categories (team_id, category_id)
-       SELECT $1::uuid, cc.id
-       FROM course_categories cc
-       WHERE cc.id = $2::uuid
-         AND cc.tenant_id = $3::uuid
-         AND COALESCE(cc.is_public, false) = false
-       ON CONFLICT DO NOTHING`,
-      [teamId, cid, tenantId],
-    );
-    if (r.rowCount! > 0) assigned++; else skipped++;
+    const inserted = await assignmentsRepository.insertTeamCourseCategory(teamId, cid, tenantId);
+    if (inserted! > 0) assigned++; else skipped++;
   }
   if (tenantId) await invalidateTenantCourseCaches(tenantId);
   return { success: true, assigned, skipped, teamName };
@@ -930,41 +520,19 @@ export async function assignTeamCourseCategories(teamId: string, categoryIds: st
 
 export async function revokeTeamCourseCategory(teamId: string, categoryId: string, tenantId: string) {
   await assertTeamInTenant(teamId, tenantId);
-  const context = await query<{ team_name: string; category_name: string | null }>(
-    `SELECT t.name AS team_name, cc.name AS category_name
-     FROM teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     LEFT JOIN course_categories cc ON cc.id = $2::uuid AND cc.tenant_id = $3::uuid
-     WHERE t.id = $1::uuid
-       AND og.tenant_id = $3::uuid`,
-    [teamId, categoryId, tenantId],
-  );
+  const context = await assignmentsRepository.selectTeamCourseCategoryContext(teamId, categoryId, tenantId);
   const result = await revokeTeamCourseCategoryFromDb(teamId, categoryId, tenantId);
   await invalidateTenantCourseCaches(tenantId);
   return {
     ...result,
-    teamName: context.rows[0]?.team_name || teamId,
-    categoryName: context.rows[0]?.category_name || categoryId,
+    teamName: context?.team_name || teamId,
+    categoryName: context?.category_name || categoryId,
   };
 }
 
 async function revokeTeamCourseCategoryFromDb(teamId: string, categoryId: string, tenantId: string) {
-  const r = await query(
-    `DELETE FROM team_course_categories tcc
-     USING teams t
-     JOIN sub_groups sg ON sg.id = t.sub_group_id
-     JOIN org_groups og ON og.id = sg.org_group_id
-     JOIN course_categories cc ON cc.id = tcc.category_id
-     WHERE tcc.team_id = t.id
-       AND tcc.team_id = $1::uuid
-       AND tcc.category_id = $2::uuid
-       AND og.tenant_id = $3::uuid
-       AND cc.tenant_id = $3::uuid
-     RETURNING tcc.category_id`,
-    [teamId, categoryId, tenantId],
-  );
-  if (r.rowCount === 0) throw new AppError('Danh mục khóa học không thuộc team', 404);
+  const removed = await assignmentsRepository.deleteTeamCourseCategory(teamId, categoryId, tenantId);
+  if (removed === 0) throw new AppError('Danh mục khóa học không thuộc team', 404);
   return { success: true };
 }
 
@@ -979,35 +547,18 @@ export async function getGroupAuditLogs(
 
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [];
-  const conditions: string[] = [];
-
-  // Chỉ lấy audit logs liên quan đến groups
-  conditions.push(`a.entity_type IN ('org_group', 'sub_group', 'team', 'team_member', 'team_course', 'team_category', 'team_course_category')`);
-
-  params.push(tenantId);
-  conditions.push(`a.tenant_id = $${params.length}`);
-  appendAuditLogViewerScopeFilter(viewerRole, params, conditions);
-  if (search && search.length >= 2) { params.push(`%${search}%`); conditions.push(`(a.entity_name ILIKE $${params.length} OR a.actor_username ILIKE $${params.length})`); }
-  const actionFilter = queryParams.action as string;
-  if (actionFilter && actionFilter !== 'all') { params.push(actionFilter); conditions.push(`a.action = $${params.length}`); }
-  const dateFrom = queryParams.date_from as string;
-  if (dateFrom) { params.push(dateFrom); conditions.push(`a.created_at >= $${params.length}::timestamptz`); }
-  else { conditions.push(`a.created_at >= now() - (${AUDIT_LOG_RETENTION_DAYS} * interval '1 day')`); }
-  const dateTo = queryParams.date_to as string;
-  if (dateTo) { params.push(dateTo); conditions.push(`a.created_at <= $${params.length}::timestamptz`); }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM audit_logs a ${where}`, params),
-    query(
-      `SELECT ${AUDIT_LOG_PUBLIC_SELECT_COLUMNS}
-       FROM audit_logs a ${where}
-       ORDER BY a.created_at DESC, a.id DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = {
+    tenantId,
+    viewerRole,
+    search,
+    action: queryParams.action as string,
+    dateFrom: queryParams.date_from as string,
+    dateTo: queryParams.date_to as string,
+  };
+  const [countR, rows] = await Promise.all([
+    auditLogsRepository.countGroupAuditLogs(filter),
+    auditLogsRepository.selectGroupAuditLogPage(filter, pageSize, offset),
   ]);
-  const total = parseInt(countR.rows[0].count, 10);
-  return { results: dataR.rows, total, page, page_size: pageSize, total_pages: calcTotalPages(total, pageSize) };
+  const total = parseInt(countR.count, 10);
+  return { results: rows, total, page, page_size: pageSize, total_pages: calcTotalPages(total, pageSize) };
 }

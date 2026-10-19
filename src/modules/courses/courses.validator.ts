@@ -60,3 +60,42 @@ export type UpdateCourseInput = z.infer<typeof updateCourseSchema>;
 export type BulkActionInput = z.infer<typeof bulkActionSchema>;
 export type MentorSectionInput = z.infer<typeof mentorSectionSchema>;
 
+
+// ── Query strings ──
+// The query string of the course list routes, read the way the services
+// always read it. They never reject and never coerce: every request accepted
+// before is accepted with the same values (a repeated parameter stays a list,
+// a page that is not a number is read by the service as before). Only the
+// keys a service reads are kept.
+
+/** The raw value, unchecked. */
+const rawQueryValue = z.unknown();
+
+/** GET /api/courses */
+export const courseListQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+  visibility: rawQueryValue,
+});
+
+/** GET /api/courses/:id/mentor-candidates */
+export const mentorCandidatesQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+});
+
+/** GET /api/courses/:id/mentor-history */
+export const mentorHistoryQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+  date_from: rawQueryValue,
+  date_to: rawQueryValue,
+});
+
+/** GET /api/courses/:id/section-modal-config (checked for presence in the controller). */
+export const sectionModalQuerySchema = z.object({
+  section_id: z.unknown().transform(value => value as string),
+});

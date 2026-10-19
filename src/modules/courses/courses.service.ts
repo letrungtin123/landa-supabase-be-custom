@@ -15,13 +15,26 @@ import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-h
 import { uploadFile, deleteFile, buildFileName, buildStoragePath, fixMulterFilename } from '../../config/storage.js';
 import { getTenantRoleLabels, type RoleLabelMap } from '../tenants/tenant-role-labels.service.js';
 import { withoutAuthorOnlyBlockMetadata } from '../course-authoring/course-author-notes.logic.js';
-import {
-  buildCourseMarkdown,
-  markdownFilename,
-  type CourseMarkdownBlock,
-  type CourseMarkdownCourse,
-} from './course-markdown-exporter.js';
+import { buildCourseMarkdown, markdownFilename } from './course-markdown-exporter.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  createCoursesRepository,
+  type CourseMentorColumns,
+  type CoursesDb,
+  type MentorAssignmentHistoryRow,
+  type MentorUserRow,
+} from './courses.repository.js';
+import {
+  createCourseMentorSectionRepository,
+  type CourseMentorSectionRow,
+} from './course-mentor-section.repository.js';
+import { createCourseModalConfigRepository } from './course-modal-config.repository.js';
+
+// query() joins the caller's current transaction (withDatabaseTransaction) when there is one.
+const poolDb: CoursesDb = { query };
+const coursesRepository = createCoursesRepository(poolDb);
+const mentorSectionRepository = createCourseMentorSectionRepository(poolDb);
+const modalConfigRepository = createCourseModalConfigRepository(poolDb);
 
 interface CourseMentor {
   id: string;
@@ -81,12 +94,9 @@ export interface CourseAuditSnapshot {
 const COURSE_MISSING_MESSAGE = 'Course không tồn tại';
 
 export async function getCourseAuditName(courseId: string, tenantId: string): Promise<string> {
-  const result = await query<{ display_name: string }>(
-    'SELECT display_name FROM courses WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL',
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError(COURSE_MISSING_MESSAGE, 404);
-  return result.rows[0].display_name;
+  const course = await coursesRepository.selectCourseName(courseId, tenantId);
+  if (!course) throw new AppError(COURSE_MISSING_MESSAGE, 404);
+  return course.display_name;
 }
 
 function getRoleDisplayLabel(role: string | null | undefined, labels: RoleLabelMap = {}): string {
@@ -94,22 +104,22 @@ function getRoleDisplayLabel(role: string | null | undefined, labels: RoleLabelM
   return labels[role as keyof RoleLabelMap]?.trim() || role;
 }
 
-function mapMentor(row: any, roleLabels: RoleLabelMap = {}): CourseMentor | null {
+function mapMentor(row: (CourseMentorColumns & { mentor_role_label?: string | null }) | null | undefined, roleLabels: RoleLabelMap = {}): CourseMentor | null {
   if (!row?.mentor_id) return null;
   return {
     id: row.mentor_id,
-    username: row.mentor_username,
+    username: row.mentor_username!,
     full_name: row.mentor_full_name,
-    email: row.mentor_email,
+    email: row.mentor_email!,
     phone: row.mentor_phone,
     avatar: row.mentor_avatar,
-    role: row.mentor_role,
+    role: row.mentor_role!,
     role_label: row.mentor_role_label || getRoleDisplayLabel(row.mentor_role, roleLabels),
     bio: row.mentor_bio,
   };
 }
 
-function mapMentorSection(row: any): CourseMentorSection | null {
+function mapMentorSection(row: CourseMentorSectionRow | null | undefined): CourseMentorSection | null {
   if (!row) return null;
   return {
     course_id: row.course_id,
@@ -120,7 +130,7 @@ function mapMentorSection(row: any): CourseMentorSection | null {
   };
 }
 
-function mapMentorHistory(row: any): CourseMentorAssignmentHistoryItem {
+function mapMentorHistory(row: MentorAssignmentHistoryRow): CourseMentorAssignmentHistoryItem {
   return {
     id: String(row.id),
     assigned_by_id: row.assigned_by ?? null,
@@ -174,34 +184,30 @@ function parseMentorHistoryDateBoundary(value: unknown, mode: 'from' | 'to'): st
   return date.toISOString();
 }
 
-async function selectUserDisplayName(userId: string | null, client?: any): Promise<string | null> {
+async function selectUserDisplayName(userId: string | null, repository: CoursesRepository): Promise<string | null> {
   if (!userId) return null;
-  const sql = `SELECT COALESCE(NULLIF(full_name, ''), username, email, 'Không xác định') AS display_name
-               FROM users
-               WHERE id = $1
-               LIMIT 1`;
-  const result = client ? await client.query(sql, [userId]) : await query<{ display_name: string }>(sql, [userId]);
-  return result.rows[0]?.display_name || null;
+  return repository.selectUserDisplayName(userId);
 }
 
+type CoursesRepository = ReturnType<typeof createCoursesRepository>;
+
+/** With `client`, inside that transaction; otherwise through query(). */
 async function insertMentorAssignmentHistory(
   courseId: string,
   tenantId: string,
   assignedBy: string | null,
   assignedTo: string | null,
   action: MentorAssignmentAction,
-  client?: any,
+  client?: CoursesDb,
 ): Promise<void> {
-  const assignedByName = await selectUserDisplayName(assignedBy, client) || 'Không xác định';
+  const repository = client ? createCoursesRepository(client) : coursesRepository;
+  const assignedByName = await selectUserDisplayName(assignedBy, repository) || 'Không xác định';
   const assignedToName = action === 'assign'
-    ? await selectUserDisplayName(assignedTo, client) || 'Không xác định'
+    ? await selectUserDisplayName(assignedTo, repository) || 'Không xác định'
     : null;
-  const sql = `INSERT INTO course_mentor_assignment_history
-                 (tenant_id, course_id, assigned_by, assigned_to, assigned_by_display_name, assigned_to_display_name, action)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)`;
-  const params = [tenantId, courseId, assignedBy, assignedTo, assignedByName, assignedToName, action];
-  if (client) await client.query(sql, params);
-  else await query(sql, params);
+  await repository.insertMentorAssignmentHistory({
+    tenantId, courseId, assignedBy, assignedTo, assignedByName, assignedToName, action,
+  });
 }
 
 /** The message these course endpoints have always returned for a course outside the tenant. */
@@ -210,64 +216,15 @@ const COURSE_NOT_FOUND_MESSAGE = 'Course khong ton tai';
 export async function listCourses(tenantId: string | null, queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [];
-  const conditions: string[] = ['c.deleted_at IS NULL'];
-
-  if (tenantId) { params.push(tenantId); conditions.push(`c.tenant_id = $${params.length}`); }
-  if (search) { params.push(`%${search}%`); conditions.push(`c.display_name ILIKE $${params.length}`); }
-  const vis = queryParams.visibility as string;
-  if (vis === 'staff_only') conditions.push('c.visible_to_staff_only = true');
-  else if (vis === 'public') conditions.push('c.visible_to_staff_only = false');
-
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const [countR, dataR, roleLabels] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses c ${where}`, params),
-    query(
-      `SELECT c.*,
-              current_category.category_id,
-              current_category.category_name,
-              EXISTS (
-                SELECT 1
-                FROM course_category_courses ccc_public
-                JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-                WHERE ccc_public.course_id = c.id
-                  AND cc_public.tenant_id = c.tenant_id
-                  AND COALESCE(cc_public.is_public, false) = true
-              ) AS is_public,
-              creator.id AS creator_id,
-              NULLIF(creator.full_name, '') AS creator_display_name,
-              mentor.id AS mentor_id,
-              mentor.username AS mentor_username,
-              mentor.full_name AS mentor_full_name,
-              mentor.email AS mentor_email,
-              mentor.phone AS mentor_phone,
-              mentor.avatar_url AS mentor_avatar,
-              mentor.role AS mentor_role,
-              mentor.bio AS mentor_bio
-       FROM courses c
-       LEFT JOIN users creator ON creator.id = c.created_by
-       LEFT JOIN users mentor ON mentor.id = c.mentor_id
-       LEFT JOIN LATERAL (
-         SELECT cc.id AS category_id,
-                cc.name AS category_name
-         FROM course_category_courses ccc_current
-         JOIN course_categories cc
-           ON cc.id = ccc_current.category_id
-          AND cc.tenant_id = c.tenant_id
-         WHERE ccc_current.course_id = c.id
-         ORDER BY ccc_current.assigned_at DESC NULLS LAST, ccc_current.id DESC
-         LIMIT 1
-       ) current_category ON true
-       ${where}
-       ORDER BY c.updated_at DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { tenantId, search, visibility: queryParams.visibility as string };
+  const [countRow, rows, roleLabels] = await Promise.all([
+    coursesRepository.countCourses(filter),
+    coursesRepository.selectCoursePage(filter, pageSize, offset),
     getTenantRoleLabels(tenantId),
   ]);
-  const total = parseInt(countR.rows[0].count, 10);
+  const total = parseInt(countRow.count, 10);
   return {
-    data: dataR.rows.map((row: any) => ({ ...row, mentor: mapMentor(row, roleLabels) })),
+    data: rows.map((row) => ({ ...row, mentor: mapMentor(row, roleLabels) })),
     total,
     page,
     pageSize,
@@ -276,46 +233,16 @@ export async function listCourses(tenantId: string | null, queryParams: Record<s
 }
 
 export async function exportCourseMarkdown(courseId: string, tenantId: string) {
-  const courseResult = await query<CourseMarkdownCourse>(
-    `SELECT id, display_name, description, org, start_date, end_date, created_at, updated_at
-     FROM courses
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseResult.rowCount === 0) throw new AppError('Course not found', 404);
+  const course = await coursesRepository.selectMarkdownCourse(courseId, tenantId);
+  if (!course) throw new AppError('Course not found', 404);
 
-  const blocksResult = await query<CourseMarkdownBlock>(
-    `WITH RECURSIVE active_tree AS (
-       SELECT id, parent_id, block_type::text AS block_type, display_name,
-              published_data AS data,
-              COALESCE(published_metadata, metadata, '{}'::jsonb) AS metadata,
-              sort_order, created_at
-       FROM course_blocks
-       WHERE course_id = $1
-         AND parent_id IS NULL
-         AND deleted_at IS NULL
-         AND is_published = true
-       UNION ALL
-       SELECT child.id, child.parent_id, child.block_type::text AS block_type, child.display_name,
-              child.published_data AS data,
-              COALESCE(child.published_metadata, child.metadata, '{}'::jsonb) AS metadata,
-              child.sort_order, child.created_at
-       FROM course_blocks child
-       JOIN active_tree parent ON parent.id = child.parent_id
-       WHERE child.deleted_at IS NULL
-         AND child.is_published = true
-     )
-     SELECT id, parent_id, block_type, display_name, data, metadata, sort_order, created_at
-     FROM active_tree
-     ORDER BY COALESCE(sort_order, 0), created_at, id`,
-    [courseId],
-  );
+  const blocks = await coursesRepository.selectMarkdownBlocks(courseId);
 
   return {
     filename: markdownFilename(courseId),
     // The export reads only known media fields today; stripping AI ID
     // author-only metadata keeps that true for any future exporter field.
-    markdown: buildCourseMarkdown(courseResult.rows[0], blocksResult.rows.map(withoutAuthorOnlyBlockMetadata)),
+    markdown: buildCourseMarkdown(course, blocks.map(withoutAuthorOnlyBlockMetadata)),
   };
 }
 
@@ -324,19 +251,25 @@ export async function createCourse(tenantId: string, createdBy: string, input: {
   const { checkQuota } = await import('../tenants/tenants.service.js');
   await checkQuota(tenantId, 'courses');
 
-  const result = await query(
-    `INSERT INTO courses (id, tenant_id, display_name, description, org, visible_to_staff_only, image_url, start_date, end_date, created_by, mentor_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-     RETURNING *`,
-    [input.id, tenantId, input.display_name, input.description, input.org || '', input.visible_to_staff_only ?? false, input.image_url || '', input.start_date || null, input.end_date || null, createdBy],
-  );
-  await initializeCourseMentorSectionDefaults(result.rows[0].id, tenantId, createdBy);
-  await recordCourseMentorAssignmentHistory(result.rows[0].id, tenantId, createdBy, createdBy, 'assign');
+  const course = await coursesRepository.insertCourse({
+    id: input.id,
+    tenantId,
+    displayName: input.display_name,
+    description: input.description,
+    org: input.org || '',
+    visibleToStaffOnly: input.visible_to_staff_only ?? false,
+    imageUrl: input.image_url || '',
+    startDate: input.start_date || null,
+    endDate: input.end_date || null,
+    createdBy,
+  });
+  await initializeCourseMentorSectionDefaults(course.id, tenantId, createdBy);
+  await recordCourseMentorAssignmentHistory(course.id, tenantId, createdBy, createdBy, 'assign');
   await Promise.all([
     invalidateTenantCourseCaches(tenantId),
-    invalidateCourseReadCaches(result.rows[0].id, tenantId),
+    invalidateCourseReadCaches(course.id, tenantId),
   ]);
-  return result.rows[0];
+  return course;
 }
 
 export async function updateCourse(
@@ -367,36 +300,13 @@ async function updateCourseFromDb(
   try {
     await client.query('BEGIN');
 
-    const current = await client.query<CourseAuditSnapshot>(
-      `SELECT id, tenant_id, display_name, visible_to_staff_only, image_url
-       FROM courses
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-       FOR UPDATE`,
-      [courseId, tenantId],
-    );
-    if (current.rowCount === 0) throw new AppError('Course không tồn tại', 404);
+    const repository = createCoursesRepository(client);
+    const current = await repository.lockCourseSnapshot(courseId, tenantId);
+    if (!current) throw new AppError('Course không tồn tại', 404);
 
-    const sets: string[] = ['updated_at = NOW()'];
-    const params: unknown[] = [];
-    let idx = 1;
-    if (input.display_name !== undefined) { sets.push(`display_name = $${idx++}`); params.push(input.display_name); }
-    if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-    if (input.visible_to_staff_only !== undefined) { sets.push(`visible_to_staff_only = $${idx++}`); params.push(input.visible_to_staff_only); }
-    if (input.image_url !== undefined) { sets.push(`image_url = $${idx++}`); params.push(input.image_url); }
-
-    params.push(courseId, tenantId);
-    const result = await client.query<CourseAuditSnapshot>(
-      `UPDATE courses
-       SET ${sets.join(', ')}
-       WHERE id = $${idx++} AND tenant_id = $${idx} AND deleted_at IS NULL
-       RETURNING *`,
-      params,
-    );
-
-
-    const updated = result.rows[0];
+    const updated = await repository.updateCourseFields(courseId, tenantId, input);
     if (!updated) throw new AppError('Course không tồn tại', 404);
-    if (auditEntry) await appendAuditLog(client, auditEntry(current.rows[0], updated));
+    if (auditEntry) await appendAuditLog(client, auditEntry(current, updated));
 
     await client.query('COMMIT');
     return updated;
@@ -410,37 +320,16 @@ async function updateCourseFromDb(
 
 export async function bulkCourseAction(ids: string[], action: string, tenantId: string) {
   const staffOnly = action === 'staff_only';
-  const r = await query(
-    `UPDATE courses
-     SET visible_to_staff_only = $1,
-         is_public = CASE WHEN $1::boolean THEN false ELSE is_public END,
-         updated_at = NOW()
-     WHERE id = ANY($2) AND tenant_id = $3 AND deleted_at IS NULL
-     RETURNING id, tenant_id`,
-    [staffOnly, ids, tenantId],
-  );
-  await Promise.all((r.rows as Array<{ id: string; tenant_id: string }>).map((row) => invalidateCourseReadCaches(row.id, row.tenant_id)));
-  return { updated: r.rowCount || 0 };
+  const r = await coursesRepository.updateCoursesVisibility(ids, staffOnly, tenantId);
+  await Promise.all(r.rows.map((row) => invalidateCourseReadCaches(row.id, row.tenant_id)));
+  return { updated: r.rowCount };
 }
 
 export async function getCourseMentor(courseId: string, tenantId: string): Promise<CourseMentor | null> {
-  const result = await query<any>(
-    `SELECT mentor.id AS mentor_id,
-            mentor.username AS mentor_username,
-            mentor.full_name AS mentor_full_name,
-            mentor.email AS mentor_email,
-            mentor.phone AS mentor_phone,
-            mentor.avatar_url AS mentor_avatar,
-            mentor.role AS mentor_role,
-            mentor.bio AS mentor_bio
-     FROM courses c
-     LEFT JOIN users mentor ON mentor.id = c.mentor_id
-     WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+  const row = await coursesRepository.selectCourseMentor(courseId, tenantId);
+  if (!row) throw new AppError('Course khong ton tai', 404);
   const roleLabels = await getTenantRoleLabels(tenantId);
-  return mapMentor(result.rows[0], roleLabels);
+  return mapMentor(row, roleLabels);
 }
 
 export async function listMentorCandidates(
@@ -452,34 +341,15 @@ export async function listMentorCandidates(
 
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [tenantId];
-  const conditions = ['u.tenant_id = $1', "u.role IN ('staff', 'superuser')", 'u.is_active = true'];
 
-  if (search) {
-    params.push(`%${search.toLowerCase()}%`);
-    conditions.push(`(
-      lower(COALESCE(u.full_name, '')) LIKE $${params.length}
-      OR lower(u.email) LIKE $${params.length}
-      OR lower(u.username) LIKE $${params.length}
-    )`);
-  }
-
-  const [result, roleLabels] = await Promise.all([
-    query<any>(
-      `SELECT u.id, u.username, u.email, u.full_name, u.phone, u.avatar_url AS avatar,
-              u.role, u.bio, COUNT(*) OVER() AS full_count
-     FROM users u
-     WHERE ${conditions.join(' AND ')}
-     ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username), u.id
-     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const [rows, roleLabels] = await Promise.all([
+    coursesRepository.selectMentorCandidates(tenantId, search, pageSize, offset),
     getTenantRoleLabels(tenantId),
   ]);
 
-  const total = parseInt(result.rows[0]?.full_count ?? '0', 10);
+  const total = parseInt(rows[0]?.full_count ?? '0', 10);
   return {
-    data: result.rows.map(({ full_count, ...row }: any) => ({
+    data: rows.map(({ full_count, ...row }) => ({
       ...row,
       role_label: getRoleDisplayLabel(row.role, roleLabels),
     })),
@@ -498,47 +368,24 @@ export async function updateCourseMentor(
   createAuditEntry?: (context: { courseName: string; mentorName: string | null }) => TransactionalAuditEntry,
 ): Promise<CourseMentor | null> {
   const client = await getClient();
-  let mentorRow: any = null;
+  let mentorRow: MentorUserRow | null = null;
   let changed = false;
 
   try {
     await client.query('BEGIN');
+    const repository = createCoursesRepository(client);
 
-    const courseResult = await client.query<{ mentor_id: string | null; display_name: string; mentor_name: string | null }>(
-      `SELECT c.mentor_id, c.display_name,
-              COALESCE(NULLIF(u.full_name, ''), u.username) AS mentor_name
-       FROM courses c
-       LEFT JOIN users u ON u.id = c.mentor_id
-       WHERE c.id = $1 AND c.tenant_id = $2 AND c.deleted_at IS NULL
-       -- The mentor join is optional. Lock only the course row; PostgreSQL
-       -- rejects an unqualified FOR UPDATE on the nullable side of a LEFT JOIN.
-       FOR UPDATE OF c`,
-      [courseId, tenantId],
-    );
-    if (courseResult.rowCount === 0) throw new AppError('Course khong ton tai', 404);
+    const course = await repository.lockCourseMentor(courseId, tenantId);
+    if (!course) throw new AppError('Course khong ton tai', 404);
 
-    const currentMentorId = courseResult.rows[0].mentor_id ?? null;
+    const currentMentorId = course.mentor_id ?? null;
     if (mentorId !== null) {
-      const mentorResult = await client.query<any>(
-        `SELECT id, username, full_name, email, phone, avatar_url AS avatar, role, bio
-         FROM users
-         WHERE id = $1
-           AND tenant_id = $2
-           AND role IN ('staff', 'superuser')
-           AND is_active = true`,
-        [mentorId, tenantId],
-      );
-      if (mentorResult.rowCount === 0) throw new AppError('Người phụ trách không hợp lệ', 400);
-      mentorRow = mentorResult.rows[0];
+      mentorRow = await repository.selectEligibleMentor(mentorId, tenantId);
+      if (!mentorRow) throw new AppError('Người phụ trách không hợp lệ', 400);
     }
 
     if (currentMentorId !== mentorId) {
-      await client.query(
-        `UPDATE courses
-         SET mentor_id = $3, updated_at = NOW()
-         WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
-        [courseId, tenantId, mentorId],
-      );
+      await repository.updateCourseMentorId(courseId, tenantId, mentorId);
       await insertMentorAssignmentHistory(
         courseId,
         tenantId,
@@ -552,8 +399,8 @@ export async function updateCourseMentor(
 
     if (changed && createAuditEntry) {
       await appendAuditLog(client, createAuditEntry({
-        courseName: courseResult.rows[0].display_name,
-        mentorName: mentorRow ? (mentorRow.full_name?.trim() || mentorRow.username) : courseResult.rows[0].mentor_name,
+        courseName: course.display_name,
+        mentorName: mentorRow ? (mentorRow.full_name?.trim() || mentorRow.username) : course.mentor_name,
       }));
     }
     await client.query('COMMIT');
@@ -601,48 +448,22 @@ export async function listCourseMentorAssignmentHistory(
     throw new AppError('date_to phai lon hon hoac bang date_from', 400);
   }
 
-  const params: unknown[] = [tenantId, courseId];
-  const conditions = ['tenant_id = $1', 'course_id = $2'];
-
-  if (dateFrom) {
-    params.push(dateFrom);
-    conditions.push(`assigned_at >= $${params.length}::timestamptz`);
-  }
-
-  if (dateTo) {
-    params.push(dateTo);
-    conditions.push(`assigned_at < $${params.length}::timestamptz`);
-  }
-
-  if (search) {
-    params.push(`%${escapeSqlLikePattern(search)}%`);
-    conditions.push(`lower(COALESCE(assigned_by_display_name, '') || ' ' || COALESCE(assigned_to_display_name, '')) LIKE $${params.length} ESCAPE '\\'`);
-  }
-
-  const where = conditions.join(' AND ');
-  const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) AS count
-     FROM course_mentor_assignment_history
-     WHERE ${where}`,
-    params,
-  );
-  const total = parseInt(countResult.rows[0]?.count ?? '0', 10);
+  const filter = {
+    tenantId,
+    courseId,
+    dateFrom,
+    dateTo,
+    searchPattern: search ? `%${escapeSqlLikePattern(search)}%` : null,
+  };
+  const total = await coursesRepository.countMentorHistory(filter);
   const totalPages = calcTotalPages(total, pageSize);
   const page = totalPages > 0 ? Math.min(requestedPage, totalPages) : 1;
   const offset = calcOffset(page, pageSize);
 
-  const result = await query<any>(
-    `SELECT id::text, assigned_by, assigned_to, assigned_by_display_name,
-            assigned_to_display_name, action, assigned_at
-     FROM course_mentor_assignment_history
-     WHERE ${where}
-     ORDER BY assigned_at DESC, id DESC
-     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    [...params, pageSize, offset],
-  );
+  const rows = await coursesRepository.selectMentorHistoryPage(filter, pageSize, offset);
 
   return {
-    data: result.rows.map(mapMentorHistory),
+    data: rows.map(mapMentorHistory),
     total,
     page,
     pageSize,
@@ -655,31 +476,12 @@ export async function initializeCourseMentorSectionDefaults(
   tenantId: string,
   userId: string | null,
 ): Promise<CourseMentorSection | null> {
-  const result = await query<any>(
-    `INSERT INTO course_mentor_sections (tenant_id, course_id, logo_light_path, logo_dark_path, updated_by)
-     SELECT t.id,
-            $2,
-            NULLIF(t.settings #>> '{branding,header_logo}', ''),
-            NULLIF(t.settings #>> '{branding,header_logo_dark}', ''),
-            $3
-     FROM tenants t
-     WHERE t.id = $1
-     ON CONFLICT (tenant_id, course_id) DO NOTHING
-     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-    [tenantId, courseId, userId],
-  );
-  return mapMentorSection(result.rows[0]);
+  return mapMentorSection(await mentorSectionRepository.insertSectionDefaults(courseId, tenantId, userId));
 }
 
 export async function getCourseMentorSection(courseId: string, tenantId: string): Promise<CourseMentorSection | null> {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
-  const result = await query<any>(
-    `SELECT course_id, description, logo_light_path, logo_dark_path, updated_at
-     FROM course_mentor_sections
-     WHERE course_id = $1 AND tenant_id = $2`,
-    [courseId, tenantId],
-  );
-  return mapMentorSection(result.rows[0]);
+  return mapMentorSection(await mentorSectionRepository.selectSection(courseId, tenantId));
 }
 
 export async function upsertCourseMentorSection(
@@ -693,20 +495,10 @@ export async function upsertCourseMentorSection(
     ? input.description.trim() || null
     : null;
 
-  const result = await query<any>(
-    `INSERT INTO course_mentor_sections (tenant_id, course_id, description, updated_by)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (tenant_id, course_id)
-     DO UPDATE SET
-       description = EXCLUDED.description,
-       updated_by = EXCLUDED.updated_by,
-       updated_at = NOW()
-     RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-    [tenantId, courseId, description, userId],
-  );
+  const section = await mentorSectionRepository.upsertDescription(courseId, tenantId, description, userId);
 
   await invalidateCourseReadCaches(courseId, tenantId);
-  return mapMentorSection(result.rows[0])!;
+  return mapMentorSection(section)!;
 }
 
 export async function uploadCourseMentorSectionLogo(
@@ -719,15 +511,10 @@ export async function uploadCourseMentorSectionLogo(
 ): Promise<CourseMentorSection> {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
 
-  const current = await query<any>(
-    `SELECT logo_light_path, logo_dark_path
-     FROM course_mentor_sections
-     WHERE course_id = $1 AND tenant_id = $2`,
-    [courseId, tenantId],
-  );
+  const current = await mentorSectionRepository.selectLogoPaths(courseId, tenantId);
   const oldPath = mode === 'light'
-    ? current.rows[0]?.logo_light_path
-    : current.rows[0]?.logo_dark_path;
+    ? current?.logo_light_path
+    : current?.logo_dark_path;
 
   const safeOriginalName = fixMulterFilename(file.originalname);
   const fileName = buildFileName(`${mode}_${safeOriginalName}`);
@@ -737,20 +524,10 @@ export async function uploadCourseMentorSectionLogo(
 
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
   const client = await getClient();
-  let result;
+  let section: CourseMentorSectionRow;
   try {
     await client.query('BEGIN');
-    result = await client.query<any>(
-      `INSERT INTO course_mentor_sections (tenant_id, course_id, ${logoColumn}, updated_by)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (tenant_id, course_id)
-       DO UPDATE SET
-         ${logoColumn} = EXCLUDED.${logoColumn},
-         updated_by = EXCLUDED.updated_by,
-         updated_at = NOW()
-       RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-      [tenantId, courseId, storagePath, userId],
-    );
+    section = await createCourseMentorSectionRepository(client).upsertLogoPath(courseId, tenantId, logoColumn, storagePath, userId);
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
@@ -780,7 +557,7 @@ export async function uploadCourseMentorSectionLogo(
   }
 
   await invalidateCourseReadCaches(courseId, tenantId);
-  return mapMentorSection(result.rows[0])!;
+  return mapMentorSection(section)!;
 }
 
 export async function deleteCourseMentorSectionLogo(
@@ -795,26 +572,15 @@ export async function deleteCourseMentorSectionLogo(
   const logoColumn = mode === 'light' ? 'logo_light_path' : 'logo_dark_path';
   const client = await getClient();
   let oldPath: string | null = null;
-  let result;
+  let section: CourseMentorSectionRow | undefined;
   try {
     await client.query('BEGIN');
-    const current = await client.query<{ logo_path: string | null }>(
-      `SELECT ${logoColumn} AS logo_path
-       FROM course_mentor_sections
-       WHERE course_id = $1 AND tenant_id = $2
-       FOR UPDATE`,
-      [courseId, tenantId],
-    );
-    if (current.rowCount === 0) { await client.query('COMMIT'); return null; }
-    oldPath = current.rows[0].logo_path;
+    const repository = createCourseMentorSectionRepository(client);
+    const current = await repository.lockLogoPath(courseId, tenantId, logoColumn);
+    if (!current) { await client.query('COMMIT'); return null; }
+    oldPath = current.logo_path;
 
-    result = await client.query<any>(
-      `UPDATE course_mentor_sections
-       SET ${logoColumn} = NULL, updated_by = $3, updated_at = NOW()
-       WHERE course_id = $1 AND tenant_id = $2
-       RETURNING course_id, description, logo_light_path, logo_dark_path, updated_at`,
-      [courseId, tenantId, userId],
-    );
+    section = await repository.clearLogoPath(courseId, tenantId, logoColumn, userId);
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
@@ -841,7 +607,7 @@ export async function deleteCourseMentorSectionLogo(
   }
 
   await invalidateCourseReadCaches(courseId, tenantId);
-  return mapMentorSection(result.rows[0]);
+  return mapMentorSection(section);
 }
 
 /** Direct course deletion is forbidden; use the durable deletion-job module. */
@@ -856,30 +622,24 @@ export async function hardDeleteCourse(courseId: string, tenantId: string) {
 /** Read like the write: only a live course of the caller's tenant, else the same 404. */
 export async function getCourseModalConfig(courseId: string, tenantId: string) {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_MISSING_MESSAGE);
-  const result = await query('SELECT * FROM course_modal_configs WHERE course_id = $1', [courseId]);
-  if (result.rowCount === 0) {
+  const config = await modalConfigRepository.selectCourseModalConfig(courseId);
+  if (!config) {
     return { course_id: courseId, welcome_enabled: false, welcome_title: '', welcome_description: '', confirm_enabled: false, confirm_title: '', confirm_description: '', confirm_checkbox_text: '', completion_enabled: false, completion_title: '', completion_description: '', completion_social_type: '', completion_social_link: '', updated_at: null };
   }
-  return result.rows[0];
+  return config;
 }
 
 export async function upsertCourseModalConfig(courseId: string, tenantId: string, input: Record<string, unknown>) {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
   const fields = ['welcome_enabled', 'welcome_title', 'welcome_description', 'confirm_enabled', 'confirm_title', 'confirm_description', 'confirm_checkbox_text', 'completion_enabled', 'completion_title', 'completion_description', 'completion_social_type', 'completion_social_link'];
-  const sets: string[] = [];
-  const params: unknown[] = [courseId];
-  let idx = 2;
+  const present: string[] = [];
   for (const f of fields) {
-    if (input[f] !== undefined) { sets.push(`${f} = $${idx++}`); params.push(input[f]); }
+    if (input[f] !== undefined) present.push(f);
   }
-  if (sets.length === 0) throw new AppError('Không có dữ liệu', 400);
-  sets.push('updated_at = NOW()');
+  if (present.length === 0) throw new AppError('Không có dữ liệu', 400);
 
-  await query(
-    `INSERT INTO course_modal_configs (course_id) VALUES ($1) ON CONFLICT (course_id) DO NOTHING`,
-    [courseId],
-  );
-  await query(`UPDATE course_modal_configs SET ${sets.join(', ')} WHERE course_id = $1`, params);
+  await modalConfigRepository.insertCourseModalConfigIfMissing(courseId);
+  await modalConfigRepository.updateCourseModalConfig(courseId, present, input);
   await invalidateCourseReadCaches(courseId);
   return { success: true };
 }
@@ -889,11 +649,11 @@ export async function upsertCourseModalConfig(courseId: string, tenantId: string
 /** Read like the write: only a live course of the caller's tenant, else the same 404. */
 export async function getSectionModalConfig(courseId: string, tenantId: string, sectionId: string) {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_MISSING_MESSAGE);
-  const result = await query('SELECT * FROM section_modal_configs WHERE course_id = $1 AND section_id = $2', [courseId, sectionId]);
-  if (result.rowCount === 0) {
+  const config = await modalConfigRepository.selectSectionModalConfig(courseId, sectionId);
+  if (!config) {
     return { course_id: courseId, section_id: sectionId, enabled: false, title: '', description: '', updated_at: null };
   }
-  return result.rows[0];
+  return config;
 }
 
 export async function upsertSectionModalConfig(
@@ -902,16 +662,12 @@ export async function upsertSectionModalConfig(
   input: { section_id: string; enabled?: boolean; title?: string; description?: string },
 ) {
   await assertCourseBelongsToTenant(courseId, tenantId, COURSE_NOT_FOUND_MESSAGE);
-  await query(
-    `INSERT INTO section_modal_configs (course_id, section_id, enabled, title, description)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (course_id, section_id) DO UPDATE SET
-       enabled = COALESCE($3, section_modal_configs.enabled),
-       title = COALESCE($4, section_modal_configs.title),
-       description = COALESCE($5, section_modal_configs.description),
-       updated_at = NOW()`,
-    [courseId, input.section_id, input.enabled ?? false, input.title || '', input.description || ''],
-  );
+  await modalConfigRepository.upsertSectionModalConfig(courseId, {
+    sectionId: input.section_id,
+    enabled: input.enabled ?? false,
+    title: input.title || '',
+    description: input.description || '',
+  });
   await invalidateCourseReadCaches(courseId);
   return { success: true };
 }
