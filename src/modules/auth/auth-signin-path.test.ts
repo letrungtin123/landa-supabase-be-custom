@@ -264,6 +264,8 @@ test('last_login_at is written at most once a minute, at sign-in and for issued 
   ]);
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('./auth.service.ts', import.meta.url), 'utf8');
-  assert.equal((source.match(/UPDATE users SET last_login_at/g) ?? []).length, 1, 'one throttled statement serves both call sites');
+  // The statement lives in auth.repository.ts since the SQL moved there.
+  const repository = readFileSync(new URL('./auth.repository.ts', import.meta.url), 'utf8');
+  assert.equal((`${source}\n${repository}`.match(/UPDATE users SET last_login_at/g) ?? []).length, 1, 'one throttled statement serves both call sites');
   assert.equal((source.match(/touchLastLogin\(user\.id\)/g) ?? []).length, 2);
 });

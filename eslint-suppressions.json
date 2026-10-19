@@ -643,11 +643,6 @@
       "count": 19
     }
   },
-  "src/modules/auth/auth.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/badges/badge-evaluation.service.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
