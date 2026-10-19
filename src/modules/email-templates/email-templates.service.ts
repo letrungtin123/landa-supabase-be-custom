@@ -3,6 +3,7 @@ import { bumpCacheVersion, getCacheJson, getCacheVersion, setCacheJson } from '.
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { query } from '../../config/database.js';
 import { AppError } from '../../utils/errors.js';
+import { createEmailTemplatesRepository, type EmailTemplatesDb } from './email-templates.repository.js';
 
 export const EMAIL_TEMPLATE_KEYS = [
   'course_notification',
@@ -70,6 +71,8 @@ interface TenantTemplateRow {
   updated_at: string | null;
   updated_by: string | null;
 }
+
+const templatesRepository = createEmailTemplatesRepository({ query } satisfies EmailTemplatesDb);
 
 interface EmailTemplateInput {
   subject_template?: unknown;
@@ -330,18 +333,8 @@ async function selectTemplate(
   key: EmailTemplateKey,
   client?: PoolClient,
 ): Promise<TenantTemplateRow | null> {
-  const sql = `SELECT tenant_id, template_key, subject_template, preheader_template, body_template,
-                     is_enabled, updated_at, updated_by
-              FROM tenant_email_templates
-              WHERE tenant_id = $1::uuid
-                AND template_key = $2
-                AND is_enabled = true
-              LIMIT 1`;
-  const params = [tenantId, key];
-  const result = client
-    ? await client.query<TenantTemplateRow>(sql, params)
-    : await query<TenantTemplateRow>(sql, params);
-  return result.rows[0] || null;
+  const repository = client ? createEmailTemplatesRepository(client) : templatesRepository;
+  return (await repository.selectTemplate<TenantTemplateRow>(tenantId, key)) || null;
 }
 
 export async function invalidateEmailTemplateCache(tenantId?: string, key?: EmailTemplateKey) {
@@ -412,24 +405,7 @@ export async function getEmailTemplateForRender(
 }
 
 export async function getEmailTemplateSmtpStatus(tenantId: string): Promise<EmailTemplateSmtpStatus> {
-  const result = await query<{
-    is_enabled: boolean;
-    host: string | null;
-    username: string | null;
-    from_email: string | null;
-    password_ciphertext: string | null;
-    password_iv: string | null;
-    password_auth_tag: string | null;
-  }>(
-    `SELECT is_enabled, host, username, from_email,
-            password_ciphertext, password_iv, password_auth_tag
-     FROM tenant_smtp_configs
-     WHERE tenant_id = $1::uuid
-     LIMIT 1`,
-    [tenantId],
-  );
-
-  const row = result.rows[0];
+  const row = await templatesRepository.selectSmtpReadiness(tenantId);
   const configured = Boolean(row);
   const hasPassword = Boolean(row?.password_ciphertext && row?.password_iv && row?.password_auth_tag);
   const hasSender = Boolean(row?.username?.trim() && row?.from_email?.trim());
@@ -462,15 +438,7 @@ async function assertSmtpReady(tenantId: string) {
 export async function listTenantEmailTemplates(tenantId: string) {
   let rows: TenantTemplateRow[] = [];
   try {
-    const result = await query<TenantTemplateRow>(
-      `SELECT tenant_id, template_key, subject_template, preheader_template, body_template,
-              is_enabled, updated_at, updated_by
-       FROM tenant_email_templates
-       WHERE tenant_id = $1::uuid
-         AND is_enabled = true`,
-      [tenantId],
-    );
-    rows = result.rows;
+    rows = await templatesRepository.selectTemplates<TenantTemplateRow>(tenantId);
   } catch (err) {
     if (!isUndefinedTableError(err)) throw err;
   }
@@ -492,36 +460,22 @@ export async function updateTenantEmailTemplate(
   const key = ensureTemplateKey(keyValue);
   await assertSmtpReady(tenantId);
   const normalized = normalizeInput(key, input);
-  const result = await query<TenantTemplateRow>(
-    `INSERT INTO tenant_email_templates (
-       tenant_id, template_key, subject_template, preheader_template, body_template,
-       is_enabled, updated_by, updated_at
-     )
-     VALUES ($1::uuid, $2, $3, $4, $5, true, $6::uuid, now())
-     ON CONFLICT (tenant_id, template_key) DO UPDATE SET
-       subject_template = EXCLUDED.subject_template,
-       preheader_template = EXCLUDED.preheader_template,
-       body_template = EXCLUDED.body_template,
-       is_enabled = true,
-       updated_by = EXCLUDED.updated_by,
-       updated_at = now()
-     RETURNING tenant_id, template_key, subject_template, preheader_template, body_template,
-               is_enabled, updated_at, updated_by`,
-    [tenantId, key, normalized.subject_template, normalized.preheader_template, normalized.body_template, updatedBy],
-  );
+  const saved = await templatesRepository.upsertTemplate<TenantTemplateRow>({
+    tenantId,
+    key,
+    subjectTemplate: normalized.subject_template,
+    preheaderTemplate: normalized.preheader_template,
+    bodyTemplate: normalized.body_template,
+    updatedBy,
+  });
   await invalidateEmailTemplateCache(tenantId, key);
-  return toRecord(DEFAULT_TEMPLATES[key], result.rows[0]);
+  return toRecord(DEFAULT_TEMPLATES[key], saved);
 }
 
 export async function resetTenantEmailTemplate(tenantId: string, keyValue: string) {
   const key = ensureTemplateKey(keyValue);
   await assertSmtpReady(tenantId);
-  await query(
-    `DELETE FROM tenant_email_templates
-     WHERE tenant_id = $1::uuid
-       AND template_key = $2`,
-    [tenantId, key],
-  );
+  await templatesRepository.deleteTemplate(tenantId, key);
   await invalidateEmailTemplateCache(tenantId, key);
   return toRecord(DEFAULT_TEMPLATES[key], null);
 }
