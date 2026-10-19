@@ -5,7 +5,8 @@
 //   connection; GET /crash answers, then the worker exits with code 3.
 // - ECHO_LISTEN_DELAY_INSTANCE + ECHO_LISTEN_DELAY_MS: that instance listens
 //   (and so signals "ready") late.
-// - ECHO_IGNORE_SHUTDOWN_INSTANCE: that instance ignores the "shutdown" message.
+// - ECHO_IGNORE_SHUTDOWN_INSTANCE: that instance ignores the "shutdown" message
+//   and stays alive (as the app does with its pools open) until it is killed.
 // - ECHO_BUILD_FILE: read once at start, like a new process reads dist/ from
 //   disk. Its text is the `build` of every answer; "crash" exits with code 4
 //   before listening, "hang" never listens (never "ready").
@@ -36,6 +37,11 @@ if (build !== 'hang') {
     server.listen(Number(process.env.PORT), '127.0.0.1', () => process.send?.('ready'));
   }, listenDelayMs);
 }
+
+// The primary also disconnects a worker it tells to stop (Node closes its
+// server and IPC channel); without this timer nothing else would keep the
+// ignoring instance alive.
+if (process.env.ECHO_IGNORE_SHUTDOWN_INSTANCE === instance) setInterval(() => undefined, 60_000);
 
 process.on('message', message => {
   if (message !== 'shutdown' || process.env.ECHO_IGNORE_SHUTDOWN_INSTANCE === instance) return;

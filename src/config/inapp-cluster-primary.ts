@@ -14,7 +14,8 @@
 //   from 1 s again after 30 s up).
 // - Shutdown: the PM2 "shutdown" message, SIGINT or SIGTERM is passed to the
 //   workers as the "shutdown" message (their graceful shutdown; signals do
-//   not reach a process on Windows). The primary waits for them up to
+//   not reach a process on Windows), and each worker told to stop leaves the
+//   round-robin at once (tellToStop). The primary waits for them up to
 //   SHUTDOWN_FORCE_EXIT_MS + 1 s (before PM2's kill_timeout of 15 s), kills
 //   the ones left, then exits (0, or 1 when it had to kill).
 // - Rolling restart (the ROLLING_RESTART_TOPIC message that
@@ -251,7 +252,21 @@ class ClusterPrimary {
     }, delayMs);
   }
 
-  /** Sends "shutdown" once per worker (a second one would cut its graceful shutdown short). */
+  /**
+   * Sends "shutdown" once per worker (a second one would cut its graceful
+   * shutdown short), then disconnects the worker in the same tick.
+   *
+   * worker.disconnect() takes the worker out of the round-robin at once, so
+   * no connection is handed to it after "shutdown"; the connections handed to
+   * it before are ahead of "shutdown" on its channel and are served before it
+   * drains. Without it the worker stayed in the round-robin until its own
+   * server.close() reached the primary, and a connection handed to it in
+   * that moment was lost when its graceful shutdown ended (it exits within a
+   * few ms when idle) before it read the handoff: the primary kept the socket
+   * and the client got no answer. The worker then closes its listening
+   * handle and its IPC channel (Node's cluster disconnect) and finishes its
+   * graceful shutdown; the primary still waits for its exit.
+   */
   private tellToStop(worker: Worker): void {
     if (this.toldToStop.has(worker) || !worker.isConnected()) return;
     this.toldToStop.add(worker);
@@ -259,6 +274,7 @@ class ClusterPrimary {
       const state = this.live.get(worker);
       if (error && state) this.logger.warn('shutdown_message_failed', { ...this.fields(state, worker), error });
     });
+    worker.disconnect();
   }
 
   private killAtDeadline(worker: Worker): void {

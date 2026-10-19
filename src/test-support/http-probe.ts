@@ -53,9 +53,12 @@ export interface LoadResult {
 }
 
 /**
- * GET `pathName` on a new connection every 1000/`perSecond` ms, without
- * waiting for earlier answers, until stop(); stop() resolves once every
- * request sent has ended.
+ * GET `pathName` on a new connection, `perSecond` requests a second by the
+ * wall clock, without waiting for earlier answers, until stop(); stop()
+ * resolves once every request sent has ended. Each tick sends the requests
+ * due since the start: a timer fires late (every 15.6 ms at best with the
+ * default Windows timer, so a 50 ms interval runs every 62.5 ms, 16/s instead
+ * of 20/s), and counting ticks would lower the rate.
  */
 export function startLoad(port: number, perSecond: number, pathName = '/'): { stop: () => Promise<LoadResult> } {
   const result: LoadResult = { sent: 0, bodies: [], failures: [] };
@@ -74,7 +77,14 @@ export function startLoad(port: number, perSecond: number, pathName = '/'): { st
     pending.add(request);
     void request.finally(() => pending.delete(request));
   };
-  const timer = setInterval(send, Math.round(1000 / perSecond));
+  const startedAt = Date.now();
+  const timer = setInterval(
+    () => {
+      const due = Math.floor(((Date.now() - startedAt) * perSecond) / 1000);
+      while (result.sent < due) send();
+    },
+    Math.round(1000 / perSecond),
+  );
   return {
     stop: async () => {
       clearInterval(timer);
