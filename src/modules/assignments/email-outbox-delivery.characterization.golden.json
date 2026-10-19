@@ -1,0 +1,16 @@
+{
+ "a claim error is counted and the tick ends": "05583ae8b247a72f0e008c2451da174c97d0ee4c9c67e22c2ffd77d52cb55b38",
+ "a disabled worker never starts and triggers do nothing": "99acb65775ac7104d6e822d9766ad684c6bab91280722b1b00a071a49634d1e1",
+ "a job whose recipient was deleted after the claim is dropped": "67b707ac8d5abda8d7788ae8b4721d1ebb9411ee63ad53e2c2635ca80e487211",
+ "a refused recipient at max attempts fails for good": "8aa58693e3792a107034ee6117f9ac347c7491fbd7e0c90403ec9e1c6aa7c9f3",
+ "a second trigger before the tick starts only replaces its reason": "88a3f6f521c05d74ffc6461d2b8dd4a7ab1bfc73c1d22a2f15676943a99d769c",
+ "a wake during a tick runs one more drain": "0507e209b941a4e0534c2f21c874dd0a3a0b69ac03749dceeb025695f4c14816",
+ "an SMTP connection failure retries the slice": "fa1264c978711581b714a51896a54d5b82893ffb4f3013a10847242c4f9cdc84",
+ "an idle startup tick claims nothing": "60cd977f174934765599d3275742bd4fed2b3f7f5d2009221082f993f010f229",
+ "an open tenant circuit releases its jobs until the cooldown ends": "936fe531343aee71dc9350867f5eefcbc2bd5713f0b0af574a8cb2d75d8bec08",
+ "inline start unrefs its interval, dedicated start keeps it": "21aea7b0512c2f343940f802dfde97e4d28b75e0d8029d6e617d168033281f64",
+ "missing SMTP config retries every job of the tenant and opens its circuit": "96d4ee62025f763184302d2482b7bdf81484953d68c329575e75d2ee6efafeb2",
+ "stale sending leases are reclaimed when the runnable claim is short": "489e8db6411d87026d07d3b8e4e448c406a1f2daa3c10d72b42f61abad3cdc20",
+ "tenants are sent in separate SMTP sessions, two messages per session": "59013b1cfb8d1f49f2dcd030ec57ba38f178c9ba4c0d79f85fd508a5fa477207",
+ "tick sends, retries a refused recipient and runs the hourly retention": "c5f1b4a13f424c6f35027148340f8bc45611e81399d433c9d9b50b6d371538f8"
+}
