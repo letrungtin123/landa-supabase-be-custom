@@ -21,6 +21,20 @@ export interface JobWakeUpConsumerOptions {
   onRunFailed(jobId: string, error: unknown): Promise<void>;
   /** RabbitMQ gave up on the message after its last retry. */
   onRetriesExhausted(jobId: string): Promise<void>;
+  /**
+   * Unset: a message without a jobId is logged ("<logPrefix> Ignoring message
+   * without jobId") and acknowledged, and an error of onRetriesExhausted goes
+   * back to the RabbitMQ consumer, which logs it.
+   *
+   * Set: a message without a jobId fails with Error(missingJobIdMessage) like
+   * a failed run (onRunFailed is not called), so RabbitMQ retries it; after
+   * the last retry that error, or an error of onRetriesExhausted, goes to
+   * onRetriesExhaustedError.
+   */
+  requiredJobId?: {
+    missingJobIdMessage: string;
+    onRetriesExhaustedError(error: unknown): void;
+  };
 }
 
 /** The trimmed `jobId` of a wake-up message; null when it is missing or blank. */
@@ -37,11 +51,13 @@ function readJobIdFromRawMessage(rawMessage: string): string | null {
 }
 
 export async function consumeJobWakeUps(options: JobWakeUpConsumerOptions): Promise<void> {
+  const required = options.requiredJobId;
   await consume(
     options.queue,
     async (message: { [key: string]: unknown; jobId?: unknown }) => {
       const jobId = readJobId(message);
       if (!jobId) {
+        if (required) throw new Error(required.missingJobIdMessage);
         console.warn(`${options.logPrefix} Ignoring message without jobId`);
         return;
       }
@@ -54,6 +70,17 @@ export async function consumeJobWakeUps(options: JobWakeUpConsumerOptions): Prom
       }
     },
     async (_queue: string, rawMessage: string) => {
+      if (required) {
+        try {
+          const jobId = readJobId(JSON.parse(rawMessage));
+          if (!jobId) throw new Error(required.missingJobIdMessage);
+          await options.onRetriesExhausted(jobId);
+        } catch (error) {
+          required.onRetriesExhaustedError(error);
+        }
+        return;
+      }
+
       const jobId = readJobIdFromRawMessage(rawMessage);
       if (!jobId) return;
       await options.onRetriesExhausted(jobId);

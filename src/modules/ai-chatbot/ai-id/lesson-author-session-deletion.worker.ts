@@ -1,4 +1,4 @@
-import { consume, QUEUES } from '../../../config/rabbitmq/index.js';
+import { QUEUES } from '../../../config/rabbitmq/index.js';
 import { env } from '../../../config/env.js';
 import {
   assertLessonAuthorSessionDeletionSchema,
@@ -6,27 +6,31 @@ import {
   requeueLessonAuthorSessionDeletionJobs,
   runLessonAuthorSessionDeletion,
 } from './lesson-author-session.service.js';
-import { stopOnShutdown } from '../../../config/process-lifecycle.js';
+import { consumeJobWakeUps, startJobPoller } from '../../../platform/job-runner/index.js';
 import { swallowAndLog } from '../../../utils/best-effort.js';
-
-function jobId(payload: Record<string, unknown>): string {
-  const value = typeof payload.jobId === 'string' ? payload.jobId.trim() : '';
-  if (!value) throw new Error('Missing lesson author session deletion jobId');
-  return value;
-}
 
 export async function startLessonAuthorSessionDeletionWorker(): Promise<void> {
   await assertLessonAuthorSessionDeletionSchema();
-  await consume(QUEUES.LESSON_AUTHOR_SESSION_DELETE, async payload => {
-    const id = jobId(payload);
-    try { await runLessonAuthorSessionDeletion(id); }
-    catch (error) { await markLessonAuthorSessionDeletionRetryable(id, error).catch(swallowAndLog('lesson_author.session_deletion_retry_mark')); throw error; }
-  }, async (_queue, raw) => {
-    try { await markLessonAuthorSessionDeletionRetryable(jobId(JSON.parse(raw)), 'RabbitMQ retry limit reached; database recovery will continue'); }
-    catch (error) { console.error('[LessonAuthorSessionDelete] max retry handler failed', error); }
+  await consumeJobWakeUps({
+    queue: QUEUES.LESSON_AUTHOR_SESSION_DELETE,
+    logPrefix: '[LessonAuthorSessionDelete]',
+    prefetch: 1,
+    // The job row carries its own retry backoff (next_attempt_at).
+    retryBackoff: false,
+    run: runLessonAuthorSessionDeletion,
+    onRunFailed: (jobId, error) =>
+      markLessonAuthorSessionDeletionRetryable(jobId, error).catch(swallowAndLog('lesson_author.session_deletion_retry_mark')),
+    onRetriesExhausted: jobId =>
+      markLessonAuthorSessionDeletionRetryable(jobId, 'RabbitMQ retry limit reached; database recovery will continue'),
+    requiredJobId: {
+      missingJobIdMessage: 'Missing lesson author session deletion jobId',
+      onRetriesExhaustedError: error => console.error('[LessonAuthorSessionDelete] max retry handler failed', error),
+    },
   });
   await requeueLessonAuthorSessionDeletionJobs().catch(error => console.error('[LessonAuthorSessionDelete] startup recovery failed', error));
-  stopOnShutdown(setInterval(() => {
-    void requeueLessonAuthorSessionDeletionJobs().catch(error => console.error('[LessonAuthorSessionDelete] recovery failed', error));
-  }, env.DELETION_REQUEUE_INTERVAL_MS).unref());
+  startJobPoller({
+    intervalMs: env.DELETION_REQUEUE_INTERVAL_MS,
+    tick: () => requeueLessonAuthorSessionDeletionJobs(),
+    onError: error => console.error('[LessonAuthorSessionDelete] recovery failed', error),
+  });
 }

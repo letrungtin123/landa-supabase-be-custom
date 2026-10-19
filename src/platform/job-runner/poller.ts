@@ -3,7 +3,8 @@ import { stopOnShutdown } from '../../config/process-lifecycle.js';
 export interface JobPollerOptions {
   /** ≤ 0: no poller. */
   intervalMs: number;
-  tick(): Promise<void>;
+  /** Its result is not used. */
+  tick(): Promise<unknown>;
   /** A tick that failed; the next tick runs as planned. */
   onError(error: unknown): void;
 }
