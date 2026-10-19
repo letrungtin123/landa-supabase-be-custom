@@ -119,7 +119,7 @@ export async function prepareDurableBlueprint(
 ) {
   admissionStage('actor_authorization');
   await assertDurableBlueprintActor(userId, tenantId);
-  if (!replay) checkRateLimit(userId);
+  if (!replay) await checkRateLimit(userId);
   admissionStage('conversation_context');
   const ctx = await loadConversationContext(conversationId, userId, tenantId, 'lesson_author');
   if (options.courseId && options.courseId !== ctx.courseId) throw new GenerationJobError('GENERATION_SNAPSHOT_CHANGED');
@@ -194,7 +194,7 @@ export async function prepareDurableBlueprint(
     embeddingModel: settings.embeddingModel,
     markAccepted() { markRateLimit(userId); },
     async filterInput() {
-      checkRateLimit(userId);
+      await checkRateLimit(userId);
       const outcome = await runStoredInputFilter({ message: trimmed, sessionId: conversationId,
         tenantId, botId: ctx.botId, rawConfig: ctx.inputFilterConfig, redisClient: getRedisClient() });
       if (outcome.blocked) throw new AppError('Yêu cầu không được bộ lọc đầu vào chấp nhận.', 400, 'GENERATION_INPUT_REJECTED');
