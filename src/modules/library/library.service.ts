@@ -3,14 +3,13 @@
 // Tenant-scoped, tối ưu cho triệu records
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../config/database.js';
 import { invalidateTenantLibraryCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../utils/errors.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/audit-log.js';
 import { parsePagination, calcOffset, calcTotalPages } from '../../utils/query-helpers.js';
 import {
   createLibraryRepository,
-  type DocumentRow,
   type LibraryDb,
 } from './library.repository.js';
 
@@ -138,9 +137,7 @@ export async function updateDocCategory(
     removedAssignments: number,
   ) => TransactionalAuditEntry,
 ) {
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  const result = await withDatabaseTransaction(async (client) => {
     const repository = createLibraryRepository(client);
 
     const current = await repository.lockCategory(catId, tenantId);
@@ -164,15 +161,10 @@ export async function updateDocCategory(
     if (!updated) throw new AppError('Danh mục tài liệu không tồn tại', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(current, updated, removedAssignments));
 
-    await client.query('COMMIT');
-    await invalidateTenantLibraryCaches(tenantId);
     return { ...updated, removed_assignments: removedAssignments };
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
+  await invalidateTenantLibraryCaches(tenantId);
+  return result;
 }
 
 export async function deleteDocCategory(catId: string, tenantId: string) {
@@ -223,17 +215,13 @@ export async function createDocument(tenantId: string, input: {
   title: string; file_url: string; file_size?: number; extension?: string;
   category_id?: string | null; is_visible?: boolean; is_public?: boolean;
 }, uploadedBy: string, options: { invalidateCache?: boolean } = {}, auditEntry?: (document: DocumentAuditSnapshot) => TransactionalAuditEntry) {
-  const client = await getClient();
-  let document: DocumentRow | undefined;
-  try {
-    await client.query('BEGIN');
-
+  const document = await withDatabaseTransaction(async (client) => {
     if (input.is_public !== undefined) throw new AppError('Chỉ được bật Công khai truy cập ở danh mục tài liệu', 400);
     const isVisible = input.is_visible ?? true;
     const isPublic = false;
     const categoryId = await normalizeDocumentCategory(client, tenantId, input.category_id || null);
 
-    document = await createLibraryRepository(client).insertDocument({
+    const document = await createLibraryRepository(client).insertDocument({
       tenantId,
       title: input.title,
       fileUrl: input.file_url,
@@ -246,18 +234,13 @@ export async function createDocument(tenantId: string, input: {
     });
     if (!document) throw new AppError('Không thể tạo tài liệu', 500);
     if (auditEntry) await appendAuditLog(client, auditEntry(document));
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+    return document;
+  });
 
   if (options.invalidateCache !== false) {
     await invalidateTenantLibraryCaches(tenantId);
   }
-  return document!;
+  return document;
 }
 
 export async function invalidateLibraryCache(tenantId: string) {
@@ -292,9 +275,7 @@ async function updateDocumentFromDb(
 
   if (input.is_public !== undefined) throw new AppError('Chỉ được bật Công khai truy cập ở danh mục tài liệu', 400);
 
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  return withDatabaseTransaction(async (client) => {
     const repository = createLibraryRepository(client);
 
     const current = await repository.lockDocument(docId, tenantId);
@@ -318,14 +299,8 @@ async function updateDocumentFromDb(
     });
     if (!updated) throw new AppError('Tài liệu không tồn tại', 404);
     if (auditEntry) await appendAuditLog(client, auditEntry(current, updated, nextCategory?.name ?? null));
-    await client.query('COMMIT');
     return updated;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 export async function deleteDocument(docId: string, tenantId: string) {
@@ -380,9 +355,7 @@ async function bulkDocumentActionFromDb(
   auditEntry?: (result: { updated: number; detached: number; categoryName: string | null }) => TransactionalAuditEntry | null,
 ) {
 
-  const client = await getClient();
-  try {
-    await client.query('BEGIN');
+  return withDatabaseTransaction(async (client) => {
     const repository = createLibraryRepository(client);
     let result: { updated: number; detached: number; categoryName: string | null };
 
@@ -409,14 +382,8 @@ async function bulkDocumentActionFromDb(
       const entry = auditEntry(result);
       if (entry) await appendAuditLog(client, entry);
     }
-    await client.query('COMMIT');
     return result;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 }
 
 

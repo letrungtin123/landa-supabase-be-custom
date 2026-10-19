@@ -653,7 +653,7 @@
       "count": 4
     },
     "prefer-const": {
-      "count": 2
+      "count": 1
     }
   },
   "src/modules/branding/dashboard-content.routes.ts": {
