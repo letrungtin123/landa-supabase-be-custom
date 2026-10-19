@@ -15,6 +15,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000001-0000-4000-8000-000000000001",
+     "a2000001-0000-4000-8000-000000000001",
+     "a1000001-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000001-0000-4000-8000-000000000001",
@@ -585,6 +594,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000002-0000-4000-8000-000000000001",
+     "a2000002-0000-4000-8000-000000000001",
+     "a1000002-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -1290,6 +1308,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000003-0000-4000-8000-000000000001",
+     "a2000003-0000-4000-8000-000000000001",
+     "a1000003-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000003-0000-4000-8000-000000000001",
@@ -1981,6 +2008,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000004-0000-4000-8000-000000000001",
+     "a2000004-0000-4000-8000-000000000001",
+     "a1000004-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000004-0000-4000-8000-000000000001",
@@ -2595,6 +2631,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000005-0000-4000-8000-000000000001",
+     "a2000005-0000-4000-8000-000000000001",
+     "a1000005-0000-4000-8000-000000000001",
+     "admin"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000005-0000-4000-8000-000000000001",
@@ -3118,6 +3163,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000006-0000-4000-8000-000000000001",
+     "a2000006-0000-4000-8000-000000000001",
+     "a1000006-0000-4000-8000-000000000001",
+     "admin"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000006-0000-4000-8000-000000000001",
@@ -3218,6 +3272,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000007-0000-4000-8000-000000000001",
+     "a2000007-0000-4000-8000-000000000001",
+     "a1000007-0000-4000-8000-000000000001",
+     "admin"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -3959,6 +4022,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000008-0000-4000-8000-000000000001",
+     "a2000008-0000-4000-8000-000000000001",
+     "a1000008-0000-4000-8000-000000000001",
+     "admin"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -4828,6 +4900,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000009-0000-4000-8000-000000000001",
+     "a2000009-0000-4000-8000-000000000001",
+     "a1000009-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000009-0000-4000-8000-000000000001",
@@ -5528,6 +5609,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000a-0000-4000-8000-000000000001",
+     "a200000a-0000-4000-8000-000000000001",
+     "a100000a-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300000a-0000-4000-8000-000000000001",
@@ -6152,6 +6242,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000b-0000-4000-8000-000000000001",
+     "a200000b-0000-4000-8000-000000000001",
+     "a100000b-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300000b-0000-4000-8000-000000000001",
@@ -6770,6 +6869,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000c-0000-4000-8000-000000000001",
+     "a200000c-0000-4000-8000-000000000001",
+     "a100000c-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300000c-0000-4000-8000-000000000001",
@@ -7378,6 +7486,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300001c-0000-4000-8000-000000000001",
+     "a200001c-0000-4000-8000-000000000001",
+     "a100001c-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300001c-0000-4000-8000-000000000001",
@@ -7914,6 +8031,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300001d-0000-4000-8000-000000000001",
+     "a200001d-0000-4000-8000-000000000001",
+     "a100001d-0000-4000-8000-000000000001",
+     "lesson_author"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -8454,6 +8580,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000d-0000-4000-8000-000000000001",
+     "a200000d-0000-4000-8000-000000000001",
+     "a100000d-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300000d-0000-4000-8000-000000000001",
@@ -8587,6 +8722,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000e-0000-4000-8000-000000000001",
+     "a200000e-0000-4000-8000-000000000001",
+     "a100000e-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -9153,6 +9297,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300000f-0000-4000-8000-000000000001",
+     "a200000f-0000-4000-8000-000000000001",
+     "a100000f-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a300000f-0000-4000-8000-000000000001",
@@ -9368,6 +9521,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000010-0000-4000-8000-000000000001",
+     "a2000010-0000-4000-8000-000000000001",
+     "a1000010-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -9953,6 +10115,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000011-0000-4000-8000-000000000001",
+     "a2000011-0000-4000-8000-000000000001",
+     "a1000011-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -10660,6 +10831,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000012-0000-4000-8000-000000000001",
+     "a2000012-0000-4000-8000-000000000001",
+     "a1000012-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000012-0000-4000-8000-000000000001",
@@ -11355,6 +11535,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000013-0000-4000-8000-000000000001",
+     "a2000013-0000-4000-8000-000000000001",
+     "a1000013-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000013-0000-4000-8000-000000000001",
@@ -11838,6 +12027,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000014-0000-4000-8000-000000000001",
+     "a2000014-0000-4000-8000-000000000001",
+     "a1000014-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000014-0000-4000-8000-000000000001",
@@ -12291,6 +12489,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000015-0000-4000-8000-000000000001",
+     "a2000015-0000-4000-8000-000000000001",
+     "a1000015-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -12856,7 +13063,7 @@
   ],
   "db": [
    {
-    "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
     "params": [
      "a3000016-0000-4000-8000-000000000001",
      "a2000016-0000-4000-8000-000000000001",
@@ -12870,25 +13077,7 @@
   "titles": [],
   "gemini": [],
   "rag": [],
-  "logs": [
-   [
-    "log",
-    "[LessonAuthorFlow] stream_error",
-    {
-     "correlation_id": null,
-     "conversation_id": "a3000016-0000-4000-8000-000000000001",
-     "error": "Cuộc hội thoại không tồn tại"
-    }
-   ],
-   [
-    "log",
-    "[LessonAuthorFlow] stream_lock_released",
-    {
-     "correlation_id": null,
-     "conversation_id": "a3000016-0000-4000-8000-000000000001"
-    }
-   ]
-  ]
+  "logs": []
  },
  "invalid_input": {
   "events": [
@@ -12922,6 +13111,15 @@
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000018-0000-4000-8000-000000000001",
+     "a2000018-0000-4000-8000-000000000001",
+     "a1000018-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -13006,6 +13204,15 @@
   ],
   "db": [
    {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000019-0000-4000-8000-000000000001",
+     "a2000019-0000-4000-8000-000000000001",
+     "a1000019-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
      "a3000019-0000-4000-8000-000000000001",
@@ -13076,10 +13283,27 @@
     "message": "Đang xử lý tin nhắn trước đó. Vui lòng đợi."
    },
    {
+    "type": "error",
+    "message": "Cuộc hội thoại không tồn tại"
+   },
+   {
+    "type": "error",
+    "message": "Cuộc hội thoại không tồn tại"
+   },
+   {
     "type": "done"
    }
   ],
   "db": [
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300001a-0000-4000-8000-000000000001",
+     "a200001a-0000-4000-8000-000000000001",
+     "a100001a-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
    {
     "sql": "WITH conv AS ( SELECT cc.id, cc.tenant_id, cc.bot_id, cc.target, cc.cour #30483078694d",
     "params": [
@@ -13252,6 +13476,33 @@
     "params": [
      "a400001a-0000-4000-8000-000000000001",
      "a100001a-0000-4000-8000-000000000001"
+    ]
+   },
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300001a-0000-4000-8000-000000000001",
+     "a200001a-0000-4000-8000-000000000001",
+     "a100001a-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a300001a-0000-4000-8000-000000000001",
+     "a2000026-0000-4000-8000-000000000002",
+     "a100001a-0000-4000-8000-000000000001",
+     "learner"
+    ]
+   },
+   {
+    "sql": "SELECT cc.id FROM chat_conversations cc JOIN tenant_bot_assignments tba  #511f3b97d8c2",
+    "params": [
+     "a3000026-0000-4000-8000-0000000000ff",
+     "a2000026-0000-4000-8000-000000000003",
+     "a100001a-0000-4000-8000-000000000001",
+     "learner"
     ]
    },
    {

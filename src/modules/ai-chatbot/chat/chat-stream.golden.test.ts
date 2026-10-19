@@ -217,6 +217,11 @@ async function installDatabase(t: TestContext, world: World, record: Record_): P
     if (/UPDATE ai_credit_monthly\s+SET used_usd/.test(sql)) {
       return rows([{ budget_usd: '100', used_usd: '0.01', warned_80: false, warned_100: false }]);
     }
+    if (/^\s*SELECT cc\.id\s+FROM chat_conversations cc/.test(sql)) {
+      const match = params[0] === world.conversationId && params[1] === world.userId && params[2] === world.tenantId
+        && (params[3] === null || params[3] === world.target);
+      return match ? rows([{ id: world.conversationId }]) : rows([]);
+    }
     if (sql.includes('WITH conv AS')) {
       const match = params[0] === world.conversationId && params[1] === world.userId && params[2] === world.tenantId
         && (params[3] === null || params[3] === world.target);
@@ -645,16 +650,30 @@ test('chat stream golden: a second turn on a conversation that is still answerin
   const held = new Promise<void>((resolve) => { release = resolve; });
   installFetch(t, [{ stream: [textChunk('Đang trả lời ')], holdUntil: held }], record);
   captureLogs(t, record);
+  const answerOf = (from: number) => JSON.stringify(record.events.slice(from));
+  let otherUser = '';
+  let missing = '';
   try {
     const first = runTurn(world, { message: 'Câu hỏi đang được trả lời', options: learner }, record);
     while (!record.events.length) await new Promise((resolve) => setImmediate(resolve));
-    await runTurn(world, { message: 'Câu hỏi gửi chồng', options: learner, userId: 'a2000026-0000-4000-8000-000000000002' }, record);
+    // The owner again, after the rate-limit window (the first answer still streams): busy.
+    runtime.rateLimitMap.clear();
+    await runTurn(world, { message: 'Câu hỏi gửi chồng', options: learner }, record);
+    // Another user of the tenant on this conversation: answered exactly like a conversation that does not exist.
+    let from = record.events.length;
+    await runTurn(world, { message: 'Câu hỏi của người khác', options: learner, userId: 'a2000026-0000-4000-8000-000000000002' }, record);
+    otherUser = answerOf(from);
+    from = record.events.length;
+    await runTurn(world, { message: 'Câu hỏi của người khác', options: learner, userId: 'a2000026-0000-4000-8000-000000000003', conversationId: 'a3000026-0000-4000-8000-0000000000ff' }, record);
+    missing = answerOf(from);
     release();
     await first;
   } finally {
     t.mock.restoreAll();
   }
   assert.equal(runtime.streamLocks.size, 0);
+  assert.equal(otherUser, missing, 'another user\'s conversation answers exactly like a missing one');
+  assert.equal(otherUser, JSON.stringify([{ type: 'error', message: 'Cuộc hội thoại không tồn tại' }]));
   const actual = compact(json(record));
   produced.conversation_busy = actual;
   if (!UPDATE) assert.deepStrictEqual(actual, golden.conversation_busy, 'golden conversation_busy');

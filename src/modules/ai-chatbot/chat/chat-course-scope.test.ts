@@ -40,6 +40,8 @@ async function installFakeDb(t: TestContext, db: FakeDb): Promise<void> {
     }
     if (sql.includes('WITH counts AS')) return one({ conv_count: 0, persona_valid: true, assignment_valid: true });
     if (/^\s*INSERT INTO chat_conversations/.test(sql)) return one({ id: CONVERSATION, course_id: params[5] });
+    // The conversation is the caller's (checked before the stream locks).
+    if (/^\s*SELECT cc\.id\s+FROM chat_conversations cc/.test(sql)) return one({ id: CONVERSATION });
     if (sql.includes('WITH conv AS')) {
       return one({
         id: CONVERSATION, tenant_id: params[2], bot_id: BOT, target: 'admin', course_id: db.storedCourseId,

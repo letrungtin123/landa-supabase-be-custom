@@ -665,7 +665,7 @@ export async function sendMessageStream(
   onError: (err: Error) => void,
   onSideEvent?: (event: ChatStreamSideEvent) => void,
 ): Promise<void> {
-  const admitted = await admitChatTurn(conversationId, userId, userContent, options, onError);
+  const admitted = await admitChatTurn(conversationId, userId, tenantId, userContent, options, onError);
   if (!admitted) return;
   const { trimmed, distributedStreamLock } = admitted;
 
