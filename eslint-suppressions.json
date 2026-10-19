@@ -690,12 +690,9 @@
       "count": 1
     }
   },
-  "src/modules/course-authoring/course-authoring.controller.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 24
-    },
+  "src/modules/course-authoring/course-author-notes.controller.ts": {
     "no-control-regex": {
-      "count": 2
+      "count": 1
     }
   },
   "src/modules/course-authoring/course-authoring.routes.ts": {
@@ -713,6 +710,14 @@
       "count": 1
     }
   },
+  "src/modules/course-authoring/course-block-input.logic.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 23
+    },
+    "no-control-regex": {
+      "count": 1
+    }
+  },
   "src/modules/course-authoring/course-blocks.repository.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
@@ -726,6 +731,11 @@
   "src/modules/course-authoring/course-outline-transfer.service.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 3
+    }
+  },
+  "src/modules/course-authoring/course-outline.controller.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
     }
   },
   "src/modules/course-authoring/course-outline.service.ts": {

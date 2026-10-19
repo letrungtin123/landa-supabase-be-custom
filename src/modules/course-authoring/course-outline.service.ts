@@ -20,7 +20,8 @@ import { withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import { type CourseComponentLocale } from './course-authoring-problem-defaults.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
 import { getDefaultData, getDefaultMetadata, getDefaultName } from './course-block-defaults.logic.js';
-import { createCourseBlocksRepository, type NewCourseRow } from './course-blocks.repository.js';
+import { initializeCourseMentorSectionDefaults, recordCourseMentorAssignmentHistory } from '../courses/courses.service.js';
+import { createCourseBlocksRepository } from './course-blocks.repository.js';
 import type { BlockInfo, BlockNode, CourseOutlineResponse, UnitChild } from './course-authoring.types.js';
 
 const blocksRepository = createCourseBlocksRepository({ query });
@@ -339,9 +340,44 @@ function safeJsonParse(str: string): any {
 
 // ── Course creation ──
 
-/** The course row of a new course (inside the caller's audited transaction). */
-export async function insertCourseRecord(course: NewCourseRow): Promise<void> {
-  await blocksRepository.insertCourse(course);
+export interface NewCourseInput {
+  courseId: string;
+  tenantId: string;
+  displayName: string;
+  description: string;
+  org: string;
+  /** From the request body; a missing start date reads as 2020-01-01. */
+  start: unknown;
+  userId: string;
+}
+
+/**
+ * A new course of the tenant (inside the caller's audited transaction): the
+ * course quota, the course row with its creator as mentor, the mentor section
+ * defaults and history, and the root block.
+ */
+export async function createCourseWithRootBlock(input: NewCourseInput): Promise<void> {
+  const { courseId, tenantId, userId } = input;
+  // ── Kiểm tra quota course cho tenant ──
+  const { checkQuota } = await import('../tenants/tenants.service.js');
+  await checkQuota(tenantId, 'courses');
+
+  // Insert into courses table
+  await blocksRepository.insertCourse({
+    courseId,
+    tenantId,
+    displayName: input.displayName,
+    description: input.description,
+    org: input.org,
+    startDate: (input.start || '2020-01-01') as string,
+    createdBy: userId,
+  });
+
+  await initializeCourseMentorSectionDefaults(courseId, tenantId, userId);
+  await recordCourseMentorAssignmentHistory(courseId, tenantId, userId, userId, 'assign');
+
+  // Initialize course structure with root block
+  await initializeCourseStructure(courseId, input.displayName, tenantId);
 }
 
 export async function initializeCourseStructure(
