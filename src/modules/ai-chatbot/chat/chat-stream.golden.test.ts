@@ -66,6 +66,8 @@ interface World {
   storeName: string | null;
   lessonAuthorKbId: string | null;
   convCount: number;
+  /** Saving the rows of an input filter refusal fails (a database error); other chat rows save. */
+  failInputFilterRefusalSave?: boolean;
 }
 
 interface Record_ {
@@ -266,6 +268,10 @@ async function installDatabase(t: TestContext, world: World, record: Record_): P
     if (/^\s*SELECT settings FROM tenants WHERE id = \$1/.test(sql)) return rows([{ settings: {} }]);
     if (sql.includes('WITH counts AS')) return rows([{ conv_count: world.convCount, persona_valid: true, assignment_valid: true }]);
     if (/^\s*INSERT INTO chat_conversations/.test(sql)) return rows([{ id: world.conversationId, course_id: params[5] }]);
+    const refusalRow = /"(?:input_filter_blocked|kind)":(?:true|"input_filter_rejection")/.test(JSON.stringify(params[2] ?? null));
+    if (world.failInputFilterRefusalSave && refusalRow && /^\s*INSERT INTO chat_messages/.test(sql)) {
+      throw Object.assign(new Error('terminating connection: secret-sql-detail'), { name: 'DatabaseError', code: '57P01' });
+    }
     if (/^\s*INSERT INTO chat_messages/.test(sql)) {
       const role = /VALUES \(\$1, '(\w+)'/.exec(sql)?.[1] ?? 'unknown';
       record.messages.push(json({ role, content: params[1], metadata: params[2] }));
@@ -672,4 +678,38 @@ test('chat stream golden: the conversation limit refuses an eleventh conversatio
   const actual = compact(json({ outcome, db: record.db, logs: record.logs }));
   produced.conversation_limit = actual;
   if (!UPDATE) assert.deepStrictEqual(actual, golden.conversation_limit, 'golden conversation_limit');
+});
+
+// Fix: an input filter refusal whose save fails stays refused (fail closed).
+test('chat stream: a refusal of the input filter that cannot be saved is still refused, without provider or AI points', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  runtime.rateLimitMap.clear();
+  pricing.clearAiRateCardCache();
+  const world = baseWorld(30, { botConfig: blockingFilter, failInputFilterRefusalSave: true });
+  const record = emptyRecord();
+  await installDatabase(t, world, record);
+  installFetch(t, [answerStream('Không được gọi.')], record);
+  ragReplies = [ragAnswer('Không được gọi.')];
+  ragRecord = record;
+  captureLogs(t, record);
+  try {
+    await runTurn(world, { message: 'Chào', options: learner }, record);
+  } finally {
+    t.mock.restoreAll();
+    ragRecord = null;
+  }
+  assert.deepEqual(record.events, [
+    { type: 'chunk', text: 'Tin nhắn hơi ngắn, bạn vui lòng mô tả rõ hơn nhé.' },
+    { type: 'done' },
+  ], 'the user gets the refusal');
+  assert.deepEqual(record.gemini, [], 'no provider call');
+  assert.deepEqual(record.rag, [], 'no AI service call');
+  assert.deepEqual(record.quota, [], 'no AI points held, reserved or charged');
+  assert.ok(record.db.every(entry => !/ai_token_|ai_credit_/.test(String((entry as { sql: string }).sql))), 'no quota statement');
+  const logs = JSON.stringify(record.logs);
+  assert.doesNotMatch(logs, /secret-sql-detail/, 'the failure text is never logged');
+  assert.ok(record.logs.some(line => JSON.stringify(line).includes('input_filter_refusal_not_saved')
+    && JSON.stringify(line).includes('DatabaseError:57P01')), 'the kind of failure is logged');
+  assert.doesNotMatch(logs, /continuing chat flow/);
+  assert.equal(runtime.streamLocks.size, 0);
 });

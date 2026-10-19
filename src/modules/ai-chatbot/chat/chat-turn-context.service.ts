@@ -8,6 +8,7 @@ import { query } from '../../../config/database.js';
 import { env } from '../../../config/env.js';
 import { getRedisClient } from '../../../config/redis.js';
 import { AppError } from '../../../middleware/error-handler.js';
+import { errorKind } from '../../../utils/best-effort.js';
 import { ChapterCheckpointError } from '../ai-id/lesson-author-chapter-checkpoint.logic.js';
 import { executeChapterCheckpoint } from '../ai-id/legacy/chapter-checkpoint.service.js';
 import { resolveLessonAuthorTurnContext } from '../ai-id/legacy/chat-turn-context.service.js';
@@ -104,11 +105,18 @@ export async function resolveChatTurnContext(request: ChatTurnRequest, state: Ch
   return lessonAuthor ? { ...base, ...lessonAuthor } : null;
 }
 
-/** The bot's input filter: true when it refused the message and answered with its reply. */
+/**
+ * The bot's input filter: true when it refused the message and answered with
+ * its reply. A filter that cannot run (invalid config, runtime error) lets the
+ * turn continue, as before. A refusal is final: when its rows cannot be saved
+ * the message stays refused (no provider call, no AI points) and only the kind
+ * of the database failure is logged.
+ */
 async function answerInputFilterRefusal(ctx: ConversationContext, request: ChatTurnRequest): Promise<boolean> {
   const { conversationId, userId, trimmed, onChunk, onDone } = request;
+  let filterOutcome: Awaited<ReturnType<typeof runStoredInputFilter>>;
   try {
-    const filterOutcome = await runStoredInputFilter({
+    filterOutcome = await runStoredInputFilter({
       message: trimmed,
       sessionId: conversationId,
       tenantId: ctx.tenantId,
@@ -116,22 +124,6 @@ async function answerInputFilterRefusal(ctx: ConversationContext, request: ChatT
       rawConfig: ctx.inputFilterConfig,
       redisClient: getRedisClient(),
     });
-
-    if (filterOutcome.blocked && filterOutcome.replyMessage) {
-      markRateLimit(userId);
-      await saveInputFilterRejectedTurn(ctx, trimmed, filterOutcome.replyMessage, filterOutcome.result);
-      logLessonAuthorFlow('input_filter_rejected', {
-        conversation_id: conversationId,
-        tenant_id: ctx.tenantId,
-        bot_id: ctx.botId,
-        target: ctx.target,
-        code: filterOutcome.result.code,
-        processing_time_ms: filterOutcome.result.processingTimeMs ?? null,
-      });
-      onChunk(filterOutcome.replyMessage);
-      onDone();
-      return true;
-    }
   } catch (err) {
     console.error('[InputFilter] Invalid config or runtime error; continuing chat flow', {
       conversation_id: conversationId,
@@ -139,6 +131,30 @@ async function answerInputFilterRefusal(ctx: ConversationContext, request: ChatT
       bot_id: ctx.botId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return false;
   }
-  return false;
+  if (!filterOutcome.blocked || !filterOutcome.replyMessage) return false;
+
+  markRateLimit(userId);
+  try {
+    await saveInputFilterRejectedTurn(ctx, trimmed, filterOutcome.replyMessage, filterOutcome.result);
+  } catch (err) {
+    console.error('[InputFilter]', JSON.stringify({
+      event: 'input_filter_refusal_not_saved',
+      conversation_id: conversationId,
+      tenant_id: ctx.tenantId,
+      error_kind: errorKind(err),
+    }));
+  }
+  logLessonAuthorFlow('input_filter_rejected', {
+    conversation_id: conversationId,
+    tenant_id: ctx.tenantId,
+    bot_id: ctx.botId,
+    target: ctx.target,
+    code: filterOutcome.result.code,
+    processing_time_ms: filterOutcome.result.processingTimeMs ?? null,
+  });
+  onChunk(filterOutcome.replyMessage);
+  onDone();
+  return true;
 }
