@@ -625,7 +625,7 @@
   },
   "src/modules/assignments/assignments.service.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 8
+      "count": 2
     }
   },
   "src/modules/assignments/email-outbox.service.ts": {
