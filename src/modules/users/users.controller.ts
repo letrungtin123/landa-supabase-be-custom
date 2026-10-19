@@ -15,7 +15,11 @@ import {
 } from './users.validator.js';
 import { PASSWORD_INPUT_INVALID_CODE, changePasswordBodySchema } from '../auth/auth.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+import {
+  createTransactionalAuditEntry,
+  platformScopeForSuperadmin,
+  runAuditedTransaction,
+} from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
 import { syncUserAccessRevocationCache } from '../auth/auth-revocation.service.js';
@@ -115,7 +119,8 @@ export async function updateController(req: Request, res: Response, next: NextFu
       },
       (updated) => {
         if (!before) throw new Error('Missing user snapshot for audit');
-        return {
+        // An account without a tenant (a Super Admin's) is audited as a platform event.
+        return platformScopeForSuperadmin(req, {
           ...createTransactionalAuditEntry(
             req,
             'UPDATE',
@@ -143,7 +148,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
             updated.username,
           ),
           tenantId: before.tenant_id || null,
-        };
+        });
       },
     );
     // After COMMIT: sessions ended by a reset/deactivation/role change are
@@ -201,13 +206,17 @@ export async function retryDeletionJobController(req: Request, res: Response, ne
   try {
     await runAuditedTransaction(
       () => retryTerminalUserDeletionJob(req.params.jobId, req.user!.tenantId || null),
-      () => createTransactionalAuditEntry(
+      // A Super Admin with no tenant selected retries any job: a platform event.
+      () => platformScopeForSuperadmin(
         req,
-        'UPDATE',
-        'user_deletion_job',
-        { code: 'user.deletion_job.retry_queued' },
-        req.params.jobId,
-        'Yêu cầu xóa tài khoản',
+        createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'user_deletion_job',
+          { code: 'user.deletion_job.retry_queued' },
+          req.params.jobId,
+          'Yêu cầu xóa tài khoản',
+        ),
       ),
     );
     sendSuccess(res, { job_id: req.params.jobId, status: 'queued' }, 'Đã đưa deletion job vào hàng đợi retry', 202);
