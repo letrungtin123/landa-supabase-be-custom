@@ -191,12 +191,21 @@ async function processJob(job: LessonAuthorTranscriptionJob): Promise<void> {
   } catch (error) {
     if (transcriptStoragePath) await deleteLessonAuthorPrivateFiles([transcriptStoragePath]).catch(swallowAndLog('lesson_author.transcript_storage_cleanup'));
     if (job.lease_token) {
-      const failed = await failLessonAuthorTranscriptionJob({
-        jobId: job.id,
-        leaseToken: job.lease_token,
-        reason: safeWorkerError(error),
-      });
-      if (failed) await syncLessonAuthorTranscriptMessage(failed, workerLocale(failed));
+      try {
+        const failed = await failLessonAuthorTranscriptionJob({
+          jobId: job.id,
+          leaseToken: job.lease_token,
+          reason: safeWorkerError(error),
+        });
+        if (failed) await syncLessonAuthorTranscriptMessage(failed, workerLocale(failed));
+      } catch (recordError) {
+        // The rest of the batch still runs. A job left unmarked keeps its
+        // lease; the claim takes it again once that lease has expired.
+        console.error('[LessonAuthorTranscription] could not record the job failure', {
+          job_id: job.id,
+          error: safeWorkerError(recordError),
+        });
+      }
     }
     console.error('[LessonAuthorTranscription] job failed', { job_id: job.id, error: safeWorkerError(error) });
   } finally {
