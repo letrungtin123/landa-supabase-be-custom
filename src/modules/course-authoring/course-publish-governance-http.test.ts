@@ -5,7 +5,8 @@ import test from 'node:test';
 
 const require = createRequire(import.meta.url);
 const routes = readFileSync(new URL('./course-authoring.routes.ts', import.meta.url), 'utf8');
-const controller = readFileSync(new URL('./course-authoring.controller.ts', import.meta.url), 'utf8');
+// The block handlers, publish among them (split out of course-authoring.controller.ts).
+const controller = readFileSync(new URL('./course-outline.controller.ts', import.meta.url), 'utf8');
 const governanceController = readFileSync(new URL('./course-publish-governance.controller.ts', import.meta.url), 'utf8');
 const envExample = readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8');
 // Evaluated, not searched as text: both processes of dist/index.js take the

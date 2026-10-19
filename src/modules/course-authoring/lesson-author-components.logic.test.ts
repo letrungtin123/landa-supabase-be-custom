@@ -216,8 +216,9 @@ test('parity exception allows transaction owner to roll back the entire unit (mo
 });
 
 test('production adapter retains tenant scope, lock, permissions and transaction rollback boundary', () => {
-  const source = readFileSync(new URL('./course-authoring.service.ts', import.meta.url), 'utf8');
-  const apply = source.slice(source.indexOf('export async function applyLessonAuthorProposalToCourse('), source.indexOf('export async function initializeCourseStructure('));
+  // The AI ID apply lives in course-lesson-author-apply.service.ts (course-authoring.service.ts re-exports it).
+  const source = readFileSync(new URL('./course-lesson-author-apply.service.ts', import.meta.url), 'utf8');
+  const apply = source.slice(source.indexOf('export async function applyLessonAuthorProposalToCourse('));
   assert.match(apply, /withDatabaseTransaction\(async \(client\)/);
   assert.match(apply, /pg_try_advisory_xact_lock/);
   assert.match(apply, /assertLessonAuthorProposalComponentsValid/);
