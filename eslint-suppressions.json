@@ -40,14 +40,6 @@
       "count": 1
     }
   },
-  "src/process-main.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    },
-    "@typescript-eslint/no-misused-promises": {
-      "count": 4
-    }
-  },
   "src/middleware/authenticate.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 4
@@ -973,11 +965,6 @@
       "count": 2
     }
   },
-  "src/modules/tenants/tenant-course-components.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    }
-  },
   "src/modules/tenants/tenants.controller.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 1
@@ -986,11 +973,6 @@
   "src/modules/tenants/tenants.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 26
-    }
-  },
-  "src/modules/tenants/tenants.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
     }
   },
   "src/modules/users/users-authority.service.test.ts": {
@@ -1016,6 +998,14 @@
   "src/modules/welcome-init/welcome-init.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 3
+    }
+  },
+  "src/process-main.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "@typescript-eslint/no-misused-promises": {
+      "count": 4
     }
   },
   "src/scripts/transfer-help-docs-between-supabase.ts": {

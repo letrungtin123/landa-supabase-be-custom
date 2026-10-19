@@ -3,6 +3,7 @@ import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/a
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../utils/errors.js';
+import { createTenantSettingsRepository, type TenantSettingsDb } from './tenant-settings.repository.js';
 
 export type GroupLabelKey = 'group' | 'subgroup' | 'team';
 export type GroupLabelMap = Partial<Record<GroupLabelKey, string>>;
@@ -17,6 +18,8 @@ export const DEFAULT_GROUP_LABELS: Record<GroupLabelKey, string> = {
 
 const GROUP_LABEL_KEY_SET = new Set<string>(SYSTEM_GROUP_LABEL_KEYS);
 const MAX_LABEL_LENGTH = 64;
+
+const settingsRepository = createTenantSettingsRepository({ query } satisfies TenantSettingsDb);
 
 function isUndefinedTableError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '42P01';
@@ -97,15 +100,10 @@ export async function getTenantGroupLabels(tenantId: string | null | undefined):
 
 async function getTenantGroupLabelsFromDb(tenantId: string): Promise<GroupLabelMap> {
   try {
-    const result = await query<{ label_key: GroupLabelKey; label: string }>(
-      `SELECT label_key, label
-       FROM tenant_group_labels
-       WHERE tenant_id = $1`,
-      [tenantId],
-    );
+    const rows = await settingsRepository.selectGroupLabels<GroupLabelKey>(tenantId);
 
     const labels: GroupLabelMap = {};
-    for (const row of result.rows) {
+    for (const row of rows) {
       if (GROUP_LABEL_KEY_SET.has(row.label_key)) labels[row.label_key] = row.label;
     }
 
@@ -128,18 +126,14 @@ export async function replaceTenantGroupLabels(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantSettingsRepository(client);
 
-    const tenant = await client.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
-    if (tenant.rowCount === 0) throw new AppError('Tenant khong ton tai', 404);
+    if (!await repository.tenantExists(tenantId)) throw new AppError('Tenant khong ton tai', 404);
 
-    await client.query('DELETE FROM tenant_group_labels WHERE tenant_id = $1', [tenantId]);
+    await repository.deleteGroupLabels(tenantId);
 
     for (const [labelKey, label] of entries) {
-      await client.query(
-        `INSERT INTO tenant_group_labels (tenant_id, label_key, label, updated_by, updated_at)
-         VALUES ($1, $2, $3, $4, now())`,
-        [tenantId, labelKey, label, actorId],
-      );
+      await repository.insertGroupLabel(tenantId, labelKey, label, actorId);
     }
 
     if (auditEntry) await appendAuditLog(client, auditEntry);
