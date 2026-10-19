@@ -17,33 +17,23 @@ import {
   registerStoragePrefixManifestPaths,
 } from '../deletion/storage-manifest.service.js';
 import { classifyCourseMentorLogoOwnership } from '../courses/course-mentor-logo-ownership.logic.js';
+import {
+  createCourseDeletionRepository,
+  type BlockPayloadRow,
+  type CourseDeletionDb,
+  type CourseReferenceTable,
+  type DeleteJobRow,
+} from './course-deletion.repository.js';
 
 const DELETE_BATCH_SIZE = 500;
 const ASSET_BATCH_SIZE = 100;
 const CACHE_INVALIDATION_BATCH_SIZE = 500;
 const JOB_LEASE_SECONDS = 15 * 60;
 
-type DeleteTargetType = 'course' | 'block';
-type DeleteJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+/** Statements on the pool (they join the current transaction, if any). */
+const deletionRepository = createCourseDeletionRepository({ query } satisfies CourseDeletionDb);
 
-interface DeleteJobRow {
-  id: string;
-  tenant_id: string;
-  course_id: string;
-  root_block_id: string | null;
-  target_type: DeleteTargetType;
-  status: DeleteJobStatus;
-  attempts: number;
-  is_terminal: boolean;
-}
-
-interface BlockPayloadRow {
-  id: string;
-  data: unknown;
-  metadata: unknown;
-  published_data: unknown;
-  published_metadata: unknown;
-}
+const FIRST_UUID = '00000000-0000-0000-0000-000000000000';
 
 interface PurgeStats {
   blocksDeleted: number;
@@ -89,21 +79,7 @@ async function invalidateBlockReadCachesInBatches(blockIds: readonly string[]): 
 }
 
 async function getBlockSubtreeIds(blockId: string, courseId: string): Promise<string[]> {
-  const result = await query<{ id: string }>(
-    `WITH RECURSIVE subtree AS (
-       SELECT id
-       FROM course_blocks
-       WHERE id = $1 AND course_id = $2
-       UNION ALL
-       SELECT child.id
-       FROM course_blocks child
-       JOIN subtree s ON child.parent_id = s.id
-       WHERE child.course_id = $2
-     )
-     SELECT id FROM subtree`,
-    [blockId, courseId],
-  );
-  return result.rows.map((row) => row.id);
+  return deletionRepository.selectBlockSubtreeIds(blockId, courseId);
 }
 
 function normalizeCourseStoragePath(value: unknown, tenantId: string, courseId: string): string | null {
@@ -120,21 +96,9 @@ async function assertNoActiveOutlineTransferForCourse(
 ): Promise<void> {
   // This is additive-schema aware so deployments remain safe until the user
   // has manually applied the approved transfer-job SQL file.
-  const schema = await client.query<{ jobs: string | null }>(
-    `SELECT to_regclass('public.course_outline_transfer_jobs')::text AS jobs`,
-  );
-  if (!schema.rows[0]?.jobs) return;
-  const active = await client.query<{ exists: boolean }>(
-    `SELECT EXISTS(
-       SELECT 1
-         FROM course_outline_transfer_jobs
-        WHERE tenant_id = $1::uuid
-          AND status IN ('queued', 'running')
-          AND (source_course_id = $2 OR destination_course_id = $2)
-     ) AS exists`,
-    [tenantId, courseId],
-  );
-  if (active.rows[0]?.exists) {
+  const repository = createCourseDeletionRepository(client);
+  if (!await repository.selectOutlineTransferTable()) return;
+  if (await repository.hasActiveOutlineTransfer(tenantId, courseId)) {
     throw new AppError('Khóa học đang có yêu cầu chuyển nội dung. Vui lòng chờ xử lý hoàn tất trước khi xóa.', 409);
   }
 }
@@ -220,12 +184,8 @@ function collectPathsFromBlocks(
 }
 
 async function getCourseAssetPathSet(tenantId: string, courseId: string): Promise<Set<string>> {
-  const result = await query<{ storage_path: string | null; url: string | null }>(
-    `SELECT storage_path, url FROM course_assets WHERE tenant_id = $1 AND course_id = $2`,
-    [tenantId, courseId],
-  );
   const paths = new Set<string>();
-  for (const row of result.rows) {
+  for (const row of await deletionRepository.selectCourseAssetPaths(tenantId, courseId)) {
     const storagePath = normalizeTenantCourseStoragePath(row.storage_path, tenantId);
     const urlPath = normalizeTenantCourseStoragePath(row.url, tenantId);
     if (storagePath) paths.add(storagePath);
@@ -323,13 +283,7 @@ function parseRetainedStorageReferenceWarnings(value: unknown): RetainedStorageR
 }
 
 async function getRetainedStorageReferenceWarnings(jobId: string): Promise<RetainedStorageReferenceWarning[]> {
-  const result = await query<{ warnings: unknown }>(
-    `SELECT stats -> 'warnings' AS warnings
-     FROM course_deletion_jobs
-     WHERE id = $1::uuid`,
-    [jobId],
-  );
-  return parseRetainedStorageReferenceWarnings(result.rows[0]?.warnings);
+  return parseRetainedStorageReferenceWarnings(await deletionRepository.selectWarnings(jobId));
 }
 
 async function persistRetainedStorageReferenceWarnings(
@@ -337,13 +291,7 @@ async function persistRetainedStorageReferenceWarnings(
   warnings: readonly RetainedStorageReferenceWarning[],
 ): Promise<void> {
   if (warnings.length === 0) return;
-  await query(
-    `UPDATE course_deletion_jobs
-     SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb), '{warnings}', $2::jsonb, true),
-         updated_at = now()
-     WHERE id = $1::uuid AND status = 'running'`,
-    [job.id, JSON.stringify(warnings)],
-  );
+  await deletionRepository.saveWarnings(job.id, JSON.stringify(warnings));
 }
 
 function normalizeLessonAuthorStoragePath(value: unknown, tenantId: string): string | null {
@@ -359,22 +307,12 @@ function normalizeLessonAuthorStoragePath(value: unknown, tenantId: string): str
 async function registerLessonAuthorPrivateArtifactsForCourse(
   job: DeleteJobRow,
 ): Promise<RetainedStorageReferenceWarning[]> {
-  const table = await query<{ exists: boolean }>(
-    `SELECT to_regclass('public.lesson_author_transcription_jobs') IS NOT NULL AS exists`,
-  );
-  if (!table.rows[0]?.exists) return [];
+  if (!await deletionRepository.transcriptionJobsTableExists()) return [];
 
-  const rows = await query<{ source_storage_path: string | null; transcript_storage_path: string | null }>(
-    `SELECT source_storage_path, transcript_storage_path
-     FROM lesson_author_transcription_jobs
-     WHERE tenant_id = $1::uuid
-       AND course_id = $2
-       AND status IN ('queued', 'running', 'succeeded', 'failed', 'committed')`,
-    [job.tenant_id, job.course_id],
-  );
+  const rows = await deletionRepository.selectTranscriptionPaths(job.tenant_id, job.course_id);
   const warnings: RetainedStorageReferenceWarning[] = [];
   const paths: string[] = [];
-  for (const row of rows.rows) {
+  for (const row of rows) {
     for (const [source, value] of [
       ['lesson_author_transcription_jobs.source_storage_path', row.source_storage_path],
       ['lesson_author_transcription_jobs.transcript_storage_path', row.transcript_storage_path],
@@ -391,27 +329,13 @@ async function registerLessonAuthorPrivateArtifactsForCourse(
 
 async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedStorageReferenceWarning[]> {
   if (job.target_type !== 'course') return [];
-  const alreadyComplete = await query<{ manifest_completed_at: Date | null }>(
-    `SELECT manifest_completed_at
-     FROM course_deletion_jobs
-     WHERE id = $1::uuid`,
-    [job.id],
-  );
-  if (alreadyComplete.rows[0]?.manifest_completed_at) return [];
+  if (await deletionRepository.selectManifestCompletedAt(job.id)) return [];
 
   const directPaths = new Set<string>();
 
   const [course, mentor] = await Promise.all([
-    query<{ image_url: string | null }>(
-      `SELECT image_url FROM courses WHERE id = $1 AND tenant_id = $2`,
-      [job.course_id, job.tenant_id],
-    ),
-    query<{ logo_light_path: string | null; logo_dark_path: string | null }>(
-      `SELECT logo_light_path, logo_dark_path
-       FROM course_mentor_sections
-       WHERE course_id = $1 AND tenant_id = $2`,
-      [job.course_id, job.tenant_id],
-    ),
+    deletionRepository.selectCourseImage(job.course_id, job.tenant_id),
+    deletionRepository.selectMentorLogos(job.course_id, job.tenant_id),
   ]);
   if (course.rowCount === 0) return [];
   const warnings: RetainedStorageReferenceWarning[] = [];
@@ -423,8 +347,8 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
   }
 
   for (const [source, value] of [
-    ['course_mentor_sections.logo_light_path', mentor.rows[0]?.logo_light_path],
-    ['course_mentor_sections.logo_dark_path', mentor.rows[0]?.logo_dark_path],
+    ['course_mentor_sections.logo_light_path', mentor?.logo_light_path],
+    ['course_mentor_sections.logo_dark_path', mentor?.logo_dark_path],
   ] as const) {
     const ownership = classifyCourseMentorLogoOwnership(value, job.tenant_id, job.course_id);
     if (ownership.kind === 'course-owned') {
@@ -443,14 +367,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
   const courseAssetPaths = new Set<string>();
   let lastAssetId = '';
   while (true) {
-    const rows = await query<{ id: string; storage_path: string | null; url: string | null }>(
-      `SELECT id, storage_path, url
-       FROM course_assets
-       WHERE tenant_id = $1 AND course_id = $2 AND id > $3::uuid
-       ORDER BY id
-       LIMIT $4`,
-      [job.tenant_id, job.course_id, lastAssetId || '00000000-0000-0000-0000-000000000000', ASSET_BATCH_SIZE],
-    );
+    const rows = await deletionRepository.selectCourseAssetPage(job.tenant_id, job.course_id, lastAssetId || FIRST_UUID, ASSET_BATCH_SIZE);
     if (rows.rowCount === 0) break;
     const paths: string[] = [];
     for (const row of rows.rows) {
@@ -473,14 +390,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
 
   let lastBlockId = '';
   while (true) {
-    const rows = await query<BlockPayloadRow>(
-      `SELECT id, data, metadata, published_data, published_metadata
-       FROM course_blocks
-       WHERE course_id = $1 AND id > $2::uuid
-       ORDER BY id
-       LIMIT $3`,
-      [job.course_id, lastBlockId || '00000000-0000-0000-0000-000000000000', DELETE_BATCH_SIZE],
-    );
+    const rows = await deletionRepository.selectBlockPayloadPage(job.course_id, lastBlockId || FIRST_UUID, DELETE_BATCH_SIZE);
     if (rows.rowCount === 0) break;
     await registerStorageManifestPaths(
       'course',
@@ -497,14 +407,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
 
   let lastAssignmentId = '';
   while (true) {
-    const rows = await query<{ id: string; storage_path: string | null }>(
-      `SELECT id, attachment_file ->> 'storage_path' AS storage_path
-       FROM course_assignments
-       WHERE course_id = $1 AND id > $2::uuid
-       ORDER BY id
-       LIMIT $3`,
-      [job.course_id, lastAssignmentId || '00000000-0000-0000-0000-000000000000', DELETE_BATCH_SIZE],
-    );
+    const rows = await deletionRepository.selectAssignmentAttachmentPage(job.course_id, lastAssignmentId || FIRST_UUID, DELETE_BATCH_SIZE);
     if (rows.rowCount === 0) break;
     const paths: string[] = [];
     for (const row of rows.rows) {
@@ -525,14 +428,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
 
   let lastFileId = '';
   while (true) {
-    const rows = await query<{ id: string; storage_path: string }>(
-      `SELECT id, storage_path
-       FROM assignment_files
-       WHERE course_id = $1 AND id > $2::uuid
-       ORDER BY id
-       LIMIT $3`,
-      [job.course_id, lastFileId || '00000000-0000-0000-0000-000000000000', DELETE_BATCH_SIZE],
-    );
+    const rows = await deletionRepository.selectAssignmentFilePage(job.course_id, lastFileId || FIRST_UUID, DELETE_BATCH_SIZE);
     if (rows.rowCount === 0) break;
     const paths: string[] = [];
     for (const row of rows.rows) {
@@ -561,12 +457,7 @@ async function ensureCourseStorageManifest(job: DeleteJobRow): Promise<RetainedS
   );
   await registerStoragePrefixManifestPaths('course', job.id, job.tenant_id, `${job.tenant_id}/assignments/${job.course_id}/`);
 
-  await query(
-    `UPDATE course_deletion_jobs
-     SET manifest_completed_at = now(), updated_at = now()
-     WHERE id = $1::uuid AND status = 'running'`,
-    [job.id],
-  );
+  await deletionRepository.markManifestCompleted(job.id);
   for (const warning of warnings) warnRetainedStorageReference(job, warning);
   return warnings;
 }
@@ -590,37 +481,17 @@ export async function requestCourseDeletion(
 
   try {
     await client.query('BEGIN');
+    const repository = createCourseDeletionRepository(client);
 
-    const courseResult = await client.query<{ id: string; display_name: string | null }>(
-      `SELECT id, display_name
-       FROM courses
-       WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-       FOR UPDATE`,
-      [courseId, tenantId],
-    );
+    const courseResult = await repository.lockActiveCourse(courseId, tenantId);
     if (courseResult.rowCount === 0) {
       throw new AppError('Course not found', 404);
     }
     await assertNoActiveOutlineTransferForCourse(client, tenantId, courseId);
 
-    const jobResult = await client.query<{ id: string }>(
-      `INSERT INTO course_deletion_jobs (tenant_id, course_id, target_type, requested_by)
-       VALUES ($1, $2, 'course', $3)
-       RETURNING id`,
-      [tenantId, courseId, requestedBy],
-    );
-    jobId = jobResult.rows[0].id;
+    jobId = await repository.insertCourseJob(tenantId, courseId, requestedBy);
 
-    await client.query(
-      `UPDATE courses
-       SET deleted_at = now(),
-           delete_status = 'queued',
-           delete_job_id = $3,
-           deleted_by = $4,
-           updated_at = now()
-       WHERE id = $1 AND tenant_id = $2`,
-      [courseId, tenantId, jobId, requestedBy],
-    );
+    await repository.markCourseDeleteQueued(courseId, tenantId, jobId, requestedBy);
 
     // The course is permanently purged by the asynchronous worker. Preserve
     // its name in the audit row while the locked course record still exists.
@@ -655,18 +526,9 @@ export async function requestBlockDeletion(
 
   try {
     await client.query('BEGIN');
+    const repository = createCourseDeletionRepository(client);
 
-    const blockResult = await client.query<{ id: string; course_id: string; block_type: string }>(
-      `SELECT b.id, b.course_id, b.block_type
-       FROM course_blocks b
-       JOIN courses c ON c.id = b.course_id
-       WHERE b.id = $1
-         AND c.tenant_id = $2
-         AND c.deleted_at IS NULL
-         AND b.deleted_at IS NULL
-       FOR UPDATE OF b`,
-      [blockId, tenantId],
-    );
+    const blockResult = await repository.lockActiveBlock(blockId, tenantId);
     if (blockResult.rowCount === 0) {
       throw new AppError('Block not found', 404);
     }
@@ -676,24 +538,9 @@ export async function requestBlockDeletion(
 
     courseId = blockResult.rows[0].course_id;
     await assertNoActiveOutlineTransferForCourse(client, tenantId, courseId);
-    const jobResult = await client.query<{ id: string }>(
-      `INSERT INTO course_deletion_jobs (tenant_id, course_id, root_block_id, target_type, requested_by)
-       VALUES ($1, $2, $3, 'block', $4)
-       RETURNING id`,
-      [tenantId, courseId, blockId, requestedBy],
-    );
-    jobId = jobResult.rows[0].id;
+    jobId = await repository.insertBlockJob(tenantId, courseId, blockId, requestedBy);
 
-    await client.query(
-      `UPDATE course_blocks
-       SET deleted_at = now(),
-           delete_status = 'queued',
-           delete_job_id = $2,
-           deleted_by = $3,
-           updated_at = now()
-       WHERE id = $1`,
-      [blockId, jobId, requestedBy],
-    );
+    await repository.markBlockDeleteQueued(blockId, jobId, requestedBy);
 
     if (auditEntry) await appendAuditLog(client, auditEntry);
 
@@ -719,24 +566,7 @@ export async function requestBlockDeletion(
 }
 
 async function markJobRunning(jobId: string): Promise<DeleteJobRow | null> {
-  const result = await query<DeleteJobRow>(
-    `UPDATE course_deletion_jobs
-     SET status = 'running',
-         attempts = attempts + 1,
-         started_at = COALESCE(started_at, now()),
-         lease_expires_at = now() + ($2::int * interval '1 second'),
-         updated_at = now()
-     WHERE id = $1
-       AND is_terminal = false
-       AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-       AND (
-         status IN ('queued', 'failed')
-         OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < now()))
-       )
-     RETURNING id, tenant_id, course_id, root_block_id, target_type, status, attempts`,
-    [jobId, JOB_LEASE_SECONDS],
-  );
-  return result.rows[0] ?? null;
+  return deletionRepository.markJobRunning(jobId, JOB_LEASE_SECONDS);
 }
 
 async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void> {
@@ -745,31 +575,10 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
     await client.query('BEGIN');
     // The completed manifest contains object keys and is no longer needed once
     // the purge commits. Retaining it would itself become deletion residue.
-    await client.query(
-      `DELETE FROM deletion_storage_items
-       WHERE job_kind = 'course' AND job_id = $1::uuid`,
-      [jobId],
-    );
-    await client.query(
-      `DELETE FROM deletion_storage_scan_cursors
-       WHERE job_kind = 'course' AND job_id = $1::uuid`,
-      [jobId],
-    );
-    await client.query(
-      `UPDATE course_deletion_jobs
-       SET status = 'succeeded',
-           course_id = NULL,
-           root_block_id = NULL,
-           is_terminal = false,
-           finished_at = now(),
-           lease_expires_at = NULL,
-           next_attempt_at = now(),
-           updated_at = now(),
-           stats = $2::jsonb,
-           last_error = NULL
-       WHERE id = $1`,
-      [jobId, JSON.stringify(stats)],
-    );
+    const repository = createCourseDeletionRepository(client);
+    await repository.deleteManifestItems(jobId);
+    await repository.deleteManifestScanCursors(jobId);
+    await repository.markJobSucceeded(jobId, JSON.stringify(stats));
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
@@ -780,50 +589,18 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
 }
 
 export async function markJobRetryable(jobId: string, error: unknown): Promise<void> {
-  const result = await query<{ course_id: string | null; root_block_id: string | null; target_type: DeleteTargetType; is_terminal: boolean }>(
-    `UPDATE course_deletion_jobs
-     SET status = CASE WHEN attempts >= $3::int THEN 'failed' ELSE 'queued' END,
-         is_terminal = attempts >= $3::int,
-         lease_expires_at = NULL,
-         next_attempt_at = CASE
-           -- Terminal jobs are filtered by is_terminal; retain a valid
-           -- timestamp to conform to the NOT NULL retry schedule column.
-           WHEN attempts >= $3::int THEN now()
-           ELSE now() + (
-             LEAST(
-               $4::numeric * power(2::numeric, GREATEST(attempts - 1, 0)),
-               $5::numeric
-             ) * (0.75 + random() * 0.5)
-           ) * interval '1 millisecond'
-         END,
-         last_error = $2,
-         updated_at = now()
-     WHERE id = $1 AND status = 'running'
-     RETURNING course_id, root_block_id, target_type, is_terminal`,
-    [
-      jobId,
-      (error instanceof Error ? error.message : String(error)).slice(0, 4000),
-      env.DELETION_MAX_ATTEMPTS,
-      env.DELETION_RETRY_BASE_MS,
-      env.DELETION_RETRY_MAX_MS,
-    ],
-  );
-  const job = result.rows[0];
+  const job = await deletionRepository.markJobRetryable({
+    jobId,
+    message: (error instanceof Error ? error.message : String(error)).slice(0, 4000),
+    maxAttempts: env.DELETION_MAX_ATTEMPTS,
+    retryBaseMs: env.DELETION_RETRY_BASE_MS,
+    retryMaxMs: env.DELETION_RETRY_MAX_MS,
+  });
   if (!job?.is_terminal || !job.course_id) return;
   if (job.target_type === 'course') {
-    await query(
-      `UPDATE courses
-       SET delete_status = 'failed', updated_at = now()
-       WHERE id = $1 AND deleted_at IS NOT NULL`,
-      [job.course_id],
-    );
+    await deletionRepository.markCourseDeleteFailed(job.course_id);
   } else if (job.root_block_id) {
-    await query(
-      `UPDATE course_blocks
-       SET delete_status = 'failed', updated_at = now()
-       WHERE id = $1 AND deleted_at IS NOT NULL`,
-      [job.root_block_id],
-    );
+    await deletionRepository.markBlockDeleteFailed(job.root_block_id);
   }
   console.error(`[CourseDelete] Job ${jobId} reached terminal failure after retry budget was exhausted`);
 }
@@ -837,17 +614,10 @@ async function registerDeletedBlockAssetManifest(
 
   for (let i = 0; i < paths.length; i += ASSET_BATCH_SIZE) {
     const batch = paths.slice(i, i + ASSET_BATCH_SIZE);
-    const assetResult = await query<{ storage_path: string | null; url: string | null }>(
-      `SELECT storage_path, url
-       FROM course_assets
-       WHERE tenant_id = $1
-         AND course_id = $2
-         AND (storage_path = ANY($3::text[]) OR url = ANY($3::text[]))`,
-      [job.tenant_id, job.course_id, batch],
-    );
+    const assetRows = await deletionRepository.selectCourseAssetsByPaths(job.tenant_id, job.course_id, batch);
 
     const manifestPaths = new Set<string>(batch);
-    for (const row of assetResult.rows) {
+    for (const row of assetRows) {
       const storagePath = normalizeTenantCourseStoragePath(row.storage_path, job.tenant_id);
       if (storagePath) manifestPaths.add(storagePath);
       const urlPath = normalizeTenantCourseStoragePath(row.url, job.tenant_id);
@@ -859,14 +629,8 @@ async function registerDeletedBlockAssetManifest(
     // commits, so no committed row can point at an already-deleted object.
     await registerStorageManifestPaths('course', job.id, job.tenant_id, [...manifestPaths]);
 
-    const deleted = await query(
-      `DELETE FROM course_assets
-       WHERE tenant_id = $1
-         AND course_id = $2
-         AND (storage_path = ANY($3::text[]) OR url = ANY($3::text[]))`,
-      [job.tenant_id, job.course_id, batch],
-    );
-    assetsDeleted += deleted.rowCount || 0;
+    const deleted = await deletionRepository.deleteCourseAssetsByPaths(job.tenant_id, job.course_id, batch);
+    assetsDeleted += deleted || 0;
   }
 
   return { assetsDeleted };
@@ -876,21 +640,12 @@ async function deleteAllCourseAssets(tenantId: string, courseId: string): Promis
   let assetsDeleted = 0;
 
   while (true) {
-    const result = await query<{ id: string }>(
-      `SELECT id
-       FROM course_assets
-       WHERE tenant_id = $1 AND course_id = $2
-       LIMIT $3`,
-      [tenantId, courseId, ASSET_BATCH_SIZE],
-    );
+    const result = await deletionRepository.selectCourseAssetIdBatch(tenantId, courseId, ASSET_BATCH_SIZE);
     if (result.rowCount === 0) break;
 
     const ids = result.rows.map((row) => row.id);
-    const deleted = await query(
-      `DELETE FROM course_assets WHERE id = ANY($1::uuid[])`,
-      [ids],
-    );
-    assetsDeleted += deleted.rowCount || 0;
+    const deleted = await deletionRepository.deleteCourseAssetsByIds(ids);
+    assetsDeleted += deleted || 0;
   }
 
   return { assetsDeleted };
@@ -904,12 +659,8 @@ async function deleteAllCourseAssets(tenantId: string, courseId: string): Promis
  * so deleting the complete course set in one statement is valid.
  */
 async function deleteAllCourseBlocks(courseId: string): Promise<Partial<PurgeStats>> {
-  const result = await query(
-    `DELETE FROM course_blocks
-     WHERE course_id = $1`,
-    [courseId],
-  );
-  return { blocksDeleted: result.rowCount || 0 };
+  const deleted = await deletionRepository.deleteAllCourseBlocks(courseId);
+  return { blocksDeleted: deleted || 0 };
 }
 
 async function deleteLeafBlocksByRoot(
@@ -921,48 +672,17 @@ async function deleteLeafBlocksByRoot(
 
   while (true) {
     const batch = await withDatabaseTransaction(async () => {
-      const result = await query<BlockPayloadRow>(
-        `WITH RECURSIVE subtree AS (
-           SELECT id FROM course_blocks WHERE id = $1 AND course_id = $2
-           UNION ALL
-           SELECT child.id
-           FROM course_blocks child
-           JOIN subtree s ON child.parent_id = s.id
-           WHERE child.course_id = $2
-         ),
-         doomed AS (
-           SELECT b.id
-           FROM course_blocks b
-           JOIN subtree s ON s.id = b.id
-           WHERE NOT EXISTS (
-             SELECT 1 FROM course_blocks child WHERE child.parent_id = b.id
-           )
-           LIMIT $3
-         )
-         DELETE FROM course_blocks b
-         USING doomed
-         WHERE b.id = doomed.id
-         RETURNING b.id, b.data, b.metadata, b.published_data, b.published_metadata`,
-        [job.root_block_id, job.course_id, DELETE_BATCH_SIZE],
-      );
+      const result = await deletionRepository.deleteLeafBlockBatch(job.root_block_id!, job.course_id, DELETE_BATCH_SIZE);
       if (result.rowCount === 0) return null;
 
       const blockIds = result.rows.map((row) => row.id);
       const paths = collectPathsFromBlocks(result.rows, job.tenant_id, job.course_id, courseAssetPaths);
       const assetStats = await registerDeletedBlockAssetManifest(job, paths);
-      const sectionConfigDeleted = await query(
-        `DELETE FROM section_modal_configs
-         WHERE course_id = $1 AND section_id = ANY($2::text[])`,
-        [job.course_id, blockIds],
-      );
-      const sectionShownDeleted = await query(
-        `DELETE FROM section_modal_shown
-         WHERE course_id = $1 AND section_id = ANY($2::text[])`,
-        [job.course_id, blockIds],
-      );
+      const sectionConfigDeleted = await deletionRepository.deleteSectionModalConfigs(job.course_id, blockIds);
+      const sectionShownDeleted = await deletionRepository.deleteSectionModalShown(job.course_id, blockIds);
       return {
         blocksDeleted: result.rowCount || 0,
-        linkedRowsDeleted: (sectionConfigDeleted.rowCount || 0) + (sectionShownDeleted.rowCount || 0),
+        linkedRowsDeleted: (sectionConfigDeleted || 0) + (sectionShownDeleted || 0),
         ...assetStats,
       };
     });
@@ -977,52 +697,18 @@ async function deleteEnrollmentsByCourse(tenantId: string, courseId: string): Pr
   let enrollmentsDeleted = 0;
 
   while (true) {
-    const result = await query<{ id: string }>(
-      `WITH doomed AS (
-         SELECT id
-         FROM enrollments
-         WHERE tenant_id = $1 AND course_id = $2
-         LIMIT $3
-       )
-       DELETE FROM enrollments e
-       USING doomed
-       WHERE e.id = doomed.id
-       RETURNING e.id`,
-      [tenantId, courseId, DELETE_BATCH_SIZE],
-    );
-    if (result.rowCount === 0) break;
-    enrollmentsDeleted += result.rowCount || 0;
+    const deleted = await deletionRepository.deleteEnrollmentBatch(tenantId, courseId, DELETE_BATCH_SIZE);
+    if (deleted === 0) break;
+    enrollmentsDeleted += deleted || 0;
   }
 
   return { enrollmentsDeleted };
 }
 
-type CourseReferenceTable =
-  | 'notifications'
-  | 'study_sessions'
-  | 'chat_conversations'
-  | 'assignment_feedback_history'
-  | 'notification_email_jobs'
-  | 'lesson_author_blueprints'
-  | 'lesson_author_jobs'
-  | 'lesson_author_transcription_jobs'
-  | 'course_mentor_assignment_history'
-  | 'course_mentor_sections'
-  | 'team_courses'
-  | 'course_category_courses'
-  | 'course_modal_configs'
-  | 'course_modal_states'
-  | 'section_modal_configs'
-  | 'section_modal_shown'
-  | 'tenant_badge_rule_courses';
 
 async function isOptionalCourseReferenceTableAvailable(tableName: CourseReferenceTable): Promise<boolean> {
   if (tableName !== 'lesson_author_blueprints' && tableName !== 'lesson_author_transcription_jobs') return true;
-  const result = await query<{ exists: boolean }>(
-    `SELECT to_regclass($1) IS NOT NULL AS exists`,
-    [tableName === 'lesson_author_blueprints' ? 'public.lesson_author_blueprints' : 'public.lesson_author_transcription_jobs'],
-  );
-  return Boolean(result.rows[0]?.exists);
+  return deletionRepository.tableExists(tableName === 'lesson_author_blueprints' ? 'public.lesson_author_blueprints' : 'public.lesson_author_transcription_jobs');
 }
 
 async function deleteCourseReferenceInBatches(
@@ -1035,20 +721,9 @@ async function deleteCourseReferenceInBatches(
   let rowsDeleted = 0;
 
   while (true) {
-    const result = await query(
-      `WITH doomed AS (
-         SELECT ctid
-         FROM ${tableName}
-         WHERE course_id = $1
-         LIMIT $2
-       )
-       DELETE FROM ${tableName} t
-       USING doomed
-       WHERE t.ctid = doomed.ctid`,
-      [courseId, DELETE_BATCH_SIZE],
-    );
-    if (result.rowCount === 0) break;
-    rowsDeleted += result.rowCount || 0;
+    const deleted = await deletionRepository.deleteCourseReferenceBatch(tableName, courseId, DELETE_BATCH_SIZE);
+    if (deleted === 0) break;
+    rowsDeleted += deleted || 0;
   }
 
   return rowsDeleted;
@@ -1057,35 +732,14 @@ async function deleteCourseReferenceInBatches(
 async function deleteCourseOutboxInBatches(courseId: string): Promise<number> {
   let rowsDeleted = 0;
   while (true) {
-    const result = await query(
-      `WITH doomed AS (
-         SELECT outbox.ctid
-         FROM email_outbox outbox
-         WHERE outbox.related_submission_id IN (
-                 SELECT id FROM assignment_submissions WHERE course_id = $1
-               )
-            OR outbox.related_notification_id IN (
-                 SELECT id FROM notifications WHERE course_id = $1
-               )
-         LIMIT $2
-       )
-       DELETE FROM email_outbox outbox
-       USING doomed
-       WHERE outbox.ctid = doomed.ctid`,
-      [courseId, DELETE_BATCH_SIZE],
-    );
-    if (result.rowCount === 0) return rowsDeleted;
-    rowsDeleted += result.rowCount || 0;
+    const deleted = await deletionRepository.deleteCourseOutboxBatch(courseId, DELETE_BATCH_SIZE);
+    if (deleted === 0) return rowsDeleted;
+    rowsDeleted += deleted || 0;
   }
 }
 
 async function touchJobLease(jobId: string): Promise<void> {
-  await query(
-    `UPDATE course_deletion_jobs
-     SET lease_expires_at = now() + ($2::int * interval '1 second'), updated_at = now()
-     WHERE id = $1 AND status = 'running'`,
-    [jobId, JOB_LEASE_SECONDS],
-  );
+  await deletionRepository.touchJobLease(jobId, JOB_LEASE_SECONDS);
 }
 
 async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeStats>> {
@@ -1125,19 +779,9 @@ async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeSt
 async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
   const stats = emptyStats();
 
-  await query(
-    `UPDATE courses
-     SET delete_status = 'running', updated_at = now()
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NOT NULL`,
-    [job.course_id, job.tenant_id],
-  );
+  await deletionRepository.markCourseDeleteRunning(job.course_id, job.tenant_id);
 
-  const course = await query<{ id: string }>(
-    `SELECT id FROM courses WHERE id = $1 AND tenant_id = $2`,
-    [job.course_id, job.tenant_id],
-  );
-
-  if (course.rowCount === 0) return stats;
+  if (!await deletionRepository.courseExists(job.course_id, job.tenant_id)) return stats;
 
   addStats(stats, await deleteAllCourseAssets(job.tenant_id, job.course_id));
   // Delete outbox rows while their related submission IDs still exist. Deleting
@@ -1150,20 +794,12 @@ async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
   addStats(stats, await deleteAllCourseBlocks(job.course_id));
   const feedbackHistory = await deleteCourseReferenceInBatches('assignment_feedback_history', job.course_id);
   stats.linkedRowsDeleted += feedbackHistory;
-  const backupCleanup = await query<{ deleted: number }>(
-    `SELECT public.purge_course_backup_pii($1::text) AS deleted`,
-    [job.course_id],
-  );
-  stats.linkedRowsDeleted += Number(backupCleanup.rows[0]?.deleted || 0);
+  stats.linkedRowsDeleted += await deletionRepository.purgeCourseBackupPii(job.course_id);
   addStats(stats, await deleteEnrollmentsByCourse(job.tenant_id, job.course_id));
 
-  const deletedCourse = await query(
-    `DELETE FROM courses
-     WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NOT NULL`,
-    [job.course_id, job.tenant_id],
-  );
+  const deletedCourse = await deletionRepository.deleteCourse(job.course_id, job.tenant_id);
 
-  if ((deletedCourse.rowCount || 0) > 0) {
+  if ((deletedCourse || 0) > 0) {
     await invalidateTenantBadgeCaches(job.tenant_id);
     // The course's notifications were deleted with it (unread counts).
     await invalidateTenantNotificationCaches(job.tenant_id);
@@ -1176,12 +812,7 @@ async function purgeBlock(job: DeleteJobRow): Promise<PurgeStats> {
   const stats = emptyStats();
   if (!job.root_block_id) return stats;
 
-  await query(
-    `UPDATE course_blocks
-     SET delete_status = 'running', updated_at = now()
-     WHERE id = $1 AND deleted_at IS NOT NULL`,
-    [job.root_block_id],
-  );
+  await deletionRepository.markBlockDeleteRunning(job.root_block_id);
 
   addStats(stats, await deleteLeafBlocksByRoot(job));
   return stats;
@@ -1240,66 +871,20 @@ export async function runDeletionJob(jobId: string): Promise<void> {
 }
 
 export async function requeuePendingDeletionJobs(limit = 100): Promise<void> {
-  const result = await query<{ id: string }>(
-    `SELECT id
-     FROM course_deletion_jobs
-     WHERE is_terminal = false
-       AND (
-         (status IN ('queued', 'failed') AND (next_attempt_at IS NULL OR next_attempt_at <= now()))
-         OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < now()))
-       )
-     ORDER BY requested_at ASC
-     LIMIT $1`,
-    [limit],
-  );
-
-  for (const row of result.rows) {
-    await publishDeleteJob(row.id);
+  for (const id of await deletionRepository.selectRunnableJobIds(limit)) {
+    await publishDeleteJob(id);
   }
 }
 
 /** Explicit operator retry for a job that exhausted the automatic retry budget. */
 export async function retryTerminalCourseDeletionJob(jobId: string, tenantId: string): Promise<void> {
-  const result = await query<{
-    id: string;
-    course_id: string;
-    root_block_id: string | null;
-    target_type: DeleteTargetType;
-  }>(
-    `UPDATE course_deletion_jobs
-     SET status = 'queued',
-         is_terminal = false,
-         attempts = 0,
-         started_at = NULL,
-         finished_at = NULL,
-         next_attempt_at = now(),
-         lease_expires_at = NULL,
-         last_error = NULL,
-         updated_at = now()
-     WHERE id = $1::uuid
-       AND tenant_id = $2::uuid
-       AND is_terminal = true
-       AND course_id IS NOT NULL
-     RETURNING id, course_id, root_block_id, target_type`,
-    [jobId, tenantId],
-  );
-  const job = result.rows[0];
+  const job = await deletionRepository.requeueTerminalJob(jobId, tenantId);
   if (!job) throw new AppError('Không tìm thấy deletion job terminal để retry', 404);
 
   if (job.target_type === 'course') {
-    await query(
-      `UPDATE courses
-       SET delete_status = 'queued', updated_at = now()
-       WHERE id = $1::varchar AND tenant_id = $2::uuid AND deleted_at IS NOT NULL`,
-      [job.course_id, tenantId],
-    );
+    await deletionRepository.markCourseDeleteRequeued(job.course_id, tenantId);
   } else if (job.root_block_id) {
-    await query(
-      `UPDATE course_blocks
-       SET delete_status = 'queued', updated_at = now()
-       WHERE id = $1::uuid AND course_id = $2::varchar AND deleted_at IS NOT NULL`,
-      [job.root_block_id, job.course_id],
-    );
+    await deletionRepository.markBlockDeleteRequeued(job.root_block_id, job.course_id);
   }
 
   // The retry endpoint runs this inside its audited transaction: the wake-up
@@ -1309,26 +894,7 @@ export async function retryTerminalCourseDeletionJob(jobId: string, tenantId: st
 }
 
 export async function getCourseDeletionJobStatus(jobId: string, tenantId: string) {
-  const result = await query<{
-    id: string;
-    course_id: string | null;
-    target_type: DeleteTargetType;
-    status: DeleteJobStatus;
-    requested_at: Date;
-    started_at: Date | null;
-    finished_at: Date | null;
-    attempts: number;
-    is_terminal: boolean;
-    next_attempt_at: Date | null;
-    last_error: string | null;
-    stats: PurgeStats;
-  }>(
-    `SELECT id, course_id, target_type, status, requested_at, started_at, finished_at, attempts,
-            is_terminal, next_attempt_at, last_error, stats
-     FROM course_deletion_jobs
-     WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-    [jobId, tenantId],
-  );
+  const result = await deletionRepository.selectJobStatus<PurgeStats>(jobId, tenantId);
   if (result.rowCount === 0) throw new AppError('Deletion job not found', 404);
   return result.rows[0];
 }
