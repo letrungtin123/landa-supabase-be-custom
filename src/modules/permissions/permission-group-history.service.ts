@@ -9,6 +9,11 @@ import { env } from '../../config/env.js';
 import { query } from '../../config/database.js';
 import { AppError } from '../../utils/errors.js';
 import { normalizeVietnameseSearchText } from './permission-group-history.search.js';
+import {
+  createPermissionGroupHistoryRepository,
+  historyFilterSql,
+  type PermissionGroupHistoryDb,
+} from './permission-group-history.repository.js';
 
 export const PERMISSION_GROUP_HISTORY_ACTIONS = [
   'created',
@@ -84,6 +89,7 @@ const HISTORY_TOTAL_CACHE_TTL_MS = 10_000;
 const HISTORY_TOTAL_CACHE_MAX_ENTRIES = 300;
 
 const historyTotalCache = new Map<string, { total: number; expiresAt: number }>();
+const historyRepository = createPermissionGroupHistoryRepository({ query } satisfies PermissionGroupHistoryDb);
 const historyTotalInFlight = new Map<string, Promise<number>>();
 
 function cleanText(value: string | null | undefined, maxLength: number): string | null {
@@ -124,7 +130,7 @@ function invalidateHistoryTotalCache(tenantId: string): void {
   }
 }
 
-async function getHistoryTotal(cacheKey: string, whereClause: string, params: unknown[]): Promise<number> {
+async function getHistoryTotal(cacheKey: string, conditions: string[], params: unknown[]): Promise<number> {
   const now = Date.now();
   const cached = historyTotalCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.total;
@@ -132,13 +138,8 @@ async function getHistoryTotal(cacheKey: string, whereClause: string, params: un
   const active = historyTotalInFlight.get(cacheKey);
   if (active) return active;
 
-  const pending = query<{ total: string }>(
-    `SELECT count(*)::text AS total
-     FROM permission_group_history h
-     WHERE ${whereClause}`,
-    params,
-  ).then((result) => {
-    const total = Number.parseInt(result.rows[0]?.total || '0', 10);
+  const pending = historyRepository.countHistory(conditions, params).then((counted) => {
+    const total = Number.parseInt(counted || '0', 10);
     if (!Number.isSafeInteger(total) || total < 0) {
       throw new AppError('Không thể đếm lịch sử nhóm quyền', 500);
     }
@@ -158,17 +159,7 @@ async function getHistoryTotal(cacheKey: string, whereClause: string, params: un
 }
 
 async function resolveActorSnapshot(client: PoolClient, actor: PermissionGroupHistoryActor) {
-  const result = await client.query<{ full_name: string | null; email: string | null; username: string | null; role: string | null }>(
-    `SELECT NULLIF(btrim(full_name), '') AS full_name,
-            NULLIF(lower(btrim(email)), '') AS email,
-            username,
-            role
-     FROM users
-     WHERE id = $1::uuid
-     LIMIT 1`,
-    [actor.id],
-  );
-  const row = result.rows[0];
+  const row = await createPermissionGroupHistoryRepository(client).selectActorSnapshot(actor.id);
   return {
     username: cleanText(row?.username || actor.username, 150) || actor.username.slice(0, 150),
     displayName: cleanText(row?.full_name, 160),
@@ -183,28 +174,21 @@ export async function appendPermissionGroupHistory(client: PoolClient, entry: Hi
   const participants = entry.participants || [];
   const searchText = buildSearchText(entry.groupName, actor, participants);
 
-  await client.query(
-    `INSERT INTO permission_group_history (
-       tenant_id, permission_group_id, permission_group_name, action,
-       actor_id, actor_username, actor_display_name, actor_email, actor_role,
-       before_state, after_state, participants, search_text
-     ) VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13)`,
-    [
-      entry.tenantId,
-      entry.groupId,
-      entry.groupName.slice(0, 100),
-      entry.action,
-      entry.actor.id,
-      actor.username,
-      actor.displayName,
-      actor.email,
-      actor.role,
-      serializeOptionalHistoryState(entry.beforeState),
-      serializeOptionalHistoryState(entry.afterState),
-      JSON.stringify(participants),
-      searchText,
-    ],
-  );
+  await createPermissionGroupHistoryRepository(client).insertHistory({
+    tenantId: entry.tenantId,
+    groupId: entry.groupId,
+    groupName: entry.groupName.slice(0, 100),
+    action: entry.action,
+    actorId: entry.actor.id,
+    actorUsername: actor.username,
+    actorDisplayName: actor.displayName,
+    actorEmail: actor.email,
+    actorRole: actor.role,
+    beforeState: serializeOptionalHistoryState(entry.beforeState),
+    afterState: serializeOptionalHistoryState(entry.afterState),
+    participants: JSON.stringify(participants),
+    searchText,
+  });
   invalidateHistoryTotalCache(entry.tenantId);
 }
 
@@ -275,47 +259,15 @@ export async function listPermissionGroupHistory(tenantId: string, queryParams: 
   const cursor = decodeCursor(queryParams.cursor, tenantId);
   if (queryParams.cursor && !cursor) throw new AppError('Trang lịch sử không hợp lệ', 400);
 
-  const filterParams: unknown[] = [tenantId];
-  const conditions = ['h.tenant_id = $1::uuid'];
-  if (search) {
-    filterParams.push(`%${search}%`);
-    conditions.push(`h.search_text ILIKE $${filterParams.length}`);
-  }
-  if (from) {
-    filterParams.push(from.toISOString());
-    conditions.push(`h.created_at >= $${filterParams.length}::timestamptz`);
-  }
-  if (to) {
-    const endExclusive = new Date(to);
-    endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
-    filterParams.push(endExclusive.toISOString());
-    conditions.push(`h.created_at < $${filterParams.length}::timestamptz`);
-  }
-  const whereClause = conditions.join(' AND ');
-  const params = [...filterParams];
-  const pageConditions = [...conditions];
-  if (cursor) {
-    params.push(cursor.createdAt, cursor.id);
-    pageConditions.push(`(h.created_at, h.id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`);
-  }
-  params.push(pageSize + 1);
+  const filter = historyFilterSql({ tenantId, search, from, to });
 
-  const [result, total] = await Promise.all([
-    query(
-    `SELECT h.id, h.permission_group_id, h.permission_group_name, h.action,
-            h.actor_username, h.actor_display_name, h.actor_role,
-            h.created_at
-     FROM permission_group_history h
-     WHERE ${pageConditions.join(' AND ')}
-     ORDER BY h.created_at DESC, h.id DESC
-     LIMIT $${params.length}`,
-    params,
-    ),
-    getHistoryTotal(historyTotalCacheKey(tenantId, search, from, to), whereClause, filterParams),
+  const [rows, total] = await Promise.all([
+    historyRepository.selectHistoryPage(filter, cursor ? { createdAt: cursor.createdAt, id: cursor.id } : null, pageSize + 1),
+    getHistoryTotal(historyTotalCacheKey(tenantId, search, from, to), filter.conditions, filter.params),
   ]);
 
-  const hasMore = result.rows.length > pageSize;
-  const data = result.rows.slice(0, pageSize);
+  const hasMore = rows.length > pageSize;
+  const data = rows.slice(0, pageSize);
   const last = data[data.length - 1] as { created_at: string; id: string } | undefined;
   return {
     data,
@@ -328,14 +280,7 @@ export async function listPermissionGroupHistory(tenantId: string, queryParams: 
 }
 
 export async function getPermissionGroupHistoryDetail(historyId: string, tenantId: string) {
-  const result = await query(
-    `SELECT h.id, h.permission_group_id, h.permission_group_name, h.action,
-            h.actor_id, h.actor_username, h.actor_display_name, h.actor_email, h.actor_role,
-            h.before_state, h.after_state, h.participants, h.created_at
-     FROM permission_group_history h
-     WHERE h.id = $1::uuid AND h.tenant_id = $2::uuid`,
-    [historyId, tenantId],
-  );
+  const result = await historyRepository.selectHistoryDetail(historyId, tenantId);
   if (result.rowCount === 0) throw new AppError('Lịch sử nhóm quyền không tồn tại', 404);
   return result.rows[0];
 }
