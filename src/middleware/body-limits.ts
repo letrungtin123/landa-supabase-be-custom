@@ -34,3 +34,13 @@ export function useJsonBodyParsers(app: Express): void {
   app.use(LEARNER_JSON_ROUTES, express.json({ limit: LEARNER_JSON_BODY_LIMIT }));
   app.use(express.json({ limit: DEFAULT_JSON_BODY_LIMIT }));
 }
+
+/**
+ * Form bodies (application/x-www-form-urlencoded), parsed with qs
+ * (`extended`: nested keys and arrays) within body-parser's defaults:
+ * 100 KB, 1000 parameters, 32 levels. Query strings are not parsed with qs:
+ * the app keeps Express 5's default `query parser` ('simple', node:querystring).
+ */
+export function useFormBodyParser(app: Express): void {
+  app.use(express.urlencoded({ extended: true }));
+}

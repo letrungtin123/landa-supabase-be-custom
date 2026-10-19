@@ -31,11 +31,11 @@ export function botAvatarFileError(file: { mimetype: string; size: number }): st
 // upload has no req.file).
 const announcedMimeTypes = new WeakMap<Request, string>();
 
-// busboy reports the limit as soon as a file reaches it, so the limit is one
-// byte above the largest accepted file: exactly 5 MB is still accepted.
+// multer >= 2.2 treats fileSize as the largest accepted file (it used to
+// refuse a file of exactly the limit): exactly 5 MB is still accepted.
 const avatarUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: BOT_AVATAR_MAX_BYTES + 1 },
+  limits: { fileSize: BOT_AVATAR_MAX_BYTES },
   fileFilter: (req, file, callback) => {
     announcedMimeTypes.set(req, file.mimetype);
     callback(null, true);
