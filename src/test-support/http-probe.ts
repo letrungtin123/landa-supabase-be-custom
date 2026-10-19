@@ -42,3 +42,44 @@ export function tally(values: readonly string[]): Record<string, number> {
   for (const value of [...values].sort()) counts[value] = (counts[value] ?? 0) + 1;
   return counts;
 }
+
+export interface LoadResult {
+  /** Requests sent. */
+  sent: number;
+  /** Bodies of the 200 answers, in the order they came. */
+  bodies: string[];
+  /** One line per failed request (error, or a status other than 200). */
+  failures: string[];
+}
+
+/**
+ * GET `pathName` on a new connection every 1000/`perSecond` ms, without
+ * waiting for earlier answers, until stop(); stop() resolves once every
+ * request sent has ended.
+ */
+export function startLoad(port: number, perSecond: number, pathName = '/'): { stop: () => Promise<LoadResult> } {
+  const result: LoadResult = { sent: 0, bodies: [], failures: [] };
+  const pending = new Set<Promise<void>>();
+  const send = () => {
+    result.sent += 1;
+    const request = getOnNewConnection(port, pathName).then(
+      ({ status, body }) => {
+        if (status === 200) result.bodies.push(body);
+        else result.failures.push(`status ${status}: ${body.slice(0, 200)}`);
+      },
+      (error: unknown) => {
+        result.failures.push(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+      },
+    );
+    pending.add(request);
+    void request.finally(() => pending.delete(request));
+  };
+  const timer = setInterval(send, Math.round(1000 / perSecond));
+  return {
+    stop: async () => {
+      clearInterval(timer);
+      await Promise.all([...pending]);
+      return result;
+    },
+  };
+}

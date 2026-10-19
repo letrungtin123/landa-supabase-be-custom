@@ -13,7 +13,8 @@
 // ecosystem.lesson-author-orchestration-v2.config.cjs + the AI service) well
 // below max_connections minus what Supabase itself holds.
 //   API          LANDA_API_INSTANCES x (LANDA_API_DB_POOL_MAX + REPORTS_DB_POOL_MAX)
-//                (2 x (10 + 4) = 28)
+//                (2 x (10 + 4) = 28; one worker more, 14, for a few seconds
+//                while a rolling restart replaces a worker)
 //   background   10 (reads no reports)   email outbox 3   tenant quota 4
 //   outline transfer 3   news cleanup 2
 //   = 50 here; + orchestration V2 8 (dispatcher 3, worker 5) + AI service 8
@@ -51,7 +52,17 @@ const sharedEnv = {
   LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "4"
 };
 
-const apiEnv = { ...sharedEnv, LANDA_PROCESS_ROLE: "api", DB_POOL_MAX: String(apiPoolMax) };
+// The API is one PM2 process in fork mode, the in-app cluster primary
+// (src/config/inapp-cluster-primary.ts): it forks LANDA_INAPP_CLUSTER_WORKERS
+// API workers and hands them the connections round-robin (in PM2 cluster mode
+// on Windows nearly every connection reaches one process). PM2 runs one
+// primary, so the workers are all of LANDA_API_INSTANCES.
+const apiEnv = {
+  ...sharedEnv,
+  LANDA_PROCESS_ROLE: "api",
+  LANDA_INAPP_CLUSTER_WORKERS: String(apiInstances),
+  DB_POOL_MAX: String(apiPoolMax)
+};
 const backgroundEnv = { ...sharedEnv, LANDA_PROCESS_ROLE: "background", DB_POOL_MAX: "10" };
 
 // Graceful restarts (src/config/graceful-shutdown.ts). PM2 on Windows
@@ -74,20 +85,30 @@ const restartPolicy = {
 module.exports = {
   apps: [
     {
-      // HTTP, SSE streams (each process owns its LISTEN connections), and
+      // HTTP, SSE streams (each worker owns its LISTEN connections), and
       // publishing to RabbitMQ.
+      //
+      // One fork-mode process, the in-app cluster primary of
+      // LANDA_INAPP_CLUSTER_WORKERS workers (apiEnv). Deploy without downtime:
+      //   npm run build
+      //   node scripts/pm2-rolling-restart.mjs landa-refactor-backend
+      // (each worker is stopped only once its replacement is ready).
+      // `pm2 reload|restart` of this app restarts every worker at once (a few
+      // seconds without API); it is needed only for a change of the primary
+      // itself (src/index.ts, src/config/inapp-cluster-*.ts) or of this env.
       name: "landa-refactor-backend",
       cwd: __dirname,
       script: "./dist/index.js",
       interpreter: "node",
-      exec_mode: "cluster",
-      instances: apiInstances,
-      // A process counts as started once it sends "ready" after listen
-      // (a reload stops the old process only then).
+      exec_mode: "fork",
+      instances: 1,
+      // The primary sends "ready" once every worker has sent it after
+      // listen. listen_timeout is also how long a rolling restart waits for
+      // a new worker (ROLLING_RESTART_READY_TIMEOUT_MS).
       wait_ready: true,
       listen_timeout: 60000,
-      // One log file for every instance (landa-refactor-backend-out.log, as
-      // in fork mode) instead of one per PM2 id.
+      // One log file for the primary and its workers
+      // (landa-refactor-backend-out.log).
       merge_logs: true,
       ...restartPolicy,
       env: apiEnv,

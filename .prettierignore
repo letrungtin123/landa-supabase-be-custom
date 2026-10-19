@@ -17,6 +17,8 @@
 !/scripts/
 /scripts/*
 !/scripts/run-tests.mjs
+!/scripts/pm2-rolling-restart.mjs
+!/scripts/pm2-rolling-restart.test.mjs
 !/scripts/lesson-author-orchestration-v2-test-files.mjs
 !/scripts/test-lesson-author-orchestration-v2.mjs
 !/scripts/codemods/
