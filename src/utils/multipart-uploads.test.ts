@@ -14,7 +14,7 @@ import multer from 'multer';
 // avatar, KB), the size-limit boundary, temp-file cleanup when a request fails,
 // and how field names and file names arrive. No network, no database.
 
-const { createKbTempUpload, withKbTempUploadCleanup } = await import('../modules/ai-chatbot/kb-upload-storage.js');
+const { createKbTempUpload, withKbTempUploadCleanup } = await import('../modules/ai-chatbot/kb/kb-upload-storage.js');
 const { fixMulterFilename } = await import('../config/storage.js');
 
 interface Outcome {
