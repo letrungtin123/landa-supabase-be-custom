@@ -1,4 +1,6 @@
-import { AppError } from '../../middleware/error-handler.js';
+// utils/errors.ts (the class the error handler re-exports) has no imports, so
+// the pure date helpers (ai-report/report-date.logic.ts) can throw this.
+import { AppError } from '../../utils/errors.js';
 
 /**
  * A report request the caller can correct: a scope outside the tenant or the

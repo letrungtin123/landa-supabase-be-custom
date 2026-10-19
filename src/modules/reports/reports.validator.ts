@@ -50,6 +50,23 @@ function pageSize(fallback: number, max: number, min?: number) {
   });
 }
 
+/**
+ * `?page=` / `?page_size=` -> parseInt when it is a positive number, else
+ * `fallback` (what a missing value reads as); at most `max`. A negative value
+ * reads as a missing one instead of reaching LIMIT / OFFSET.
+ */
+function positiveOr(fallback: number, max = Number.POSITIVE_INFINITY) {
+  return z.unknown().transform(value => {
+    const parsed = rawInt(value);
+    return Math.min(parsed > 0 ? parsed : fallback, max);
+  });
+}
+
+/** A text filter sent once (or not at all); a repeated parameter is a list and is refused by the controller. */
+export function isSingleQueryText(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
 const COURSE_COMPLETION_STATUSES = new Set(['all', 'not_started', 'learning', 'completed']);
 /** A course status filter: one of the four values, anything else lists every status. */
 const courseCompletionStatus = z
@@ -81,12 +98,12 @@ export const reportChartQuerySchema = z.object({
   series_limit: z.unknown().transform(parsePositiveInteger),
 });
 
-/** GET /top-courses */
+/** GET /top-courses (its service does not clamp: a negative page or size reads as the default). */
 export const reportTopCoursesQuerySchema = z.object({
   ...periodFields,
   ...scopeFields,
-  page: page(1),
-  page_size: pageSize(10, 100),
+  page: positiveOr(1),
+  page_size: positiveOr(10, 100),
 });
 
 /** GET /course-completion-ranking */

@@ -45,9 +45,14 @@ test('pages and page sizes read as before', () => {
   assert.deepEqual(pick(ranking.parse({ page: '2.9', page_size: ['5', '6'] }), ['page', 'page_size']), { page: 2, page_size: 5 });
 
   const top = validator.reportTopCoursesQuerySchema;
-  // No lower bound on the top courses and learners pages (as before).
-  assert.deepEqual(pick(top.parse({ page: '-4', page_size: '-9' }), ['page', 'page_size']), { page: -4, page_size: -9 });
+  // Top courses: a negative page or size reads as the default (its service
+  // does not clamp, so it used to reach LIMIT / OFFSET).
+  assert.deepEqual(pick(top.parse({ page: '-4', page_size: '-9' }), ['page', 'page_size']), { page: 1, page_size: 10 });
   assert.deepEqual(pick(top.parse({ page: 'x', page_size: '0' }), ['page', 'page_size']), { page: 1, page_size: 10 });
+  assert.deepEqual(pick(top.parse({ page: '3', page_size: '1000' }), ['page', 'page_size']), { page: 3, page_size: 100 });
+  // The learners list keeps no lower bound here: its service clamps to 1.
+  const learners = validator.reportLearnersQuerySchema;
+  assert.deepEqual(pick(learners.parse({ page: '-4', page_size: '-9' }), ['page', 'page_size']), { page: -4, page_size: -9 });
 });
 
 test('period, scope and filters read as before', () => {

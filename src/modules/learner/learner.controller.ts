@@ -19,6 +19,20 @@ function demoProgressState() {
   return { progress: 0, is_completed: false, completed_at: null, last_activity_at: null };
 }
 
+/** `?courseIds=` sent more than once (a list) instead of one comma-separated text. */
+export const LEARNER_COURSE_IDS_INVALID_CODE = 'LEARNER_COURSE_IDS_INVALID';
+export const LEARNER_COURSE_IDS_INVALID_MESSAGE = 'Danh sách khóa học không hợp lệ.';
+
+/**
+ * The JSON body as an object to read fields from. A request without a JSON
+ * body (no body, another content type) has `req.body` undefined in Express 5;
+ * it reads as an empty object, so the route's own "missing field" 400 answers
+ * instead of a 500 on destructuring.
+ */
+function bodyFieldsOf(req: Request): Record<string, unknown> {
+  return req.body !== null && typeof req.body === 'object' ? (req.body as Record<string, unknown>) : {};
+}
+
 function maskEnrollmentProgress<T extends object>(rows: T[]) {
   return rows.map((row) => ({
     ...row,
@@ -210,7 +224,7 @@ export async function enroll(req: Request, res: Response, next: NextFunction): P
     const tenantId = req.user.tenantId;
     if (!tenantId) { sendError(res, 'Thiếu tenant', 400); return; }
 
-    const { course_id } = req.body;
+    const { course_id } = bodyFieldsOf(req) as { course_id?: string };
     if (!course_id) { sendError(res, 'Thiếu course_id', 400); return; }
 
     if (isDemoIframeSession(req.user)) {
@@ -230,7 +244,7 @@ export async function completeBlocks(req: Request, res: Response, next: NextFunc
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
 
-    const { course_id, block_ids } = req.body;
+    const { course_id, block_ids } = bodyFieldsOf(req) as { course_id?: string; block_ids?: unknown };
     if (!course_id || !Array.isArray(block_ids)) {
       sendError(res, 'Thiếu course_id hoặc block_ids', 400);
       return;
@@ -276,6 +290,10 @@ export async function getBatchProgress(req: Request, res: Response, next: NextFu
 
     const raw = learnerBatchProgressQuerySchema.parse(req.query).courseIds;
     if (!raw) { sendError(res, 'Thiếu courseIds', 400); return; }
+    if (typeof raw !== 'string') {
+      sendError(res, LEARNER_COURSE_IDS_INVALID_MESSAGE, 400, LEARNER_COURSE_IDS_INVALID_CODE);
+      return;
+    }
 
     const courseIds = raw.split(',').map(id => id.trim()).filter(Boolean);
     if (courseIds.length === 0) { sendSuccess(res, { progress: {} }); return; }

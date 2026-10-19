@@ -2,6 +2,8 @@
 // Asia/Ho_Chi_Minh calendar day in YYYY-MM-DD form; no Date arithmetic here
 // depends on the server time zone.
 
+import { ReportRequestError } from '../../reports/report-request-error.js';
+
 export const REPORT_TIME_ZONE = 'Asia/Ho_Chi_Minh';
 export const MAX_REPORT_RANGE_DAYS = 366;
 
@@ -252,7 +254,8 @@ function sameCalendarDateInYear(dateFrom: string, dateTo: string, targetYear: nu
 export function resolveComparableReportPeriod(dateFrom: string, dateTo: string): ReportComparisonPeriod {
   const from = parseYmd(dateFrom);
   const to = parseYmd(dateTo);
-  if (!from || !to) throw { status: 400, message: 'Khoảng ngày báo cáo không hợp lệ' };
+  // An AppError with the same `status` and `message` (and no code) as the plain object it used to be.
+  if (!from || !to) throw new ReportRequestError('Khoảng ngày báo cáo không hợp lệ', 400);
 
   if (isCalendarYear(dateFrom, dateTo)) {
     return {

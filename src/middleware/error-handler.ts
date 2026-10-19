@@ -8,6 +8,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { Request, Response, NextFunction } from 'express';
+import multer from 'multer';
 import { env } from '../config/env.js';
 import {
   TENANT_DATA_LIMIT_REACHED_CODE,
@@ -36,12 +37,18 @@ export const UNSUPPORTED_ENCODING_CODE = 'UNSUPPORTED_ENCODING';
 export const UNSUPPORTED_ENCODING_MESSAGE = 'Dữ liệu gửi lên có định dạng chưa được hỗ trợ. Vui lòng thử lại.';
 export const REQUEST_ABORTED_CODE = 'REQUEST_ABORTED';
 export const REQUEST_ABORTED_MESSAGE = 'Yêu cầu bị gián đoạn trước khi gửi xong. Vui lòng thử lại.';
+export const TOO_MANY_PARAMETERS_CODE = 'TOO_MANY_PARAMETERS';
+export const TOO_MANY_PARAMETERS_MESSAGE = 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.';
+export const INVALID_FORM_BODY_CODE = 'INVALID_FORM_BODY';
+export const REQUEST_SIZE_INVALID_CODE = 'REQUEST_SIZE_INVALID';
+export const REQUEST_SIZE_INVALID_MESSAGE = 'Dữ liệu gửi lên không đầy đủ hoặc bị sai kích thước. Vui lòng thử lại.';
 
 /**
- * Request bodies the body parser (express.json, middleware/body-limits.ts)
- * refuses, by the `type` it sets on the error: [status, code, message].
- * The error's message and `body` can quote the request body (a password on
- * the sign-in route), so neither is ever sent or logged.
+ * Request bodies the body parsers (express.json, middleware/body-limits.ts,
+ * and express.urlencoded in app.ts) refuse, by the `type` they set on the
+ * error: [status, code, message]. The error's message and `body` can quote
+ * the request body (a password on the sign-in route), so neither is ever
+ * sent or logged.
  */
 export const REQUEST_BODY_ERRORS: Readonly<Record<string, readonly [number, string, string]>> = Object.freeze({
   'entity.parse.failed': [400, INVALID_JSON_CODE, INVALID_JSON_MESSAGE],
@@ -49,6 +56,34 @@ export const REQUEST_BODY_ERRORS: Readonly<Record<string, readonly [number, stri
   'encoding.unsupported': [415, UNSUPPORTED_ENCODING_CODE, UNSUPPORTED_ENCODING_MESSAGE],
   'charset.unsupported': [415, UNSUPPORTED_ENCODING_CODE, UNSUPPORTED_ENCODING_MESSAGE],
   'request.aborted': [400, REQUEST_ABORTED_CODE, REQUEST_ABORTED_MESSAGE],
+  // A form body (urlencoded) with more than 1000 fields, or nested deeper than 32 levels.
+  'parameters.too.many': [413, TOO_MANY_PARAMETERS_CODE, TOO_MANY_PARAMETERS_MESSAGE],
+  'querystring.parse.rangeError': [400, INVALID_FORM_BODY_CODE, INVALID_JSON_MESSAGE],
+  // A body shorter or longer than its Content-Length.
+  'request.size.invalid': [400, REQUEST_SIZE_INVALID_CODE, REQUEST_SIZE_INVALID_MESSAGE],
+});
+
+/**
+ * Multipart uploads multer refuses, by the MulterError code: [status, code,
+ * message]. They used to fall through to the 500 below. Routes that answer
+ * these themselves (bot avatar size, library, course assets, the AI ID video
+ * and source uploads) keep their own answers and never get here. The error
+ * names the form field (`field`); neither it, a field value nor the file
+ * content is ever sent or logged.
+ */
+export const UPLOAD_ERRORS: Readonly<Record<string, readonly [number, string, string]>> = Object.freeze({
+  LIMIT_FILE_SIZE: [413, PAYLOAD_TOO_LARGE_CODE, 'Tệp tải lên quá lớn. Vui lòng chọn tệp nhỏ hơn.'],
+  LIMIT_FILE_COUNT: [400, 'UPLOAD_TOO_MANY_FILES', 'Bạn đã chọn quá nhiều tệp. Vui lòng chọn ít tệp hơn và thử lại.'],
+  LIMIT_UNEXPECTED_FILE: [
+    400,
+    'UPLOAD_UNEXPECTED_FILE',
+    'Tệp gửi lên không đúng chỗ hoặc nhiều hơn số tệp cho phép. Vui lòng kiểm tra lại và thử lại.',
+  ],
+  LIMIT_PART_COUNT: [400, 'UPLOAD_TOO_MANY_PARTS', 'Dữ liệu gửi lên có quá nhiều phần. Vui lòng gửi ít nội dung hơn.'],
+  LIMIT_FIELD_KEY: [400, 'UPLOAD_FIELD_NAME_TOO_LONG', 'Tên một mục gửi lên quá dài. Vui lòng tải lại trang và thử lại.'],
+  LIMIT_FIELD_VALUE: [400, 'UPLOAD_FIELD_VALUE_TOO_LONG', 'Một mục gửi lên quá dài. Vui lòng gửi ít nội dung hơn.'],
+  LIMIT_FIELD_COUNT: [400, 'UPLOAD_TOO_MANY_FIELDS', 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.'],
+  MISSING_FIELD_NAME: [400, 'UPLOAD_FIELD_NAME_MISSING', 'Dữ liệu gửi lên thiếu tên mục. Vui lòng tải lại trang và thử lại.'],
 });
 
 const MAX_LOGGED_PATH_LENGTH = 200;
@@ -58,11 +93,14 @@ export interface ErrorResponse {
   body: ErrorBody;
   /**
    * What the handler logs before answering: an unexpected error with its
-   * stack, a refused request body by its type only, or nothing.
+   * stack, a refused request body by its type only, a refused upload by its
+   * multer code only, or nothing.
    */
-  log: 'unexpected' | 'request_body' | 'none';
+  log: 'unexpected' | 'request_body' | 'upload' | 'none';
   /** For log 'request_body': the body parser's error type. */
   requestBodyType?: string;
+  /** For log 'upload': the multer error code. */
+  uploadErrorCode?: string;
 }
 
 function propertyOf(err: unknown, key: 'code' | 'type'): unknown {
@@ -74,6 +112,12 @@ function propertyOf(err: unknown, key: 'code' | 'type'): unknown {
 function requestBodyErrorType(err: unknown): string | undefined {
   const type = propertyOf(err, 'type');
   return typeof type === 'string' && Object.hasOwn(REQUEST_BODY_ERRORS, type) ? type : undefined;
+}
+
+/** The multer code of a refused upload, when it is one the handler answers itself. */
+function uploadErrorCode(err: unknown): string | undefined {
+  if (!(err instanceof multer.MulterError)) return undefined;
+  return typeof err.code === 'string' && Object.hasOwn(UPLOAD_ERRORS, err.code) ? err.code : undefined;
 }
 
 /** Status and body the global handler answers for an error. No I/O. */
@@ -112,6 +156,14 @@ export function describeErrorResponse(err: unknown, options: { production: boole
     return { status, body: errorBody(status, message, bodyCode), log: 'request_body', requestBodyType };
   }
 
+  // A multipart upload multer refused (file too large, too many files or
+  // fields, an unexpected file field) on a route that does not answer it.
+  const uploadCode = uploadErrorCode(err);
+  if (uploadCode) {
+    const [status, bodyCode, message] = UPLOAD_ERRORS[uploadCode];
+    return { status, body: errorBody(status, message, bodyCode), log: 'upload', uploadErrorCode: uploadCode };
+  }
+
   // Anything else is unexpected. Production: ẩn message và stack trace.
   // Its own `code` (a SQLSTATE, a Node error code) is internal and never sent.
   const error = err as { message?: unknown; stack?: unknown } | null | undefined;
@@ -134,6 +186,7 @@ export function errorHandler(err: Error, req: Request, res: Response, _next: Nex
   // Log lỗi không mong đợi
   if (response.log === 'unexpected') console.error('[ERROR]', err?.stack || err?.message);
   else if (response.log === 'request_body') logRequestBodyRefusal(req, response);
+  else if (response.log === 'upload') logUploadRefusal(req, response);
   res.status(response.status).json(response.body);
 }
 
@@ -149,6 +202,19 @@ function logRequestBodyRefusal(req: Pick<Request, 'method' | 'originalUrl' | 'ur
     `[RequestBody] ${JSON.stringify({
       event: 'request_body_refused',
       type: response.requestBodyType,
+      status: response.status,
+      method: String(req.method ?? '').slice(0, 16),
+      path: loggedPathOf(req),
+    })}`,
+  );
+}
+
+/** One line per refused upload: its multer code, status, method and path. Never a field name, value or file. */
+function logUploadRefusal(req: Pick<Request, 'method' | 'originalUrl' | 'url'>, response: ErrorResponse): void {
+  console.warn(
+    `[Upload] ${JSON.stringify({
+      event: 'upload_refused',
+      multer_code: response.uploadErrorCode,
       status: response.status,
       method: String(req.method ?? '').slice(0, 16),
       path: loggedPathOf(req),

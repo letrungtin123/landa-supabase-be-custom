@@ -158,3 +158,44 @@ test('the learner list service never filters on the text undefined', async (t) =
   await svc.getReportLearners(TENANT, 1, 20, undefined, undefined, undefined, undefined, undefined, undefined, 'completed', range);
   assert.match(statements.find((entry) => entry.text.includes('learner_status'))!.text, /WHERE learner_status\.status = 'completed'/);
 });
+
+test('a repeated search is a 400 REPORT_SEARCH_INVALID before any read, not a 500 on .trim()', async (t) => {
+  const statements = installDb(t);
+  const search = ['an', 'bo'] as unknown as string;
+  const cases: Array<[(req: Request, res: Response) => Promise<unknown>, Record<string, string>, Record<string, string>]> = [
+    [ctrl.getLearners, { status: 'all', search }, {}],
+    [ctrl.getCourseCompletionLearners, { search }, { courseId: 'd0000000-0000-4000-8000-000000000001' }],
+    [ctrl.getLearnerDetail, { username: 'learner01', search }, {}],
+  ];
+  for (const [handler, query, params] of cases) {
+    const res = await respond(handler, { ...fakeRequest(query), params } as unknown as Request);
+    assert.equal(res.statusCode, 400, handler.name);
+    assert.deepEqual(res.body, {
+      success: false,
+      message: 'Từ khóa tìm kiếm không hợp lệ. Vui lòng nhập một từ khóa và thử lại.',
+      code: 'REPORT_SEARCH_INVALID',
+      error: 'REPORT_SEARCH_INVALID',
+    }, handler.name);
+  }
+  assert.equal(statements.length, 0, 'nothing was read');
+
+  // One search still lists.
+  const listed = await respond(ctrl.getLearners, fakeRequest({ status: 'all', search: ' an ' }));
+  assert.equal(listed.statusCode, 200);
+});
+
+test('a negative page or page size on top courses reads as the default, never a negative LIMIT or OFFSET', async (t) => {
+  const statements = installDb(t);
+  const negative = await respond(ctrl.getTopCourses, fakeRequest({ page: '-4', page_size: '-9' }));
+  assert.equal(negative.statusCode, 200);
+  const negativeParams = statements.map((entry) => entry.params);
+  assert.ok(negativeParams.length > 0);
+  for (const params of negativeParams) {
+    for (const value of params) assert.ok(typeof value !== 'number' || value >= 0, `parameter ${value}`);
+  }
+
+  // Same statements as for no page at all (page 1, 10 per page).
+  statements.length = 0;
+  await respond(ctrl.getTopCourses, fakeRequest({}));
+  assert.deepEqual(statements.map((entry) => entry.params), negativeParams);
+});

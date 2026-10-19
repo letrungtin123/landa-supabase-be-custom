@@ -67,20 +67,42 @@ None of these collides with a code or a prefix the frontends branch on
 |---|---|---|---|
 | `INTERNAL_ERROR` | 500 | Unexpected error reaching the global handler. Message hidden in production; its own code (SQLSTATE, Node code) is never sent. | `middleware/error-handler.ts` |
 | `INVALID_JSON` | 400 | The JSON body could not be parsed. Logged by type, status, method and path only (never the body). | `middleware/error-handler.ts` (body-parser `entity.parse.failed`) |
-| `PAYLOAD_TOO_LARGE` | 413 | The JSON body is over its route limit (`middleware/body-limits.ts`). | `middleware/error-handler.ts` (`entity.too.large`) |
+| `PAYLOAD_TOO_LARGE` | 413 | The JSON body is over its route limit (`middleware/body-limits.ts`), or an uploaded file is over its multer limit. | `middleware/error-handler.ts` (`entity.too.large`, multer `LIMIT_FILE_SIZE`) |
 | `UNSUPPORTED_ENCODING` | 415 | The body uses an unsupported content encoding or charset. | `middleware/error-handler.ts` (`encoding.unsupported`, `charset.unsupported`) |
 | `REQUEST_ABORTED` | 400 | The client stopped sending the body before it was complete. | `middleware/error-handler.ts` (`request.aborted`) |
+| `TOO_MANY_PARAMETERS` | 413 | A form (urlencoded) body with more than 1000 fields. Logged by type only. | `middleware/error-handler.ts` (`parameters.too.many`) |
+| `INVALID_FORM_BODY` | 400 | A form (urlencoded) body nested deeper than 32 levels. Logged by type only. | `middleware/error-handler.ts` (`querystring.parse.rangeError`) |
+| `REQUEST_SIZE_INVALID` | 400 | The body is shorter or longer than its `Content-Length`. Logged by type only. | `middleware/error-handler.ts` (`request.size.invalid`) |
+| `UPLOAD_TOO_MANY_FILES` | 400 | More files than the route's multer `files` limit. | `middleware/error-handler.ts` (multer `LIMIT_FILE_COUNT`) |
+| `UPLOAD_UNEXPECTED_FILE` | 400 | A file in a field the route does not read, or more files than its `array(name, max)`. | `middleware/error-handler.ts` (multer `LIMIT_UNEXPECTED_FILE`) |
+| `UPLOAD_TOO_MANY_PARTS` | 400 | More multipart parts than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_PART_COUNT`) |
+| `UPLOAD_FIELD_NAME_TOO_LONG` | 400 | A multipart field name over the limit. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_KEY`) |
+| `UPLOAD_FIELD_VALUE_TOO_LONG` | 400 | A multipart text field over the limit. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_VALUE`) |
+| `UPLOAD_TOO_MANY_FIELDS` | 400 | More multipart text fields than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_COUNT`) |
+| `UPLOAD_FIELD_NAME_MISSING` | 400 | A multipart part without a field name. | `middleware/error-handler.ts` (multer `MISSING_FIELD_NAME`) |
 | `TENANT_DATA_LIMIT_REACHED` | 409 | The tenant's data quota is used up (quota trigger SQLSTATE `LQ001`, or the storage check). | `middleware/error-handler.ts`, `utils/client-error.ts`, `tenants/tenant-data-quota.service.ts` |
 | `TENANT_DATA_QUOTA_RECONCILING` | 503 | The tenant's quota is being recounted (SQLSTATE `LQ002`); retry in a few minutes. | same as above |
 | `REQUEST_FAILED` | 500 | Unexpected error caught by a controller through `sendClientError`; fixed message in the request language, cause only in the log. | `utils/client-error.ts` |
 | `PERMISSION_DENIED` | 403 | The permission group does not allow this action on the module. | `middleware/authorize.ts` (`checkPermission`) |
 | `MODULE_DISABLED` | 403 | The feature is turned off for the tenant. Also sent as `error` by `requireTenantModule`. | `middleware/authorize.ts`, `middleware/require-tenant-module.ts` |
 | `TENANT_REQUIRED` | 403 | The user belongs to no tenant. Also sent as `error`. | `middleware/require-tenant-module.ts` |
+| `ROUTE_NOT_FOUND` | 404 | No endpoint at this path ("Endpoint không tồn tại"). | `app.ts` (404 handler) |
+| `DEMO_LOGIN_RATE_LIMITED` | 429 | More than 120 demo-login requests a minute. | `app.ts` (`demoLoginLimiter`) |
+| `STUDY_SESSION_RATE_LIMITED` | 429 | More than 30 study-session requests a minute. | `app.ts` (`studySessionLimiter`) |
 | `LOGIN_RATE_LIMITED` | 429 | Too many failed sign-ins for the account or the IP. | `middleware/auth-rate-limit.ts` |
 | `REFRESH_RATE_LIMITED` | 429 | Too many session refreshes for the token or the IP. | `middleware/auth-rate-limit.ts` |
 | `PASSWORD_CHANGE_RATE_LIMITED` | 429 | Too many password change attempts. | `middleware/auth-rate-limit.ts` |
 | `ACCOUNT_ACTION_RATE_LIMITED` | 429 | Too many one-time links or profile updates. | `middleware/auth-rate-limit.ts` |
 | `API_RATE_LIMITED` | 429 | The general per-user / per-IP API limit. | `middleware/auth-rate-limit.ts` (`apiLimiter`) |
+
+Upload refusals (multer errors) reach the global handler from the routes that
+do not answer them: assignments, badges, branding, the course mentor logo,
+help docs, news, prompt templates, the user avatar, KB documents and FAQ, and
+the bot avatar for anything but its size. They are logged as one
+`[Upload] upload_refused` line (multer code, status, method, path), never the
+field name, a field value or the file. Routes that answer multer themselves
+keep their own codes and messages (bot avatar size, library, course assets,
+AI ID video and source uploads).
 
 `authenticate`, `authorize(...roles)` and `tenantContext` refuse with
 `sendError` and no code of their own, so they send `UNAUTHORIZED` (401),
@@ -241,9 +263,13 @@ JSON).
 `modules/ai-chatbot`, `modules/reports` and `modules/learner` are being moved
 or refactored in parallel lanes; their codes are not reviewed here. Through
 the shared layers above, every error body they send through the global
-handler, `sendError` or `sendClientError` already carries a code. Their own
-hand-written bodies, and the 404 and rate-limit answers in `src/app.ts`, are
-not covered yet (see the follow-ups of BE-S8).
+handler, `sendError` or `sendClientError` already carries a code. Their
+hand-written HTTP error bodies carry one too: the lesson author apply refusal
+(`chat.controller.ts`) gets the code of its status when its AppError has none,
+and the last plain-object throw (`ai-report/report-date.logic.ts`, an invalid
+comparison range) is a `ReportRequestError` (400, same message, no code of its
+own, so `BAD_REQUEST`). The chat stream's SSE `error` events are events, not
+error bodies, and are unchanged (a `code` only when the error has one).
 
 Inventory from an AST scan of `src` (2026-10-19): codes raised with a status
 (`new AppError`, a `[status, vi, en]` table, a `{ code }` body). Keys of three
@@ -288,4 +314,5 @@ that reach a response, with their meaning.
 | `ai-chatbot/report-chat.service.ts` | `REPORT_RANGE_INVALID` 400 |
 | `ai-chatbot/report-pdf.controller.ts` | `AI_CREDIT_LIMIT_REACHED` 429 (new export while the AI points are spent), `REPORT_PDF_ARTIFACT_TOO_LARGE` 413, `REPORT_PDF_AUDIT_FAILED` 503, `REPORT_PDF_DEMO_SESSION` 403, `REPORT_PDF_EXPORT_EXPIRED` 410, `REPORT_PDF_EXPORT_FAILED` 500, `REPORT_PDF_INVALID_REQUEST` 400, `REPORT_PDF_JOB_NOT_FOUND` 404, `REPORT_PDF_NOT_FOUND` 404, `REPORT_PDF_NOT_READY` 409, `REPORT_PDF_PERMISSION_DENIED` 403, `REPORT_PDF_QUEUE_FULL` 429, `REPORT_PDF_RATE_LIMITED` 429, `REPORT_PDF_RENDER_BUSY` 429, `REPORT_PDF_RENDER_TIMEOUT` 504, `REPORT_PDF_RENDERER_UNAVAILABLE` 503, `REPORT_PDF_SCOPE_DENIED` 403, `REPORT_PDF_SNAPSHOT_UNAVAILABLE` 409, `REPORT_PDF_STORAGE_FAILED` 503 |
 | `reports/report-access.service.ts` | `REPORT_SCOPE_FORBIDDEN` 403, `REPORT_SCOPE_INVALID` 400, `REPORT_SCOPE_REQUIRED` 400 |
-| `reports/reports.controller.ts` | `REPORT_SUMMARY_REFRESH_FAILED`, `REPORTS_BUSY` |
+| `reports/reports.controller.ts` | `REPORT_SUMMARY_REFRESH_FAILED`, `REPORTS_BUSY`, `REPORT_SEARCH_INVALID` 400 (a repeated `search` on the learner lists and learner detail) |
+| `learner/learner.controller.ts` | `LEARNER_COURSE_IDS_INVALID` 400 (a repeated `courseIds` on `progress-batch`) |

@@ -175,7 +175,7 @@ test('actual Express GET returns JSON status; repeated reads do not trigger any 
 
 test('production wiring retains auth/tenant middleware, edit permission, and default-off flag', () => {
   const routes = readFileSync(new URL('../ai-chatbot.routes.ts', import.meta.url), 'utf8');
-  const config = readFileSync(new URL('../../../config/env.ts', import.meta.url), 'utf8');
+  const config = readFileSync(new URL('../../../config/env/ai-id.ts', import.meta.url), 'utf8');
   const routeIndex = routes.indexOf("router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId'");
   assert.ok(routeIndex > routes.indexOf('router.use(authenticate)'));
   assert.ok(routeIndex > routes.indexOf('router.use(tenantContext)'));

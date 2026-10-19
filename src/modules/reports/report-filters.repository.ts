@@ -38,8 +38,11 @@ export function createReportFiltersRepository(db: ReportsDb) {
       return course.rows[0];
     },
 
-    /** The groups of the teams the user belongs to. */
-    async listGroupsOfMember(userId: string): Promise<ReportOrgGroupRow[]> {
+    /**
+     * The groups of the teams the user belongs to, in the tenant only (defense
+     * in depth: a membership row pointing at another tenant's team is never listed).
+     */
+    async listGroupsOfMember(userId: string, tenantId: string): Promise<ReportOrgGroupRow[]> {
       const result = await db.query<ReportOrgGroupRow>(
         `SELECT DISTINCT og.id, og.name,
               (SELECT COUNT(*)::int FROM sub_groups sg2 WHERE sg2.org_group_id = og.id) AS subgroup_count
@@ -47,9 +50,9 @@ export function createReportFiltersRepository(db: ReportsDb) {
        JOIN teams t ON t.id = tm.team_id
        JOIN sub_groups sg ON sg.id = t.sub_group_id
        JOIN org_groups og ON og.id = sg.org_group_id
-       WHERE tm.user_id = $1
+       WHERE tm.user_id = $1 AND og.tenant_id = $2
        ORDER BY og.name`,
-        [userId],
+        [userId, tenantId],
       );
       return result.rows;
     },

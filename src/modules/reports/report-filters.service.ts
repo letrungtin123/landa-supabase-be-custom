@@ -32,10 +32,10 @@ export function findReportCourse(tenantId: string, courseId: string): Promise<{ 
   return repository.findCourse(courseId, tenantId);
 }
 
-/** Staff and above: every group of the tenant. learner_plus: the groups of their teams. */
+/** Staff and above: every group of the tenant. learner_plus: the groups of their teams in the tenant. */
 export function listReportGroups(actor: ReportFilterActor): Promise<ReportOrgGroupRow[]> {
   return actor.role === 'learner_plus'
-    ? repository.listGroupsOfMember(actor.userId)
+    ? repository.listGroupsOfMember(actor.userId, actor.tenantId)
     : repository.listTenantGroups(actor.tenantId);
 }
 

@@ -495,11 +495,6 @@
       "count": 1
     }
   },
-  "src/modules/ai-chatbot/ai-report/report-date.logic.ts": {
-    "@typescript-eslint/only-throw-error": {
-      "count": 1
-    }
-  },
   "src/modules/ai-chatbot/ai-report/report-pdf-quality.logic.test.ts": {
     "no-irregular-whitespace": {
       "count": 1

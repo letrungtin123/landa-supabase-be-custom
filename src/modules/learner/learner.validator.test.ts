@@ -23,7 +23,7 @@ test('no query string is ever rejected', () => {
   }
 });
 
-test('pages read as parseInt of the raw value, absent when empty', () => {
+test('pages read as parseInt of the raw value, absent when empty or not a number', () => {
   const schema = validator.learnerNotificationsQuerySchema;
   const empty = schema.parse({});
   assert.equal(empty.page, undefined);
@@ -31,7 +31,9 @@ test('pages read as parseInt of the raw value, absent when empty', () => {
   assert.deepEqual(schema.parse({ page: '2.7', page_size: ['5', '6'] }), { page: 2, page_size: 5 });
   assert.equal(schema.parse({ page: '' }).page, undefined);
   assert.equal(schema.parse({ page: '0' }).page, 0);
-  assert.ok(Number.isNaN(schema.parse({ page: 'abc' }).page));
+  // Not a number: absent, so the service default applies (it read as NaN, a NaN OFFSET and a 500).
+  assert.equal(schema.parse({ page: 'abc' }).page, undefined);
+  assert.equal(schema.parse({ page_size: 'y' }).page_size, undefined);
 });
 
 test('text filters pass through unchanged', () => {

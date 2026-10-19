@@ -352,6 +352,36 @@ const REQUEST_BODY_CASES: Array<{
     },
     before: { status: 500, body: 'unexpected 500' },
   },
+  {
+    type: 'parameters.too.many',
+    status: 413,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên có quá nhiều mục. Vui lòng gửi ít nội dung hơn.',
+      code: 'TOO_MANY_PARAMETERS',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+  {
+    type: 'querystring.parse.rangeError',
+    status: 400,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên không đúng định dạng. Vui lòng kiểm tra lại và thử lại.',
+      code: 'INVALID_FORM_BODY',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
+  {
+    type: 'request.size.invalid',
+    status: 400,
+    body: {
+      success: false,
+      message: 'Dữ liệu gửi lên không đầy đủ hoặc bị sai kích thước. Vui lòng thử lại.',
+      code: 'REQUEST_SIZE_INVALID',
+    },
+    before: { status: 500, body: 'unexpected 500' },
+  },
 ];
 
 for (const item of REQUEST_BODY_CASES) {

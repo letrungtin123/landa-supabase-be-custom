@@ -802,3 +802,24 @@ test('a failing breakdown query leaves the report without a breakdown instead of
     console.warn = warn;
   }
 });
+
+test('an invalid comparison range is an AppError with the status and message of the old plain object', async () => {
+  const { AppError, describeErrorResponse } = await import('../../../middleware/error-handler.js');
+  let thrown: unknown;
+  try {
+    resolveComparableReportPeriod('2026-13-01', 'not-a-date');
+  } catch (error) {
+    thrown = error;
+  }
+  assert.ok(thrown instanceof AppError, 'an AppError, not a plain object (a 500 at the global handler)');
+  const error = thrown as InstanceType<typeof AppError> & { status: number };
+  assert.equal(error.status, 400);
+  assert.equal(error.statusCode, 400);
+  assert.equal(error.message, 'Khoảng ngày báo cáo không hợp lệ');
+  assert.equal(error.code, undefined, 'no code of its own, as before (report chat reads codes by shape)');
+  assert.deepEqual(describeErrorResponse(thrown, { production: true }), {
+    status: 400,
+    body: { success: false, message: 'Khoảng ngày báo cáo không hợp lệ', code: 'BAD_REQUEST' },
+    log: 'none',
+  });
+});

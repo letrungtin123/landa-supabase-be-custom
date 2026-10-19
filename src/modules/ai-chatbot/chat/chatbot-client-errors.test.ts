@@ -65,3 +65,22 @@ test('a chat history cursor must be an ISO timestamp', async (t) => {
   }
   assert.equal(queries.mock.callCount(), 0);
 });
+
+test('a refused lesson author apply without a code of its own gets the code of its status', async (t) => {
+  const { AppError } = await import('../../../middleware/error-handler.js');
+  const refusal = new AppError('Đề xuất này không còn áp dụng được.', 409);
+  const pg = await import('pg');
+  t.mock.method(pg.default.Pool.prototype, 'query', async () => { throw refusal; });
+  t.mock.method(pg.default.Pool.prototype, 'connect', async () => ({
+    query: async (text: string) => {
+      if (/^\s*(BEGIN|ROLLBACK|COMMIT)/i.test(text)) return { rows: [], rowCount: 0 };
+      throw refusal;
+    },
+    release: () => undefined,
+  }));
+  const chat = await import('./chat.controller.js');
+  const { req, res, out } = call({ jobId: '0b9f6c7e-2f43-4d55-9a54-6f0c1d2e3a4b' });
+  await chat.applyLessonAuthorJob(req, res);
+  assert.equal(out.status, 409);
+  assert.deepEqual(out.body, { success: false, message: 'Đề xuất này không còn áp dụng được.', code: 'CONFLICT' });
+});
