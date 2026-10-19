@@ -1,6 +1,11 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './course-categories.service.js';
-import { courseCategoryListQuerySchema, publicImpactQuerySchema } from './course-categories.validator.js';
+import {
+  COURSE_CATEGORY_INPUT_INVALID_CODE,
+  courseCategoryListQuerySchema,
+  createCourseCategoryBodySchema,
+  publicImpactQuerySchema,
+} from './course-categories.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import {
   createTransactionalAuditEntry,
@@ -19,8 +24,14 @@ export async function createController(req: Request, res: Response, next: NextFu
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const parsed = createCourseCategoryBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, COURSE_CATEGORY_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
     const cat = await runAuditedTransaction(
-      () => svc.createCourseCategory(tenantId, req.body),
+      () => svc.createCourseCategory(tenantId, body),
       (created) => createTransactionalAuditEntry(
         req,
         'CREATE',

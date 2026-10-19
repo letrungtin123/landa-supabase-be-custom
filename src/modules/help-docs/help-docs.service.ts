@@ -100,7 +100,7 @@ export async function listFolders(tenantId: string) {
   return { folders: result.rows, total: result.rowCount || 0 };
 }
 
-export async function createFolder(tenantId: string, input: { title: string; icon?: string }) {
+export async function createFolder(tenantId: string, input: { title: string; icon?: string | null }) {
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const created = await helpDocsRepository.insertFolder(tenantId, input.title, slug, input.icon || 'BookOpen');
   return { success: true, id: created.id, slug: created.slug, title: input.title };
@@ -157,7 +157,11 @@ export async function getPage(pageId: string, tenantId: string) {
   return result.rows[0];
 }
 
-export async function createPage(tenantId: string, input: { folder_id: string; title: string; content?: string }, userId: string) {
+export async function createPage(
+  tenantId: string,
+  input: { folder_id: string; title: string; content?: string | null },
+  userId: string,
+) {
   const slug = input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const result = await helpDocsRepository.insertPage({
     tenantId,

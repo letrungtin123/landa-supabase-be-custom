@@ -239,6 +239,26 @@ some of these codes with status 400 for invalid input.
 | `COURSE_PUBLISH_ASSIGNMENT_FORBIDDEN` | 403 (400) | Not allowed to assign reviewers (400: invalid assignment id). |
 | `COURSE_PUBLISH_ASSIGNMENT_TRANSITION_INVALID` | 409 | The reviewer assignment cannot move to that state. |
 
+### Refused request bodies
+
+A body that is not a JSON object (no body, a list, text), a required text that
+is missing or blank, a field of the wrong type or a text longer than its
+column. Status 400, a fixed Vietnamese message naming what to fix (sent as
+`error` too), and nothing is read or written. Text limits are the columns'
+`VARCHAR(n)`, counted in characters as Postgres counts them
+(`utils/text-length.ts`). A missing field the route already answered keeps its
+earlier answer (for example `course_id và title là bắt buộc`).
+
+| Code | Routes | Raised in |
+|---|---|---|
+| `COURSE_CATEGORY_INPUT_INVALID` | `POST /api/course-categories` (name required, at most 200 characters; description text; sort order an integer) | `course-categories.validator.ts` |
+| `NOTIFICATION_INPUT_INVALID` | `POST /api/notifications` (title at most 500 characters; course, title and message text) | `notifications.validator.ts` |
+| `ENROLLMENT_INPUT_INVALID` | `POST /api/enrollments` (course id text) | `enrollments.validator.ts` |
+| `PROFILE_INPUT_INVALID` | `PATCH /api/users/profile`, `PATCH /api/auth/profile` (name 255, phone 20, country 10, language 10 characters; year of birth an integer; on the auth route gender and education one of the database values or empty) | `users.validator.ts`, `auth.validator.ts` |
+| `PASSWORD_INPUT_INVALID` | `POST /api/auth/change-password`, `POST /api/users/profile/change-password` (passwords text) | `auth.validator.ts` |
+| `HELP_DOC_INPUT_INVALID` | `POST /api/help-docs/folders`, `PATCH /api/help-docs/folders/:id`, `POST /api/help-docs/pages`, `PATCH /api/help-docs/pages/:id` (title required on create; folder title 200, icon 100, page title 500 characters; folder id a UUID; content text; published a boolean) | `help-docs.validator.ts` |
+| `EMAIL_TEMPLATE_INPUT_INVALID` | `PUT /api/email-templates/:key` (a JSON object; each field keeps the service's own checks) | `email-templates.validator.ts` |
+
 ### Other modules
 
 assignments, audit-logs, badges, branding (and dashboard content), course-categories,
@@ -246,7 +266,8 @@ course-deletion, courses, deletion, demo-login,
 email-templates, enrollments, groups, help-docs, library, metrics, modules,
 notifications, permissions, prompt-templates, storage, tenant-badges,
 tenants, welcome-init and the workers raise `AppError` without codes of their
-own (or answer through `sendError`), so they send the codes of their status.
+own (or answer through `sendError`), so they send the codes of their status,
+apart from the refused request bodies above.
 The storage proxy sends `BAD_REQUEST` (invalid path), `NOT_FOUND`,
 `BAD_GATEWAY` and `INTERNAL_ERROR`; its 416 range refusal has no body.
 `GET /internal/metrics` answers 401 with plain text (a Prometheus scrape, not

@@ -6,7 +6,9 @@ import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
 import {
+  ENROLLMENT_INPUT_INVALID_CODE,
   bulkEnrollSchema,
+  enrollBodySchema,
   courseEnrollmentsQuerySchema,
   singleEnrollUserIdSchema,
   studyTimeQuerySchema,
@@ -22,7 +24,9 @@ const VALID_GRANULARITIES = new Set(['day', 'month', 'year']);
 
 /** POST /api/enrollments — Enroll user(s) into a course */
 export async function enroll(req: Request, res: Response) {
-  const { user_id, user_ids, course_id } = req.body;
+  const body = enrollBodySchema.safeParse(req.body);
+  if (!body.success) return sendError(res, body.error.errors[0].message, 400, ENROLLMENT_INPUT_INVALID_CODE);
+  const { user_id, user_ids, course_id } = body.data;
   const tenantId = req.user!.tenantId!;
 
   if (!course_id) return sendError(res, 'course_id is required', 400);
@@ -56,12 +60,14 @@ export async function enroll(req: Request, res: Response) {
 
   // Single enroll
   if (!user_id) return sendError(res, 'user_id or user_ids is required', 400);
-  if (!singleEnrollUserIdSchema.safeParse(user_id).success) return sendError(res, 'user_id không hợp lệ', 400);
+  const singleUserId = singleEnrollUserIdSchema.safeParse(user_id);
+  if (!singleUserId.success) return sendError(res, 'user_id không hợp lệ', 400);
+  const learnerId = singleUserId.data;
 
   const result = await runAuditedTransaction(
     async () => {
-      const enrollment = await svc.enrollUser(user_id, course_id, tenantId);
-      const auditContext = await svc.getEnrollmentAuditContext(user_id, course_id, tenantId);
+      const enrollment = await svc.enrollUser(learnerId, course_id, tenantId);
+      const auditContext = await svc.getEnrollmentAuditContext(learnerId, course_id, tenantId);
       return { enrollment, auditContext };
     },
     ({ enrollment, auditContext }) => createTransactionalAuditEntry(

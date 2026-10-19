@@ -387,14 +387,14 @@ export async function getProfile(userId: string) {
 export async function updateProfile(
   userId: string,
   input: {
-    name?: string;
-    bio?: string;
+    name?: string | null;
+    bio?: string | null;
     gender?: string;
-    country?: string;
+    country?: string | null;
     level_of_education?: string;
-    language?: string;
+    language?: string | null;
     year_of_birth?: number | null;
-    phone_number?: string;
+    phone_number?: string | null;
   },
 ) {
   await assertUserIsNotPendingDeletion(userId);

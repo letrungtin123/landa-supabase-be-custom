@@ -4,11 +4,20 @@ import type { Request, Response, NextFunction } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry } from '../../middleware/audit-log.js';
 import * as svc from './notifications.service.js';
-import { notificationListQuerySchema } from './notifications.validator.js';
+import {
+  NOTIFICATION_INPUT_INVALID_CODE,
+  notificationListQuerySchema,
+  sendNotificationBodySchema,
+} from './notifications.validator.js';
 
 export async function send(req: Request, res: Response, next: NextFunction) {
   try {
-    const { course_id, title, message } = req.body;
+    const parsed = sendNotificationBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, NOTIFICATION_INPUT_INVALID_CODE);
+      return;
+    }
+    const { course_id, title, message } = parsed.data;
     const tenantId = req.user!.tenantId!;
     const userId = req.user!.id;
 
