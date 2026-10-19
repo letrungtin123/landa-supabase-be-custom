@@ -675,6 +675,16 @@
       "count": 1
     }
   },
+  "src/modules/course-authoring/course-assets.repository.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 12
+    }
+  },
+  "src/modules/course-authoring/course-assets.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
   "src/modules/course-authoring/course-author-notes.boundaries.test.ts": {
     "no-regex-spaces": {
       "count": 1
@@ -693,14 +703,6 @@
       "count": 60
     }
   },
-  "src/modules/course-authoring/course-authoring.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 28
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 1
-    }
-  },
   "src/modules/course-authoring/course-authoring.types.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 5
@@ -711,6 +713,11 @@
       "count": 1
     }
   },
+  "src/modules/course-authoring/course-blocks.repository.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    }
+  },
   "src/modules/course-authoring/course-markup-scrubber.logic.ts": {
     "no-control-regex": {
       "count": 1
@@ -719,6 +726,11 @@
   "src/modules/course-authoring/course-outline-transfer.service.ts": {
     "@typescript-eslint/no-unused-vars": {
       "count": 3
+    }
+  },
+  "src/modules/course-authoring/course-outline.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 11
     }
   },
   "src/modules/course-authoring/course-publish-checks.logic.ts": {

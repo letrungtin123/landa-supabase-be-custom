@@ -15,7 +15,10 @@ const learnerRow = read('../learner/learner-block-row.logic.ts');
 const learnerTree = read('../learner/learner-course-blocks.logic.ts');
 const controller = read('./course-authoring.controller.ts');
 const routes = read('./course-authoring.routes.ts');
-const service = read('./course-authoring.service.ts');
+// The course-authoring service is split by concern; its SQL is in the blocks repository.
+const service = ['./course-outline.service.ts', './course-blocks.repository.ts', './course-author-notes.service.ts']
+  .map(read)
+  .join('\n');
 const transfer = read('./course-outline-transfer.service.ts');
 const courses = read('../courses/courses.service.ts');
 const chat = readChatServiceSource().replace(/\r\n/g, '\n');
