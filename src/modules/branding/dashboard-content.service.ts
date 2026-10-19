@@ -10,6 +10,9 @@ import { CACHE_TTL, cacheKeys, cacheVersions, normalizeCacheDomain } from '../..
 import { invalidateTenantPublicDomainCaches } from '../../config/cache-invalidation.js';
 import { AppError } from '../../utils/errors.js';
 import type { DashboardContentData, UpsertDashboardContentInput } from './dashboard-content.validator.js';
+import { createBrandingRepository, type BrandingDb } from './branding.repository.js';
+
+const brandingRepository = createBrandingRepository({ query } satisfies BrandingDb);
 
 // ── Types ──
 
@@ -26,10 +29,7 @@ interface DashboardContentResponse {
 
 /** Đọc dashboard_content từ tenants.settings */
 async function readDashboardContent(tenantId: string): Promise<DashboardContentData | null> {
-  const result = await query<{ settings: Record<string, unknown> }>(
-    'SELECT settings FROM tenants WHERE id = $1',
-    [tenantId],
-  );
+  const result = await brandingRepository.selectSettings(tenantId);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
   const settings = result.rows[0].settings || {};
   return (settings as any).dashboard_content || null;
@@ -37,10 +37,7 @@ async function readDashboardContent(tenantId: string): Promise<DashboardContentD
 
 /** Ghi dashboard_content vào tenants.settings */
 async function writeDashboardContent(tenantId: string, data: DashboardContentData): Promise<void> {
-  await query(
-    `UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{dashboard_content}', $1::jsonb) WHERE id = $2`,
-    [JSON.stringify(data), tenantId],
-  );
+  await brandingRepository.writeDashboardContent(tenantId, JSON.stringify(data));
 }
 
 // ── Public API ──
@@ -81,14 +78,7 @@ export async function getDashboardContentByDomain(domain: string): Promise<Dashb
     cacheKeys.publicDomain(normalizedDomain, 'dashboard-content', version),
     CACHE_TTL.publicConfig,
     async () => {
-      const result = await query<{ id: string; settings: Record<string, unknown> }>(
-        `SELECT id, settings FROM tenants
-         WHERE (
-           regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
-           OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
-         ) AND is_active = true`,
-        [normalizedDomain],
-      );
+      const result = await brandingRepository.selectSettingsByDomain(normalizedDomain);
 
       if (result.rowCount === 0) return null;
 
@@ -115,11 +105,7 @@ export async function upsertDashboardContent(
   input: UpsertDashboardContentInput,
 ): Promise<DashboardContentResponse> {
   // Verify tenant exists
-  const result = await query<{ id: string }>(
-    'SELECT id FROM tenants WHERE id = $1',
-    [tenantId],
-  );
-  if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
+  if (!await brandingRepository.tenantExists(tenantId)) throw new AppError('Tenant không tồn tại', 404);
 
   const data: DashboardContentData = {
     hero_badge: input.hero_badge || null,
