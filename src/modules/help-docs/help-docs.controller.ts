@@ -4,6 +4,13 @@ import { sendSuccess, sendError } from '../../utils/response.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, fixMulterFilename, deleteFile } from '../../config/storage.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  HELP_DOC_INPUT_INVALID_CODE,
+  createHelpFolderSchema,
+  createHelpPageSchema,
+  updateHelpFolderSchema,
+  updateHelpPageSchema,
+} from './help-docs.validator.js';
 
 async function deleteStoragePaths(paths: string[]): Promise<void> {
   await Promise.allSettled(paths.map((path) => deleteFile(path)));
@@ -23,8 +30,14 @@ export async function createFolderController(req: Request, res: Response, next: 
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const parsed = createHelpFolderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
     const result = await runAuditedTransaction(
-      () => svc.createFolder(tenantId, req.body),
+      () => svc.createFolder(tenantId, body),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'help_folder', { code: 'help_folder.created' }, created.id, created.title),
     );
     sendSuccess(res, result, 'Tạo folder thành công', 201);
@@ -35,8 +48,14 @@ export async function updateFolderController(req: Request, res: Response, next: 
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const parsed = updateHelpFolderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
     const folder = await runAuditedTransaction(
-      () => svc.updateFolder(req.params.id, tenantId, req.body),
+      () => svc.updateFolder(req.params.id, tenantId, body),
       (updated) => createTransactionalAuditEntry(
         req,
         'UPDATE',
@@ -104,9 +123,15 @@ export async function createPageController(req: Request, res: Response, next: Ne
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const folder = (await svc.listFolders(tenantId)).folders.find((item: { id: string; title: string }) => item.id === req.body?.folder_id);
+    const parsed = createHelpPageSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
+    const folder = (await svc.listFolders(tenantId)).folders.find((item: { id: string; title: string }) => item.id === body.folder_id);
     const result = await runAuditedTransaction(
-      () => svc.createPage(tenantId, req.body, req.user!.id),
+      () => svc.createPage(tenantId, body, req.user!.id),
       (created) => createTransactionalAuditEntry(req, 'CREATE', 'help_page', { code: 'help_page.created', context: { parent_name: folder?.title } }, created.id, created.title),
     );
     sendSuccess(res, result, 'Tạo trang thành công', 201);
@@ -117,9 +142,15 @@ export async function updatePageController(req: Request, res: Response, next: Ne
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
+    const parsed = updateHelpPageSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, HELP_DOC_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
     const current = await svc.getPage(req.params.id, tenantId);
     const page = await runAuditedTransaction(
-      () => svc.updatePage(req.params.id, tenantId, req.body, req.user!.id),
+      () => svc.updatePage(req.params.id, tenantId, body, req.user!.id),
       (updated) => createTransactionalAuditEntry(
         req,
         'UPDATE',
@@ -129,8 +160,8 @@ export async function updatePageController(req: Request, res: Response, next: Ne
           context: { parent_name: current.folder_title },
           changes: [
             ...(updated.previousTitle !== updated.title ? [{ field: 'title', before: updated.previousTitle || null, after: updated.title }] : []),
-            ...(req.body.is_published !== undefined && updated.previousPublished !== req.body.is_published
-              ? [{ field: 'is_published', before: updated.previousPublished ?? null, after: req.body.is_published }]
+            ...(body.is_published !== undefined && updated.previousPublished !== body.is_published
+              ? [{ field: 'is_published', before: updated.previousPublished ?? null, after: body.is_published }]
               : []),
           ],
         },

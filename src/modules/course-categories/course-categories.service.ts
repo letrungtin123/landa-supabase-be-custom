@@ -81,7 +81,10 @@ export async function listCourseCategories(tenantId: string | null, queryParams:
   return { results: rows, total, page, pageSize, totalPages: calcTotalPages(total, pageSize) };
 }
 
-export async function createCourseCategory(tenantId: string, input: { name: string; description?: string; sort_order?: number }) {
+export async function createCourseCategory(
+  tenantId: string,
+  input: { name: string; description?: string | null; sort_order?: number | null },
+) {
   const slug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   const created = await categoriesRepository.insertCategory(tenantId, input.name, slug, input.description || '', input.sort_order || 0);
   await invalidateTenantCourseCaches(tenantId);

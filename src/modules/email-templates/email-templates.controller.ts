@@ -3,8 +3,9 @@ import {
   createTransactionalAuditEntry,
   runAuditedTransaction,
 } from '../../middleware/audit-log.js';
-import { sendSuccess } from '../../utils/response.js';
+import { sendError, sendSuccess } from '../../utils/response.js';
 import * as svc from './email-templates.service.js';
+import { EMAIL_TEMPLATE_INPUT_INVALID_CODE, emailTemplateBodySchema } from './email-templates.validator.js';
 
 export async function list(req: Request, res: Response, next: NextFunction) {
   try {
@@ -20,8 +21,14 @@ export async function update(req: Request, res: Response, next: NextFunction) {
   try {
     const tenantId = req.user!.tenantId!;
     const userId = req.user!.id;
+    const parsed = emailTemplateBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, EMAIL_TEMPLATE_INPUT_INVALID_CODE);
+      return;
+    }
+    const body = parsed.data;
     const result = await runAuditedTransaction(
-      () => svc.updateTenantEmailTemplate(tenantId, req.params.key, req.body, userId),
+      () => svc.updateTenantEmailTemplate(tenantId, req.params.key, body, userId),
       (updated) => createTransactionalAuditEntry(
         req,
         'UPDATE',

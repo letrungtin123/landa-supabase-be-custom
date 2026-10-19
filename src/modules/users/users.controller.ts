@@ -5,9 +5,21 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as usersService from './users.service.js';
 import * as permissionGroupsService from '../permissions/permissions.service.js';
-import { createUserSchema, updateUserSchema, assignGroupsSchema, userListQuerySchema } from './users.validator.js';
+import {
+  PROFILE_INPUT_INVALID_CODE,
+  createUserSchema,
+  updateUserSchema,
+  assignGroupsSchema,
+  updateOwnProfileSchema,
+  userListQuerySchema,
+} from './users.validator.js';
+import { PASSWORD_INPUT_INVALID_CODE, changePasswordBodySchema } from '../auth/auth.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
-import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
+import {
+  createTransactionalAuditEntry,
+  platformScopeForSuperadmin,
+  runAuditedTransaction,
+} from '../../middleware/audit-log.js';
 import { uploadFile, buildFileName, buildStoragePath, deleteFileByUrl, deleteTenantFileByUrl } from '../../config/storage.js';
 import { invalidatePermissionCache } from '../../middleware/authorize.js';
 import { syncUserAccessRevocationCache } from '../auth/auth-revocation.service.js';
@@ -107,7 +119,8 @@ export async function updateController(req: Request, res: Response, next: NextFu
       },
       (updated) => {
         if (!before) throw new Error('Missing user snapshot for audit');
-        return {
+        // An account without a tenant (a Super Admin's) is audited as a platform event.
+        return platformScopeForSuperadmin(req, {
           ...createTransactionalAuditEntry(
             req,
             'UPDATE',
@@ -135,7 +148,7 @@ export async function updateController(req: Request, res: Response, next: NextFu
             updated.username,
           ),
           tenantId: before.tenant_id || null,
-        };
+        });
       },
     );
     // After COMMIT: sessions ended by a reset/deactivation/role change are
@@ -193,13 +206,17 @@ export async function retryDeletionJobController(req: Request, res: Response, ne
   try {
     await runAuditedTransaction(
       () => retryTerminalUserDeletionJob(req.params.jobId, req.user!.tenantId || null),
-      () => createTransactionalAuditEntry(
+      // A Super Admin with no tenant selected retries any job: a platform event.
+      () => platformScopeForSuperadmin(
         req,
-        'UPDATE',
-        'user_deletion_job',
-        { code: 'user.deletion_job.retry_queued' },
-        req.params.jobId,
-        'Yêu cầu xóa tài khoản',
+        createTransactionalAuditEntry(
+          req,
+          'UPDATE',
+          'user_deletion_job',
+          { code: 'user.deletion_job.retry_queued' },
+          req.params.jobId,
+          'Yêu cầu xóa tài khoản',
+        ),
       ),
     );
     sendSuccess(res, { job_id: req.params.jobId, status: 'queued' }, 'Đã đưa deletion job vào hàng đợi retry', 202);
@@ -252,7 +269,12 @@ export async function updateProfileController(req: Request, res: Response, next:
       sendError(res, 'Phiên demo iframe không thể cập nhật hồ sơ', 403);
       return;
     }
-    const result = await usersService.updateProfile(userId, req.body);
+    const parsed = updateOwnProfileSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, PROFILE_INPUT_INVALID_CODE);
+      return;
+    }
+    const result = await usersService.updateProfile(userId, parsed.data);
     sendSuccess(res, result);
   } catch (err) { next(err); }
 }
@@ -305,7 +327,12 @@ export async function uploadAvatarController(req: Request, res: Response, next: 
 export async function changePasswordController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.id;
-    const { current_password, new_password } = req.body;
+    const parsed = changePasswordBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, PASSWORD_INPUT_INVALID_CODE);
+      return;
+    }
+    const { current_password, new_password } = parsed.data;
     if (isDemoIframeSession(req.user)) {
       sendError(res, 'Phiên demo iframe không thể đổi mật khẩu', 403);
       return;

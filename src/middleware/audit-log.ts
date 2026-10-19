@@ -138,6 +138,18 @@ export function createPlatformTransactionalAuditEntry(
   };
 }
 
+/**
+ * A Super Admin manages every tenant: with no tenant selected, or acting on an
+ * account that belongs to none, the entry has no tenant owner. Such an entry
+ * of a Super Admin becomes a platform event (superadmin_only, no tenant
+ * charged) instead of being refused. Anyone else is unchanged: an entry
+ * without a tenant is still refused by appendAuditLog.
+ */
+export function platformScopeForSuperadmin(req: Request, entry: TransactionalAuditEntry): TransactionalAuditEntry {
+  if (entry.tenantId || entry.platformEvent || req.user?.role !== 'superadmin') return entry;
+  return { ...entry, tenantId: null, platformEvent: true };
+}
+
 export function createTransactionalAuditEntry(
   req: Request,
   action: AuditAction,

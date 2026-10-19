@@ -18,7 +18,7 @@
  "enroll demo learner": "c45eaddc1951c96834ad3cabb2138641fb5fb6142b8a3ffb11fc14bcae1302d9",
  "enroll missing course": "0a2e6071cceab2807e79c51e20e5a994f9f4685a9a3f4e60980194be53dcdfb3",
  "enroll no audit context": "26f88a70aa4148090a4c5b3905faf492dbd2651635312c550db906d38b67a694",
- "enroll no body": "84635458c5802bea9162ad08f75c4d382cb79ff19b072583d331eeb4cc024ea4",
+ "enroll no body": "986ec1356871a3a3f76868d967639880de69689f097212b6e279a55722034f71",
  "enroll no course": "9715a87053e08000b0ad40bf701f527a3e2214b37df825c5ac9a695a29c0e697",
  "enroll no user": "ca23ffa229b6e235d78728af008e3914c94549dd5fdaee8927e991e6a44632a7",
  "enroll not a learner": "3e86b95e46b43fe7810638d4c6a1701af7398e348586f2a0b3bf7f555410f098",
@@ -56,7 +56,7 @@
  "unenroll not enrolled": "a20c7e8700204ea61660e8a1da0cc8e1c9c804712d56dd9361dfb5a6bd524b0f",
  "user enrollments": "b372adcf3aca6d214a5f686b211d78daab350d7681a524d822074d422f0038a6",
  "user enrollments empty": "aa079d14cb1d262d711a898e17d54a057ba1b0dd6f2212f21cf3378c714eeec6",
- "user enrollments odd query": "fc6f8b4b1a6c44649afc1ce380a28230e8a80ce8f0f54c2a647edb25ec31eec2",
- "user enrollments search": "e35ea70813294105f0a254849e73c24371a62bd8b06cf48e6c5a0f68fa127dca",
+ "user enrollments odd query": "5cbd93fe4f1855a51d32f4f8144937667f6c53908092b6ee18150413512d8a5f",
+ "user enrollments search": "4c0b5d0bfd8f5be8243822b9f11472a06209b2307efa3187c1a49e184001a6eb",
  "weekly study time": "e9faa5316fd52d4daad7fcb72c287aaf66c8c57d2f96decdd1193f369f12f23d"
 }

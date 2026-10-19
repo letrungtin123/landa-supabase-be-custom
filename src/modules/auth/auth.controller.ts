@@ -4,7 +4,14 @@
 
 import type { Request, Response, NextFunction } from 'express';
 import * as authService from './auth.service.js';
-import { loginSchema, refreshSchema } from './auth.validator.js';
+import {
+  PASSWORD_INPUT_INVALID_CODE,
+  changePasswordBodySchema,
+  loginSchema,
+  refreshSchema,
+  updateProfileSchema,
+} from './auth.validator.js';
+import { PROFILE_INPUT_INVALID_CODE } from '../users/users.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import { appendBestEffortAuthAudit, type AuthAuditActor } from './auth-audit.service.js';
 import { AuthLoginError } from './auth-login-error.logic.js';
@@ -163,7 +170,12 @@ export async function changePasswordController(req: Request, res: Response, next
   try {
     if (!req.user) { sendError(res, 'Chưa xác thực', 401); return; }
 
-    const { current_password, new_password } = req.body;
+    const parsed = changePasswordBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, PASSWORD_INPUT_INVALID_CODE);
+      return;
+    }
+    const { current_password, new_password } = parsed.data;
     if (!current_password || !new_password) {
       sendError(res, 'Thiếu current_password hoặc new_password', 400);
       return;
@@ -195,7 +207,13 @@ export async function updateProfileController(req: Request, res: Response, next:
       return;
     }
 
-    const result = await authService.updateProfile(req.user.id, req.body);
+    const parsed = updateProfileSchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendError(res, parsed.error.errors[0].message, 400, PROFILE_INPUT_INVALID_CODE);
+      return;
+    }
+
+    const result = await authService.updateProfile(req.user.id, parsed.data);
     sendSuccess(res, result, 'Cập nhật thông tin thành công');
   } catch (err) {
     next(err);

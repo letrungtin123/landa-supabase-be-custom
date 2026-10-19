@@ -63,7 +63,7 @@
  "profile update demo account": "f3987b975b81704d82b4ac21f0c6733948fb26e80478e32b1195bb022964a545",
  "profile update demo session": "5486e9e8be1e80b14b2c9dde50fdbdec3f3e87b40d76e80b1c434fc1c278629f",
  "profile update missing": "d3bdb111f63ece5aa17654890d3ea36e28020895175e236425e458e36320cbde",
- "profile update no body": "6ec1b175073dc8cd223cd53d4f105268c8f40cd226cee4928f1b72208d0e496c",
+ "profile update no body": "d0c38c450fc808369139d2dfa6f5f83877db6690586a5d34b56444c4633b944a",
  "profile update nothing": "238b861dfc3af1f9f1555196c8fcf93e2f5a26c96f5196a0dd8af12878a210b0",
  "profile update pending deletion": "c935c2dba3a11b4a3569675f324faa10c7d8d104d61f74683558ddb96a12fdb4",
  "update by staff": "ba5c5f336deccc3c7245db671595fc704b08221204103341f717f05f79813d5b",
@@ -83,7 +83,7 @@
  "update same role": "b3d8219629bf10acd33991cf94f863400d9602200de800577196e3fdf5680220",
  "update self": "a084989f62b7f1ba1098491e581abe1dd857e76c84e0005c7be9b061bd47c824",
  "update staff to learner": "30db987d8b59032031a5c81a827a9928cb87fba933c8a7d6061351a098ebbc9b",
- "update staff to learner no tenant": "9961ded2551db7aec93c11d0d8fe60f6d7222421fc63c8d2cfc96dd29d4cb352",
+ "update staff to learner no tenant": "cc5345412296b8902cc9228fc75f395c9fcb5ac4b56212a58bf7fcf113e45d46",
  "update target changed": "08a8c0462070bc7a4c201aacb802d2205990caf355ee0a4dfb05eb6030d4ff79",
  "update unique violation": "23fc2abfb2b0e6b3c8a9703a4ec130dd33d14f683ffdbdd7de710162da7286ac",
  "update username and email": "31e9d7b8e3653ee06392e46199c23af01a0d8dff43650a179edcab0f648f08d2"
