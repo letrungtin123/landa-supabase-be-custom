@@ -5,7 +5,13 @@
 import type { Request, Response } from 'express';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import * as svc from './enrollments.service.js';
-import { bulkEnrollSchema, singleEnrollUserIdSchema } from './enrollments.validator.js';
+import {
+  bulkEnrollSchema,
+  courseEnrollmentsQuerySchema,
+  singleEnrollUserIdSchema,
+  studyTimeQuerySchema,
+  userEnrollmentsQuerySchema,
+} from './enrollments.validator.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
 import {
   createTransactionalAuditEntry,
@@ -187,15 +193,16 @@ export async function recordStudySession(req: Request, res: Response) {
 export async function getWeeklyStudyTime(req: Request, res: Response) {
   const userId = req.user!.id;
   const tenantId = req.user!.tenantId!;
-  const granularity = req.query.granularity as string | undefined;
+  const studyQuery = studyTimeQuerySchema.parse(req.query);
+  const granularity = studyQuery.granularity as string | undefined;
 
   if (granularity && !VALID_GRANULARITIES.has(granularity)) {
     return sendError(res, 'granularity must be day, month, or year', 400);
   }
 
   const result = await svc.getWeeklyStudyTime(userId, tenantId, {
-    from: req.query.from as string | undefined,
-    to: req.query.to as string | undefined,
+    from: studyQuery.from as string | undefined,
+    to: studyQuery.to as string | undefined,
     granularity: granularity as svc.StudyTimeGranularity | undefined,
   });
   sendSuccess(res, result);
@@ -205,9 +212,10 @@ export async function getWeeklyStudyTime(req: Request, res: Response) {
 export async function getUserEnrollments(req: Request, res: Response) {
   const { userId } = req.params;
   const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 1;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 10, 100);
-  const search = (req.query.search as string) || '';
+  const listQuery = userEnrollmentsQuerySchema.parse(req.query);
+  const page = parseInt(listQuery.page as string) || 1;
+  const pageSize = Math.min(parseInt(listQuery.page_size as string) || 10, 100);
+  const search = (listQuery.search as string) || '';
 
   const result = await svc.getUserEnrollments(userId, tenantId, page, pageSize, search);
   sendSuccess(res, {
@@ -222,10 +230,11 @@ export async function getUserEnrollments(req: Request, res: Response) {
 export async function getCourseEnrollments(req: Request, res: Response) {
   const { courseId } = req.params;
   const tenantId = req.user!.tenantId!;
-  const page = parseInt(req.query.page as string) || 1;
-  const pageSize = Math.min(parseInt(req.query.page_size as string) || 20, 100);
-  const search = (req.query.search as string) || '';
-  const status = (req.query.status as string) || 'all';
+  const listQuery = courseEnrollmentsQuerySchema.parse(req.query);
+  const page = parseInt(listQuery.page as string) || 1;
+  const pageSize = Math.min(parseInt(listQuery.page_size as string) || 20, 100);
+  const search = (listQuery.search as string) || '';
+  const status = (listQuery.status as string) || 'all';
 
   const result = await svc.getCourseEnrollments(
     courseId, tenantId, page, pageSize, search,
