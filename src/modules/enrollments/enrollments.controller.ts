@@ -12,6 +12,8 @@ import {
   courseEnrollmentsQuerySchema,
   singleEnrollUserIdSchema,
   studyTimeQuerySchema,
+  unenrollBodySchema,
+  unenrollTargetSchema,
   userEnrollmentsQuerySchema,
 } from './enrollments.validator.js';
 import { isDemoIframeSession } from '../demo-login/demo-iframe.service.js';
@@ -92,8 +94,12 @@ export async function enroll(req: Request, res: Response) {
 
 /** DELETE /api/enrollments — Unenroll user from course */
 export async function unenroll(req: Request, res: Response) {
-  const { user_id, course_id } = req.body;
-  if (!user_id || !course_id) return sendError(res, 'user_id and course_id are required', 400);
+  const body = unenrollBodySchema.safeParse(req.body);
+  if (!body.success) return sendError(res, body.error.errors[0].message, 400, ENROLLMENT_INPUT_INVALID_CODE);
+  if (!body.data.user_id || !body.data.course_id) return sendError(res, 'user_id and course_id are required', 400);
+  const target = unenrollTargetSchema.safeParse(body.data);
+  if (!target.success) return sendError(res, target.error.errors[0].message, 400, ENROLLMENT_INPUT_INVALID_CODE);
+  const { user_id, course_id } = target.data;
 
   const tenantId = req.user!.tenantId!;
   const result = await runAuditedTransaction(

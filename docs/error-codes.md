@@ -259,7 +259,7 @@ earlier answer (for example `course_id và title là bắt buộc`).
 |---|---|---|
 | `COURSE_CATEGORY_INPUT_INVALID` | `POST /api/course-categories` (name required, at most 200 characters; description text; sort order an integer) | `course-categories.validator.ts` |
 | `NOTIFICATION_INPUT_INVALID` | `POST /api/notifications` (title at most 500 characters; course, title and message text) | `notifications.validator.ts` |
-| `ENROLLMENT_INPUT_INVALID` | `POST /api/enrollments` (course id text) | `enrollments.validator.ts` |
+| `ENROLLMENT_INPUT_INVALID` | `POST /api/enrollments` (course id text), `DELETE /api/enrollments` (learner id a UUID, course id text; a missing one keeps `user_id and course_id are required`) | `enrollments.validator.ts` |
 | `PROFILE_INPUT_INVALID` | `PATCH /api/users/profile`, `PATCH /api/auth/profile` (name 255, phone 20, country 10, language 10 characters; year of birth an integer; on the auth route gender and education one of the database values or empty) | `users.validator.ts`, `auth.validator.ts` |
 | `PASSWORD_INPUT_INVALID` | `POST /api/auth/change-password`, `POST /api/users/profile/change-password` (passwords text) | `auth.validator.ts` |
 | `HELP_DOC_INPUT_INVALID` | `POST /api/help-docs/folders`, `PATCH /api/help-docs/folders/:id`, `POST /api/help-docs/pages`, `PATCH /api/help-docs/pages/:id` (title required on create; folder title 200, icon 100, page title 500 characters; folder id a UUID; content text; published a boolean) | `help-docs.validator.ts` |

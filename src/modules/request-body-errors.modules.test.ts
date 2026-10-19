@@ -5,7 +5,7 @@ import type { NextFunction, Request, Response } from 'express';
 // Staff and profile routes answer a missing or malformed JSON body with a 400,
 // a fixed Vietnamese message and a stable code, never a 500, and read nothing
 // before refusing: course category create, course notification send,
-// enrollment create, own profile update (users and auth routes), password
+// enrollment create and delete, own profile update (users and auth routes), password
 // change (auth and users routes), help docs folder and page create/update, and
 // email template update. Each handler runs as Express runs it: an error passed
 // to next (or a rejected promise) goes to the global error handler. pg double;
@@ -159,6 +159,37 @@ test('POST /api/enrollments without a JSON object or with a course id that is no
   for (const body of [...NOT_AN_OBJECT, { course_id: 5, user_id: USER }, { course_id: { id: COURSE }, user_ids: [USER] }]) {
     await expectRefused(t, 'enroll', enrollments.enroll as Handler, body, 'ENROLLMENT_INPUT_INVALID', message);
   }
+});
+
+test('DELETE /api/enrollments without a JSON object, with a learner id that is not a UUID or a course id that is not text is a 400 ENROLLMENT_INPUT_INVALID', async t => {
+  const message = 'Vui lòng chọn khóa học và học viên cần hủy ghi danh.';
+  for (const body of [
+    ...NOT_AN_OBJECT,
+    { user_id: 'not-a-uuid', course_id: COURSE },
+    { user_id: `${USER}x`, course_id: COURSE },
+    { user_id: 42, course_id: COURSE },
+    { user_id: [USER], course_id: COURSE },
+    { user_id: USER, course_id: 5 },
+    { user_id: USER, course_id: { id: COURSE } },
+  ]) {
+    await expectRefused(t, 'unenroll', enrollments.unenroll as Handler, body, 'ENROLLMENT_INPUT_INVALID', message);
+  }
+});
+
+test('DELETE /api/enrollments keeps its answer for a missing field and still unenrolls a valid body', async t => {
+  for (const body of [{}, { user_id: USER }, { course_id: COURSE }, { user_id: '', course_id: COURSE }]) {
+    const statements = installDb(t);
+    const res = await respond(enrollments.unenroll as Handler, body);
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, { success: false, message: 'user_id and course_id are required', code: 'BAD_REQUEST' });
+    assert.deepEqual(statements, []);
+    t.mock.restoreAll();
+  }
+  const statements = installDb(t);
+  const res = await respond(enrollments.unenroll as Handler, { user_id: USER.toUpperCase(), course_id: COURSE });
+  // The double has no enrollment: the request reached the service and its database reads.
+  assert.equal(res.statusCode, 404);
+  assert.ok(statements.some(text => /UPDATE enrollments/.test(text)));
 });
 
 test('PATCH /api/users/profile and PATCH /api/auth/profile refuse a missing body, a wrong type or a text over its column', async t => {

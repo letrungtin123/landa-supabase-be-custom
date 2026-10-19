@@ -31,6 +31,29 @@ export const enrollBodySchema = z.object(
 /** Single enroll: the learner id */
 export const singleEnrollUserIdSchema = z.string().uuid();
 
+export const UNENROLL_INPUT_INVALID_MESSAGE = 'Vui lòng chọn khóa học và học viên cần hủy ghi danh.';
+
+/**
+ * DELETE /api/enrollments: the body must be a JSON object (no JSON body used
+ * to fail on req.body with a 500). A missing learner or course keeps its own
+ * answer in the controller; unenrollTargetSchema then checks the values.
+ */
+export const unenrollBodySchema = z.object(
+  { user_id: z.unknown(), course_id: z.unknown() },
+  { required_error: UNENROLL_INPUT_INVALID_MESSAGE, invalid_type_error: UNENROLL_INPUT_INVALID_MESSAGE },
+);
+
+/**
+ * The learner id a UUID (enrollments.user_id is a uuid column: any other value
+ * failed in the database with a 500) and the course id text, as on enroll.
+ */
+export const unenrollTargetSchema = z.object({
+  user_id: z
+    .string({ invalid_type_error: UNENROLL_INPUT_INVALID_MESSAGE })
+    .uuid(UNENROLL_INPUT_INVALID_MESSAGE),
+  course_id: z.string({ invalid_type_error: UNENROLL_INPUT_INVALID_MESSAGE }),
+});
+
 /** Schema bulk unenroll */
 export const bulkUnenrollSchema = z.object({
   user_ids: z.array(z.string().uuid()).min(1).max(500),
