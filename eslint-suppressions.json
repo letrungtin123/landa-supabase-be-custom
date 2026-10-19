@@ -948,9 +948,6 @@
     }
   },
   "src/modules/storage/storage.routes.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    },
     "@typescript-eslint/no-misused-promises": {
       "count": 1
     }
