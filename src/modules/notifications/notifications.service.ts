@@ -13,6 +13,12 @@ import {
   enqueueCourseNotificationEmailJob,
   wakeEmailOutboxWorker,
 } from '../assignments/email-outbox.service.js';
+import { createNotificationsRepository, type NotificationsDb } from './notifications.repository.js';
+
+// query() joins the caller's current transaction when there is one; the
+// transaction block below uses the repository over its own client.
+const poolDb: NotificationsDb = { query };
+const notificationsRepository = createNotificationsRepository(poolDb);
 
 export interface SmtpStatus {
   configured: boolean;
@@ -25,24 +31,7 @@ export interface SmtpStatus {
 }
 
 export async function getCourseNotificationSmtpStatus(tenantId: string): Promise<SmtpStatus> {
-  const result = await query<{
-    is_enabled: boolean;
-    host: string | null;
-    username: string | null;
-    from_email: string | null;
-    password_ciphertext: string | null;
-    password_iv: string | null;
-    password_auth_tag: string | null;
-  }>(
-    `SELECT is_enabled, host, username, from_email,
-            password_ciphertext, password_iv, password_auth_tag
-     FROM tenant_smtp_configs
-     WHERE tenant_id = $1::uuid
-     LIMIT 1`,
-    [tenantId],
-  );
-
-  const row = result.rows[0];
+  const row = await notificationsRepository.selectSmtpConfig(tenantId);
   const configured = Boolean(row);
   const hasPassword = Boolean(row?.password_ciphertext && row?.password_iv && row?.password_auth_tag);
   const hasSender = Boolean(row?.username?.trim() && row?.from_email?.trim());
@@ -89,26 +78,11 @@ export async function sendCourseNotification(
   const sendEmail = smtpStatus.can_send_email;
   const emailSkippedReason = sendEmail ? null : smtpStatus.reason;
 
-  const courseCheck = await query<{ visible_to_staff_only: boolean; is_public: boolean; display_name: string }>(
-    `SELECT display_name, visible_to_staff_only,
-            EXISTS (
-              SELECT 1
-              FROM course_category_courses ccc
-              JOIN course_categories cc ON cc.id = ccc.category_id
-              WHERE ccc.course_id = courses.id
-                AND cc.tenant_id = courses.tenant_id
-                AND COALESCE(cc.is_public, false) = true
-            ) AS is_public
-     FROM courses
-     WHERE id = $1
-       AND tenant_id = $2::uuid
-       AND deleted_at IS NULL`,
-    [courseId, tenantId],
-  );
-  if (courseCheck.rowCount === 0) {
+  const course = await notificationsRepository.selectCourse(courseId, tenantId);
+  if (!course) {
     throw new AppError('Khóa học không tồn tại', 404);
   }
-  if (courseCheck.rows[0].visible_to_staff_only) {
+  if (course.visible_to_staff_only) {
     throw new AppError('Không thể gửi thông báo cho khóa học đang ẩn.', 400);
   }
 
@@ -119,81 +93,21 @@ export async function sendCourseNotification(
 
   try {
     await client.query('BEGIN');
+    const tx = createNotificationsRepository(client);
 
-    const notifResult = await client.query<{ id: string }>(
-      `INSERT INTO notifications (tenant_id, course_id, type, metadata, title, message, sent_by, recipient_count)
-       VALUES (
-         $1::uuid,
-         $2::varchar,
-         'course_manual_notification',
-         jsonb_build_object('send_email', $6::boolean, 'recipient_rule', $7::varchar),
-         $3::varchar,
-         $4::text,
-         $5::uuid,
-         0
-       )
-       RETURNING id`,
-      [tenantId, courseId, title, message, sentBy, sendEmail, courseCheck.rows[0].is_public ? 'all_active_learners' : 'course_assignments'],
-    );
-    notificationId = notifResult.rows[0].id;
+    notificationId = await tx.insertCourseNotification({
+      tenantId,
+      courseId,
+      title,
+      message,
+      sentBy,
+      sendEmail,
+      recipientRule: course.is_public ? 'all_active_learners' : 'course_assignments',
+    });
 
-    const insertResult = await client.query(
-      `WITH course_scope AS (
-         SELECT c.id,
-                c.tenant_id,
-                EXISTS (
-                  SELECT 1
-                  FROM course_category_courses ccc_public
-                  JOIN course_categories cc_public ON cc_public.id = ccc_public.category_id
-                  WHERE ccc_public.course_id = c.id
-                    AND cc_public.tenant_id = c.tenant_id
-                    AND COALESCE(cc_public.is_public, false) = true
-                ) AS is_public
-         FROM courses c
-         WHERE c.id = $2::varchar
-           AND c.tenant_id = $3::uuid
-           AND c.deleted_at IS NULL
-           AND c.visible_to_staff_only = false
-       ),
-       eligible_learners AS (
-         SELECT DISTINCT u.id AS user_id
-         FROM users u
-         LEFT JOIN team_members tm ON tm.user_id = u.id
-         CROSS JOIN course_scope cs
-         WHERE u.tenant_id = cs.tenant_id
-           AND u.role IN ('learner', 'learner_plus')
-           AND u.is_active = true
-           AND (
-             cs.is_public = true
-             OR EXISTS (
-               SELECT 1
-               FROM team_courses tc
-               WHERE tc.team_id = tm.team_id
-                 AND tc.course_id = cs.id
-               UNION ALL
-               SELECT 1
-               FROM team_course_categories tcc
-               JOIN course_category_courses ccc ON ccc.category_id = tcc.category_id
-               WHERE tcc.team_id = tm.team_id
-                 AND ccc.course_id = cs.id
-             )
-           )
-       )
-       INSERT INTO notification_recipients (notification_id, user_id)
-       SELECT $1::uuid, user_id
-       FROM eligible_learners
-       ON CONFLICT (notification_id, user_id) DO NOTHING`,
-      [notificationId, courseId, tenantId],
-    );
+    recipientCount = await tx.addCourseLearnerRecipients(notificationId, courseId, tenantId);
 
-    recipientCount = insertResult.rowCount || 0;
-
-    await client.query(
-      `UPDATE notifications
-       SET recipient_count = $1::int
-       WHERE id = $2::uuid`,
-      [recipientCount, notificationId],
-    );
+    await tx.updateRecipientCount(recipientCount, notificationId);
 
     if (sendEmail && recipientCount > 0) {
       const jobCount = await enqueueCourseNotificationEmailJob(client, {
@@ -209,7 +123,7 @@ export async function sendCourseNotification(
         notificationId,
         recipientCount,
         courseId,
-        courseName: courseCheck.rows[0].display_name,
+        courseName: course.display_name,
       }));
     }
 
@@ -242,52 +156,12 @@ export async function getNotifications(
 ) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [tenantId];
-  const conditions = ['n.tenant_id = $1::uuid'];
-
   const courseId = typeof queryParams.course_id === 'string' ? queryParams.course_id.trim() : '';
-  if (courseId) {
-    params.push(courseId);
-    conditions.push(`n.course_id = $${params.length}::varchar`);
-  }
+  const { countRow, rows } = await notificationsRepository.selectNotificationPage(tenantId, courseId, search, pageSize, offset);
 
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(n.title ILIKE $${params.length} OR c.display_name ILIKE $${params.length})`);
-  }
-
-  const where = `WHERE ${conditions.join(' AND ')}`;
-
-  const [countR, dataR] = await Promise.all([
-    query<{ count: string }>(
-      `SELECT COUNT(*) AS count
-       FROM notifications n
-       LEFT JOIN courses c ON c.id = n.course_id
-       ${where}`,
-      params,
-    ),
-    query(
-      `SELECT n.*,
-              c.display_name AS course_name,
-              COALESCE(NULLIF(u.full_name, ''), u.email) AS sent_by_username,
-              COALESCE(NULLIF(u.full_name, ''), u.email) AS sent_by_display_name,
-              nej.status AS email_status,
-              COALESCE(nej.queued_count, 0) AS email_queued_count,
-              nej.last_error AS email_last_error
-       FROM notifications n
-       LEFT JOIN courses c ON c.id = n.course_id
-       LEFT JOIN users u ON u.id = n.sent_by
-       LEFT JOIN notification_email_jobs nej ON nej.notification_id = n.id
-       ${where}
-       ORDER BY n.created_at DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
-  ]);
-
-  const total = parseInt(countR.rows[0].count, 10);
+  const total = parseInt(countRow.count, 10);
   return {
-    data: dataR.rows,
+    data: rows,
     total,
     page,
     pageSize,
