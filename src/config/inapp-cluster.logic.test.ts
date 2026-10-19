@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   nextWorkerRestartDelayMs,
+  parseRollingRestartRequest,
   planInAppCluster,
+  ROLLING_RESTART_TOPIC,
+  rollingRestartMessage,
+  rollingRestartTimeoutMs,
   workerInstanceLabel,
   WORKER_RESTART_INITIAL_DELAY_MS,
   WORKER_RESTART_MAX_DELAY_MS,
@@ -64,4 +68,36 @@ test('restart backoff: 1 s, x1.5 up to 15 s, back to 1 s after a stable run', ()
   assert.deepEqual(delays, [1000, 1500, 2250, 3375, 5063, 7595, 11393, 15000, 15000, 15000]);
   assert.equal(nextWorkerRestartDelayMs(WORKER_RESTART_MAX_DELAY_MS, WORKER_STABLE_UPTIME_MS), WORKER_RESTART_INITIAL_DELAY_MS);
   assert.equal(nextWorkerRestartDelayMs(null, 0), WORKER_RESTART_INITIAL_DELAY_MS);
+});
+
+test('a rolling restart request is the PM2 message with the rolling restart topic', () => {
+  const packet = (data: unknown) => ({ id: 0, type: 'process:msg', topic: ROLLING_RESTART_TOPIC, data });
+  assert.deepEqual(parseRollingRestartRequest(packet({ request_id: 'a1b2-C3_d.4:5' })), { requestId: 'a1b2-C3_d.4:5' });
+  assert.deepEqual(parseRollingRestartRequest(packet({})), { requestId: '' });
+  assert.deepEqual(parseRollingRestartRequest(packet(null)), { requestId: '' });
+  assert.deepEqual(parseRollingRestartRequest(packet({ request_id: 'bad id\n' })), { requestId: '' });
+  assert.deepEqual(parseRollingRestartRequest(packet({ request_id: 'x'.repeat(101) })), { requestId: '' });
+  assert.deepEqual(parseRollingRestartRequest(packet({ request_id: 42 })), { requestId: '' });
+  for (const other of ['shutdown', 'ready', null, undefined, 3, { topic: 'other' }, { data: { request_id: 'x' } }]) {
+    assert.equal(parseRollingRestartRequest(other), null, JSON.stringify(other));
+  }
+});
+
+test('a rolling restart takes at most, per slot, the wait for "ready" and the stop of the old worker', () => {
+  assert.equal(rollingRestartTimeoutMs(2, 60_000, 15_500), 151_000);
+  assert.equal(rollingRestartTimeoutMs(1, 1_000, 500), 1_500);
+});
+
+test('every rejected or failed rolling restart has a message for the operator', () => {
+  const reasons = [
+    'in_progress',
+    'shutting_down',
+    'not_ready',
+    'exited_before_ready',
+    'ready_timeout',
+    'replacement_exited',
+    'slot_not_ready',
+  ] as const;
+  for (const reason of reasons) assert.ok(rollingRestartMessage(reason, 60_000).length > 20, reason);
+  assert.match(rollingRestartMessage('ready_timeout', 60_000), /within 60 s/);
 });

@@ -100,3 +100,97 @@ export function nextWorkerRestartDelayMs(previousDelayMs: number | null, uptimeM
   if (previousDelayMs === null || uptimeMs >= WORKER_STABLE_UPTIME_MS) return WORKER_RESTART_INITIAL_DELAY_MS;
   return Math.min(WORKER_RESTART_MAX_DELAY_MS, Math.round(previousDelayMs * WORKER_RESTART_FACTOR));
 }
+
+// ── Rolling restart ──────────────────────────────────────────────
+// `node scripts/pm2-rolling-restart.mjs <app>` sends the primary a message
+// with topic ROLLING_RESTART_TOPIC through PM2 (sendDataToProcessId; no
+// signal, so it works on Windows). The primary replaces its workers one slot
+// after the other and answers on PM2's bus (process.send({ type:
+// 'process:msg', data })) with topic ROLLING_RESTART_REPLY_TOPIC. Both
+// topics are repeated in the script; scripts/pm2-rolling-restart.test.mjs
+// checks they match.
+
+export const ROLLING_RESTART_TOPIC = 'landa:rolling-restart';
+export const ROLLING_RESTART_REPLY_TOPIC = 'landa:rolling-restart:reply';
+/**
+ * The longest wait for a new worker's "ready" during a rolling restart: the
+ * listen_timeout of the API in ecosystem.config.cjs, PM2's own wait for
+ * "ready" when it starts the app (src/config/pm2-ecosystem.test.ts).
+ */
+export const ROLLING_RESTART_READY_TIMEOUT_MS = 60_000;
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,100}$/;
+
+export type RollingRestartRejectReason = 'in_progress' | 'shutting_down' | 'not_ready';
+export type RollingRestartFailReason =
+  | 'exited_before_ready'
+  | 'ready_timeout'
+  | 'replacement_exited'
+  | 'slot_not_ready'
+  | 'shutting_down';
+
+export interface RollingRestartSlotResult {
+  slot: number;
+  instance: string;
+  old_pid: number | null;
+  new_pid: number | null;
+  /** From the fork of the new worker to its "ready". */
+  ready_ms: number;
+  /** From "shutdown" to the exit of the old worker. */
+  stop_ms: number;
+  /** The old worker did not exit by the shutdown deadline and was killed. */
+  forced_stop: boolean;
+}
+
+/** What the primary answers to a rolling restart request, in order: accepted|rejected, slot_replaced per slot, succeeded|failed. */
+export type RollingRestartReply =
+  | { status: 'accepted'; request_id: string; workers: number; timeout_ms: number }
+  | { status: 'rejected'; request_id: string; reason: RollingRestartRejectReason; message: string }
+  | ({ status: 'slot_replaced'; request_id: string } & RollingRestartSlotResult)
+  | { status: 'succeeded'; request_id: string; workers: number; duration_ms: number; slots: RollingRestartSlotResult[] }
+  | {
+      status: 'failed';
+      request_id: string;
+      reason: RollingRestartFailReason;
+      slot: number;
+      /** Slots replaced before the failure (they keep their new worker). */
+      replaced: number;
+      duration_ms: number;
+      message: string;
+    };
+
+/** The request id of a rolling restart message from PM2 ('' when it has none or an invalid one), or null for any other message. */
+export function parseRollingRestartRequest(message: unknown): { requestId: string } | null {
+  if (typeof message !== 'object' || message === null) return null;
+  const { topic, data } = message as { topic?: unknown; data?: unknown };
+  if (topic !== ROLLING_RESTART_TOPIC) return null;
+  const raw = typeof data === 'object' && data !== null ? (data as { request_id?: unknown }).request_id : undefined;
+  return { requestId: typeof raw === 'string' && REQUEST_ID.test(raw) ? raw : '' };
+}
+
+/** The longest a rolling restart of `workers` slots can take: per slot, the wait for "ready" and the stop of the old worker. */
+export function rollingRestartTimeoutMs(workers: number, readyTimeoutMs: number, stopTimeoutMs: number): number {
+  return workers * (readyTimeoutMs + stopTimeoutMs);
+}
+
+/** The message of a rejected or failed rolling restart, for the operator. */
+export function rollingRestartMessage(
+  reason: RollingRestartRejectReason | RollingRestartFailReason,
+  readyTimeoutMs: number,
+): string {
+  switch (reason) {
+    case 'in_progress':
+      return 'A rolling restart is already in progress; this one was not started.';
+    case 'shutting_down':
+      return 'The API is shutting down; the rolling restart stopped.';
+    case 'not_ready':
+      return 'Not every worker is ready yet (starting, or restarting after a crash); nothing was restarted. Try again in a moment.';
+    case 'exited_before_ready':
+      return 'The new worker exited before it was ready (see the PM2 log); the old worker of this slot keeps serving and the rolling restart stopped.';
+    case 'ready_timeout':
+      return `The new worker was not ready within ${Math.round(readyTimeoutMs / 1000)} s; it was stopped, the old worker of this slot keeps serving and the rolling restart stopped.`;
+    case 'replacement_exited':
+      return 'The new worker exited right after it took over the slot (see the PM2 log); the slot restarts as after a crash and the rolling restart stopped.';
+    case 'slot_not_ready':
+      return 'The worker of this slot is not ready (restarting after a crash); the rolling restart stopped before replacing it.';
+  }
+}

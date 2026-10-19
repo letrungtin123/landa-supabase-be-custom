@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
+import { INAPP_CLUSTER_SHUTDOWN_DEADLINE_MS } from './inapp-cluster-primary.js';
+import { ROLLING_RESTART_READY_TIMEOUT_MS } from './inapp-cluster.logic.js';
 
 // The PM2 files at the repository root:
 // - ecosystem.production-no-ai.config.cjs is the file prod 226 runs (no AI
 //   service, every AI ID flag off). Changing it is a deploy action.
 // - ecosystem.config.cjs is the file this machine runs. It must never be
-//   started on 226.
+//   started on 226. Its API is one PM2 fork process, the in-app cluster
+//   primary of LANDA_INAPP_CLUSTER_WORKERS workers (226 keeps PM2 cluster
+//   mode).
 const require = createRequire(import.meta.url);
 
 interface Pm2App {
@@ -14,6 +18,9 @@ interface Pm2App {
   script: string;
   exec_mode?: string;
   instances?: number;
+  wait_ready?: boolean;
+  listen_timeout?: number;
+  kill_timeout?: number;
   env?: Record<string, string>;
   env_production?: Record<string, string>;
 }
@@ -129,4 +136,49 @@ test('the repo and prod 226 files give the shared apps the same names and script
     REPO_ONLY_APPS,
     'an app added to ecosystem.config.cjs needs a decision for ecosystem.production-no-ai.config.cjs',
   );
+});
+
+test('this machine: the API is one PM2 fork process, the in-app cluster primary of LANDA_API_INSTANCES workers', () => {
+  const api = repoApps.find(app => app.name === 'landa-refactor-backend');
+  assert.ok(api, 'landa-refactor-backend is missing');
+  assert.equal(api.script, MAIN_SCRIPT);
+  assert.equal(api.exec_mode, 'fork');
+  assert.equal(api.instances, 1);
+  assert.equal(api.wait_ready, true, 'PM2 waits for the "ready" of the primary (every worker ready)');
+  assert.equal(
+    api.listen_timeout,
+    ROLLING_RESTART_READY_TIMEOUT_MS,
+    'a rolling restart waits as long as PM2 for "ready"',
+  );
+  assert.equal(api.kill_timeout, 15000);
+  assert.ok(
+    api.kill_timeout > INAPP_CLUSTER_SHUTDOWN_DEADLINE_MS,
+    'PM2 kills the primary only after it stopped its workers',
+  );
+
+  for (const [label, env] of environments(api)) {
+    assert.equal(role(env), 'api', label);
+    const workers = Number(env.LANDA_INAPP_CLUSTER_WORKERS);
+    assert.ok(
+      Number.isInteger(workers) && workers > 0,
+      `${label}: LANDA_INAPP_CLUSTER_WORKERS must be a positive integer`,
+    );
+    assert.equal(
+      Number(env.LANDA_API_INSTANCES),
+      api.instances * workers,
+      `${label}: LANDA_API_INSTANCES counts every API worker (instances x LANDA_INAPP_CLUSTER_WORKERS)`,
+    );
+  }
+  for (const app of repoApps.filter(candidate => candidate !== api)) {
+    for (const [label, env] of environments(app)) {
+      assert.equal('LANDA_INAPP_CLUSTER_WORKERS' in env, false, `${label}: only the API is clustered`);
+      if (app.script === MAIN_SCRIPT) {
+        assert.equal(
+          env.LANDA_API_INSTANCES,
+          environments(api)[0]![1].LANDA_API_INSTANCES,
+          `${label}: LANDA_API_INSTANCES`,
+        );
+      }
+    }
+  }
 });
