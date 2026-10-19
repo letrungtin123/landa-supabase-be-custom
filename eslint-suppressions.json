@@ -1008,11 +1008,6 @@
       "count": 25
     }
   },
-  "src/modules/users/users.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/modules/welcome-init/welcome-init.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 3
