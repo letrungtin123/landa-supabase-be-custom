@@ -119,6 +119,8 @@
           "KB_OPERATION_WORKER_RETRY_MAX_SECONDS",
           "KB_RESTORE_RECOVERY_POLL_INTERVAL_MS",
           "LANDA_API_INSTANCES",
+          "LANDA_INAPP_CLUSTER_SLOT",
+          "LANDA_INAPP_CLUSTER_WORKERS",
           "LANDA_PROCESS_ROLE",
           "LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED",
           "LESSON_AUTHOR_GENERATION_ENABLED",
@@ -326,6 +328,8 @@
           "KB_OPERATION_WORKER_RETRY_MAX_SECONDS": 3600,
           "KB_RESTORE_RECOVERY_POLL_INTERVAL_MS": 30000,
           "LANDA_API_INSTANCES": 1,
+          "LANDA_INAPP_CLUSTER_SLOT": "",
+          "LANDA_INAPP_CLUSTER_WORKERS": 0,
           "LANDA_PROCESS_ROLE": "all",
           "LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED": false,
           "LESSON_AUTHOR_GENERATION_ENABLED": false,
@@ -514,6 +518,8 @@
         "RUNTIME_GLOBAL_MAINTENANCE_ENABLED": " No ",
         "LANDA_PROCESS_ROLE": " background ",
         "LANDA_API_INSTANCES": "2",
+        "LANDA_INAPP_CLUSTER_WORKERS": "2",
+        "LANDA_INAPP_CLUSTER_SLOT": " 1 ",
         "BIND_HOST": "fake-bind-host",
         "TRUST_PROXY_HOPS": "  1  ",
         "TRUSTED_PROXY_CIDRS": " fake-trusted-proxy-cidrs-a , fake-trusted-proxy-cidrs-b,, fake-trusted-proxy-cidrs-a ",
@@ -811,6 +817,8 @@
           "KB_OPERATION_WORKER_RETRY_MAX_SECONDS": 3601,
           "KB_RESTORE_RECOVERY_POLL_INTERVAL_MS": 30001,
           "LANDA_API_INSTANCES": 2,
+          "LANDA_INAPP_CLUSTER_SLOT": "1",
+          "LANDA_INAPP_CLUSTER_WORKERS": 2,
           "LANDA_PROCESS_ROLE": "background",
           "LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED": true,
           "LESSON_AUTHOR_GENERATION_ENABLED": true,
@@ -1203,6 +1211,7 @@
       "base": "required",
       "set": {
         "LANDA_API_INSTANCES": "64",
+        "LANDA_INAPP_CLUSTER_WORKERS": "64",
         "AUTH_LOGIN_IP_MAX_FAILURES": "100000",
         "AUTH_LOGIN_ACCOUNT_MAX_FAILURES": "1000",
         "AUTH_REFRESH_TOKEN_MAX_ATTEMPTS": "1000",
@@ -1359,6 +1368,7 @@
           "KB_OPERATION_WORKER_RETRY_MAX_SECONDS": 86400,
           "KB_RESTORE_RECOVERY_POLL_INTERVAL_MS": 300000,
           "LANDA_API_INSTANCES": 64,
+          "LANDA_INAPP_CLUSTER_WORKERS": 64,
           "LESSON_AUTHOR_IDM_UNIT_SOFT_DEADLINE_MS": 300000,
           "LESSON_AUTHOR_ORCHESTRATION_V2_DISPATCH_BATCH_SIZE": 500,
           "LESSON_AUTHOR_ORCHESTRATION_V2_GLOBAL_CONCURRENCY": 4096,
@@ -2659,6 +2669,18 @@
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
         "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
         "error": "Error: [ENV] LANDA_API_INSTANCES must be between 1 and 64, received: \"65\""
+      }
+    },
+    {
+      "name": "invalid/LANDA_INAPP_CLUSTER_WORKERS",
+      "base": "required",
+      "set": {
+        "LANDA_INAPP_CLUSTER_WORKERS": "65"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LANDA_INAPP_CLUSTER_WORKERS must be between 0 and 64, received: \"65\""
       }
     },
     {

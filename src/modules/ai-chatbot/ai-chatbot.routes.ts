@@ -64,6 +64,7 @@ import {
   renameLessonAuthorSessionController,
 } from './ai-id/lesson-author-session.controller.js';
 import { hasAiIdCoursePermission } from './ai-id/lesson-author-ai-id-access.service.js';
+import { legacyAiId, mountLegacyAiIdCounters } from '../metrics/legacy-ai-id-usage.js';
 
 const router = Router();
 
@@ -190,6 +191,9 @@ function observeLessonAuthorTranscriptionRequest(req: Request, res: Response, ne
 // All routes require auth + tenant context
 router.use(authenticate);
 router.use(tenantContext);
+// AI ID V1 usage counters (modules/metrics/legacy-ai-id-usage.ts): one counting
+// step per V1 route, ahead of that route; it only counts and calls next().
+mountLegacyAiIdCounters(router, legacyAiId, getRuntimeChatTarget);
 
 // ── AI course design (lesson author) access ──
 // Using AI never requires the ai_chatbot module (configuration pages only):
@@ -310,13 +314,15 @@ const workspaceV2Launch = createWorkspaceV2LaunchService({
 });
 const orchestrationV2LaunchEnabled = () => env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED
   && env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED;
+// AI ID V1 usage (modules/metrics/legacy-ai-id-usage.ts): a launch on the V1 workspace runtime.
+const createV1Workspace = legacyAiId.withCount('workspace_v1_launch', createLessonAuthorWorkspace);
 const workspaceLaunch = createWorkspaceLaunchHandlers({ readEnabled:()=>env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
   editEnabled:()=>env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED,
   executionReady:()=>env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED
     ? orchestrationV2LaunchEnabled() : isLessonAuthorWorkspaceReady(),
   db:{transaction:withDatabaseTransaction},
   create:(user,input)=>env.LESSON_AUTHOR_ORCHESTRATION_V2_ADMISSION_ENABLED
-    ? workspaceV2Launch(user,input) : createLessonAuthorWorkspace(user,input),
+    ? workspaceV2Launch(user,input) : createV1Workspace(user,input),
   report:event=>console.info('[LessonAuthorWorkspace]',JSON.stringify(event)) });
 router.get('/chat/lesson-author/courses/:courseId/workspaces/latest',workspaceLaunch.latest);
 router.get('/chat/lesson-author/courses/:courseId/sessions', checkPermission('courses', 'can_edit'), listLessonAuthorSessionController);

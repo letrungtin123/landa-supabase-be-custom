@@ -4,7 +4,8 @@
 // Read on scrape only: event-loop delay (perf_hooks histogram, reset after
 // each scrape, so p50/p99/max cover the time since the previous scrape),
 // database pool, HTTP requests, AI chat admission, the Redis breaker and the
-// process gauges of the heartbeat (role, pid, uptime, memory; heartbeat.logic.ts).
+// process gauges of the heartbeat (role, pid, uptime, memory; heartbeat.logic.ts)
+// and the AI ID V1 entry point counters (legacy-ai-id-usage.ts).
 // Every sample carries an `instance` label (PM2 instance number, else pid).
 // ═══════════════════════════════════════════════════════════════
 
@@ -14,6 +15,8 @@ import { pool } from '../../config/database.js';
 import { redisMetricsState } from '../../config/redis.js';
 import { processMetricFamilies } from './heartbeat.logic.js';
 import { sampleProcess } from './heartbeat.service.js';
+import { legacyAiId } from './legacy-ai-id-usage.js';
+import { legacyAiIdMetricFamilies } from './legacy-ai-id-usage.logic.js';
 import {
   createRequestMetrics,
   formatPrometheus,
@@ -119,5 +122,6 @@ export function collectMetricsText(): string {
     ...aiChatFamilies(),
     ...redisFamilies(),
     ...processFamilies(),
+    ...legacyAiIdMetricFamilies(legacyAiId.usage),
   ], { instance: METRICS_INSTANCE });
 }

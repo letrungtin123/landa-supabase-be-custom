@@ -1,6 +1,6 @@
 // Boot harness for src/config/process-role-matrix.test.ts (test only, never
 // loaded by the server). Preloaded with `--import` into a child process that
-// then runs src/index.ts with a fake environment:
+// then runs src/index.ts (process-main.ts) with a fake environment:
 //
 // - dotenv reads no file (the environment is exactly what the test passes);
 // - pg clients never open a socket: every query answers no rows, `LISTEN x`
@@ -30,7 +30,13 @@ const require = createRequire(import.meta.url);
 const srcRoot = process.env.BOOT_HARNESS_SRC_ROOT
   ? path.resolve(process.env.BOOT_HARNESS_SRC_ROOT)
   : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outFile = process.env.BOOT_HARNESS_OUT;
+// A worker of the in-app cluster (config/inapp-cluster-primary.ts) inherits
+// this preload: it writes to BOOT_HARNESS_OUT.worker-<slot>, the primary to
+// BOOT_HARNESS_OUT.
+const outFile =
+  process.env.BOOT_HARNESS_OUT && process.env.LANDA_INAPP_CLUSTER_SLOT
+    ? `${process.env.BOOT_HARNESS_OUT}.worker-${process.env.LANDA_INAPP_CLUSTER_SLOT}`
+    : process.env.BOOT_HARNESS_OUT;
 
 const seen = {
   intervals: [],

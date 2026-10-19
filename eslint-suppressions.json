@@ -40,7 +40,7 @@
       "count": 1
     }
   },
-  "src/index.ts": {
+  "src/process-main.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
     },

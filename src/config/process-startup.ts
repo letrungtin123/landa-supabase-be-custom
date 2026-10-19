@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
 // Process startup and shutdown order per role (config/process-role.ts)
 //
-// index.ts supplies the real steps; tests supply stand-ins. Every role keeps
+// process-main.ts supplies the real steps; tests supply stand-ins. Every role keeps
 // the owner's rule: the process exits when the first RabbitMQ connection
 // fails (the rabbitmq step does that), and a connection lost later still ends
 // the process (config/rabbitmq/connection.ts, unchanged).
