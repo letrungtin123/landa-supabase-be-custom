@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import * as svc from './course-categories.service.js';
+import { courseCategoryListQuerySchema, publicImpactQuerySchema } from './course-categories.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
 import {
   createTransactionalAuditEntry,
@@ -10,7 +11,7 @@ import type { AuditChange } from '../audit-logs/audit-event.contract.js';
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    sendSuccess(res, await svc.listCourseCategories(tenantId, req.query as Record<string, unknown>));
+    sendSuccess(res, await svc.listCourseCategories(tenantId, courseCategoryListQuerySchema.parse(req.query)));
   } catch (err) { next(err); }
 }
 
@@ -63,7 +64,8 @@ export async function publicImpactController(req: Request, res: Response, next: 
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id là bắt buộc', 400); return; }
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const impactQuery = publicImpactQuerySchema.parse(req.query);
+    const limit = impactQuery.limit ? Number(impactQuery.limit) : undefined;
     sendSuccess(res, await svc.getCourseCategoryPublicImpact(req.params.id, tenantId, limit));
   } catch (err) { next(err); }
 }
