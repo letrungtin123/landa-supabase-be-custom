@@ -6,7 +6,7 @@ import type { NextFunction, Request, Response } from 'express';
 // a fixed Vietnamese message and a stable code, never a 500, and read nothing
 // before refusing: course category create, course notification send,
 // enrollment create and delete, own profile update (users and auth routes), password
-// change (auth and users routes), help docs folder and page create/update, and
+// change (auth and users routes), help docs folder and page create/update/reorder, and
 // email template update. Each handler runs as Express runs it: an error passed
 // to next (or a rejected promise) goes to the global error handler. pg double;
 // no database, no Redis, no network.
@@ -281,6 +281,60 @@ test('help docs folder and page bodies are checked before anything is read', asy
   await expectRefused(t, 'page update long', helpDocs.updatePageController, { title: long(501) }, code, 'Tiêu đề trang tối đa 500 ký tự.', pageParams);
   await expectRefused(t, 'page update content', helpDocs.updatePageController, { content: null }, code, 'Nội dung trang không hợp lệ.', pageParams);
   await expectRefused(t, 'page update publish', helpDocs.updatePageController, { is_published: 'yes' }, code, 'Trạng thái xuất bản không hợp lệ.', pageParams);
+});
+
+test('help docs reorders without a JSON object, with an id that is not a UUID or with over 1000 ids are a 400 HELP_DOC_INPUT_INVALID', async t => {
+  const code = 'HELP_DOC_INPUT_INVALID';
+  const folderOrder = 'Thứ tự thư mục không hợp lệ. Vui lòng tải lại trang và thử lại.';
+  const pageOrder = 'Thứ tự trang không hợp lệ. Vui lòng tải lại trang và thử lại.';
+  const notUuids: unknown[][] = [['not-a-uuid'], [FOLDER, 'x'], [`${FOLDER} `], [42], [FOLDER, null], [{ id: FOLDER }]];
+  const ids = (count: number) => Array.from({ length: count }, (_, index) => `d0000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+
+  for (const body of [...NOT_AN_OBJECT, ...notUuids.map(list => ({ ordered_ids: list }))]) {
+    await expectRefused(t, 'folders reorder', helpDocs.reorderFoldersController, body, code, folderOrder);
+  }
+  await expectRefused(t, 'folders reorder cap', helpDocs.reorderFoldersController, { ordered_ids: ids(1001) }, code, 'Mỗi lần chỉ sắp xếp được tối đa 1000 thư mục.');
+
+  for (const body of [
+    ...NOT_AN_OBJECT,
+    ...notUuids.map(list => ({ folder_id: FOLDER, ordered_ids: list })),
+    { folder_id: 'not-a-uuid', ordered_ids: [PAGE] },
+    { folder_id: 5, ordered_ids: [PAGE] },
+    { folder_id: [FOLDER], ordered_ids: [PAGE] },
+  ]) {
+    await expectRefused(t, 'pages reorder', helpDocs.reorderPagesController, body, code, pageOrder);
+  }
+  await expectRefused(t, 'pages reorder cap', helpDocs.reorderPagesController, { folder_id: FOLDER, ordered_ids: ids(1001) }, code, 'Mỗi lần chỉ sắp xếp được tối đa 1000 trang.');
+});
+
+test('help docs reorders keep their answers for a missing field and still reorder 1000 ids', async t => {
+  const kept: Array<[Handler, unknown, string]> = [
+    [helpDocs.reorderFoldersController, {}, 'ordered_ids phải là mảng'],
+    [helpDocs.reorderFoldersController, { ordered_ids: FOLDER }, 'ordered_ids phải là mảng'],
+    [helpDocs.reorderPagesController, { ordered_ids: [PAGE] }, 'folder_id và ordered_ids bắt buộc'],
+    [helpDocs.reorderPagesController, { folder_id: '', ordered_ids: [PAGE] }, 'folder_id và ordered_ids bắt buộc'],
+    [helpDocs.reorderPagesController, { folder_id: FOLDER, ordered_ids: PAGE }, 'folder_id và ordered_ids bắt buộc'],
+  ];
+  for (const [handler, body, message] of kept) {
+    const statements = installDb(t);
+    const res = await respond(handler, body);
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, { success: false, message, code: 'BAD_REQUEST' });
+    assert.deepEqual(statements, []);
+    t.mock.restoreAll();
+  }
+  const ids = Array.from({ length: 1000 }, (_, index) => `D0000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+  for (const [handler, body] of [
+    [helpDocs.reorderFoldersController, { ordered_ids: ids }],
+    [helpDocs.reorderPagesController, { folder_id: FOLDER, ordered_ids: ids }],
+  ] as Array<[Handler, unknown]>) {
+    const statements = installDb(t);
+    const res = await respond(handler, body);
+    // The double has no folder or page: the request reached the service and its database reads.
+    assert.equal(res.statusCode, 404);
+    assert.ok(statements.length > 0);
+    t.mock.restoreAll();
+  }
 });
 
 test('PUT /api/email-templates/:key without a JSON object is a 400 EMAIL_TEMPLATE_INPUT_INVALID', async t => {
