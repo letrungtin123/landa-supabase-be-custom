@@ -30,6 +30,7 @@
 /src/middleware/*
 !/src/middleware/error-handler.test.ts
 !/src/middleware/request-body-errors.test.ts
+!/src/middleware/upload-errors.test.ts
 !/src/utils/
 /src/utils/*
 !/src/utils/errors.ts

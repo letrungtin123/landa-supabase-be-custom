@@ -67,9 +67,16 @@ None of these collides with a code or a prefix the frontends branch on
 |---|---|---|---|
 | `INTERNAL_ERROR` | 500 | Unexpected error reaching the global handler. Message hidden in production; its own code (SQLSTATE, Node code) is never sent. | `middleware/error-handler.ts` |
 | `INVALID_JSON` | 400 | The JSON body could not be parsed. Logged by type, status, method and path only (never the body). | `middleware/error-handler.ts` (body-parser `entity.parse.failed`) |
-| `PAYLOAD_TOO_LARGE` | 413 | The JSON body is over its route limit (`middleware/body-limits.ts`). | `middleware/error-handler.ts` (`entity.too.large`) |
+| `PAYLOAD_TOO_LARGE` | 413 | The JSON body is over its route limit (`middleware/body-limits.ts`), or an uploaded file is over its multer limit. | `middleware/error-handler.ts` (`entity.too.large`, multer `LIMIT_FILE_SIZE`) |
 | `UNSUPPORTED_ENCODING` | 415 | The body uses an unsupported content encoding or charset. | `middleware/error-handler.ts` (`encoding.unsupported`, `charset.unsupported`) |
 | `REQUEST_ABORTED` | 400 | The client stopped sending the body before it was complete. | `middleware/error-handler.ts` (`request.aborted`) |
+| `UPLOAD_TOO_MANY_FILES` | 400 | More files than the route's multer `files` limit. | `middleware/error-handler.ts` (multer `LIMIT_FILE_COUNT`) |
+| `UPLOAD_UNEXPECTED_FILE` | 400 | A file in a field the route does not read, or more files than its `array(name, max)`. | `middleware/error-handler.ts` (multer `LIMIT_UNEXPECTED_FILE`) |
+| `UPLOAD_TOO_MANY_PARTS` | 400 | More multipart parts than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_PART_COUNT`) |
+| `UPLOAD_FIELD_NAME_TOO_LONG` | 400 | A multipart field name over the limit. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_KEY`) |
+| `UPLOAD_FIELD_VALUE_TOO_LONG` | 400 | A multipart text field over the limit. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_VALUE`) |
+| `UPLOAD_TOO_MANY_FIELDS` | 400 | More multipart text fields than the route allows. | `middleware/error-handler.ts` (multer `LIMIT_FIELD_COUNT`) |
+| `UPLOAD_FIELD_NAME_MISSING` | 400 | A multipart part without a field name. | `middleware/error-handler.ts` (multer `MISSING_FIELD_NAME`) |
 | `TENANT_DATA_LIMIT_REACHED` | 409 | The tenant's data quota is used up (quota trigger SQLSTATE `LQ001`, or the storage check). | `middleware/error-handler.ts`, `utils/client-error.ts`, `tenants/tenant-data-quota.service.ts` |
 | `TENANT_DATA_QUOTA_RECONCILING` | 503 | The tenant's quota is being recounted (SQLSTATE `LQ002`); retry in a few minutes. | same as above |
 | `REQUEST_FAILED` | 500 | Unexpected error caught by a controller through `sendClientError`; fixed message in the request language, cause only in the log. | `utils/client-error.ts` |
@@ -81,6 +88,15 @@ None of these collides with a code or a prefix the frontends branch on
 | `PASSWORD_CHANGE_RATE_LIMITED` | 429 | Too many password change attempts. | `middleware/auth-rate-limit.ts` |
 | `ACCOUNT_ACTION_RATE_LIMITED` | 429 | Too many one-time links or profile updates. | `middleware/auth-rate-limit.ts` |
 | `API_RATE_LIMITED` | 429 | The general per-user / per-IP API limit. | `middleware/auth-rate-limit.ts` (`apiLimiter`) |
+
+Upload refusals (multer errors) reach the global handler from the routes that
+do not answer them: assignments, badges, branding, the course mentor logo,
+help docs, news, prompt templates, the user avatar, KB documents and FAQ, and
+the bot avatar for anything but its size. They are logged as one
+`[Upload] upload_refused` line (multer code, status, method, path), never the
+field name, a field value or the file. Routes that answer multer themselves
+keep their own codes and messages (bot avatar size, library, course assets,
+AI ID video and source uploads).
 
 `authenticate`, `authorize(...roles)` and `tenantContext` refuse with
 `sendError` and no code of their own, so they send `UNAUTHORIZED` (401),
