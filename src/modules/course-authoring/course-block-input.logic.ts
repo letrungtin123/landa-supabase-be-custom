@@ -2,12 +2,32 @@
 // Course block input: what the browser may store in a component (media of a
 // problem or text block, media quiz, image-choice question, scenario
 // conversation, editable metadata) and which storage paths a delete may name.
-// Pure; moved unchanged from course-authoring.controller.ts.
+// Pure; moved unchanged from course-authoring.controller.ts. Data a sanitizer
+// refuses is a client error: AppError 400 COURSE_BLOCK_DATA_INVALID with the
+// sanitizer's message (docs/error-codes.md).
 // ═══════════════════════════════════════════════════════════════
 
 import { sanitizeCourseRichText } from './course-html-sanitizer.logic.js';
 import { withoutServerOwnedAuthorNotes } from './course-author-notes.logic.js';
 import { isUuid } from '../../utils/uuid.js';
+import { AppError } from '../../utils/errors.js';
+
+/** Component data a sanitizer refuses (400, with the sanitizer's own message). */
+export const COURSE_BLOCK_DATA_INVALID_CODE = 'COURSE_BLOCK_DATA_INVALID';
+
+export function courseBlockDataInvalid(message: string): AppError {
+  return new AppError(message, 400, COURSE_BLOCK_DATA_INVALID_CODE);
+}
+
+/** Component JSON sent as a string (typed as JSON.parse types it); text that is not JSON reads as no object. */
+function parseComponentJson(raw: unknown): ReturnType<typeof JSON.parse> {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 function extractYoutubeId(input: unknown): string {
   const value = typeof input === 'string' ? input.trim() : '';
@@ -112,12 +132,12 @@ function sanitizeMediaQuizMode(raw: unknown, fallback: 'single_select' | 'multip
 }
 
 export function sanitizeMediaQuizData(raw: any) {
-  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu câu hỏi kèm media phải là object');
+  const parsed = parseComponentJson(raw);
+  if (!parsed || typeof parsed !== 'object') throw courseBlockDataInvalid('Dữ liệu câu hỏi kèm media phải là object');
 
   const mode = sanitizeMediaQuizMode(parsed.mode, 'single_select');
   if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
-    throw new Error('Câu hỏi kèm media cần ít nhất một câu hỏi');
+    throw courseBlockDataInvalid('Câu hỏi kèm media cần ít nhất một câu hỏi');
   }
 
   const questions = parsed.questions.slice(0, 50).map((question: any, questionIndex: number) => {
@@ -127,11 +147,11 @@ export function sanitizeMediaQuizData(raw: any) {
       ? question.media.storage_path.trim()
       : '';
     if (!isSafeCourseAssetPath(storagePath)) {
-      throw new Error(`Câu hỏi ${questionIndex + 1} cần tải media của khóa học lên`);
+      throw courseBlockDataInvalid(`Câu hỏi ${questionIndex + 1} cần tải media của khóa học lên`);
     }
 
     if (!Array.isArray(question?.choices) || question.choices.length < 2) {
-      throw new Error(`Câu hỏi ${questionIndex + 1} cần ít nhất hai lựa chọn`);
+      throw courseBlockDataInvalid(`Câu hỏi ${questionIndex + 1} cần ít nhất hai lựa chọn`);
     }
 
     const choices = question.choices.slice(0, 12).map((choice: any, choiceIndex: number) => ({
@@ -142,10 +162,10 @@ export function sanitizeMediaQuizData(raw: any) {
 
     const correctCount = choices.filter((choice: any) => choice.correct).length;
     if (correctCount === 0) {
-      throw new Error(`Câu hỏi ${questionIndex + 1} cần ít nhất một đáp án đúng`);
+      throw courseBlockDataInvalid(`Câu hỏi ${questionIndex + 1} cần ít nhất một đáp án đúng`);
     }
     if (questionMode === 'single_select' && correctCount !== 1) {
-      throw new Error(`Câu hỏi ${questionIndex + 1} phải có đúng một đáp án đúng`);
+      throw courseBlockDataInvalid(`Câu hỏi ${questionIndex + 1} phải có đúng một đáp án đúng`);
     }
 
     const hints = Array.isArray(question?.hints)
@@ -193,29 +213,29 @@ function plainTextFromHtml(raw: string): string {
 }
 
 export function sanitizeImageChoiceQuizData(raw: any) {
-  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu câu hỏi đáp án hình ảnh phải là object');
+  const parsed = parseComponentJson(raw);
+  if (!parsed || typeof parsed !== 'object') throw courseBlockDataInvalid('Dữ liệu câu hỏi đáp án hình ảnh phải là object');
 
   const promptHtml = sanitizeMediaQuizHtml(parsed.prompt_html, '', 4000);
   if (!plainTextFromHtml(promptHtml)) {
-    throw new Error('Câu hỏi đáp án hình ảnh cần nội dung câu hỏi');
+    throw courseBlockDataInvalid('Câu hỏi đáp án hình ảnh cần nội dung câu hỏi');
   }
 
   if (!Array.isArray(parsed.choices) || parsed.choices.length < 2 || parsed.choices.length > 4) {
-    throw new Error('Câu hỏi đáp án hình ảnh phải có từ 2 đến 4 đáp án');
+    throw courseBlockDataInvalid('Câu hỏi đáp án hình ảnh phải có từ 2 đến 4 đáp án');
   }
 
   const choices = parsed.choices.map((choice: any, choiceIndex: number) => {
     const choiceHtml = sanitizeMediaQuizHtml(choice?.html, '', 2000);
     if (!plainTextFromHtml(choiceHtml)) {
-      throw new Error(`Đáp án ${choiceIndex + 1} cần nội dung`);
+      throw courseBlockDataInvalid(`Đáp án ${choiceIndex + 1} cần nội dung`);
     }
 
     const storagePath = typeof choice?.image?.storage_path === 'string'
       ? choice.image.storage_path.trim()
       : '';
     if (storagePath && !isSafeCourseAssetPath(storagePath)) {
-      throw new Error(`Đáp án ${choiceIndex + 1} có đường dẫn hình ảnh không hợp lệ`);
+      throw courseBlockDataInvalid(`Đáp án ${choiceIndex + 1} có đường dẫn hình ảnh không hợp lệ`);
     }
 
     return {
@@ -233,7 +253,7 @@ export function sanitizeImageChoiceQuizData(raw: any) {
 
   const correctCount = choices.filter((choice: any) => choice.correct).length;
   if (correctCount !== 1) {
-    throw new Error('Câu hỏi đáp án hình ảnh phải có đúng 1 đáp án đúng');
+    throw courseBlockDataInvalid('Câu hỏi đáp án hình ảnh phải có đúng 1 đáp án đúng');
   }
 
   const hints = Array.isArray(parsed.hints)
@@ -286,16 +306,16 @@ function getScenarioChatContextDescription(raw: any): string {
 }
 
 export function sanitizeScenarioChatData(raw: any) {
-  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  if (!parsed || typeof parsed !== 'object') throw new Error('Dữ liệu Giao tiếp tình huống phải là object');
+  const parsed = parseComponentJson(raw);
+  if (!parsed || typeof parsed !== 'object') throw courseBlockDataInvalid('Dữ liệu Giao tiếp tình huống phải là object');
   if (!Array.isArray(parsed.rounds) || parsed.rounds.length === 0) {
-    throw new Error('Giao tiếp tình huống cần ít nhất một lượt hội thoại');
+    throw courseBlockDataInvalid('Giao tiếp tình huống cần ít nhất một lượt hội thoại');
   }
 
   const contextDescription = sanitizeScenarioChatText(getScenarioChatContextDescription(parsed), '', 1200);
   const rounds = parsed.rounds.slice(0, 100).map((round: any, roundIndex: number) => {
     if (!Array.isArray(round?.choices) || round.choices.length !== 3) {
-      throw new Error(`Lượt ${roundIndex + 1} phải có đúng 3 câu trả lời`);
+      throw courseBlockDataInvalid(`Lượt ${roundIndex + 1} phải có đúng 3 câu trả lời`);
     }
 
     const choices = round.choices.map((choice: any, choiceIndex: number) => ({
@@ -310,7 +330,7 @@ export function sanitizeScenarioChatData(raw: any) {
 
     const correctCount = choices.filter((choice: any) => choice.correct).length;
     if (correctCount !== 1) {
-      throw new Error(`Lượt ${roundIndex + 1} phải có đúng 1 câu trả lời đúng`);
+      throw courseBlockDataInvalid(`Lượt ${roundIndex + 1} phải có đúng 1 câu trả lời đúng`);
     }
 
     return {

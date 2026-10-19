@@ -198,6 +198,7 @@ thrown in `users.service.ts`, answered by `users.controller.ts`.
 | Code | Status | Meaning | Raised in |
 |---|---|---|---|
 | `COURSE_ASSET_STORAGE_SIZE_LIMIT` | 413 | The course file is over the storage size limit. | `course-authoring.controller.ts` |
+| `COURSE_BLOCK_DATA_INVALID` | 400 | The component data is invalid: a media quiz, image-choice question or scenario conversation on block create or edit (text that is not JSON reads as "phải là object"), or a diagram on studio submit. The message is the sanitizer's or the diagram normalizer's own Vietnamese text. Nothing is saved. The AI ID apply and workspace keep their own diagram errors. | `course-block-input.logic.ts` (`courseBlockDataInvalid`), `course-outline.service.ts` (studio submit diagrams) |
 | `LESSON_AUTHOR_OUTLINE_BUSY` | 409 | The course is being changed elsewhere; retry. | `course-authoring.service.ts` |
 | `COMPONENT_APPLY_INSTANCE_INVALID`, `COMPONENT_APPLY_IDENTITY_AMBIGUOUS`, `COMPONENT_APPLY_IDENTITY_CONFLICT`, `COMPONENT_APPLY_PROTECTED_INSTANCE`, `COMPONENT_APPLY_TARGET_REUSED`, `COMPONENT_APPLY_PARITY_FAILED` | 409 | An AI ID component proposal could not be applied in full; nothing was saved. | `lesson-author-component-apply.logic.ts`, answered by `course-authoring.service.ts` |
 | `COURSE_AUTHOR_NOTES_TENANT_REQUIRED` | 403 | The active organization is unknown. | `course-authoring.controller.ts` (`getAuthorNotes`) |
