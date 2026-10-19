@@ -16,11 +16,12 @@ const SUPERUSER_2 = 'a0000000-0000-4000-8000-000000000004';
 const STAFF = 'a0000000-0000-4000-8000-000000000005';
 const LEARNER = 'a0000000-0000-4000-8000-000000000006';
 const OTHER_TENANT_LEARNER = 'a0000000-0000-4000-8000-000000000007';
+const TENANTLESS_SUPERADMIN = 'a0000000-0000-4000-8000-000000000008';
 
 type Role = 'learner' | 'learner_plus' | 'staff' | 'superuser' | 'superadmin';
 type UserRow = {
   id: string; username: string; email: string; full_name: string; role: Role;
-  tenant_id: string | null; is_active: boolean; avatar_url: null;
+  tenant_id: string | null; is_active: boolean; avatar_url: string | null;
 };
 type Call = { sql: string; params: unknown[] };
 
@@ -221,6 +222,30 @@ test('requestUserDeletion applies the same policy, including the last superadmin
   const rowLockAt = db.calls.findIndex((call, index) => index > lockAt && call.sql.includes('FOR UPDATE'));
   assert.ok(lockAt >= 0 && rowLockAt > lockAt, 'superadmin-set lock precedes the row lock');
   assert.equal(wrote(db, /INSERT INTO user_deletion_jobs|INSERT INTO auth_revocations|^\s*UPDATE users/), false);
+});
+
+test('requestUserDeletion refuses an account without a tenant that has an avatar, before any write', async (t) => {
+  // The worker deletes avatars only under a tenant folder, so such a job could never finish.
+  const db = fakeDb();
+  db.users.set(TENANTLESS_SUPERADMIN, {
+    id: TENANTLESS_SUPERADMIN, username: 'root3', email: 'root3@example.test', full_name: 'root3', role: 'superadmin',
+    tenant_id: null, is_active: true, avatar_url: 'https://storage.example.test/storage/v1/object/public/landa/default/avatars/root3.png',
+  });
+  await installFakeDb(t, db);
+  const { requestUserDeletion } = await import('./user-deletion.service.js');
+
+  await rejectsWith(requestUserDeletion(TENANTLESS_SUPERADMIN, actorOf(db, SUPERADMIN)), 'USER_AUTHORITY_TENANTLESS_AVATAR_DELETE', 409);
+  assert.equal(wrote(db, /INSERT INTO user_deletion_jobs|INSERT INTO auth_revocations|refresh_tokens|^\s*UPDATE users|email_outbox/), false);
+  assert.ok(db.calls.some((call) => /^\s*ROLLBACK/i.test(call.sql)), 'the request transaction rolls back');
+
+  // Without an avatar the same account goes on to the job insert (the double returns no job row, so it still rejects).
+  db.users.get(TENANTLESS_SUPERADMIN)!.avatar_url = null;
+  db.calls.length = 0;
+  await assert.rejects(
+    requestUserDeletion(TENANTLESS_SUPERADMIN, actorOf(db, SUPERADMIN)),
+    (error: unknown) => (error as { code?: string }).code !== 'USER_AUTHORITY_TENANTLESS_AVATAR_DELETE',
+  );
+  assert.equal(wrote(db, /INSERT INTO user_deletion_jobs/), true);
 });
 
 function request(user: { id: string; role: Role; tenantId: string | null; username: string }, input: { params?: Record<string, string>; body?: unknown; locale?: string }): Request {

@@ -46,6 +46,7 @@ export const USER_AUTHORITY_ERRORS = {
   TENANT_REQUIRED: [403, 'Không xác định được doanh nghiệp đang thao tác.', 'The active organization could not be determined.'],
   LAST_SUPERADMIN: [409, 'Không thể khóa, hạ quyền hoặc xóa Super Admin cuối cùng đang hoạt động.', 'The last active Super Admin cannot be disabled, demoted or deleted.'],
   TARGET_CHANGED: [409, 'Tài khoản vừa được người khác thay đổi. Vui lòng tải lại và thử lại.', 'This account was just changed by someone else. Reload and try again.'],
+  TENANTLESS_AVATAR_DELETE: [409, 'Tài khoản này không thuộc doanh nghiệp nào và đang có ảnh đại diện nên chưa xóa vĩnh viễn được. Bạn có thể khóa tài khoản thay cho việc xóa.', 'This account belongs to no organization and has a profile picture, so it cannot be deleted permanently yet. You can disable the account instead.'],
 } as const satisfies Record<string, readonly [number, string, string]>;
 
 export type UserAuthorityErrorCode = keyof typeof USER_AUTHORITY_ERRORS;

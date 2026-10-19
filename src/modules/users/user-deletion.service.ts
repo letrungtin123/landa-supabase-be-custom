@@ -16,6 +16,7 @@ import { assertUserNotActiveDemoIframeAccount } from '../demo-login/demo-iframe.
 import {
   assertCanDeleteUser,
   removesActiveSuperadmin,
+  UserAuthorityError,
   type UserAuthorityActor,
   type UserAuthorityTarget,
 } from './user-authority.logic.js';
@@ -115,6 +116,9 @@ export async function requestUserDeletion(
       await client.query('COMMIT');
       return response;
     }
+    // The worker deletes avatars only under a tenant folder; it could never finish
+    // this job, so refuse it before the account is logged out and queued.
+    if (!target.tenant_id && target.avatar_url) throw new UserAuthorityError('TENANTLESS_AVATAR_DELETE');
 
     const expiresAt = new Date(Date.now() + parseExpiresIn(env.JWT_ACCESS_EXPIRES_IN) + 60_000);
     await tx.upsertAuthRevocation(targetId, expiresAt);
