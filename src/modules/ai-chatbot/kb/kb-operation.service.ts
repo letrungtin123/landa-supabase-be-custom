@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { query, withDatabaseTransaction } from '../../../config/database.js';
 import { env } from '../../../config/env.js';
 import { runtimeTenantSql } from '../../../config/runtime-tenant-fence.js';
+import { cappedExponentialBackoffSeconds } from '../../../platform/job-runner/index.js';
 import type { AiEngine } from '../ai-platform/ai-engine.types.js';
 
 export type KbOperationType =
@@ -185,9 +186,10 @@ export async function failKbOperation(
   // that the user can no longer retry from the UI.
   const terminal = !['document_delete', 'knowledgebase_delete'].includes(job.operation)
     && job.attempt_count >= env.KB_OPERATION_WORKER_MAX_ATTEMPTS;
-  const backoffSeconds = Math.min(
+  const backoffSeconds = cappedExponentialBackoffSeconds(
+    job.attempt_count,
+    env.KB_OPERATION_WORKER_RETRY_BASE_SECONDS,
     env.KB_OPERATION_WORKER_RETRY_MAX_SECONDS,
-    env.KB_OPERATION_WORKER_RETRY_BASE_SECONDS * (2 ** Math.min(Math.max(job.attempt_count - 1, 0), 10)),
   );
   const result = await query(
     `UPDATE kb_operation_jobs

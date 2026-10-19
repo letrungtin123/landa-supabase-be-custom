@@ -36,10 +36,13 @@ import {
 import { AppError } from '../../../middleware/error-handler.js';
 import { invalidateTenantAiCaches } from '../../../config/cache-invalidation.js';
 import { invalidateGeminiStoreNameCache } from '../chat/chat.service.js';
-import { stopOnShutdown } from '../../../config/process-lifecycle.js';
 import { swallowAndLog } from '../../../utils/best-effort.js';
-
-let drainInFlight = false;
+import {
+  createSingleFlight,
+  runWithConcurrency,
+  startJobPoller,
+  startLeaseHeartbeat,
+} from '../../../platform/job-runner/index.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -252,14 +255,10 @@ async function deleteKnowledgebaseResources(job: KbOperationJob): Promise<void> 
 
 async function runKbOperation(job: KbOperationJob): Promise<void> {
   if (!job.lease_token) return;
-  const renewEveryMs = Math.max(1_000, Math.floor((env.KB_OPERATION_WORKER_LEASE_SECONDS * 1000) / 3));
-  let leaseLost = false;
-  const heartbeat = setInterval(() => {
-    renewKbOperationLease(job.id, job.lease_token!)
-      .then((renewed) => { if (!renewed) leaseLost = true; })
-      .catch(() => { leaseLost = true; });
-  }, renewEveryMs);
-  heartbeat.unref();
+  const heartbeat = startLeaseHeartbeat({
+    leaseSeconds: env.KB_OPERATION_WORKER_LEASE_SECONDS,
+    renew: () => renewKbOperationLease(job.id, job.lease_token!),
+  });
 
   // Keep a session-level per-KB lock across remote calls. Document jobs share
   // it; a whole-KB delete is exclusive. This prevents a late Gemini upload
@@ -304,7 +303,7 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
     }
     // Whole-KB deletion cascades its own outbox row through the foreign key.
     const isCascadeCompletion = job.operation === 'knowledgebase_delete';
-    if (leaseLost || (!isCascadeCompletion && !(await completeKbOperation(job.id, job.lease_token)))) {
+    if (heartbeat.lost || (!isCascadeCompletion && !(await completeKbOperation(job.id, job.lease_token)))) {
       throw new Error(`KB operation lease lost before completion: ${job.id}`);
     }
   } catch (error) {
@@ -335,33 +334,19 @@ async function runKbOperation(job: KbOperationJob): Promise<void> {
       if (releaseError) lockClient.release(releaseError);
       else lockClient.release();
     }
-    clearInterval(heartbeat);
+    heartbeat.stop();
   }
 }
 
-async function runWithConcurrency(jobs: KbOperationJob[]): Promise<void> {
-  const workers = Math.min(env.KB_OPERATION_WORKER_CONCURRENCY, jobs.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: workers }, async () => {
-    while (next < jobs.length) {
-      const job = jobs[next++];
-      await runKbOperation(job);
-    }
-  }));
-}
-
-async function drainDueKbOperations(): Promise<void> {
-  if (drainInFlight) return;
-  drainInFlight = true;
+/** One claim-and-run pass; a poll tick that finds the previous pass still running skips its turn. */
+const drainDueKbOperations = createSingleFlight(async () => {
   try {
     const jobs = await claimDueKbOperations();
-    if (jobs.length > 0) await runWithConcurrency(jobs);
+    if (jobs.length > 0) await runWithConcurrency(jobs, env.KB_OPERATION_WORKER_CONCURRENCY, runKbOperation);
   } catch (error) {
     console.error('[KbOperationWorker] Failed to claim due operations:', errorMessage(error));
-  } finally {
-    drainInFlight = false;
   }
-}
+});
 
 export async function startKbOperationWorker(): Promise<void> {
   if (!env.KB_OPERATION_WORKER_ENABLED) {
@@ -369,8 +354,13 @@ export async function startKbOperationWorker(): Promise<void> {
     return;
   }
   await drainDueKbOperations();
-  stopOnShutdown(setInterval(() => {
-    void drainDueKbOperations();
-  }, env.KB_OPERATION_WORKER_POLL_INTERVAL_MS).unref());
+  startJobPoller({
+    intervalMs: env.KB_OPERATION_WORKER_POLL_INTERVAL_MS,
+    tick: drainDueKbOperations,
+    // Unreachable: the drain logs its own failures. A rejection stays unhandled, as before.
+    onError: (error) => {
+      throw error;
+    },
+  });
   console.log('[KbOperationWorker] Durable KB operation recovery started');
 }
