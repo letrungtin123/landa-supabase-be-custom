@@ -361,6 +361,10 @@ Object.assign(env as unknown as Record<string, unknown>, {
   LESSON_AUTHOR_CHAPTER_CHECKPOINT_ENABLED: false,
   AI_CHAT_ANSWER_DEADLINE_MS: 180_000,
   AI_TOKEN_RESERVATION_SECONDS: 600,
+  // The values of .env.example: they bound the reservation of a turn (and so
+  // the output tokens of a self-built RAG chat answer).
+  AI_CHAT_TOKEN_RESERVE_ESTIMATE: 8_000,
+  AI_LESSON_AUTHOR_TOKEN_RESERVE_ESTIMATE: 250_000,
 });
 encryptedKey = (await import('../ai-platform/ai-secret.service.js')).encryptAiProviderKey(FAKE_KEY);
 const chatService = await import('./chat.service.js');
