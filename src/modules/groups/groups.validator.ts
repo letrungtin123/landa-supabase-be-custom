@@ -34,3 +34,35 @@ export const assignCourseSchema = z.object({
 export const assignCategorySchema = z.object({
   category_id: z.string().uuid('category_id phải là UUID hợp lệ'),
 });
+
+// ── Query strings ──
+// The query string of the group list routes, read the way the service always
+// read it. They never reject and never coerce: every request accepted before
+// is accepted with the same values (a repeated parameter stays a list, a page
+// that is not a number is read by the service as before). Only the keys the
+// service reads are kept.
+
+/** The raw value, unchecked. */
+const rawQueryValue = z.unknown();
+
+/** GET /api/groups, GET /api/groups/teams/:teamId/members|categories|course-categories */
+export const groupPageQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+});
+
+/** GET /api/groups/:groupId/subgroups, GET /api/groups/subgroups/:subgroupId/teams */
+export const groupSearchQuerySchema = z.object({
+  search: rawQueryValue,
+});
+
+/** GET /api/groups/audit-logs */
+export const groupAuditLogsQuerySchema = z.object({
+  page: rawQueryValue,
+  page_size: rawQueryValue,
+  search: rawQueryValue,
+  action: rawQueryValue,
+  date_from: rawQueryValue,
+  date_to: rawQueryValue,
+});
