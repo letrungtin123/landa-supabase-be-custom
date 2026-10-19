@@ -923,9 +923,6 @@
     }
   },
   "src/modules/storage/storage.routes.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
-    },
     "@typescript-eslint/no-misused-promises": {
       "count": 1
     }
@@ -933,11 +930,6 @@
   "src/modules/tenant-badges/tenant-badges.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 8
-    }
-  },
-  "src/modules/tenants/tenant-course-components.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 1
     }
   },
   "src/modules/tenants/tenants.controller.ts": {
@@ -948,11 +940,6 @@
   "src/modules/tenants/tenants.routes.ts": {
     "@typescript-eslint/no-misused-promises": {
       "count": 26
-    }
-  },
-  "src/modules/tenants/tenants.service.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
     }
   },
   "src/modules/users/users-authority.service.test.ts": {

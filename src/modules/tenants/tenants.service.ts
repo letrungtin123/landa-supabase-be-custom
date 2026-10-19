@@ -21,23 +21,22 @@ import { fingerprintGeminiApiKey, markTenantGeminiStoresKeyChanged } from '../ai
 import { getTenantDataQuota } from './tenant-data-quota.service.js';
 import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';
 import { removeAiSecretsFromTenantSettings } from '../ai-chatbot/ai-platform/ai-settings.service.js';
+import {
+  createTenantsRepository,
+  tenantDetailSql,
+  tenantPageStatement,
+  tenantUpdateAssignments,
+  type TenantDetailRow,
+  type TenantPageRow,
+  type TenantSnapshotRow,
+  type TenantsDb,
+} from './tenants.repository.js';
 
 const TENANT_PUBLIC_CACHE_RESOURCES = ['branding', 'dashboard-content', 'sso-public', 'demo-login'] as const;
 
-type UpdatedTenantRow = {
-  id: string;
-  name: string;
-  slug: string;
-  domain_learner: string | null;
-  domain_admin: string | null;
-  max_users: number | null;
-  max_courses: number | null;
-  data_limit_bytes: string | null;
-  is_active: boolean;
-  previous_data_limit_bytes?: string | null;
-};
+const tenantsRepository = createTenantsRepository({ query } satisfies TenantsDb);
 
-export type TenantAuditSnapshot = Omit<UpdatedTenantRow, 'previous_data_limit_bytes'>;
+export type TenantAuditSnapshot = TenantSnapshotRow;
 
 function getGeminiKeyFromSettings(settings: unknown): string | null {
   if (!settings || typeof settings !== 'object') return null;
@@ -46,11 +45,7 @@ function getGeminiKeyFromSettings(settings: unknown): string | null {
 }
 
 async function getTenantPublicDomains(tenantId: string): Promise<string[]> {
-  const result = await query<{ domain_admin: string | null; domain_learner: string | null }>(
-    'SELECT domain_admin, domain_learner FROM tenants WHERE id = $1',
-    [tenantId],
-  );
-  const row = result.rows[0];
+  const row = await tenantsRepository.selectPublicDomains(tenantId);
   return [row?.domain_admin ?? null, row?.domain_learner ?? null].filter((domain): domain is string => !!domain);
 }
 
@@ -60,48 +55,13 @@ async function getTenantPublicDomains(tenantId: string): Promise<string[]> {
 export async function listTenants(queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [];
-  let where = '';
-
-  if (search) {
-    params.push(`%${search}%`);
-    where = `WHERE t.name ILIKE $${params.length} OR t.slug ILIKE $${params.length} OR t.domain_learner ILIKE $${params.length} OR t.domain_admin ILIKE $${params.length}`;
-  }
-
-  params.push(pageSize, offset);
-  const result = await readWithPendingDatabaseBytes<any>(
-    (databaseBytes) => `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
-            t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
-            ${databaseBytes('quota', 't.id')}::bigint::text AS database_used_bytes,
-            COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
-            COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
-            COALESCE(quota.state, 'initializing') AS data_quota_state,
-            quota.last_verified_at AS data_quota_last_verified_at,
-            COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
-            NULL::text AS ai_monthly_token_limit, -- retired token limit (AI limits are points); kept for older dashboards
-            COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
-            COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
-            COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,
-            ai_transition.to_engine AS ai_pending_engine,
-            COUNT(*) OVER() AS full_count
-     FROM tenants t
-     LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
-     LEFT JOIN tenant_ai_settings ai_settings ON ai_settings.tenant_id = t.id
-     LEFT JOIN ai_token_monthly_usage ai_usage
-       ON ai_usage.tenant_id = t.id
-      AND ai_usage.period_start = date_trunc('month', now() AT TIME ZONE COALESCE(ai_settings.token_timezone, 'Asia/Saigon'))::date
-     LEFT JOIN ai_engine_transition_jobs ai_transition
-       ON ai_transition.id = ai_settings.active_transition_job_id
-     ${where}
-     ORDER BY t.created_at DESC
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
-  );
+  const statement = tenantPageStatement(search, pageSize, offset);
+  const result = await readWithPendingDatabaseBytes<TenantPageRow>(statement.sql, statement.params);
 
   const total = parseInt(result.rows[0]?.full_count ?? '0');
 
   return {
-    data: result.rows.map((r: any) => {
+    data: result.rows.map((r) => {
       const { full_count, ...rest } = r;
       rest.settings = removeAiSecretsFromTenantSettings(rest.settings);
       return rest;
@@ -117,31 +77,7 @@ export async function listTenants(queryParams: Record<string, unknown>) {
  * Chi tiết tenant theo ID.
  */
 export async function getTenantById(id: string) {
-  const result = await readWithPendingDatabaseBytes(
-    (databaseBytes) => `SELECT t.id, t.name, t.slug, t.domain_learner, t.domain_admin, t.is_active, t.settings,
-            t.max_users, t.max_courses, t.data_limit_bytes, t.created_at, t.updated_at,
-            ${databaseBytes('quota', 't.id')}::bigint::text AS database_used_bytes,
-            COALESCE(quota.storage_used_bytes, 0)::bigint::text AS storage_used_bytes,
-            COALESCE(quota.storage_reserved_bytes, 0)::bigint::text AS storage_reserved_bytes,
-            COALESCE(quota.state, 'initializing') AS data_quota_state,
-            quota.last_verified_at AS data_quota_last_verified_at,
-            COALESCE(ai_settings.active_engine, 'gemini_file_search') AS ai_active_engine,
-            NULL::text AS ai_monthly_token_limit, -- retired token limit (AI limits are points); kept for older dashboards
-            COALESCE(ai_usage.total_tokens, 0)::bigint::text AS ai_token_total_used,
-            COALESCE(ai_usage.reserved_tokens, 0)::bigint::text AS ai_token_reserved,
-            COALESCE(ai_settings.transition_state, 'idle') AS ai_transition_state,
-            ai_transition.to_engine AS ai_pending_engine
-     FROM tenants t
-     LEFT JOIN tenant_data_quota_usage quota ON quota.tenant_id = t.id
-     LEFT JOIN tenant_ai_settings ai_settings ON ai_settings.tenant_id = t.id
-     LEFT JOIN ai_token_monthly_usage ai_usage
-       ON ai_usage.tenant_id = t.id
-      AND ai_usage.period_start = date_trunc('month', now() AT TIME ZONE COALESCE(ai_settings.token_timezone, 'Asia/Saigon'))::date
-     LEFT JOIN ai_engine_transition_jobs ai_transition
-       ON ai_transition.id = ai_settings.active_transition_job_id
-     WHERE t.id = $1`,
-    [id],
-  );
+  const result = await readWithPendingDatabaseBytes<TenantDetailRow>(tenantDetailSql, [id]);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
   const tenant = result.rows[0] as Record<string, unknown>;
   tenant.settings = removeAiSecretsFromTenantSettings(tenant.settings);
@@ -156,40 +92,32 @@ export async function createTenant(
   auditEntry?: (tenant: TenantAuditSnapshot) => TransactionalAuditEntry,
 ) {
   // Kiểm tra slug trùng
-  const existing = await query('SELECT id FROM tenants WHERE slug = $1', [input.slug]);
-  if (existing.rowCount! > 0) throw new AppError('Slug đã tồn tại', 409);
+  if (await tenantsRepository.slugExists(input.slug)) throw new AppError('Slug đã tồn tại', 409);
 
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantsRepository(client);
 
-    const result = await client.query(
-      `INSERT INTO tenants (name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, settings)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::bigint, $8)
-       RETURNING id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active`,
-      [input.name, input.slug, input.domain_learner ?? null, input.domain_admin ?? null, input.max_users ?? null, input.max_courses ?? null, input.data_limit_bytes ?? null, JSON.stringify(input.settings || {})],
-    );
-    const tenant = result.rows[0];
+    const tenant = await repository.insertTenant({
+      name: input.name,
+      slug: input.slug,
+      domainLearner: input.domain_learner ?? null,
+      domainAdmin: input.domain_admin ?? null,
+      maxUsers: input.max_users ?? null,
+      maxCourses: input.max_courses ?? null,
+      dataLimitBytes: input.data_limit_bytes ?? null,
+      settings: JSON.stringify(input.settings || {}),
+    });
 
-    await client.query(
-      `INSERT INTO tenant_ai_settings (tenant_id, chat_model, lesson_author_model)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (tenant_id) DO NOTHING`,
-      [
-        tenant.id,
-        process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
-        process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
-      ],
+    await repository.insertAiSettings(
+      tenant.id,
+      process.env.GEMINI_CHAT_MODEL?.trim() || 'gemini-3.8-flash',
+      process.env.GEMINI_LESSON_AUTHOR_MODEL?.trim() || 'gemini-3.8-flash',
     );
 
     // Tenant management, badge management và news cần được superadmin cấp riêng.
-    await client.query(
-      `INSERT INTO tenant_modules (tenant_id, module_id, is_enabled)
-       SELECT $1, id, true
-       FROM modules
-       WHERE code NOT IN ('tenant_management', 'badge_management', 'news') AND is_active = true`,
-      [tenant.id],
-    );
+    await repository.enableDefaultModules(tenant.id);
 
     if (auditEntry) await appendAuditLog(client, auditEntry(tenant));
 
@@ -219,10 +147,7 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
   let nextGeminiFingerprint: string | null = null;
 
   if (input.settings !== undefined) {
-    const currentSettings = await query<{ settings: unknown }>(
-      'SELECT settings FROM tenants WHERE id = $1',
-      [id],
-    );
+    const currentSettings = await tenantsRepository.selectSettings(id);
     if (currentSettings.rowCount === 0) throw new AppError('Tenant khong ton tai', 404);
     const oldKey = getGeminiKeyFromSettings(currentSettings.rows[0]?.settings);
     const nextKey = getGeminiKeyFromSettings(input.settings);
@@ -247,42 +172,18 @@ export async function updateTenant(id: string, input: UpdateTenantInput) {
 }
 
 async function updateTenantFromDb(id: string, input: UpdateTenantInput) {
-  // Build SET clause động
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
-
-  if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
-  if (input.slug !== undefined) { sets.push(`slug = $${idx++}`); params.push(input.slug); }
-  if (input.domain_learner !== undefined) { sets.push(`domain_learner = $${idx++}`); params.push(input.domain_learner); }
-  if (input.domain_admin !== undefined) { sets.push(`domain_admin = $${idx++}`); params.push(input.domain_admin); }
-  if (input.max_users !== undefined) { sets.push(`max_users = $${idx++}`); params.push(input.max_users); }
-  if (input.max_courses !== undefined) { sets.push(`max_courses = $${idx++}`); params.push(input.max_courses); }
-  if (input.data_limit_bytes !== undefined) { sets.push(`data_limit_bytes = $${idx++}::bigint`); params.push(input.data_limit_bytes); }
-  if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
-  if (input.settings !== undefined) { sets.push(`settings = $${idx++}`); params.push(JSON.stringify(input.settings)); }
-
-  if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
+  // SET clause động
+  const assignments = tenantUpdateAssignments(input);
+  if (assignments.sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
   return withDatabaseTransaction(async () => {
-    const tenantFields = 'id, name, slug, domain_learner, domain_admin, max_users, max_courses, data_limit_bytes, is_active';
-    const current = await query<TenantAuditSnapshot>(
-      `SELECT ${tenantFields}
-         FROM tenants
-        WHERE id = $1
-        FOR UPDATE`,
-      [id],
-    );
+    const current = await tenantsRepository.lockSnapshot(id);
     if (current.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
 
-    params.push(id);
-    const result = await query<UpdatedTenantRow>(
-      `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${tenantFields}`,
-      params,
-    );
+    const result = await tenantsRepository.updateTenant(id, assignments);
     if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
 
-    const tenant = result.rows[0] as TenantAuditSnapshot;
+    const tenant = result.rows[0];
     return {
       tenant,
       previousTenant: current.rows[0],
@@ -307,25 +208,16 @@ export async function deleteTenant(id: string) {
 }
 
 async function deleteTenantFromDb(id: string) {
-  const result = await query<{ id: string; name: string }>('DELETE FROM tenants WHERE id = $1 RETURNING id, name', [id]);
-  if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
-  return result.rows[0];
+  const deleted = await tenantsRepository.deleteTenant(id);
+  if (!deleted) throw new AppError('Tenant không tồn tại', 404);
+  return deleted;
 }
 
 /**
  * Lấy cấu hình modules của tenant (ma trận bật/tắt).
  */
 export async function getTenantModules(tenantId: string) {
-  const result = await query(
-    `SELECT m.id AS module_id, m.code, m.name, m.icon, m.sort_order,
-            COALESCE(tm.is_enabled, false) AS is_enabled
-     FROM modules m
-     LEFT JOIN tenant_modules tm ON tm.module_id = m.id AND tm.tenant_id = $1
-     WHERE m.is_active = true
-     ORDER BY m.sort_order`,
-    [tenantId],
-  );
-  return result.rows;
+  return tenantsRepository.selectModules(tenantId);
 }
 
 /**
@@ -339,14 +231,10 @@ export async function updateTenantModules(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantsRepository(client);
 
     for (const mod of modules) {
-      await client.query(
-        `INSERT INTO tenant_modules (tenant_id, module_id, is_enabled)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (tenant_id, module_id) DO UPDATE SET is_enabled = $3`,
-        [tenantId, mod.module_id, mod.is_enabled],
-      );
+      await repository.upsertModule(tenantId, mod.module_id, mod.is_enabled);
     }
 
     if (auditEntry) await appendAuditLog(client, auditEntry);
@@ -384,37 +272,18 @@ export async function listSimpleTenants(userId: string, role: string) {
 
 async function listSimpleTenantsFromDb(userId: string, role: string) {
   if (role === 'superadmin') {
-    const result = await query<{ id: string; name: string }>(
-      'SELECT id, name FROM tenants WHERE is_active = true ORDER BY name ASC',
-    );
-    return result.rows;
+    return tenantsRepository.selectActiveTenants();
   }
 
   // superuser: chỉ lấy tenants được phân quyền qua user_tenants
-  const result = await query<{ id: string; name: string }>(
-    `SELECT t.id, t.name
-     FROM user_tenants ut
-     JOIN tenants t ON t.id = ut.tenant_id
-     WHERE ut.user_id = $1 AND t.is_active = true
-     ORDER BY t.name ASC`,
-    [userId],
-  );
-  return result.rows;
+  return tenantsRepository.selectActiveTenantsOfUser(userId);
 }
 
 /**
  * Lấy danh sách tenant IDs mà user được quản lý.
  */
 export async function getUserTenants(userId: string) {
-  const result = await query<{ tenant_id: string; tenant_name: string }>(
-    `SELECT ut.tenant_id, t.name AS tenant_name
-     FROM user_tenants ut
-     JOIN tenants t ON t.id = ut.tenant_id
-     WHERE ut.user_id = $1
-     ORDER BY t.name ASC`,
-    [userId],
-  );
-  return result.rows;
+  return tenantsRepository.selectUserTenants(userId);
 }
 
 /**
@@ -429,25 +298,20 @@ export async function setUserTenants(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantsRepository(client);
 
-    const user = await client.query<{ username: string }>(
-      'SELECT username FROM users WHERE id = $1 FOR UPDATE',
-      [userId],
-    );
-    if (user.rowCount === 0) throw new AppError('Người dùng không tồn tại', 404);
+    const user = await repository.lockUsername(userId);
+    if (!user) throw new AppError('Người dùng không tồn tại', 404);
 
     // Xóa tất cả assign cũ
-    await client.query('DELETE FROM user_tenants WHERE user_id = $1', [userId]);
+    await repository.deleteUserTenants(userId);
 
     // Insert mới
     for (const tid of tenantIds) {
-      await client.query(
-        'INSERT INTO user_tenants (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [userId, tid],
-      );
+      await repository.insertUserTenant(userId, tid);
     }
 
-    const auditEntry = createAuditEntry?.(user.rows[0]);
+    const auditEntry = createAuditEntry?.(user);
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
     await invalidateUserMembershipCaches([userId]);
@@ -464,18 +328,7 @@ export async function setUserTenants(
  * Lấy quota usage hiện tại của tenant — dùng cho UI hiển thị.
  */
 export async function getTenantQuotaUsage(tenantId: string) {
-  const result = await query<{
-    max_users: number | null;
-    max_courses: number | null;
-    current_users: string;
-    current_courses: string;
-  }>(
-    `SELECT t.max_users, t.max_courses,
-            (SELECT COUNT(*)::text FROM users WHERE tenant_id = $1) AS current_users,
-            (SELECT COUNT(*)::text FROM courses WHERE tenant_id = $1) AS current_courses
-     FROM tenants t WHERE t.id = $1`,
-    [tenantId],
-  );
+  const result = await tenantsRepository.selectCounts(tenantId);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
   const row = result.rows[0];
   const dataQuota = await getTenantDataQuota(tenantId);
@@ -505,23 +358,12 @@ export async function checkQuota(
   resource: 'users' | 'courses',
   client?: import('pg').PoolClient,
 ): Promise<void> {
-  const col = resource === 'users' ? 'max_users' : 'max_courses';
-  const table = resource === 'users' ? 'users' : 'courses';
-
   // Dùng subquery atomic — không cần lock nếu không truyền client
-  const q = client || { query: (sql: string, p: unknown[]) => query(sql, p) };
-  const result = await q.query(
-    `SELECT ${col} AS quota,
-            (SELECT COUNT(*) FROM ${table} WHERE tenant_id = $1) AS current_count
-     FROM tenants
-     WHERE id = $1
-     ${client ? 'FOR UPDATE' : ''}`,
-    [tenantId],
-  );
+  const rows = await createTenantsRepository(client || { query }).selectQuotaCount(resource, !!client, tenantId);
 
-  if (result.rows.length === 0) throw new AppError('Tenant không tồn tại', 404);
+  if (rows.length === 0) throw new AppError('Tenant không tồn tại', 404);
 
-  const { quota, current_count } = result.rows[0] as { quota: number | null; current_count: string };
+  const { quota, current_count } = rows[0];
   if (quota !== null && parseInt(current_count, 10) >= quota) {
     const label = resource === 'users' ? 'user' : 'course';
     throw new AppError(`Đã đạt mức giới hạn của ${label}`, 403);

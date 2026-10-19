@@ -2,6 +2,12 @@ import { query } from '../../config/database.js';
 import { deleteFiles, extractStoragePath, STORAGE_BUCKET } from '../../config/storage.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  createStorageManifestRepository,
+  type StorageItemRow,
+  type StorageManifestDb,
+  type StorageScanCursorRow,
+} from './storage-manifest.repository.js';
 
 export type DeletionJobKind = 'course' | 'user';
 
@@ -9,15 +15,7 @@ const STORAGE_DELETE_BATCH_SIZE = 100;
 const STORAGE_ITEM_LEASE_SECONDS = 10 * 60;
 const STORAGE_DISCOVERY_BATCH_SIZE = 500;
 
-type StorageItemRow = {
-  id: string;
-  storage_path: string;
-};
-
-type StorageScanCursorRow = {
-  last_storage_path: string | null;
-  completed_at: Date | null;
-};
+const manifestRepository = createStorageManifestRepository({ query } satisfies StorageManifestDb);
 
 /**
  * A course-outline move keeps the physical object key so it does not consume
@@ -92,14 +90,7 @@ export async function registerStorageManifestPaths(
     .filter((path): path is string => path !== null))];
   if (paths.length === 0) return 0;
 
-  const result = await query(
-    `INSERT INTO deletion_storage_items (job_kind, job_id, tenant_id, storage_path)
-     SELECT $1::varchar, $2::uuid, $3::uuid, path
-     FROM unnest($4::text[]) AS path
-     ON CONFLICT (job_kind, job_id, storage_path) DO NOTHING`,
-    [jobKind, jobId, tenantId, paths],
-  );
-  return result.rowCount || 0;
+  return manifestRepository.insertItems(jobKind, jobId, tenantId, paths);
 }
 
 async function getOrCreateStorageScanCursor(
@@ -108,19 +99,8 @@ async function getOrCreateStorageScanCursor(
   tenantId: string,
   prefix: string,
 ): Promise<StorageScanCursorRow> {
-  await query(
-    `INSERT INTO deletion_storage_scan_cursors (job_kind, job_id, tenant_id, prefix)
-     VALUES ($1::varchar, $2::uuid, $3::uuid, $4::text)
-     ON CONFLICT (job_kind, job_id, prefix) DO NOTHING`,
-    [jobKind, jobId, tenantId, prefix],
-  );
-  const result = await query<StorageScanCursorRow>(
-    `SELECT last_storage_path, completed_at
-     FROM deletion_storage_scan_cursors
-     WHERE job_kind = $1::varchar AND job_id = $2::uuid AND prefix = $3::text`,
-    [jobKind, jobId, prefix],
-  );
-  const cursor = result.rows[0];
+  await manifestRepository.ensureScanCursor(jobKind, jobId, tenantId, prefix);
+  const cursor = await manifestRepository.selectScanCursor(jobKind, jobId, prefix);
   if (!cursor) throw new Error('Unable to create durable storage scan cursor');
   return cursor;
 }
@@ -131,15 +111,7 @@ async function advanceStorageScanCursor(
   prefix: string,
   lastStoragePath: string,
 ): Promise<void> {
-  await query(
-    `UPDATE deletion_storage_scan_cursors
-     SET last_storage_path = $4::text, updated_at = now()
-     WHERE job_kind = $1::varchar
-       AND job_id = $2::uuid
-       AND prefix = $3::text
-       AND (last_storage_path IS NULL OR last_storage_path < $4::text)`,
-    [jobKind, jobId, prefix, lastStoragePath],
-  );
+  await manifestRepository.advanceScanCursor(jobKind, jobId, prefix, lastStoragePath);
 }
 
 async function markStorageScanCursorCompleted(
@@ -147,12 +119,7 @@ async function markStorageScanCursorCompleted(
   jobId: string,
   prefix: string,
 ): Promise<void> {
-  await query(
-    `UPDATE deletion_storage_scan_cursors
-     SET completed_at = now(), updated_at = now()
-     WHERE job_kind = $1::varchar AND job_id = $2::uuid AND prefix = $3::text`,
-    [jobKind, jobId, prefix],
-  );
+  await manifestRepository.completeScanCursor(jobKind, jobId, prefix);
 }
 
 /**
@@ -176,33 +143,14 @@ async function discoverStoragePrefixManifestPaths(
   let after = cursor.last_storage_path || '';
   let registered = 0;
   while (true) {
-    const result = await query<{ storage_path: string }>(
-      `SELECT storage_object.name AS storage_path
-       FROM storage.objects storage_object
-       WHERE storage_object.bucket_id = $1
-         AND storage_object.name LIKE $2 || '%'
-         AND ($3 = '' OR storage_object.name > $3)
-         AND (
-           $5::text IS NULL
-           OR NOT EXISTS (
-             SELECT 1
-             FROM course_assets asset
-             WHERE asset.tenant_id = $4::uuid
-               AND asset.course_id <> $5::text
-               AND asset.storage_path = storage_object.name
-           )
-         )
-       ORDER BY storage_object.name ASC
-       LIMIT $6::int`,
-      [
-        STORAGE_BUCKET,
-        scanPrefix,
-        after,
-        tenantId,
-        options.excludeCourseAssetReferencesForOtherCourses || null,
-        STORAGE_DISCOVERY_BATCH_SIZE,
-      ],
-    );
+    const result = await manifestRepository.selectStorageObjectPage({
+      bucket: STORAGE_BUCKET,
+      scanPrefix,
+      after,
+      tenantId,
+      excludeCourseId: options.excludeCourseAssetReferencesForOtherCourses || null,
+      limit: STORAGE_DISCOVERY_BATCH_SIZE,
+    });
     if (result.rowCount === 0) {
       await markStorageScanCursorCompleted(jobKind, jobId, cursorPrefix);
       return registered;
@@ -257,58 +205,18 @@ export async function registerUserAvatarStemManifestPaths(
 }
 
 async function claimStorageItems(jobKind: DeletionJobKind, jobId: string): Promise<StorageItemRow[]> {
-  const result = await query<StorageItemRow>(
-    `WITH expired AS (
-       UPDATE deletion_storage_items
-       SET status = 'pending', lease_expires_at = NULL, updated_at = now()
-       WHERE job_kind = $1::varchar
-         AND job_id = $2::uuid
-         AND status = 'running'
-         AND lease_expires_at < now()
-     ),
-     picked AS (
-       SELECT id
-       FROM deletion_storage_items
-       WHERE job_kind = $1::varchar
-         AND job_id = $2::uuid
-         AND status = 'pending'
-       ORDER BY id
-       LIMIT $3::int
-       FOR UPDATE SKIP LOCKED
-     )
-     UPDATE deletion_storage_items item
-     SET status = 'running',
-         attempts = item.attempts + 1,
-         lease_expires_at = now() + ($4::int * interval '1 second'),
-         updated_at = now(),
-         last_error = NULL
-     FROM picked
-     WHERE item.id = picked.id
-     RETURNING item.id, item.storage_path`,
-    [jobKind, jobId, STORAGE_DELETE_BATCH_SIZE, STORAGE_ITEM_LEASE_SECONDS],
-  );
-  return result.rows;
+  return manifestRepository.claimItems(jobKind, jobId, STORAGE_DELETE_BATCH_SIZE, STORAGE_ITEM_LEASE_SECONDS);
 }
 
 async function markStorageItemsSucceeded(ids: readonly string[]): Promise<void> {
   if (ids.length === 0) return;
-  await query(
-    `UPDATE deletion_storage_items
-     SET status = 'succeeded', lease_expires_at = NULL, last_error = NULL, updated_at = now()
-     WHERE id = ANY($1::uuid[])`,
-    [ids],
-  );
+  await manifestRepository.markItemsSucceeded(ids);
 }
 
 async function releaseStorageItems(ids: readonly string[], error: unknown): Promise<void> {
   if (ids.length === 0) return;
   const message = error instanceof Error ? error.message : String(error);
-  await query(
-    `UPDATE deletion_storage_items
-     SET status = 'pending', lease_expires_at = NULL, last_error = $2, updated_at = now()
-     WHERE id = ANY($1::uuid[])`,
-    [ids, message.slice(0, 4000)],
-  );
+  await manifestRepository.releaseItems(ids, message.slice(0, 4000));
 }
 
 /**
@@ -333,13 +241,5 @@ export async function deleteStorageManifest(jobKind: DeletionJobKind, jobId: str
 }
 
 export async function countUnfinishedStorageManifestItems(jobKind: DeletionJobKind, jobId: string): Promise<number> {
-  const result = await query<{ count: string }>(
-    `SELECT count(*)::text AS count
-     FROM deletion_storage_items
-     WHERE job_kind = $1::varchar
-       AND job_id = $2::uuid
-       AND status <> 'succeeded'`,
-    [jobKind, jobId],
-  );
-  return Number(result.rows[0]?.count || 0);
+  return Number((await manifestRepository.countUnfinished(jobKind, jobId)) || 0);
 }

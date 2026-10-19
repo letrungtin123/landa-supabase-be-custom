@@ -13,6 +13,9 @@ import { uploadFile, deleteFile, buildFileName } from '../../config/storage.js';
 import { AppError } from '../../utils/errors.js';
 import { SINGLE_IMAGE_KEYS, IMAGE_SIZE_HINTS, MAX_CAROUSEL } from './branding.validator.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import { createBrandingRepository, type BrandingDb } from './branding.repository.js';
+
+const brandingRepository = createBrandingRepository({ query } satisfies BrandingDb);
 
 // ── Types ──
 
@@ -45,10 +48,7 @@ interface BrandingResponse {
 
 /** Đọc branding config từ tenants.settings */
 async function readBrandingSettings(tenantId: string): Promise<BrandingConfig> {
-  const result = await query<{ settings: Record<string, unknown> }>(
-    'SELECT settings FROM tenants WHERE id = $1',
-    [tenantId],
-  );
+  const result = await brandingRepository.selectSettings(tenantId);
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
   const settings = result.rows[0].settings || {};
   return (settings as any).branding || {};
@@ -57,10 +57,7 @@ async function readBrandingSettings(tenantId: string): Promise<BrandingConfig> {
 /** Ghi branding config vào tenants.settings.branding */
 async function writeBrandingSettings(tenantId: string, branding: BrandingConfig): Promise<void> {
   // Sử dụng jsonb_set để chỉ cập nhật key 'branding' trong settings
-  await query(
-    `UPDATE tenants SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{branding}', $1::jsonb) WHERE id = $2`,
-    [JSON.stringify(branding), tenantId],
-  );
+  await brandingRepository.writeBranding(tenantId, JSON.stringify(branding));
 }
 
 // ── Public API ──
@@ -76,14 +73,7 @@ export async function getBrandingByDomain(domain: string): Promise<BrandingRespo
     cacheKeys.publicDomain(normalizedDomain, 'branding', version),
     CACHE_TTL.publicConfig,
     async () => {
-      const result = await query<{ id: string; name: string; domain_admin: string | null; domain_learner: string | null; settings: Record<string, unknown> }>(
-        `SELECT id, name, domain_admin, domain_learner, settings FROM tenants
-         WHERE (
-           regexp_replace(regexp_replace(domain_learner, '^https?://', ''), ':[0-9]+$', '') = $1
-           OR regexp_replace(regexp_replace(domain_admin, '^https?://', ''), ':[0-9]+$', '') = $1
-         ) AND is_active = true`,
-        [normalizedDomain],
-      );
+      const result = await brandingRepository.selectBrandingTenantByDomain(normalizedDomain);
 
       if (result.rowCount === 0) return null;
 
@@ -108,10 +98,7 @@ export async function getBrandingByTenantId(tenantId: string): Promise<BrandingR
 }
 
 async function getBrandingByTenantIdFromDb(tenantId: string): Promise<BrandingResponse> {
-  const result = await query<{ id: string; name: string; domain_admin: string | null; domain_learner: string | null; settings: Record<string, unknown> }>(
-    'SELECT id, name, domain_admin, domain_learner, settings FROM tenants WHERE id = $1',
-    [tenantId],
-  );
+  const result = await brandingRepository.selectBrandingTenant(tenantId);
 
   if (result.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
 
@@ -147,10 +134,8 @@ export async function uploadBrandingImage(
   let pathsToDelete: string[] = [];
   try {
     await client.query('BEGIN');
-    const tenant = await client.query<{ settings: Record<string, unknown> }>(
-      'SELECT settings FROM tenants WHERE id = $1 FOR UPDATE',
-      [tenantId],
-    );
+    const repository = createBrandingRepository(client);
+    const tenant = await repository.lockSettings(tenantId);
     if (tenant.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
     const branding = ((tenant.rows[0].settings || {}) as { branding?: BrandingConfig }).branding || {};
 
@@ -166,12 +151,7 @@ export async function uploadBrandingImage(
       branding[imageKey] = storagePath;
     }
 
-    await client.query(
-      `UPDATE tenants
-       SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{branding}', $1::jsonb), updated_at = now()
-       WHERE id = $2`,
-      [JSON.stringify(branding), tenantId],
-    );
+    await repository.updateBranding(tenantId, JSON.stringify(branding));
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {
@@ -206,10 +186,8 @@ export async function deleteBrandingImage(
   let pathsToDelete: string[] = [];
   try {
     await client.query('BEGIN');
-    const tenant = await client.query<{ settings: Record<string, unknown> }>(
-      'SELECT settings FROM tenants WHERE id = $1 FOR UPDATE',
-      [tenantId],
-    );
+    const repository = createBrandingRepository(client);
+    const tenant = await repository.lockSettings(tenantId);
     if (tenant.rowCount === 0) throw new AppError('Tenant không tồn tại', 404);
     const branding = ((tenant.rows[0].settings || {}) as { branding?: BrandingConfig }).branding || {};
 
@@ -225,12 +203,7 @@ export async function deleteBrandingImage(
       delete branding[imageKey];
     }
 
-    await client.query(
-      `UPDATE tenants
-       SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), '{branding}', $1::jsonb), updated_at = now()
-       WHERE id = $2`,
-      [JSON.stringify(branding), tenantId],
-    );
+    await repository.updateBranding(tenantId, JSON.stringify(branding));
     if (auditEntry) await appendAuditLog(client, auditEntry);
     await client.query('COMMIT');
   } catch (error) {

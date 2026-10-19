@@ -21,6 +21,12 @@ import {
   assertUserNotActiveDemoIframeAccount,
   getActiveDemoIframeUserIds,
 } from '../demo-login/demo-iframe.service.js';
+import {
+  createPermissionsRepository,
+  type MemberSnapshotRow,
+  type PermissionGroupRow,
+  type PermissionsDb,
+} from './permissions.repository.js';
 
 const PROTECTED_MODULE_CODE = 'permission_groups';
 
@@ -32,19 +38,11 @@ type MatrixInput = {
   can_delete: boolean;
 };
 
-interface LockedGroup {
-  id: string;
-  name: string;
-  description: string | null;
-}
+type LockedGroup = PermissionGroupRow;
 
-interface MemberSnapshot {
-  id: string;
-  username: string;
-  full_name: string | null;
-  email: string | null;
-  role: string | null;
-}
+type MemberSnapshot = MemberSnapshotRow;
+
+const permissionsRepository = createPermissionsRepository({ query } satisfies PermissionsDb);
 
 function groupState(group: LockedGroup, matrix: PermissionGroupStateSnapshot['matrix']): PermissionGroupStateSnapshot {
   return {
@@ -62,58 +60,17 @@ function uniqueIds(ids: string[]): string[] {
 }
 
 async function lockGroup(client: PoolClient, groupId: string, tenantId: string): Promise<LockedGroup> {
-  const result = await client.query<LockedGroup>(
-    `SELECT id, name, description
-     FROM permission_groups
-     WHERE id = $1::uuid AND tenant_id = $2::uuid
-     FOR UPDATE`,
-    [groupId, tenantId],
-  );
+  const result = await createPermissionsRepository(client).lockGroup(groupId, tenantId);
   if (result.rowCount === 0) throw new AppError('Nhóm quyền không tồn tại', 404);
   return result.rows[0];
 }
 
 async function getMatrixSnapshot(client: PoolClient, groupId: string, tenantId: string): Promise<PermissionGroupStateSnapshot['matrix']> {
-  const result = await client.query<PermissionGroupStateSnapshot['matrix'][number]>(
-    `SELECT m.code AS module_code,
-            m.name AS module_name,
-            m.icon AS module_icon,
-            COALESCE(pgm.can_view, false) AS can_view,
-            COALESCE(pgm.can_add, false) AS can_add,
-            COALESCE(pgm.can_edit, false) AS can_edit,
-            COALESCE(pgm.can_delete, false) AS can_delete
-     FROM modules m
-     JOIN tenant_modules tm
-       ON tm.module_id = m.id
-      AND tm.tenant_id = $2::uuid
-      AND tm.is_enabled = true
-     LEFT JOIN permission_group_modules pgm
-       ON pgm.permission_group_id = $1::uuid
-      AND pgm.module_id = m.id
-      AND pgm.tenant_id = $2::uuid
-     WHERE m.is_active = true
-       AND m.code <> $3
-     ORDER BY m.sort_order ASC, m.code ASC`,
-    [groupId, tenantId, PROTECTED_MODULE_CODE],
-  );
-  return result.rows;
+  return createPermissionsRepository(client).selectMatrixSnapshot(groupId, tenantId, PROTECTED_MODULE_CODE);
 }
 
 async function getMembersSnapshot(client: PoolClient, groupId: string, tenantId: string): Promise<MemberSnapshot[]> {
-  const result = await client.query<MemberSnapshot>(
-    `SELECT u.id, u.username,
-            NULLIF(btrim(u.full_name), '') AS full_name,
-            NULLIF(lower(btrim(u.email)), '') AS email,
-            u.role
-     FROM user_permission_groups upg
-     JOIN users u ON u.id = upg.user_id
-     WHERE upg.permission_group_id = $1::uuid
-       AND upg.tenant_id = $2::uuid
-       AND u.tenant_id = $2::uuid
-     ORDER BY u.id ASC`,
-    [groupId, tenantId],
-  );
-  return result.rows;
+  return createPermissionsRepository(client).selectMembersSnapshot(groupId, tenantId);
 }
 
 async function getStateSnapshot(client: PoolClient, group: LockedGroup, tenantId: string): Promise<PermissionGroupStateSnapshot> {
@@ -130,47 +87,14 @@ async function assertCompleteEditableMatrix(client: PoolClient, tenantId: string
     throw new AppError('Không thể cấu hình quyền cho tính năng Nhóm quyền', 403);
   }
 
-  const available = await client.query<{ code: string }>(
-    `SELECT m.code
-     FROM modules m
-     JOIN tenant_modules tm ON tm.module_id = m.id
-     WHERE tm.tenant_id = $1::uuid
-       AND tm.is_enabled = true
-       AND m.is_active = true
-       AND m.code <> $2
-     ORDER BY m.code ASC`,
-    [tenantId, PROTECTED_MODULE_CODE],
-  );
-  const availableCodes = new Set(available.rows.map((row) => row.code));
+  const availableCodes = new Set(await createPermissionsRepository(client).selectEditableModuleCodes(tenantId, PROTECTED_MODULE_CODE));
   if (availableCodes.size !== uniqueCodes.size || Array.from(uniqueCodes).some((code) => !availableCodes.has(code))) {
     throw new AppError('Ma trận phải bao gồm chính xác các tính năng đang bật của doanh nghiệp', 400);
   }
 }
 
 async function applyMatrix(client: PoolClient, groupId: string, tenantId: string, permissions: MatrixInput[]): Promise<void> {
-  await client.query(
-    `INSERT INTO permission_group_modules (
-       permission_group_id, module_id, tenant_id,
-       can_view, can_add, can_edit, can_delete
-     )
-     SELECT $1::uuid, m.id, $2::uuid,
-            p.can_view, p.can_add, p.can_edit, p.can_delete
-     FROM jsonb_to_recordset($3::jsonb) AS p(
-       module_code text,
-       can_view boolean,
-       can_add boolean,
-       can_edit boolean,
-       can_delete boolean
-     )
-     JOIN modules m ON m.code = p.module_code
-     ON CONFLICT (permission_group_id, module_id) DO UPDATE
-       SET can_view = EXCLUDED.can_view,
-           can_add = EXCLUDED.can_add,
-           can_edit = EXCLUDED.can_edit,
-           can_delete = EXCLUDED.can_delete,
-           tenant_id = EXCLUDED.tenant_id`,
-    [groupId, tenantId, JSON.stringify(permissions)],
-  );
+  await createPermissionsRepository(client).upsertMatrix(groupId, tenantId, JSON.stringify(permissions));
 }
 
 async function ensureDemoUsersAreUnlocked(userIds: string[]): Promise<void> {
@@ -189,15 +113,7 @@ async function ensureDemoUsersAreUnlocked(userIds: string[]): Promise<void> {
 async function lockMembershipUsers(client: PoolClient, userIds: string[]): Promise<void> {
   const ids = uniqueIds(userIds).sort();
   if (ids.length === 0) return;
-  await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended(user_id::text, 20260911))
-     FROM (
-       SELECT user_id
-       FROM unnest($1::uuid[]) AS u(user_id)
-       ORDER BY user_id
-     ) ordered_users`,
-    [ids],
-  );
+  await createPermissionsRepository(client).lockMembershipUsers(ids);
 }
 
 async function applyMemberChanges(
@@ -213,36 +129,14 @@ async function applyMemberChanges(
     throw new AppError('Một thành viên không thể vừa được thêm vừa bị xóa trong cùng lần lưu', 400);
   }
 
+  const repository = createPermissionsRepository(client);
   const participants: PermissionGroupHistoryParticipant[] = [];
   if (removeIds.length > 0) {
-    const membersToRemove = await client.query<MemberSnapshot>(
-      `SELECT u.id, u.username,
-              NULLIF(btrim(u.full_name), '') AS full_name,
-              NULLIF(lower(btrim(u.email)), '') AS email,
-              u.role
-       FROM user_permission_groups upg
-       JOIN users u ON u.id = upg.user_id
-       WHERE upg.permission_group_id = $1::uuid
-         AND upg.tenant_id = $2::uuid
-         AND u.tenant_id = $2::uuid
-         AND u.id = ANY($3::uuid[])
-       ORDER BY u.id ASC
-       FOR UPDATE`,
-      [group.id, tenantId, removeIds],
-    );
+    const membersToRemove = await repository.lockGroupMembers(group.id, tenantId, removeIds);
     if (membersToRemove.rowCount !== removeIds.length) {
       throw new AppError('Có thành viên không thuộc nhóm quyền này', 404);
     }
-    await client.query(
-      `DELETE FROM user_permission_groups upg
-       USING permission_groups pg
-       WHERE upg.permission_group_id = pg.id
-         AND upg.permission_group_id = $1::uuid
-         AND upg.tenant_id = $2::uuid
-         AND pg.tenant_id = $2::uuid
-         AND upg.user_id = ANY($3::uuid[])`,
-      [group.id, tenantId, removeIds],
-    );
+    await repository.deleteGroupMembers(group.id, tenantId, removeIds);
     participants.push(...membersToRemove.rows.map((member) => ({
       user_id: member.id,
       username: member.username,
@@ -256,52 +150,15 @@ async function applyMemberChanges(
   }
 
   if (addIds.length > 0) {
-    const eligibleUsers = await client.query<MemberSnapshot & { previous_group_id: string | null; previous_group_name: string | null }>(
-      `SELECT u.id, u.username,
-              NULLIF(btrim(u.full_name), '') AS full_name,
-              NULLIF(lower(btrim(u.email)), '') AS email,
-              u.role,
-              current_group.permission_group_id AS previous_group_id,
-              current_group.name AS previous_group_name
-       FROM users u
-       LEFT JOIN LATERAL (
-         SELECT upg.permission_group_id, pg.name
-         FROM user_permission_groups upg
-         JOIN permission_groups pg ON pg.id = upg.permission_group_id
-         WHERE upg.user_id = u.id
-           AND upg.tenant_id = $2::uuid
-           AND pg.tenant_id = $2::uuid
-         ORDER BY upg.created_at DESC, upg.id DESC
-         LIMIT 1
-       ) current_group ON true
-       WHERE u.id = ANY($1::uuid[])
-         AND u.tenant_id = $2::uuid
-         AND u.role IN ('staff', 'learner_plus')
-       ORDER BY u.id ASC
-       FOR UPDATE OF u`,
-      [addIds, tenantId],
-    );
+    const eligibleUsers = await repository.lockEligibleUsers(addIds, tenantId);
     if (eligibleUsers.rowCount !== addIds.length) {
       throw new AppError('Có thành viên không hợp lệ hoặc không thuộc doanh nghiệp hiện tại', 404);
     }
     const usersToAssign = eligibleUsers.rows.filter((member) => member.previous_group_id !== group.id);
     if (usersToAssign.length > 0) {
       const idsToAssign = usersToAssign.map((member) => member.id);
-      await client.query(
-        `DELETE FROM user_permission_groups upg
-         USING permission_groups pg
-         WHERE upg.permission_group_id = pg.id
-           AND upg.tenant_id = $2::uuid
-           AND pg.tenant_id = $2::uuid
-           AND upg.user_id = ANY($1::uuid[])`,
-        [idsToAssign, tenantId],
-      );
-      await client.query(
-        `INSERT INTO user_permission_groups (user_id, permission_group_id, tenant_id)
-         SELECT user_id, $2::uuid, $3::uuid
-         FROM unnest($1::uuid[]) AS user_id`,
-        [idsToAssign, group.id, tenantId],
-      );
+      await repository.deleteMemberships(idsToAssign, tenantId);
+      await repository.insertMemberships(idsToAssign, group.id, tenantId);
       participants.push(...usersToAssign.map((member) => ({
         user_id: member.id,
         username: member.username,
@@ -321,82 +178,32 @@ async function applyMemberChanges(
 export async function listPermGroups(tenantId: string | null, queryParams: Record<string, unknown>) {
   const { page, pageSize, search } = parsePagination(queryParams);
   const offset = calcOffset(page, pageSize);
-  const params: unknown[] = [];
-  const conditions: string[] = [];
-  if (tenantId) {
-    params.push(tenantId);
-    conditions.push(`pg.tenant_id = $${params.length}::uuid`);
-  }
-  if (search) {
-    params.push(`%${search}%`);
-    conditions.push(`(pg.name ILIKE $${params.length} OR pg.description ILIKE $${params.length})`);
-  }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const [countResult, dataResult] = await Promise.all([
-    query<{ count: string }>(`SELECT COUNT(*) AS count FROM permission_groups pg ${where}`, params),
-    query(
-      `SELECT pg.id, pg.name, pg.description, pg.tenant_id, pg.created_at, pg.updated_at,
-              t.name AS tenant_name,
-              (SELECT COUNT(*) FROM user_permission_groups upg WHERE upg.permission_group_id = pg.id AND upg.tenant_id = pg.tenant_id) AS member_count
-       FROM permission_groups pg
-       LEFT JOIN tenants t ON t.id = pg.tenant_id
-       ${where}
-       ORDER BY pg.created_at DESC, pg.id DESC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, pageSize, offset],
-    ),
+  const filter = { tenantId, search };
+  const [count, data] = await Promise.all([
+    permissionsRepository.countGroups(filter),
+    permissionsRepository.selectGroupPage(filter, pageSize, offset),
   ]);
-  const total = Number.parseInt(countResult.rows[0].count, 10);
-  return { data: dataResult.rows, total, page, pageSize, totalPages: calcTotalPages(total, pageSize) };
+  const total = Number.parseInt(count, 10);
+  return { data, total, page, pageSize, totalPages: calcTotalPages(total, pageSize) };
 }
 
 /** Chi tiết nhóm + ma trận current, tuyệt đối không trả module Nhóm quyền. */
 export async function getPermGroupById(groupId: string, tenantId: string) {
-  const groupResult = await query<LockedGroup & { tenant_id: string; tenant_name: string | null; created_at: string; updated_at: string }>(
-    `SELECT pg.id, pg.name, pg.description, pg.tenant_id, t.name AS tenant_name, pg.created_at, pg.updated_at
-     FROM permission_groups pg
-     LEFT JOIN tenants t ON t.id = pg.tenant_id
-     WHERE pg.id = $1::uuid AND pg.tenant_id = $2::uuid`,
-    [groupId, tenantId],
-  );
+  const groupResult = await permissionsRepository.selectGroup(groupId, tenantId);
   if (groupResult.rowCount === 0) throw new AppError('Nhóm quyền không tồn tại', 404);
   const [permissions, members] = await Promise.all([
-    query(
-      `SELECT m.id AS module_id, m.code, m.name, m.icon, m.sort_order,
-              COALESCE(pgm.can_view, false) AS can_view,
-              COALESCE(pgm.can_add, false) AS can_add,
-              COALESCE(pgm.can_edit, false) AS can_edit,
-              COALESCE(pgm.can_delete, false) AS can_delete
-       FROM modules m
-       JOIN tenant_modules tm ON tm.module_id = m.id AND tm.tenant_id = $2::uuid AND tm.is_enabled = true
-       LEFT JOIN permission_group_modules pgm ON pgm.module_id = m.id AND pgm.permission_group_id = $1::uuid AND pgm.tenant_id = $2::uuid
-       WHERE m.is_active = true AND m.code <> $3
-       ORDER BY m.sort_order ASC, m.code ASC`,
-      [groupId, tenantId, PROTECTED_MODULE_CODE],
-    ),
-    query(
-      `SELECT u.id, u.username, u.email, u.full_name, u.avatar_url
-       FROM user_permission_groups upg
-       JOIN users u ON u.id = upg.user_id
-       WHERE upg.permission_group_id = $1::uuid AND upg.tenant_id = $2::uuid AND u.tenant_id = $2::uuid
-       ORDER BY u.username ASC, u.id ASC`,
-      [groupId, tenantId],
-    ),
+    permissionsRepository.selectGroupPermissions(groupId, tenantId, PROTECTED_MODULE_CODE),
+    permissionsRepository.selectGroupMembers(groupId, tenantId),
   ]);
-  return { ...groupResult.rows[0], permissions: permissions.rows, members: members.rows };
+  return { ...groupResult.rows[0], permissions, members };
 }
 
 export async function createPermGroup(tenantId: string, input: CreatePermGroupInput, actor: PermissionGroupHistoryActor) {
   return withDatabaseTransaction(async (client) => {
-    const existing = await client.query('SELECT id FROM permission_groups WHERE tenant_id = $1::uuid AND name = $2', [tenantId, input.name]);
-    if (existing.rowCount && existing.rowCount > 0) throw new AppError('Tên nhóm quyền đã tồn tại trong doanh nghiệp này', 409);
-    const result = await client.query<LockedGroup & { tenant_id: string }>(
-      `INSERT INTO permission_groups (tenant_id, name, description)
-       VALUES ($1::uuid, $2, $3)
-       RETURNING id, name, description, tenant_id`,
-      [tenantId, input.name, input.description || ''],
-    );
-    const created = result.rows[0];
+    const repository = createPermissionsRepository(client);
+    const existing = await repository.nameTaken(tenantId, input.name);
+    if (existing && existing > 0) throw new AppError('Tên nhóm quyền đã tồn tại trong doanh nghiệp này', 409);
+    const created = await repository.insertGroup(tenantId, input.name, input.description || '');
     await appendPermissionGroupHistory(client, { tenantId, groupId: created.id, groupName: created.name, action: 'created', actor, afterState: await getStateSnapshot(client, created, tenantId) });
     return created;
   });
@@ -410,16 +217,10 @@ export async function updatePermGroup(groupId: string, tenantId: string, input: 
     const description = input.description === undefined ? beforeGroup.description || '' : input.description;
     if (name === beforeGroup.name && description === (beforeGroup.description || '')) return beforeGroup;
     if (name !== beforeGroup.name) {
-      const duplicate = await client.query('SELECT id FROM permission_groups WHERE tenant_id = $1::uuid AND name = $2 AND id <> $3::uuid', [tenantId, name, groupId]);
-      if (duplicate.rowCount && duplicate.rowCount > 0) throw new AppError('Tên nhóm quyền đã tồn tại trong doanh nghiệp này', 409);
+      const duplicate = await createPermissionsRepository(client).nameTakenByOther(tenantId, name, groupId);
+      if (duplicate && duplicate > 0) throw new AppError('Tên nhóm quyền đã tồn tại trong doanh nghiệp này', 409);
     }
-    const updated = await client.query<LockedGroup>(
-      `UPDATE permission_groups SET name = $1, description = $2
-       WHERE id = $3::uuid AND tenant_id = $4::uuid
-       RETURNING id, name, description`,
-      [name, description, groupId, tenantId],
-    );
-    const afterGroup = updated.rows[0];
+    const afterGroup = await createPermissionsRepository(client).updateGroup(groupId, tenantId, name, description);
     await appendPermissionGroupHistory(client, {
       tenantId, groupId, groupName: afterGroup.name, action: 'updated', actor,
       beforeState, afterState: await getStateSnapshot(client, afterGroup, tenantId),
@@ -432,7 +233,7 @@ export async function deletePermGroup(groupId: string, tenantId: string, actor: 
   return withDatabaseTransaction(async (client) => {
     const group = await lockGroup(client, groupId, tenantId);
     const beforeState = await getStateSnapshot(client, group, tenantId);
-    await client.query('DELETE FROM permission_groups WHERE id = $1::uuid AND tenant_id = $2::uuid', [groupId, tenantId]);
+    await createPermissionsRepository(client).deleteGroup(groupId, tenantId);
     await appendPermissionGroupHistory(client, {
       tenantId, groupId, groupName: group.name, action: 'deleted', actor, beforeState,
     });
@@ -551,19 +352,9 @@ export async function replaceUserPermissionGroup(
 ) {
   return withDatabaseTransaction(async (client) => {
     await lockMembershipUsers(client, [userId]);
+    const repository = createPermissionsRepository(client);
 
-    const userResult = await client.query<MemberSnapshot>(
-      `SELECT id, username,
-              NULLIF(btrim(full_name), '') AS full_name,
-              NULLIF(lower(btrim(email)), '') AS email,
-              role
-       FROM users
-       WHERE id = $1::uuid
-         AND tenant_id = $2::uuid
-         AND deletion_requested_at IS NULL
-       FOR UPDATE`,
-      [userId, tenantId],
-    );
+    const userResult = await repository.lockTenantUser(userId, tenantId);
     if (userResult.rowCount === 0) {
       throw new AppError('Thành viên không tồn tại trong doanh nghiệp hiện tại', 404);
     }
@@ -573,17 +364,7 @@ export async function replaceUserPermissionGroup(
     }
     await assertUserNotActiveDemoIframeAccount(userId, 'Không thể cập nhật nhóm quyền cho học viên demo đang hoạt động');
 
-    const currentResult = await client.query<LockedGroup>(
-      `SELECT pg.id, pg.name, pg.description
-       FROM user_permission_groups upg
-       JOIN permission_groups pg ON pg.id = upg.permission_group_id
-       WHERE upg.user_id = $1::uuid
-         AND upg.tenant_id = $2::uuid
-         AND pg.tenant_id = $2::uuid
-       ORDER BY upg.created_at DESC, upg.id DESC
-       FOR UPDATE`,
-      [userId, tenantId],
-    );
+    const currentResult = await repository.lockCurrentGroups(userId, tenantId);
     if ((currentResult.rowCount || 0) > 1) {
       throw new AppError('Dữ liệu nhóm quyền của thành viên không hợp lệ, vui lòng liên hệ quản trị viên', 409);
     }
@@ -616,20 +397,10 @@ export async function replaceUserPermissionGroup(
       : null;
 
     if (currentGroup) {
-      await client.query(
-        `DELETE FROM user_permission_groups
-         WHERE user_id = $1::uuid
-           AND permission_group_id = $2::uuid
-           AND tenant_id = $3::uuid`,
-        [userId, currentGroup.id, tenantId],
-      );
+      await repository.deleteMembership(userId, currentGroup.id, tenantId);
     }
     if (targetGroup) {
-      await client.query(
-        `INSERT INTO user_permission_groups (user_id, permission_group_id, tenant_id)
-         VALUES ($1::uuid, $2::uuid, $3::uuid)`,
-        [userId, targetGroup.id, tenantId],
-      );
+      await repository.insertMembership(userId, targetGroup.id, tenantId);
     }
 
     if (currentGroup && previousState) {

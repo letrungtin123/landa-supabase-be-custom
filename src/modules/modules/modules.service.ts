@@ -7,6 +7,9 @@ import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../utils/errors.js';
 import type { CreateModuleInput, UpdateModuleInput } from './modules.validator.js';
+import { createModulesRepository, type ModulesDb } from './modules.repository.js';
+
+const modulesRepository = createModulesRepository({ query } satisfies ModulesDb);
 
 /**
  * Danh sách tất cả modules (không phân trang vì số lượng ít).
@@ -21,28 +24,25 @@ export async function listModules() {
 }
 
 async function listModulesFromDb() {
-  const result = await query(
-    'SELECT id, code, name, description, icon, sort_order, is_active, created_at FROM modules ORDER BY sort_order',
-  );
-  return result.rows;
+  return modulesRepository.selectAll();
 }
 
 /**
  * Tạo module mới (superadmin only).
  */
 export async function createModule(input: CreateModuleInput) {
-  const existing = await query('SELECT id FROM modules WHERE code = $1', [input.code]);
-  if (existing.rowCount! > 0) throw new AppError('Module code đã tồn tại', 409);
+  if (await modulesRepository.codeExists(input.code)) throw new AppError('Module code đã tồn tại', 409);
 
-  const result = await query(
-    `INSERT INTO modules (code, name, description, icon, sort_order)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, code, name, icon, sort_order`,
-    [input.code, input.name, input.description || '', input.icon || '', input.sort_order || 0],
-  );
+  const created = await modulesRepository.insert({
+    code: input.code,
+    name: input.name,
+    description: input.description || '',
+    icon: input.icon || '',
+    sortOrder: input.sort_order || 0,
+  });
   await bumpCacheVersion(...cacheVersions.modules());
 
-  return result.rows[0];
+  return created;
 }
 
 /**
@@ -55,28 +55,11 @@ export async function updateModule(moduleId: string, input: UpdateModuleInput) {
 }
 
 async function updateModuleFromDb(moduleId: string, input: UpdateModuleInput) {
-  const before = await query<{ name: string; sort_order: number; is_active: boolean }>(
-    'SELECT name, sort_order, is_active FROM modules WHERE id = $1 FOR UPDATE',
-    [moduleId],
-  );
+  const before = await modulesRepository.lockSnapshot(moduleId);
   if (before.rowCount === 0) throw new AppError('Module không tồn tại', 404);
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
 
-  if (input.name !== undefined) { sets.push(`name = $${idx++}`); params.push(input.name); }
-  if (input.description !== undefined) { sets.push(`description = $${idx++}`); params.push(input.description); }
-  if (input.icon !== undefined) { sets.push(`icon = $${idx++}`); params.push(input.icon); }
-  if (input.sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); params.push(input.sort_order); }
-  if (input.is_active !== undefined) { sets.push(`is_active = $${idx++}`); params.push(input.is_active); }
-
-  if (sets.length === 0) throw new AppError('Không có dữ liệu cần cập nhật', 400);
-
-  params.push(moduleId);
-  const result = await query(
-    `UPDATE modules SET ${sets.join(', ')} WHERE id = $${idx} RETURNING id, code, name, icon, sort_order, is_active`,
-    params,
-  );
+  const result = await modulesRepository.update(moduleId, input);
+  if (!result) throw new AppError('Không có dữ liệu cần cập nhật', 400);
 
   if (result.rowCount === 0) throw new AppError('Module không tồn tại', 404);
   return { ...result.rows[0], previous: before.rows[0] };

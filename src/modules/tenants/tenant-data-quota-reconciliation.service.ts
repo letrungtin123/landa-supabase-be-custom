@@ -11,6 +11,12 @@ import { getClient, query } from '../../config/database.js';
 import { TENANT_STORAGE_BUCKETS } from '../../config/storage.js';
 import { RFC_UUID_PATTERN } from '../../utils/uuid.js';
 import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  createTenantDataQuotaReconciliationRepository,
+  type ReconciliationClaimRow,
+  type StorageObjectRow,
+  type TenantDataQuotaReconciliationDb,
+} from './tenant-data-quota-reconciliation.repository.js';
 
 const MAX_BIGINT = 9223372036854775807n;
 const MINIMUM_SLICE_LEASE_GUARD_MS = 30_000;
@@ -54,19 +60,12 @@ export type TenantDataQuotaReconciliationOptions = {
 
 export type TenantDataQuotaReconciliationResult = 'completed' | 'yielded' | 'skipped';
 
-type ClaimRow = {
-  claimed: boolean;
-  retry_at: Date | null;
-  quota_state: string;
-  storage_scan_cursor: string | null;
-  scanned_object_count: string;
-};
+type ClaimRow = ReconciliationClaimRow;
 
-type StorageObject = {
-  bucket_id: string;
-  name: string;
-  size_bytes: string | null;
-};
+type StorageObject = StorageObjectRow;
+
+/** Statements on the pool. */
+const repository = createTenantDataQuotaReconciliationRepository({ query } satisfies TenantDataQuotaReconciliationDb);
 
 class ReconciliationClaimLostError extends Error {
   constructor(tenantId: string) {
@@ -180,16 +179,7 @@ export function assertTenantDataQuotaReconciliationOptions(
  * lease-less reconciliation interface.
  */
 export async function isTenantDataQuotaReconciliationSchemaReady(): Promise<boolean> {
-  const result = await query<{ ready: boolean }>(
-    `SELECT to_regprocedure('public.tenant_data_quota_list_reconciliation_candidates(integer)') IS NOT NULL
-         AND to_regprocedure('public.tenant_data_quota_claim_reconciliation(uuid,uuid,integer)') IS NOT NULL
-         AND to_regprocedure('public.tenant_data_quota_finish_reconciliation(uuid,uuid)') IS NOT NULL
-         AND to_regclass('public.tenant_data_quota_reconciliation_queue') IS NOT NULL
-         AND to_regprocedure('public.tenant_data_quota_prepare_reconciliation_finalization(uuid,uuid,integer)') IS NOT NULL
-         AND to_regprocedure('public.tenant_data_quota_finish_reconciliation(uuid,uuid,integer)') IS NOT NULL
-         AS ready`,
-  );
-  return result.rows[0]?.ready === true;
+  return repository.isSchemaReady();
 }
 
 /**
@@ -201,30 +191,20 @@ export async function isTenantDataQuotaReconciliationSchemaReady(): Promise<bool
 export async function recordTenantDataQuotaWorkerHeartbeat(
   heartbeat: TenantDataQuotaWorkerHeartbeat,
 ): Promise<void> {
-  await query(
-    `SELECT public.tenant_data_quota_record_worker_heartbeat(
-       $1::text, $2::uuid, $3::text, $4::integer, $5::integer,
-       $6::integer, $7::integer, $8::text
-     )`,
-    [
-      heartbeat.workerName,
-      heartbeat.instanceId,
-      heartbeat.state,
-      heartbeat.candidates,
-      heartbeat.completed,
-      heartbeat.yielded,
-      heartbeat.failed,
-      heartbeat.lastError ? heartbeat.lastError.slice(0, 4_000) : null,
-    ],
-  );
+  await repository.recordHeartbeat({
+    workerName: heartbeat.workerName,
+    instanceId: heartbeat.instanceId,
+    state: heartbeat.state,
+    candidates: heartbeat.candidates,
+    completed: heartbeat.completed,
+    yielded: heartbeat.yielded,
+    failed: heartbeat.failed,
+    lastError: heartbeat.lastError ? heartbeat.lastError.slice(0, 4_000) : null,
+  });
 }
 
 export async function listTenantDataQuotaReconciliationCandidates(limit: number): Promise<string[]> {
-  const result = await query<{ tenant_id: string }>(
-    'SELECT tenant_id FROM public.tenant_data_quota_list_reconciliation_candidates($1::integer)',
-    [limit],
-  );
-  return result.rows.map((row) => row.tenant_id);
+  return repository.listCandidates(limit);
 }
 
 async function claimTenant(
@@ -232,12 +212,7 @@ async function claimTenant(
   claimToken: string,
   leaseSeconds: number,
 ): Promise<ClaimRow | null> {
-  const result = await query<ClaimRow>(
-    `SELECT claimed, retry_at, quota_state, storage_scan_cursor, scanned_object_count
-       FROM public.tenant_data_quota_claim_reconciliation($1::uuid, $2::uuid, $3::integer)`,
-    [tenantId, claimToken, leaseSeconds],
-  );
-  return result.rows[0] || null;
+  return repository.claim(tenantId, claimToken, leaseSeconds);
 }
 
 async function writeStoragePage(
@@ -253,30 +228,16 @@ async function writeStoragePage(
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO tenant_storage_quota_objects (tenant_id, storage_path, size_bytes)
-       SELECT $1::uuid, input.storage_path, input.size_bytes
-       FROM unnest($2::text[], $3::bigint[]) AS input(storage_path, size_bytes)
-       ON CONFLICT (tenant_id, storage_path)
-       DO UPDATE SET size_bytes = EXCLUDED.size_bytes, updated_at = now()`,
-      [tenantId, storagePaths, sizes],
-    );
-    const leaseUpdate = await client.query(
-      `UPDATE tenant_data_quota_reconciliation_runs
-       SET storage_scan_cursor = $3,
-           scanned_object_count = scanned_object_count + $4::bigint,
-           status = 'running',
-           lease_expires_at = clock_timestamp() + ($5::integer * interval '1 second'),
-           heartbeat_at = clock_timestamp(),
-           last_error = NULL,
-           updated_at = clock_timestamp()
-       WHERE tenant_id = $1::uuid
-         AND claim_token = $2::uuid
-         AND lease_expires_at > clock_timestamp()
-       RETURNING tenant_id`,
-      [tenantId, claimToken, cursor, objects.length, leaseSeconds],
-    );
-    if (leaseUpdate.rowCount !== 1) throw new ReconciliationClaimLostError(tenantId);
+    const transaction = createTenantDataQuotaReconciliationRepository(client);
+    await transaction.upsertObjectSizes(tenantId, storagePaths, sizes);
+    const renewed = await transaction.renewLease({
+      tenantId,
+      claimToken,
+      cursor,
+      objectCount: objects.length,
+      leaseSeconds,
+    });
+    if (renewed !== 1) throw new ReconciliationClaimLostError(tenantId);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
@@ -287,10 +248,7 @@ async function writeStoragePage(
 }
 
 async function releaseClaim(tenantId: string, claimToken: string): Promise<void> {
-  await query(
-    'SELECT public.tenant_data_quota_release_reconciliation_claim($1::uuid, $2::uuid, 0::integer)',
-    [tenantId, claimToken],
-  );
+  await repository.releaseClaim(tenantId, claimToken);
 }
 
 async function failClaim(
@@ -299,12 +257,13 @@ async function failClaim(
   error: unknown,
   options: TenantDataQuotaReconciliationOptions,
 ): Promise<void> {
-  await query(
-    `SELECT public.tenant_data_quota_fail_reconciliation(
-       $1::uuid, $2::uuid, $3::text, $4::integer, $5::integer
-     )`,
-    [tenantId, claimToken, errorMessage(error), options.retryBaseSeconds, options.retryMaxSeconds],
-  );
+  await repository.failClaim({
+    tenantId,
+    claimToken,
+    message: errorMessage(error),
+    retryBaseSeconds: options.retryBaseSeconds,
+    retryMaxSeconds: options.retryMaxSeconds,
+  });
 }
 
 async function finishReconciliation(
@@ -318,28 +277,18 @@ async function finishReconciliation(
   // This autocommitted, token-checked renewal must complete before the long
   // transaction begins. If the worker lost its original claim, no snapshot is
   // attempted and the tenant remains safely reconciling.
-  await query(
-    `SELECT public.tenant_data_quota_prepare_reconciliation_finalization(
-       $1::uuid, $2::uuid, $3::integer
-     )`,
-    [tenantId, claimToken, finalizationLeaseSeconds],
-  );
+  await repository.prepareFinalization(tenantId, claimToken, finalizationLeaseSeconds);
 
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const transaction = createTenantDataQuotaReconciliationRepository(client);
     // The application pool stays at a short timeout for HTTP traffic. Only the
     // exact, fenced database baseline gets this longer transaction-local budget.
     // With the delta ledger (SQL 20261018_1100) the finish function consumes
     // exactly the unfolded deltas its per-relation snapshots already contain.
-    await client.query(
-      `SELECT set_config('statement_timeout', $1::text, true)`,
-      [String(databaseSnapshotTimeoutMs)],
-    );
-    await client.query(
-      'SELECT public.tenant_data_quota_finish_reconciliation($1::uuid, $2::uuid, $3::integer)',
-      [tenantId, claimToken, minimumFinalizationWindowSeconds],
-    );
+    await transaction.setLocalStatementTimeout(databaseSnapshotTimeoutMs);
+    await transaction.finish(tenantId, claimToken, minimumFinalizationWindowSeconds);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
@@ -374,19 +323,14 @@ export async function reconcileTenantDataQuota(
     while (!shouldStop()
       && pages < options.maxPagesPerClaim
       && !isTenantDataQuotaSliceExpired(scanStartedAtMs, options.maxSliceMs)) {
-      const objects = await query<StorageObject>(
-        `SELECT bucket_id, name, metadata ->> 'size' AS size_bytes
-         FROM storage.objects
-         WHERE bucket_id = ANY($1::text[])
-           AND name COLLATE "C" >= $2::text COLLATE "C"
-           AND name COLLATE "C" < $3::text COLLATE "C"
-           AND ($4::text = ''
-             OR bucket_id > $4::text
-             OR (bucket_id = $4::text AND name COLLATE "C" > $5::text COLLATE "C"))
-         ORDER BY bucket_id ASC, name COLLATE "C" ASC
-         LIMIT $6::integer`,
-        [TENANT_STORAGE_BUCKETS, lowerBound, upperBound, cursor?.bucketId || '', cursor?.name || '', options.pageSize],
-      );
+      const objects = await repository.selectStoragePage({
+        buckets: TENANT_STORAGE_BUCKETS,
+        lowerBound,
+        upperBound,
+        cursorBucketId: cursor?.bucketId || '',
+        cursorName: cursor?.name || '',
+        pageSize: options.pageSize,
+      });
 
       if (objects.rowCount === 0) {
         await finishReconciliation(tenantId, claimToken, options.databaseSnapshotTimeoutMs);

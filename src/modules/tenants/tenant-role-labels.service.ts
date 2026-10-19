@@ -3,6 +3,7 @@ import { appendAuditLog, type TransactionalAuditEntry } from '../../middleware/a
 import { cacheJson, bumpCacheVersion, getCacheVersion } from '../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../config/cache-keys.js';
 import { AppError } from '../../utils/errors.js';
+import { createTenantSettingsRepository, type TenantSettingsDb } from './tenant-settings.repository.js';
 import type { UserRole } from '../../types/index.js';
 
 export type RoleLabelMap = Partial<Record<UserRole, string>>;
@@ -17,6 +18,8 @@ export const SYSTEM_ROLES = [
 
 const ROLE_SET = new Set<string>(SYSTEM_ROLES);
 const MAX_LABEL_LENGTH = 64;
+
+const settingsRepository = createTenantSettingsRepository({ query } satisfies TenantSettingsDb);
 
 function isUndefinedTableError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '42P01';
@@ -71,15 +74,10 @@ export async function getTenantRoleLabels(tenantId: string | null | undefined): 
 
 async function getTenantRoleLabelsFromDb(tenantId: string): Promise<RoleLabelMap> {
   try {
-    const result = await query<{ role: UserRole; label: string }>(
-      `SELECT role::text AS role, label
-       FROM tenant_role_labels
-       WHERE tenant_id = $1`,
-      [tenantId],
-    );
+    const rows = await settingsRepository.selectRoleLabels(tenantId);
 
     const labels: RoleLabelMap = {};
-    for (const row of result.rows) {
+    for (const row of rows) {
       if (ROLE_SET.has(row.role)) labels[row.role] = row.label;
     }
 
@@ -102,18 +100,14 @@ export async function replaceTenantRoleLabels(
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantSettingsRepository(client);
 
-    const tenant = await client.query('SELECT id FROM tenants WHERE id = $1', [tenantId]);
-    if (tenant.rowCount === 0) throw new AppError('Tenant khong ton tai', 404);
+    if (!await repository.tenantExists(tenantId)) throw new AppError('Tenant khong ton tai', 404);
 
-    await client.query('DELETE FROM tenant_role_labels WHERE tenant_id = $1', [tenantId]);
+    await repository.deleteRoleLabels(tenantId);
 
     for (const [role, label] of entries) {
-      await client.query(
-        `INSERT INTO tenant_role_labels (tenant_id, role, label, updated_by, updated_at)
-         VALUES ($1, $2::user_role, $3, $4, now())`,
-        [tenantId, role, label, actorId],
-      );
+      await repository.insertRoleLabel(tenantId, role, label, actorId);
     }
 
     if (auditEntry) await appendAuditLog(client, auditEntry);

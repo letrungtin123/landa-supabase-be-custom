@@ -9,6 +9,14 @@ import { getClient, query } from '../../config/database.js';
 import { AppError } from '../../utils/errors.js';
 import { TENANT_DATA_QUOTA_COUNTED_STATES } from './tenant-data-quota-ledger.logic.js';
 import { createTenantDataQuotaLedgerRepository } from './tenant-data-quota-ledger.repository.js';
+import {
+  createTenantDataQuotaRepository,
+  tenantDataQuotaReadSql,
+  type LockedQuotaRow,
+  type TenantDataQuotaDb,
+  type TenantDataQuotaReadRow,
+  type TenantDataQuotaState,
+} from './tenant-data-quota.repository.js';
 import { readWithPendingDatabaseBytes } from './tenant-data-quota-ledger.service.js';
 import {
   TENANT_DATA_LIMIT_REACHED_CODE,
@@ -28,25 +36,10 @@ export {
 
 const STORAGE_RESERVATION_TTL_MINUTES = 30;
 
-type QuotaState = 'initializing' | 'observing' | 'enforced' | 'reconciling' | 'drifted';
+type QuotaState = TenantDataQuotaState;
 
-type LockedQuotaRow = {
-  data_limit_bytes: string | null;
-  database_used_bytes: string;
-  storage_used_bytes: string;
-  storage_reserved_bytes: string;
-  state: QuotaState;
-};
-
-type ReservationRow = {
-  id: string;
-  tenant_id: string;
-  storage_path: string;
-  previous_size_bytes: string;
-  reserved_bytes: string;
-  requested_size_bytes: string;
-  status: 'pending' | 'committed' | 'released' | 'reconcile_required' | 'reconciled';
-};
+/** Statements on the pool (they join the current transaction, if any). */
+const poolRepository = createTenantDataQuotaRepository({ query } satisfies TenantDataQuotaDb);
 
 export type StorageUploadReservation = {
   id: string | null;
@@ -111,27 +104,10 @@ export function getTenantIdFromStoragePath(storagePath: string): string | null {
 }
 
 async function lockQuota(client: Awaited<ReturnType<typeof getClient>>, tenantId: string): Promise<LockedQuotaRow> {
-  await client.query(
-    `INSERT INTO tenant_data_quota_usage (tenant_id)
-     VALUES ($1::uuid)
-     ON CONFLICT (tenant_id) DO NOTHING`,
-    [tenantId],
-  );
+  const repository = createTenantDataQuotaRepository(client);
+  await repository.ensureUsageRow(tenantId);
 
-  const result = await client.query<LockedQuotaRow>(
-    `SELECT t.data_limit_bytes,
-            usage.database_used_bytes,
-            usage.storage_used_bytes,
-            usage.storage_reserved_bytes,
-            usage.state
-     FROM tenants t
-     JOIN tenant_data_quota_usage usage ON usage.tenant_id = t.id
-     WHERE t.id = $1::uuid
-     FOR UPDATE OF usage`,
-    [tenantId],
-  );
-
-  const quota = result.rows[0];
+  const quota = await repository.lockUsage(tenantId);
   if (!quota) throw new AppError('Doanh nghiệp không tồn tại', 404);
 
   // Database writes append lock-free deltas (SQL 20261018_1100) that the quota
@@ -190,17 +166,12 @@ export async function reserveStorageUpload(storagePath: string, requestedSize: n
   const client = await getClient();
   try {
     await client.query('BEGIN');
+    const repository = createTenantDataQuotaRepository(client);
     const quota = await lockQuota(client, tenantId);
     if (isQuotaReconciliationState(quota.state)) throw dataQuotaReconciling();
 
-    const existing = await client.query<{ size_bytes: string }>(
-      `SELECT size_bytes
-       FROM tenant_storage_quota_objects
-       WHERE tenant_id = $1::uuid AND storage_path = $2
-       FOR UPDATE`,
-      [tenantId, storagePath],
-    );
-    const previousSizeBytes = asBigInt(existing.rows[0]?.size_bytes);
+    const existingSizeBytes = await repository.lockObjectSize(tenantId, storagePath);
+    const previousSizeBytes = asBigInt(existingSizeBytes);
     const delta = requestedSizeBytes > previousSizeBytes ? requestedSizeBytes - previousSizeBytes : 0n;
     if (quota.state === 'drifted' && delta > 0n) throw dataQuotaReconciling();
     if (quota.state !== 'enforced' && quota.state !== 'drifted') {
@@ -210,22 +181,17 @@ export async function reserveStorageUpload(storagePath: string, requestedSize: n
     if (exceedsLimit(quota, delta)) throw dataLimitReached();
 
     const reservationId = randomUUID();
-    await client.query(
-      `INSERT INTO tenant_storage_quota_reservations
-         (id, tenant_id, storage_path, requested_size_bytes, previous_size_bytes, reserved_bytes, expires_at)
-       VALUES ($1::uuid, $2::uuid, $3, $4::bigint, $5::bigint, $6::bigint,
-               now() + ($7::int * interval '1 minute'))`,
-      [reservationId, tenantId, storagePath, requestedSizeBytes.toString(), previousSizeBytes.toString(), delta.toString(), STORAGE_RESERVATION_TTL_MINUTES],
-    );
+    await repository.insertUploadReservation({
+      id: reservationId,
+      tenantId,
+      storagePath,
+      requestedSizeBytes: requestedSizeBytes.toString(),
+      previousSizeBytes: previousSizeBytes.toString(),
+      reservedBytes: delta.toString(),
+      ttlMinutes: STORAGE_RESERVATION_TTL_MINUTES,
+    });
     if (delta > 0n) {
-      await client.query(
-        `UPDATE tenant_data_quota_usage
-         SET storage_reserved_bytes = storage_reserved_bytes + $2::bigint,
-             revision = revision + 1,
-             updated_at = now()
-         WHERE tenant_id = $1::uuid`,
-        [tenantId, delta.toString()],
-      );
+      await repository.addReservedBytes(tenantId, delta.toString());
     }
     await client.query('COMMIT');
     return { id: reservationId, tenantId, storagePath, previousSizeBytes, requestedSizeBytes };
@@ -244,14 +210,8 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const reservationResult = await client.query<ReservationRow>(
-      `SELECT id, tenant_id, storage_path, previous_size_bytes, reserved_bytes, requested_size_bytes, status
-       FROM tenant_storage_quota_reservations
-       WHERE id = $1::uuid
-       FOR UPDATE`,
-      [reservation.id],
-    );
-    const row = reservationResult.rows[0];
+    const repository = createTenantDataQuotaRepository(client);
+    const row = await repository.lockReservation(reservation.id);
     if (!row || row.status === 'committed' || row.status === 'reconciled') {
       await client.query('COMMIT');
       return;
@@ -260,12 +220,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
 
     const quota = await lockQuota(client, row.tenant_id);
     if (isQuotaReconciliationState(quota.state)) {
-      await client.query(
-        `UPDATE tenant_storage_quota_reservations
-         SET status = 'reconcile_required', updated_at = now()
-         WHERE id = $1::uuid`,
-        [row.id],
-      );
+      await repository.markReservationReconcileRequired(row.id);
       await client.query('COMMIT');
       return;
     }
@@ -273,12 +228,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
     const reservedBytes = asBigInt(row.reserved_bytes);
     const actualDelta = actualSizeBytes - previousSizeBytes;
     if (quota.state === 'drifted' && actualDelta > 0n) {
-      await client.query(
-        `UPDATE tenant_storage_quota_reservations
-         SET status = 'reconcile_required', updated_at = now()
-         WHERE id = $1::uuid`,
-        [row.id],
-      );
+      await repository.markReservationReconcileRequired(row.id);
       await client.query('COMMIT');
       throw dataQuotaReconciling();
     }
@@ -289,12 +239,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
       - reservedBytes;
 
     if (quota.data_limit_bytes !== null && projected > asBigInt(quota.data_limit_bytes)) {
-      await client.query(
-        `UPDATE tenant_storage_quota_reservations
-         SET status = 'reconcile_required', updated_at = now()
-         WHERE id = $1::uuid`,
-        [row.id],
-      );
+      await repository.markReservationReconcileRequired(row.id);
       await client.query('COMMIT');
       throw dataLimitReached();
     }
@@ -302,28 +247,9 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
     const nextStorageUsage = asBigInt(quota.storage_used_bytes) + actualDelta;
     if (nextStorageUsage < 0n) throw new Error('Storage quota usage underflow blocked');
 
-    await client.query(
-      `INSERT INTO tenant_storage_quota_objects (tenant_id, storage_path, size_bytes)
-       VALUES ($1::uuid, $2, $3::bigint)
-       ON CONFLICT (tenant_id, storage_path)
-       DO UPDATE SET size_bytes = EXCLUDED.size_bytes, updated_at = now()`,
-      [row.tenant_id, row.storage_path, actualSizeBytes.toString()],
-    );
-    await client.query(
-      `UPDATE tenant_data_quota_usage
-       SET storage_used_bytes = $2::bigint,
-           storage_reserved_bytes = storage_reserved_bytes - $3::bigint,
-           revision = revision + 1,
-           updated_at = now()
-       WHERE tenant_id = $1::uuid`,
-      [row.tenant_id, nextStorageUsage.toString(), reservedBytes.toString()],
-    );
-    await client.query(
-      `UPDATE tenant_storage_quota_reservations
-       SET status = 'committed', committed_at = now(), updated_at = now()
-       WHERE id = $1::uuid`,
-      [row.id],
-    );
+    await repository.upsertObjectSize(row.tenant_id, row.storage_path, actualSizeBytes.toString());
+    await repository.commitUploadUsage(row.tenant_id, nextStorageUsage.toString(), reservedBytes.toString());
+    await repository.markReservationCommitted(row.id);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
@@ -339,12 +265,7 @@ export async function commitStorageUpload(reservation: StorageUploadReservation,
  */
 export async function flagStorageUploadForReconciliation(reservation: StorageUploadReservation): Promise<void> {
   if (!reservation.id) return;
-  await query(
-    `UPDATE tenant_storage_quota_reservations
-     SET status = 'reconcile_required', updated_at = now()
-     WHERE id = $1::uuid AND status = 'pending'`,
-    [reservation.id],
-  );
+  await poolRepository.flagUploadReservation(reservation.id);
 }
 
 /**
@@ -358,14 +279,8 @@ export async function releaseStorageUploadReservation(reservation: StorageUpload
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const reservationResult = await client.query<ReservationRow>(
-      `SELECT id, tenant_id, reserved_bytes, status
-       FROM tenant_storage_quota_reservations
-       WHERE id = $1::uuid
-       FOR UPDATE`,
-      [reservation.id],
-    );
-    const row = reservationResult.rows[0];
+    const repository = createTenantDataQuotaRepository(client);
+    const row = await repository.lockReservationForRelease(reservation.id);
     if (!row || row.status !== 'pending') {
       await client.query('COMMIT');
       return;
@@ -378,20 +293,8 @@ export async function releaseStorageUploadReservation(reservation: StorageUpload
       throw new Error('Storage quota reservation underflow blocked');
     }
 
-    await client.query(
-      `UPDATE tenant_data_quota_usage
-       SET storage_reserved_bytes = storage_reserved_bytes - $2::bigint,
-           revision = revision + 1,
-           updated_at = now()
-       WHERE tenant_id = $1::uuid`,
-      [row.tenant_id, reservedBytes.toString()],
-    );
-    await client.query(
-      `UPDATE tenant_storage_quota_reservations
-       SET status = 'released', updated_at = now()
-       WHERE id = $1::uuid`,
-      [row.id],
-    );
+    await repository.releaseReservedBytes(row.tenant_id, reservedBytes.toString());
+    await repository.markReservationReleased(row.id);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined); // fails only on a broken connection, which pg-pool discards
@@ -425,25 +328,20 @@ export async function reserveStorageDeletes(storagePaths: readonly string[]): Pr
       const client = await getClient();
       try {
         await client.query('BEGIN');
+        const repository = createTenantDataQuotaRepository(client);
         const quota = await lockQuota(client, tenantId);
         if (isQuotaReconciliationState(quota.state)) throw dataQuotaReconciling();
-        const existing = await client.query<{ storage_path: string; size_bytes: string }>(
-          `SELECT storage_path, size_bytes
-           FROM tenant_storage_quota_objects
-           WHERE tenant_id = $1::uuid AND storage_path = ANY($2::text[])
-           FOR UPDATE`,
-          [tenantId, paths],
-        );
-        const sizes = new Map(existing.rows.map((row) => [row.storage_path, row.size_bytes]));
+        const existing = await repository.lockObjectSizes(tenantId, paths);
+        const sizes = new Map(existing.map((row) => [row.storage_path, row.size_bytes]));
         for (const storagePath of paths) {
           const id = randomUUID();
-          await client.query(
-            `INSERT INTO tenant_storage_quota_reservations
-               (id, tenant_id, storage_path, requested_size_bytes, previous_size_bytes, reserved_bytes, expires_at)
-             VALUES ($1::uuid, $2::uuid, $3, 0, $4::bigint, 0,
-                     now() + ($5::int * interval '1 minute'))`,
-            [id, tenantId, storagePath, asBigInt(sizes.get(storagePath)).toString(), STORAGE_RESERVATION_TTL_MINUTES],
-          );
+          await repository.insertDeleteReservation({
+            id,
+            tenantId,
+            storagePath,
+            previousSizeBytes: asBigInt(sizes.get(storagePath)).toString(),
+            ttlMinutes: STORAGE_RESERVATION_TTL_MINUTES,
+          });
           reservations.push({ id, tenantId, storagePath });
         }
         await client.query('COMMIT');
@@ -463,23 +361,13 @@ export async function reserveStorageDeletes(storagePaths: readonly string[]): Pr
 
 export async function flagStorageDeletesForReconciliation(reservations: readonly StorageDeleteReservation[]): Promise<void> {
   if (reservations.length === 0) return;
-  await query(
-    `UPDATE tenant_storage_quota_reservations
-     SET status = 'reconcile_required', updated_at = now()
-     WHERE id = ANY($1::uuid[]) AND status = 'pending'`,
-    [reservations.map((reservation) => reservation.id)],
-  );
+  await poolRepository.flagDeleteReservations(reservations.map((reservation) => reservation.id));
 }
 
 /** Release zero-byte delete fences after a provider-declared rejection. */
 export async function releaseStorageDeleteReservations(reservations: readonly StorageDeleteReservation[]): Promise<void> {
   if (reservations.length === 0) return;
-  await query(
-    `UPDATE tenant_storage_quota_reservations
-     SET status = 'released', updated_at = now()
-     WHERE id = ANY($1::uuid[]) AND status = 'pending'`,
-    [reservations.map((reservation) => reservation.id)],
-  );
+  await poolRepository.releaseDeleteReservations(reservations.map((reservation) => reservation.id));
 }
 
 /** Call only after Supabase successfully removes every supplied object. */
@@ -502,35 +390,21 @@ export async function recordStorageDelete(
     const client = await getClient();
     try {
       await client.query('BEGIN');
+      const repository = createTenantDataQuotaRepository(client);
       const quota = await lockQuota(client, tenantId);
       if (isQuotaReconciliationState(quota.state)) throw dataQuotaReconciling();
-      const rows = await client.query<{ size_bytes: string }>(
-        `DELETE FROM tenant_storage_quota_objects
-         WHERE tenant_id = $1::uuid AND storage_path = ANY($2::text[])
-         RETURNING size_bytes`,
-        [tenantId, [...new Set(paths)]],
-      );
-      const freed = rows.rows.reduce((sum, row) => sum + asBigInt(row.size_bytes), 0n);
+      const rows = await repository.deleteObjects(tenantId, [...new Set(paths)]);
+      const freed = rows.reduce((sum, row) => sum + asBigInt(row.size_bytes), 0n);
       if (freed > 0n) {
         const nextUsage = asBigInt(quota.storage_used_bytes) - freed;
         if (nextUsage < 0n) throw new Error('Storage quota usage underflow blocked');
-        await client.query(
-          `UPDATE tenant_data_quota_usage
-           SET storage_used_bytes = $2::bigint, revision = revision + 1, updated_at = now()
-           WHERE tenant_id = $1::uuid`,
-          [tenantId, nextUsage.toString()],
-        );
+        await repository.setStorageUsed(tenantId, nextUsage.toString());
       }
       const reservationIds = reservations
         .filter((reservation) => reservation.tenantId === tenantId)
         .map((reservation) => reservation.id);
       if (reservationIds.length > 0) {
-        await client.query(
-          `UPDATE tenant_storage_quota_reservations
-           SET status = 'committed', committed_at = now(), updated_at = now()
-           WHERE id = ANY($1::uuid[]) AND status = 'pending'`,
-          [reservationIds],
-        );
+        await repository.commitDeleteReservations(reservationIds);
       }
       await client.query('COMMIT');
     } catch (error) {
@@ -544,22 +418,7 @@ export async function recordStorageDelete(
 
 export async function getTenantDataQuota(tenantId: string): Promise<TenantDataQuota | null> {
   // Database usage includes the deltas the quota worker has not folded yet.
-  const result = await readWithPendingDatabaseBytes<{
-    data_limit_bytes: string | null;
-    database_used_bytes: string | null;
-    storage_used_bytes: string | null;
-    storage_reserved_bytes: string | null;
-    state: QuotaState | null;
-    last_verified_at: Date | null;
-  }>(
-    (databaseBytes) => `SELECT t.data_limit_bytes,
-            CASE WHEN usage.tenant_id IS NOT NULL THEN ${databaseBytes('usage', 't.id')}::text END AS database_used_bytes,
-            usage.storage_used_bytes, usage.storage_reserved_bytes, usage.state, usage.last_verified_at
-     FROM tenants t
-     LEFT JOIN tenant_data_quota_usage usage ON usage.tenant_id = t.id
-     WHERE t.id = $1::uuid`,
-    [tenantId],
-  );
+  const result = await readWithPendingDatabaseBytes<TenantDataQuotaReadRow>(tenantDataQuotaReadSql, [tenantId]);
   const row = result.rows[0];
   if (!row) return null;
   const databaseUsedBytes = row.database_used_bytes || '0';
