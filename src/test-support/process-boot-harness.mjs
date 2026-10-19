@@ -50,9 +50,16 @@ const seen = {
 };
 let recording = true;
 
-/** The src/ file (posix, relative to src/) of the nearest caller outside this harness, or null. */
+/**
+ * The src/ file (posix, relative to src/) of the nearest caller outside this
+ * harness, or null. Frames in the shared job plumbing (platform/job-runner:
+ * startJobPoller, ...) are passed over: the timer belongs to the job that
+ * started it. Only when no other src/ frame follows is the plumbing file
+ * itself returned.
+ */
 function callerFile() {
   const lines = (new Error().stack ?? '').split('\n').slice(2);
+  let plumbing = null;
   for (const line of lines) {
     // file:///D:/a.ts, file:///home/a.ts, D:\a.ts or /home/a.ts, then :line:column.
     const match = /(file:\/\/\/[A-Za-z]:\/[^:)]+|file:\/\/\/[^:)]+|[A-Za-z]:[\\/][^:)]+|\/[^:)]+):\d+:\d+\)?\s*$/.exec(
@@ -66,12 +73,17 @@ function callerFile() {
       continue;
     }
     if (file === fileURLToPath(import.meta.url)) continue;
-    if (file.includes(`${path.sep}node_modules${path.sep}`) || file.includes('/node_modules/')) return null;
+    if (file.includes(`${path.sep}node_modules${path.sep}`) || file.includes('/node_modules/')) return plumbing;
     const relative = path.relative(srcRoot, file);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
-    return relative.split(path.sep).join('/');
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return plumbing;
+    const posix = relative.split(path.sep).join('/');
+    if (posix.startsWith('platform/job-runner/')) {
+      plumbing ??= posix;
+      continue;
+    }
+    return posix;
   }
-  return null;
+  return plumbing;
 }
 
 // ── dotenv: no file ──

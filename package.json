@@ -73,7 +73,7 @@
     "test:groups": "tsx --test src/modules/groups/groups-sql.characterization.test.ts src/modules/groups/groups.validator.test.ts",
     "test:library": "tsx --test src/modules/library/library-sql.characterization.test.ts src/modules/library/library.validator.test.ts",
     "test:loadtest-kit": "node --test scripts/loadtest/loadtest.selftest.test.mjs",
-    "test:job-runner": "tsx --test src/modules/learner/progress-recalculation-job.characterization.test.ts",
+    "test:job-runner": "tsx --test src/platform/job-runner/job-runner.test.ts src/modules/learner/progress-recalculation-job.characterization.test.ts",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
     "verify:audit-event-usage": "tsx src/scripts/verify-audit-event-usage.ts",
     "transfer:help-docs": "tsx src/scripts/transfer-help-docs-between-supabase.ts"

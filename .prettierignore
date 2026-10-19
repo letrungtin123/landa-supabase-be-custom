@@ -23,6 +23,7 @@
 !/src/
 /src/*
 !/src/test-support/
+!/src/platform/
 !/src/config/
 /src/config/*
 !/src/config/pm2-ecosystem.test.ts

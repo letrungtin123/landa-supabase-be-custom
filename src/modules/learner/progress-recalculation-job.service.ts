@@ -2,6 +2,7 @@ import { afterCommit, query } from '../../config/database.js';
 import { invalidateTenantBadgeCaches } from '../../config/cache-invalidation.js';
 import { env } from '../../config/env.js';
 import { QUEUES, publish } from '../../config/rabbitmq/index.js';
+import { runSlicedJob, type SliceOutcome } from '../../platform/job-runner/index.js';
 
 interface ProgressRecalculationJob {
   id: string;
@@ -376,41 +377,49 @@ export async function markCourseProgressRecalculationJobFailed(
   );
 }
 
+/** One batch of enrollments after the job's cursor; 'done' when the batch was the last one. */
+async function recalculateNextCourseProgressBatch(
+  job: ProgressRecalculationJob,
+  batchSize: number,
+): Promise<SliceOutcome> {
+  const result = await recalculateCourseProgressBatch(job, batchSize);
+  if (result.processed === 0 || !result.lastEnrollmentId) return 'done';
+
+  await updateCourseProgressRecalculationCursor(job.id, result.processed, result.lastEnrollmentId);
+  // Completed courses of this batch may have changed: the tenant's badge
+  // overviews (and rules) are evaluated again on their next read.
+  await invalidateTenantBadgeCaches(job.tenant_id);
+  job.last_enrollment_id = result.lastEnrollmentId;
+  job.processed_count += result.processed;
+
+  return result.processed < batchSize ? 'done' : 'more';
+}
+
+/**
+ * One turn of the job: at most COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK
+ * batches, then it is queued again and woken up, so a large course does not
+ * hold the worker. A rerun requested meanwhile starts over from the first
+ * enrollment.
+ */
 export async function runCourseProgressRecalculationJob(jobId: string): Promise<void> {
-  const job = await claimCourseProgressRecalculationJob(jobId);
-  if (!job) return;
-
   const batchSize = env.COURSE_PROGRESS_RECALC_BATCH_SIZE;
-
-  for (let batch = 0; batch < env.COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK; batch += 1) {
-    const result = await recalculateCourseProgressBatch(job, batchSize);
-
-    if (result.processed === 0 || !result.lastEnrollmentId) {
-      const shouldRunAgain = await finishCourseProgressRecalculationJob(job.id);
-      if (shouldRunAgain) {
+  await runSlicedJob<ProgressRecalculationJob>(
+    {
+      claim: () => claimCourseProgressRecalculationJob(jobId),
+      runSlice: job => recalculateNextCourseProgressBatch(job, batchSize),
+      complete: async job => {
+        const shouldRunAgain = await finishCourseProgressRecalculationJob(job.id);
+        if (shouldRunAgain) {
+          await wakeCourseProgressRecalculationJob(job.id);
+        }
+      },
+      yieldTurn: async job => {
+        await pauseCourseProgressRecalculationJob(job.id);
         await wakeCourseProgressRecalculationJob(job.id);
-      }
-      return;
-    }
-
-    await updateCourseProgressRecalculationCursor(job.id, result.processed, result.lastEnrollmentId);
-    // Completed courses of this batch may have changed: the tenant's badge
-    // overviews (and rules) are evaluated again on their next read.
-    await invalidateTenantBadgeCaches(job.tenant_id);
-    job.last_enrollment_id = result.lastEnrollmentId;
-    job.processed_count += result.processed;
-
-    if (result.processed < batchSize) {
-      const shouldRunAgain = await finishCourseProgressRecalculationJob(job.id);
-      if (shouldRunAgain) {
-        await wakeCourseProgressRecalculationJob(job.id);
-      }
-      return;
-    }
-  }
-
-  await pauseCourseProgressRecalculationJob(job.id);
-  await wakeCourseProgressRecalculationJob(job.id);
+      },
+    },
+    env.COURSE_PROGRESS_RECALC_MAX_BATCHES_PER_TICK,
+  );
 }
 
 export async function requeuePendingCourseProgressRecalculationJobs(limit = 100): Promise<void> {
