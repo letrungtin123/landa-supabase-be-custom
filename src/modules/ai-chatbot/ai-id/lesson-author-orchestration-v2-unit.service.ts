@@ -12,6 +12,7 @@ import type {
 import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
 import { isIdmPreserveSource } from './lesson-author-idm-preserve.logic.js';
 import { withOrchestrationV2TransientRetry } from './lesson-author-orchestration-v2-lock-order.js';
+import { atOrchestrationV2Stage, tagOrchestrationV2Stage } from './lesson-author-orchestration-v2-diagnostics.logic.js';
 
 type UnitRepository = ReturnType<typeof createOrchestrationV2UnitRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -60,24 +61,12 @@ type OrchestrationV2UnitStage =
   | 'unit_publication';
 
 function throwAtStage(error: unknown, stage: OrchestrationV2UnitStage): never {
-  if (error && typeof error === 'object'
-    && typeof (error as { orchestration_stage?: unknown }).orchestration_stage !== 'string') {
-    try {
-      Object.defineProperty(error, 'orchestration_stage', { value: stage, enumerable: true });
-    } catch {
-      // Some third-party errors may be frozen. Preserve the authoritative
-      // error rather than replacing it only for telemetry metadata.
-    }
-  }
+  tagOrchestrationV2Stage(error, stage);
   throw error;
 }
 
-async function atStage<T>(stage: OrchestrationV2UnitStage, operation: () => Promise<T>): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    return throwAtStage(error, stage);
-  }
+function atStage<T>(stage: OrchestrationV2UnitStage, operation: () => Promise<T>): Promise<T> {
+  return atOrchestrationV2Stage(stage, operation);
 }
 
 /** Execute one claimed unit. Dispatch is persisted before the only provider call. */

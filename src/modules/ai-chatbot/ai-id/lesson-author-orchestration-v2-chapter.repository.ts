@@ -4,6 +4,8 @@ import { readOrchestrationV2ArchitectureAssembly } from './lesson-author-orchest
 import {
   ORCHESTRATION_V2_CHAPTER_CONTRACT,
   validateOrchestrationV2Chapter,
+  type OrchestrationV2ChapterEvidenceDiagnosis,
+  type OrchestrationV2ChapterEvidenceReason,
   type OrchestrationV2ChapterReceipt,
 } from './lesson-author-orchestration-v2-chapter.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
@@ -19,7 +21,9 @@ export class OrchestrationV2ChapterRepositoryError extends Error {
     | 'ORCHESTRATION_V2_CHAPTER_AUTHORITY_INVALID'
     | 'ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID'
     | 'ORCHESTRATION_V2_CHAPTER_STATE_INVALID'
-    | 'ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED') {
+    | 'ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED',
+  /** Telemetry-only diagnosis; the public code is unchanged. */
+  readonly chapter_evidence: OrchestrationV2ChapterEvidenceDiagnosis | null = null) {
     super(code);
     this.name = 'OrchestrationV2ChapterRepositoryError';
   }
@@ -28,6 +32,9 @@ export class OrchestrationV2ChapterRepositoryError extends Error {
 const HASH = /^[0-9a-f]{64}$/;
 const fail = (code: OrchestrationV2ChapterRepositoryError['code']): never => {
   throw new OrchestrationV2ChapterRepositoryError(code);
+};
+const evidenceInvalid = (reason: OrchestrationV2ChapterEvidenceReason): never => {
+  throw new OrchestrationV2ChapterRepositoryError('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID', { reason, path: null });
 };
 const record = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object'
   && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -79,7 +86,7 @@ export function createOrchestrationV2ChapterRepository(
       const inventory = record(inventoryRow?.payload);
       if (artifacts.rows.length !== 2 || !architectureRow || !inventory
         || !HASH.test(String(architectureRow.artifact_hash)) || !HASH.test(String(inventory.inventory_hash))) {
-        fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
+        evidenceInvalid('PLANNING_ARTIFACTS_MISSING');
       }
       const architectureArtifact = architectureRow!;
       const inventoryPayload = inventory!;
@@ -87,7 +94,7 @@ export function createOrchestrationV2ChapterRepository(
       const chapter = assembly.architecture.chapters.find(item => item.chapter_key === lease.chapter_key);
       if (!chapter || assembly.assembly_hash !== architectureArtifact.artifact_hash
         || assembly.source_snapshot_hash !== lease.source_snapshot_hash) {
-        fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
+        evidenceInvalid('ARCHITECTURE_MISMATCH');
       }
       const acceptedChapter = chapter!;
       const units = await tx.query(`SELECT parent.id::text AS task_id,parent.task_key,parent.node_id::text,
@@ -108,7 +115,7 @@ export function createOrchestrationV2ChapterRepository(
         kind: 'validate_chapter', chapter_key: lease.chapter_key, node_id: lease.node_id,
         input_context_hash: expectedInputHash, budget });
       if (expectedInputHash !== lease.input_context_hash || expectedContractHash !== lease.contract_hash) {
-        fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
+        evidenceInvalid('INPUT_HASH_MISMATCH');
       }
       // IDM: the chapter's COURSE facts are the facts of its block scopes (spec §8.5),
       // re-keyed through the run's scope view; legacy reads its snapshot scopes.
@@ -124,7 +131,7 @@ export function createOrchestrationV2ChapterRepository(
         return nodes.map(node => String(record(node)?.path ?? ''));
       });
       if (!paths.length || new Set(paths).size !== paths.length || paths.some(path => !path)) {
-        fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID');
+        evidenceInvalid('UNIT_PATHS_INVALID');
       }
       const baselines = await tx.query(`SELECT n.canonical_path,n.kind,r.content_hash,r.revision,r.operation_id::text
         FROM lesson_author_workspace_nodes n
@@ -140,7 +147,7 @@ export function createOrchestrationV2ChapterRepository(
         source_facts: facts.rows as unknown as Array<OrchestrationV2SourceFact & { fact_hash: string }>,
         units: units.rows.map(item => ({ task_id: String(item.task_id), task_key: String(item.task_key),
           node_id: String(item.node_id), artifact_hash: String(item.artifact_hash),
-          payload: record(item.payload) ?? fail('ORCHESTRATION_V2_CHAPTER_EVIDENCE_INVALID') })),
+          payload: record(item.payload) ?? evidenceInvalid('UNIT_PAYLOAD_MISSING') })),
         baselines: baselines.rows.map(item => ({ canonical_path: String(item.canonical_path),
           kind: item.kind as 'unit' | 'component', content_hash: String(item.content_hash),
           revision: Number(item.revision), operation_id: String(item.operation_id) })) });
