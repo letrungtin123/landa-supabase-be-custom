@@ -835,6 +835,54 @@
    "methods": [
     "GET"
    ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/recovery",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "registered_by": "mountOrchestrationV2RecoveryRoutes(router,{workspacePath:workspaceReadPath,ownerOnly:lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'})})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/stop",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "registered_by": "mountOrchestrationV2RecoveryRoutes(router,{workspacePath:workspaceReadPath,ownerOnly:lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'})})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/resume",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "registered_by": "mountOrchestrationV2RecoveryRoutes(router,{workspacePath:workspaceReadPath,ownerOnly:lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'})})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId/regenerate",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "registered_by": "mountOrchestrationV2RecoveryRoutes(router,{workspacePath:workspaceReadPath,ownerOnly:lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'})})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
    "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId",
    "stack": [
     "<anonymous>"
@@ -1011,5 +1059,5 @@
    "source": "router.post('/chat/conversations/:id/messages',allowRuntimeChatTarget,lessonAuthorCourseEditor,lessonAuthorSessionOwnerOnly('id'),chatCtrl.sendMessage)"
   }
  ],
- "router_code_sha256": "90f04adf608239dd2524090ce05f5f37991e04e890d7f7028e21a243756815c0"
+ "router_code_sha256": "864688032e5a63991ac1e0dd70df6e0cdece56ba8d03dfa02e100fd7d6dcbc90"
 }
