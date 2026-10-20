@@ -6,6 +6,7 @@ import type { AuthUser } from '../../../../../types/express.js';
 import {
   ORCHESTRATION_V2_RECOVERY_ERRORS,
   createOrchestrationV2RecoveryHandlers,
+  orchestrationV2RecoveryInternalCode,
   orchestrationV2RecoveryRoute,
   type OrchestrationV2RecoveryDiagnostic,
 } from './lesson-author-orchestration-v2-recovery.controller.js';
@@ -121,6 +122,32 @@ test('input, actor and service errors map to the localized table', async () => {
     assert.equal(crash.logs[0]!.internal_failure_code, 'SQLSTATE_55P03');
     assert.doesNotMatch(JSON.stringify(timeout.json), /boom|55P03/);
   } finally { await crash.close(); }
+
+  // An internal code of a lower layer is logged as is; the client still gets the plain "unavailable" answer.
+  const internal = server({ describe: async () => { throw Object.assign(new Error('secret detail'),
+    { code: 'ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID' }); },
+  stop: async () => { throw Object.assign(new Error('x'), { code: 'not a code; DROP TABLE' }); } });
+  const internalApp = await internal;
+  try {
+    const failed = await internalApp.call('GET', `${base}/recovery`);
+    assert.equal(failed.status, 503);
+    assert.equal(failed.json.code, 'RECOVERY_UNAVAILABLE');
+    assert.equal(internalApp.logs[0]!.internal_failure_code, 'ORCHESTRATION_V2_ACCOUNTING_AUTHORITY_INVALID');
+    assert.equal(internalApp.logs[0]!.external_failure_code, 'RECOVERY_UNAVAILABLE');
+    assert.doesNotMatch(JSON.stringify(failed.json), /ORCHESTRATION_V2|ACCOUNTING|secret/);
+    const odd = await internalApp.call('POST', `${base}/stop`, { operation_id: OPERATION });
+    assert.equal(odd.status, 503);
+    assert.equal(internalApp.logs[1]!.internal_failure_code, 'RECOVERY_UNEXPECTED_ERROR');
+  } finally { await internalApp.close(); }
+  assert.equal(orchestrationV2RecoveryInternalCode(Object.assign(new Error('x'), { code: '40P01' })), 'SQLSTATE_40P01');
+  assert.equal(orchestrationV2RecoveryInternalCode(Object.assign(new Error('x'), { code: 'TASK_FAILED' })), 'TASK_FAILED');
+  assert.equal(orchestrationV2RecoveryInternalCode(Object.assign(new Error('x'), { code: `A${'B'.repeat(100)}` })),
+    'RECOVERY_UNEXPECTED_ERROR', 'longer than 100 characters');
+  for (const code of ['lower_case', '_LEADING', 'WITH SPACE', 'É_ACCENT', 42, null]) {
+    assert.equal(orchestrationV2RecoveryInternalCode({ code }), 'RECOVERY_UNEXPECTED_ERROR', String(code));
+  }
+  assert.equal(orchestrationV2RecoveryInternalCode('TASK_FAILED'), 'RECOVERY_UNEXPECTED_ERROR');
+  assert.equal(orchestrationV2RecoveryInternalCode(undefined), 'RECOVERY_UNEXPECTED_ERROR');
 
   for (const user of [null, { ...staff, role: 'learner' as const }, { ...staff, sessionMode: 'demo_iframe' as const }]) {
     const refused = await server({ describe: async () => assert.fail('never reached'), stop: async () => assert.fail('never') },

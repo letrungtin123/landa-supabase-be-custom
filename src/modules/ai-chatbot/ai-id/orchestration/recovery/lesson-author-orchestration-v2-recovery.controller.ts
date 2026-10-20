@@ -118,6 +118,18 @@ type Operation = (context: OrchestrationV2RecoveryRequestContext) => Promise<{
   replayed?: boolean | null;
 }>;
 
+/**
+ * Log-only code of an unexpected failure: a database SQLSTATE, or the internal
+ * code of a lower layer (accounting, worker repository, ...). Only codes of the
+ * fixed shapes are kept, never a message; the client always gets RECOVERY_UNAVAILABLE.
+ */
+export function orchestrationV2RecoveryInternalCode(error: unknown): string {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  if (typeof code !== 'string') return 'RECOVERY_UNEXPECTED_ERROR';
+  if (/^[0-9A-Z]{5}$/.test(code)) return `SQLSTATE_${code}`;
+  return /^[A-Z][A-Z0-9_]{0,99}$/.test(code) ? code : 'RECOVERY_UNEXPECTED_ERROR';
+}
+
 /** Shared request pipeline: no-store, request id, actor + input checks, one error table, one log line. */
 export function createOrchestrationV2RecoveryHandler(
   deps: Pick<OrchestrationV2RecoveryHandlerDependencies, 'report'>,
@@ -173,9 +185,7 @@ export function createOrchestrationV2RecoveryHandler(
       res.status(200).json({ success: true, data: result.data, request_id: requestId });
     } catch (error) {
       if (error instanceof OrchestrationV2RecoveryError) { reject(error.code); return; }
-      const sqlstate = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
-        && /^[0-9A-Z]{5}$/.test((error as { code: string }).code) ? `SQLSTATE_${(error as { code: string }).code}` : null;
-      reject('RECOVERY_UNAVAILABLE', sqlstate ?? 'RECOVERY_UNEXPECTED_ERROR');
+      reject('RECOVERY_UNAVAILABLE', orchestrationV2RecoveryInternalCode(error));
     }
   };
 }
