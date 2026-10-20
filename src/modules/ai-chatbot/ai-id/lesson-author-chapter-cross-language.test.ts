@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runChapterCheckpoint, ChapterWorkflowTimeout, type ChapterRunDependencies } from './lesson-author-chapter-runner.logic.js';
 import { readRagChapterCheckpointResponse, type RagChapterCheckpointRequest } from './lesson-author-chapter-rag-contract.logic.js';
@@ -24,8 +22,8 @@ test('offline multi-slot HTML and Diagram repair reaches Python chapter + Node a
     const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
   });
   const { normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('../chat/chat.service.js');
-  const root = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(root, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
+  const root = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_multi_component_repair_slots', '--node-fixture'],
     { cwd: root, encoding: 'utf8', timeout: 20000, maxBuffer: 4000000 });
   assert.equal(out.status, 0, out.error?.message ?? out.stderr);
@@ -59,8 +57,8 @@ test('offline Node→Python unit contract→timeout→explicit resume→Python w
     const timer=nativeInterval(...args);timer.unref();t.after(()=>clearInterval(timer));return timer;
   });
   const {normalizeLessonAuthorProposal,lockProposalToBlueprintChapter}=await import('../chat/chat.service.js');
-  const root=fileURLToPath(new URL('../../../../../landa-ai-rag/',import.meta.url));
-  const python=resolve(root,process.platform==='win32'?'.venv-dev/Scripts/python.exe':'.venv-dev/bin/python');
+  const root=AI_RAG_ROOT;
+  const python=AI_RAG_DEV_PYTHON;
   const call=(input:unknown)=>{
     const out=spawnSync(python,['-X','utf8','-B','-m','tests.chapter_checkpoint_bridge'],{
       cwd:root,input:JSON.stringify(input),encoding:'utf8',timeout:20000,maxBuffer:4000000});
@@ -149,8 +147,8 @@ test(`offline ${action}→scoped repair→Python full validation→Node acceptan
     const timer=nativeInterval(...args);timer.unref();t.after(()=>clearInterval(timer));return timer;
   });
   const {normalizeLessonAuthorProposal,lockProposalToBlueprintChapter}=await import('../chat/chat.service.js');
-  const root=fileURLToPath(new URL('../../../../../landa-ai-rag/',import.meta.url));
-  const python=resolve(root,process.platform==='win32'?'.venv-dev/Scripts/python.exe':'.venv-dev/bin/python');
+  const root=AI_RAG_ROOT;
+  const python=AI_RAG_DEV_PYTHON;
   const out=spawnSync(python,['-X','utf8','-B','-m','tests.chapter_checkpoint_bridge'],{
     cwd:root,input:JSON.stringify({action}),encoding:'utf8',timeout:20000,maxBuffer:4000000});
   assert.equal(out.status,0,out.error?.message ?? out.stderr);

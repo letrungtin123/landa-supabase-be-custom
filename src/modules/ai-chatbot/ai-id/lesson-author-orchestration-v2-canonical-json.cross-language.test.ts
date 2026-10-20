@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
-import { AI_RAG_DEV_PYTHON, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
 import { assembleOrchestrationV2Architecture } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { canonicalJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import { idmBriefHash, idmDesignHash } from './lesson-author-idm-primitives.contract.js';
@@ -15,7 +14,7 @@ import { prepareOrchestrationV2UnitGenerationContract } from './lesson-author-or
  * Python's own canonical_hash is shown to differ exactly where the JavaScript number and key layout does.
  */
 
-const RAG_ROOT = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
+const RAG_ROOT = AI_RAG_ROOT;
 const LS = String.fromCodePoint(0x2028), PS = String.fromCodePoint(0x2029);
 const TEXT = 'Thiết kế khóa học an toàn';
 

@@ -9,7 +9,9 @@
     "ai-platform": "Shared AI platform: AI settings, secrets, pricing, usage, token quota, metered calls, RAG client, engine transition, Gemini client and File Search store calls, input filter"
   },
   "keep": {
-    "ai-chatbot.routes.ts": "The module's router stays at the module root: app.ts mounts it at /api/ai-chatbot, and it wires the controllers of every sub-folder."
+    "ai-chatbot.routes.ts": "The module's router stays at the module root: app.ts mounts it at /api/ai-chatbot, and it wires the controllers of every sub-folder.",
+    "ai-chatbot.routes.golden.test.ts": "The router's route-table golden test stays next to it.",
+    "ai-chatbot.routes.golden.json": "The router's route-table golden stays next to it."
   },
   "rules": [
     { "pattern": "^lesson-author", "folder": "ai-id" },
