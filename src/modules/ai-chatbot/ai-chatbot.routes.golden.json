@@ -1,0 +1,1015 @@
+{
+ "router": "src/modules/ai-chatbot/ai-chatbot.routes.ts",
+ "mount": "/api/ai-chatbot",
+ "app_before": [
+  "requestMetricsMiddleware",
+  "router",
+  "closeConnectionWhileShuttingDown",
+  "helmetMiddleware",
+  "corsMiddleware",
+  "jsonParser",
+  "urlencodedParser",
+  "<anonymous>"
+ ],
+ "app_after": [
+  "notFoundHandler",
+  "errorHandler"
+ ],
+ "layers": [
+  {
+   "kind": "use",
+   "path": "/api/ai-chatbot",
+   "stack": [
+    "authenticate"
+   ],
+   "source": "router.use(authenticate)"
+  },
+  {
+   "kind": "use",
+   "path": "/api/ai-chatbot",
+   "stack": [
+    "tenantContext"
+   ],
+   "source": "router.use(tenantContext)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/chapter-checkpoint",
+   "stack": [
+    "countLegacyAiIdCall"
+   ],
+   "registered_by": "mountLegacyAiIdCounters(router,legacyAiId,getRuntimeChatTarget)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId",
+   "stack": [
+    "countLegacyAiIdCall"
+   ],
+   "registered_by": "mountLegacyAiIdCounters(router,legacyAiId,getRuntimeChatTarget)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/lesson-author/jobs/:jobId/apply",
+   "stack": [
+    "countLegacyAiIdCall"
+   ],
+   "registered_by": "mountLegacyAiIdCounters(router,legacyAiId,getRuntimeChatTarget)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/messages",
+   "stack": [
+    "countLegacyLessonAuthorMessage"
+   ],
+   "registered_by": "mountLegacyAiIdCounters(router,legacyAiId,getRuntimeChatTarget)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/kb",
+   "stack": [
+    "permissionMiddleware",
+    "listKbs"
+   ],
+   "source": "router.get('/kb',checkPermission('ai_chatbot','can_view'),kbCtrl.listKbs)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/reports/overview",
+   "stack": [
+    "permissionMiddleware",
+    "getAiOverviewController"
+   ],
+   "source": "router.get('/reports/overview',checkPermission('ai_chatbot','can_view'),getAiOverviewController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/kb/:id",
+   "stack": [
+    "permissionMiddleware",
+    "getKb"
+   ],
+   "source": "router.get('/kb/:id',checkPermission('ai_chatbot','can_view'),kbCtrl.getKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb",
+   "stack": [
+    "permissionMiddleware",
+    "createKb"
+   ],
+   "source": "router.post('/kb',checkPermission('ai_chatbot','can_add'),kbCtrl.createKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/kb/:id",
+   "stack": [
+    "permissionMiddleware",
+    "updateKb"
+   ],
+   "source": "router.put('/kb/:id',checkPermission('ai_chatbot','can_edit'),kbCtrl.updateKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/restore",
+   "stack": [
+    "permissionMiddleware",
+    "restoreKb"
+   ],
+   "source": "router.post('/kb/:kbId/restore',checkPermission('ai_chatbot','can_edit'),kbCtrl.restoreKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/kb/:id",
+   "stack": [
+    "permissionMiddleware",
+    "deleteKb"
+   ],
+   "source": "router.delete('/kb/:id',checkPermission('ai_chatbot','can_delete'),kbCtrl.deleteKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents",
+   "stack": [
+    "permissionMiddleware",
+    "listDocuments"
+   ],
+   "source": "router.get('/kb/:kbId/documents',checkPermission('ai_chatbot','can_view'),kbCtrl.listDocuments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents",
+   "stack": [
+    "permissionMiddleware",
+    "multerMiddleware",
+    "handleKbUpload"
+   ],
+   "source": "router.post('/kb/:kbId/documents',checkPermission('ai_chatbot','can_add'),upload.array('files',20),kbCtrl.uploadDocuments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents/:docId",
+   "stack": [
+    "permissionMiddleware",
+    "deleteDocument"
+   ],
+   "source": "router.delete('/kb/:kbId/documents/:docId',checkPermission('ai_chatbot','can_delete'),kbCtrl.deleteDocument)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents/bulk-delete",
+   "stack": [
+    "permissionMiddleware",
+    "bulkDeleteDocuments"
+   ],
+   "source": "router.post('/kb/:kbId/documents/bulk-delete',checkPermission('ai_chatbot','can_delete'),kbCtrl.bulkDeleteDocuments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents/retry",
+   "stack": [
+    "permissionMiddleware",
+    "retryDocuments"
+   ],
+   "source": "router.post('/kb/:kbId/documents/retry',checkPermission('ai_chatbot','can_edit'),kbCtrl.retryDocuments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents/faq-template",
+   "stack": [
+    "permissionMiddleware",
+    "downloadFaqTemplate"
+   ],
+   "source": "router.get('/kb/:kbId/documents/faq-template',checkPermission('ai_chatbot','can_view'),kbCtrl.downloadFaqTemplate)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/documents/faq",
+   "stack": [
+    "permissionMiddleware",
+    "multerMiddleware",
+    "handleKbUpload"
+   ],
+   "source": "router.post('/kb/:kbId/documents/faq',checkPermission('ai_chatbot','can_add'),upload.single('file'),kbCtrl.uploadFaqDocument)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/articles",
+   "stack": [
+    "permissionMiddleware",
+    "createArticle"
+   ],
+   "source": "router.post('/kb/:kbId/articles',checkPermission('ai_chatbot','can_add'),kbCtrl.createArticle)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/articles/:docId",
+   "stack": [
+    "permissionMiddleware",
+    "updateArticle"
+   ],
+   "source": "router.put('/kb/:kbId/articles/:docId',checkPermission('ai_chatbot','can_edit'),kbCtrl.updateArticle)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/kb/:kbId/articles/:docId",
+   "stack": [
+    "permissionMiddleware",
+    "getArticle"
+   ],
+   "source": "router.get('/kb/:kbId/articles/:docId',checkPermission('ai_chatbot','can_view'),kbCtrl.getArticle)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/bots/assignments",
+   "stack": [
+    "permissionMiddleware",
+    "getAssignments"
+   ],
+   "source": "router.get('/bots/assignments',checkPermission('ai_chatbot','can_view'),chatCtrl.getAssignments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/bots/assignments",
+   "stack": [
+    "permissionMiddleware",
+    "assignBot"
+   ],
+   "source": "router.put('/bots/assignments',checkPermission('ai_chatbot','can_edit'),chatCtrl.assignBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/bots/assignments/:target",
+   "stack": [
+    "permissionMiddleware",
+    "unassignBot"
+   ],
+   "source": "router.delete('/bots/assignments/:target',checkPermission('ai_chatbot','can_edit'),chatCtrl.unassignBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/lesson-author/settings",
+   "stack": [
+    "permissionMiddleware",
+    "getLessonAuthorSettings"
+   ],
+   "source": "router.get('/lesson-author/settings',checkPermission('ai_chatbot','can_view'),chatCtrl.getLessonAuthorSettings)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/lesson-author/kb-assignment",
+   "stack": [
+    "permissionMiddleware",
+    "assignLessonAuthorKb"
+   ],
+   "source": "router.put('/lesson-author/kb-assignment',checkPermission('ai_chatbot','can_edit'),chatCtrl.assignLessonAuthorKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/lesson-author/kb-assignment",
+   "stack": [
+    "permissionMiddleware",
+    "unassignLessonAuthorKb"
+   ],
+   "source": "router.delete('/lesson-author/kb-assignment',checkPermission('ai_chatbot','can_edit'),chatCtrl.unassignLessonAuthorKb)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/lesson-author/jobs/:jobId/apply",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>",
+    "applyLessonAuthorJob"
+   ],
+   "source": "router.post('/lesson-author/jobs/:jobId/apply',checkPermission('courses','can_edit'),lessonAuthorAuthor,chatCtrl.applyLessonAuthorJob)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/bots",
+   "stack": [
+    "permissionMiddleware",
+    "listBots"
+   ],
+   "source": "router.get('/bots',checkPermission('ai_chatbot','can_view'),botCtrl.listBots)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/bots/:id",
+   "stack": [
+    "permissionMiddleware",
+    "getBot"
+   ],
+   "source": "router.get('/bots/:id',checkPermission('ai_chatbot','can_view'),botCtrl.getBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/bots",
+   "stack": [
+    "permissionMiddleware",
+    "createBot"
+   ],
+   "source": "router.post('/bots',checkPermission('ai_chatbot','can_add'),botCtrl.createBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/bots/:id",
+   "stack": [
+    "permissionMiddleware",
+    "updateBot"
+   ],
+   "source": "router.put('/bots/:id',checkPermission('ai_chatbot','can_edit'),botCtrl.updateBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/bots/:id",
+   "stack": [
+    "permissionMiddleware",
+    "deleteBot"
+   ],
+   "source": "router.delete('/bots/:id',checkPermission('ai_chatbot','can_delete'),botCtrl.deleteBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/avatar",
+   "stack": [
+    "permissionMiddleware",
+    "parseBotAvatarUpload",
+    "uploadAvatar"
+   ],
+   "source": "router.post('/bots/:id/avatar',checkPermission('ai_chatbot','can_edit'),parseBotAvatarUpload,botCtrl.uploadAvatar)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/input-filter",
+   "stack": [
+    "permissionMiddleware",
+    "getInputFilterConfig"
+   ],
+   "source": "router.get('/bots/:id/input-filter',checkPermission('ai_chatbot','can_view'),botCtrl.getInputFilterConfig)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/input-filter",
+   "stack": [
+    "permissionMiddleware",
+    "updateInputFilterConfig"
+   ],
+   "source": "router.put('/bots/:id/input-filter',checkPermission('ai_chatbot','can_edit'),botCtrl.updateInputFilterConfig)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/personas",
+   "stack": [
+    "permissionMiddleware",
+    "listPersonas"
+   ],
+   "source": "router.get('/bots/:id/personas',checkPermission('ai_chatbot','can_view'),botCtrl.listPersonas)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/personas",
+   "stack": [
+    "permissionMiddleware",
+    "addPersona"
+   ],
+   "source": "router.post('/bots/:id/personas',checkPermission('ai_chatbot','can_edit'),botCtrl.addPersona)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/personas/:personaId",
+   "stack": [
+    "permissionMiddleware",
+    "updatePersona"
+   ],
+   "source": "router.put('/bots/:id/personas/:personaId',checkPermission('ai_chatbot','can_edit'),botCtrl.updatePersona)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/personas/:personaId/reset",
+   "stack": [
+    "permissionMiddleware",
+    "resetPersona"
+   ],
+   "source": "router.post('/bots/:id/personas/:personaId/reset',checkPermission('ai_chatbot','can_edit'),botCtrl.resetPersona)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/bots/:id/personas/:personaId",
+   "stack": [
+    "permissionMiddleware",
+    "removePersona"
+   ],
+   "source": "router.delete('/bots/:id/personas/:personaId',checkPermission('ai_chatbot','can_delete'),botCtrl.removePersona)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/demo-iframe-preview",
+   "stack": [
+    "getDemoIframePreview"
+   ],
+   "source": "router.get('/chat/demo-iframe-preview',chatCtrl.getDemoIframePreview)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/active-bot",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "getActiveBot"
+   ],
+   "source": "router.get('/chat/active-bot',allowRuntimeChatTarget,chatCtrl.getActiveBot)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/active-bot/personas",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "getActiveBotPersonas"
+   ],
+   "source": "router.get('/chat/active-bot/personas',allowRuntimeChatTarget,chatCtrl.getActiveBotPersonas)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/settings",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "getLessonAuthorChatSettings"
+   ],
+   "source": "router.get('/chat/lesson-author/settings',allowRuntimeChatTarget,checkPermission('courses','can_edit'),chatCtrl.getLessonAuthorChatSettings)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/source-documents",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "listLessonAuthorSourceDocuments"
+   ],
+   "source": "router.get('/chat/lesson-author/source-documents',allowRuntimeChatTarget,checkPermission('courses','can_edit'),chatCtrl.listLessonAuthorSourceDocuments)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/source-documents",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>",
+    "parseLessonAuthorSourceUpload",
+    "handleKbUpload"
+   ],
+   "source": "router.post('/chat/lesson-author/source-documents',checkPermission('courses','can_edit'),lessonAuthorAuthor,parseLessonAuthorSourceUpload,uploadLessonAuthorSourceDocument)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/source-documents/:documentId/stream",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/source-documents/:documentId/stream',allowRuntimeChatTarget,createSourceDocumentStreamHandler({db:{query},canRead:user=>hasPermission(user,'courses','can_edit'),subscribe:(documentId,listener)=>sourceDocumentHub.subscribe(documentId,listener),report:event=>{const line='[LessonAuthorSourceStream] '+JSON.stringify(event);if(event.event==='source_stream_failed')console.warn(line);else console.info(line);}}))"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/chapter-checkpoint",
+   "stack": [
+    "permissionMiddleware",
+    "getChapterCheckpoint"
+   ],
+   "source": "router.get('/chat/lesson-author/conversations/:conversationId/chapter-checkpoint',checkPermission('courses','can_edit'),chatCtrl.getChapterCheckpoint)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/workspaces/latest",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/courses/:courseId/workspaces/latest',workspaceLaunch.latest)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/sessions",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/courses/:courseId/sessions',checkPermission('courses','can_edit'),listLessonAuthorSessionController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/sessions/active-runs",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/courses/:courseId/sessions/active-runs',checkPermission('courses','can_edit'),createLessonAuthorActiveRunsHandler(lessonAuthorAccess))"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PATCH"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/sessions/:conversationId",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.patch('/chat/lesson-author/courses/:courseId/sessions/:conversationId',checkPermission('courses','can_edit'),renameLessonAuthorSessionController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/sessions/:conversationId/delete-impact",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/courses/:courseId/sessions/:conversationId/delete-impact',checkPermission('courses','can_edit'),getLessonAuthorSessionDeleteImpactController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/sessions/:conversationId",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.delete('/chat/lesson-author/courses/:courseId/sessions/:conversationId',checkPermission('courses','can_edit'),deleteLessonAuthorSessionController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/session-deletions/:jobId",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/courses/:courseId/session-deletions/:jobId',checkPermission('courses','can_edit'),getLessonAuthorSessionDeletionStatusController)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "source": "router.post('/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces',lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'}),workspaceLaunch.create)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(workspaceReadPath,workspaceReads.status)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/events",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(`${workspaceReadPath}/events`,workspaceReads.events)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/graph",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(`${workspaceReadPath}/graph`,workspaceReads.graph)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(`${workspaceReadPath}/nodes/:nodeId`,workspaceReads.detail)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/stream",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(`${workspaceReadPath}/stream`,createWorkspaceStreamHandler({enabled:()=>env.LESSON_AUTHOR_WORKSPACE_STREAM_ENABLED,db:{query},canRead:user=>hasPermission(user,'courses','can_edit'),resolveSessionOwner:resolveLessonAuthorSessionOwner,subscribe:(workspaceId,listener)=>workspaceCommitHub.subscribe(workspaceId,listener),report:record=>{const line='[LessonAuthorWorkspaceStream] '+JSON.stringify(record);if(record.event==='workspace_stream_failed')console.warn(line);else console.info(line);}}))"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId/save",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "source": "router.post(`${workspaceReadPath}/nodes/:nodeId/save`,lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'}),workspaceEdits.save)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId/reset",
+   "stack": [
+    "<anonymous>",
+    "<anonymous>"
+   ],
+   "source": "router.post(`${workspaceReadPath}/nodes/:nodeId/reset`,lessonAuthorSessionOwnerOnly('conversationId',{courseParam:'courseId'}),workspaceEdits.reset)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId/apply",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.post(`${workspaceReadPath}/nodes/:nodeId/apply`,workspaceApply)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/review-items",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get(`${workspaceReadPath}/review-items`,(req,res,next)=>{workspaceReview.list(req,res).catch(next);})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/review-items/:obligationId/resolve",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.post(`${workspaceReadPath}/review-items/:obligationId/resolve`,(req,res,next)=>{workspaceReview.resolve(req,res).catch(next);})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId",
+   "stack": [
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId',createGenerationStatusHandler({enabled:()=>env.LESSON_AUTHOR_GENERATION_STATUS_ENABLED||env.LESSON_AUTHOR_GENERATION_ENABLED,canRead:user=>hasPermission(user,'courses','can_edit'),findOwned:(owner,jobId)=>generationJobRepository.findOwned(owner,jobId),reportFailure:record=>console.warn('[LessonAuthorGeneration] '+JSON.stringify(record))}))"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/transcriptions",
+   "stack": [
+    "observeLessonAuthorTranscriptionRequest",
+    "permissionMiddleware",
+    "<anonymous>",
+    "parseLessonAuthorVideoUpload",
+    "createLessonAuthorTranscription"
+   ],
+   "source": "router.post('/chat/lesson-author/conversations/:conversationId/transcriptions',observeLessonAuthorTranscriptionRequest,checkPermission('courses','can_edit'),lessonAuthorSessionOwnerOnly('conversationId'),parseLessonAuthorVideoUpload,transcriptCtrl.createLessonAuthorTranscription)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId",
+   "stack": [
+    "permissionMiddleware",
+    "getLessonAuthorTranscription"
+   ],
+   "source": "router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId',checkPermission('courses','can_edit'),transcriptCtrl.getLessonAuthorTranscription)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/download",
+   "stack": [
+    "permissionMiddleware",
+    "downloadLessonAuthorTranscript"
+   ],
+   "source": "router.get('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/download',checkPermission('courses','can_edit'),transcriptCtrl.downloadLessonAuthorTranscript)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit",
+   "stack": [
+    "permissionMiddleware",
+    "<anonymous>",
+    "commitLessonAuthorTranscript"
+   ],
+   "source": "router.post('/chat/lesson-author/conversations/:conversationId/transcriptions/:jobId/commit',checkPermission('courses','can_edit'),lessonAuthorSessionOwnerOnly('conversationId'),transcriptCtrl.commitLessonAuthorTranscript)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "<anonymous>",
+    "listConversations"
+   ],
+   "source": "router.get('/chat/conversations',allowRuntimeChatTarget,lessonAuthorCourseEditor,chatCtrl.listConversations)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "<anonymous>",
+    "createConversation"
+   ],
+   "source": "router.post('/chat/conversations',allowRuntimeChatTarget,lessonAuthorCourseEditor,chatCtrl.createConversation)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "deleteConversation"
+   ],
+   "source": "router.delete('/chat/conversations/:id',allowRuntimeChatTarget,chatCtrl.deleteConversation)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/messages",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "<anonymous>",
+    "getMessages"
+   ],
+   "source": "router.get('/chat/conversations/:id/messages',allowRuntimeChatTarget,lessonAuthorCourseEditor,chatCtrl.getMessages)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/report-pdf",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.post('/chat/conversations/:id/report-pdf',allowRuntimeChatTarget,checkPermission('report_summary','can_view'),reportPdfHandlers.exportReportPdf)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/report-pdf/jobs",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.post('/chat/conversations/:id/report-pdf/jobs',allowRuntimeChatTarget,checkPermission('report_summary','can_view'),reportPdfHandlers.startReportPdfJob)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/report-pdf/jobs/:jobId",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/conversations/:id/report-pdf/jobs/:jobId',allowRuntimeChatTarget,checkPermission('report_summary','can_view'),reportPdfHandlers.getReportPdfJob)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/report-pdf/jobs/:jobId/download",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "permissionMiddleware",
+    "<anonymous>"
+   ],
+   "source": "router.get('/chat/conversations/:id/report-pdf/jobs/:jobId/download',allowRuntimeChatTarget,checkPermission('report_summary','can_view'),reportPdfHandlers.downloadReportPdfJob)"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/conversations/:id/messages",
+   "stack": [
+    "allowRuntimeChatTarget",
+    "<anonymous>",
+    "<anonymous>",
+    "sendMessage"
+   ],
+   "source": "router.post('/chat/conversations/:id/messages',allowRuntimeChatTarget,lessonAuthorCourseEditor,lessonAuthorSessionOwnerOnly('id'),chatCtrl.sendMessage)"
+  }
+ ],
+ "router_code_sha256": "90f04adf608239dd2524090ce05f5f37991e04e890d7f7028e21a243756815c0"
+}

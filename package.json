@@ -90,6 +90,7 @@
     "test:job-runner": "tsx --test src/platform/job-runner/job-runner.test.ts src/modules/learner/progress-recalculation-job.characterization.test.ts src/modules/ai-chatbot/kb/restore-worker.characterization.test.ts src/modules/ai-chatbot/ai-id/lesson-author-session-deletion-worker.characterization.test.ts src/modules/course-authoring/course-outline-transfer.characterization.test.ts src/modules/course-deletion/course-deletion-job.characterization.test.ts src/modules/ai-chatbot/kb/kb-operation-worker.characterization.test.ts src/modules/ai-chatbot/ai-platform/ai-engine-transition-worker.characterization.test.ts src/modules/ai-chatbot/ai-id/lesson-author-transcription-worker.characterization.test.ts src/modules/course-authoring/course-outline-transfer-worker.test.ts src/modules/ai-chatbot/ai-id/lesson-author-transcription-worker.test.ts",
     "test:transaction-helpers": "tsx --test src/modules/transaction-helpers.modules.test.ts",
     "test:schema-manifest": "tsx --test src/platform/schema-manifest/schema-pins.test.ts",
+    "test:ai-id-structure": "tsx --test src/modules/ai-chatbot/ai-chatbot.routes.golden.test.ts src/modules/ai-chatbot/ai-id/ai-id-import-closure.golden.test.ts src/modules/ai-chatbot/ai-id/ai-id-layers.test.ts src/test-support/express-route-table.test.ts",
     "verify:audit-i18n": "tsx src/scripts/verify-audit-event-i18n.ts",
     "verify:audit-event-usage": "tsx src/scripts/verify-audit-event-usage.ts",
     "transfer:help-docs": "tsx src/scripts/transfer-help-docs-between-supabase.ts"
