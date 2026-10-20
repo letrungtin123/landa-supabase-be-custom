@@ -7,6 +7,7 @@ import {
   isLaunchBriefErrorCode, isNormalizedLaunchBrief, LAUNCH_BRIEF_BODY_KEYS, LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError,
   parseLaunchBrief, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
 } from '../../contracts/lesson-author-launch-brief.logic.js';
+import { ORG_CONTEXT_LAUNCH_ERRORS, isOrgContextLaunchErrorCode } from '../../contracts/lesson-author-org-context.contract.js';
 import { UUID_PATTERN, isUuid } from '../../../../../utils/uuid.js';
 import { isAiIdActor } from '../../shared/lesson-author-ai-id-access.logic.js';
 import { AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE } from '../../../../ai-credits/ai-credit.logic.js';
@@ -14,8 +15,13 @@ import { AppError } from '../../../../../utils/errors.js';
 
 const states=['queued','designing','drafting','ready','needs_action','failed','canceled'];
 const BASE_CREATE_KEYS='content_locale,operation_id,source_document_ids';
-/** `brief` (QLT-6): the validated launch brief of the Create request, stored write-once with the workspace. */
-export interface WorkspaceLaunchInput{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief;}
+/** Optional Create key: freeze the confirmed organization profile into the new run (absent = false). */
+const ORG_CONTEXT_KEY='use_organization_context';
+/**
+ * `brief` (QLT-6): the validated launch brief of the Create request, stored write-once with the workspace.
+ * `useOrganizationContext`: the author's "Dùng hồ sơ doanh nghiệp" switch (absent = false).
+ */
+export interface WorkspaceLaunchInput{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief;useOrganizationContext?:boolean;}
 /** `launch_brief`: null for a workspace created before QLT-6 (storage `version` is never exposed). */
 export interface WorkspaceLaunchResult{workspace_id:string;conversation_id:string;correlation_id:string;content_locale:'en'|'vi';status:string;launch_brief:LessonAuthorLaunchBrief|null;replayed?:boolean;}
 function validResult(value:WorkspaceLaunchResult){return[ value.workspace_id,value.conversation_id,value.correlation_id ].every(id=>UUID_PATTERN.test(id))
@@ -51,16 +57,19 @@ export function createWorkspaceLaunchHandlers(deps:{
         let result:WorkspaceLaunchResult|null;
         if(action==='create'){
           const body:unknown=req.body,conversationId=req.params.conversationId;
-          // Exactly the three base keys plus the QLT-6 brief keys; the brief keys are checked below with their own codes.
+          // Exactly the three base keys plus the QLT-6 brief keys and the optional organization context switch;
+          // the brief keys are checked below with their own codes.
           if(!UUID_PATTERN.test(conversationId??'')||!object(body)
-            ||Object.keys(body).filter(k=>!(LAUNCH_BRIEF_BODY_KEYS as readonly string[]).includes(k)).sort().join(',')!==BASE_CREATE_KEYS
+            ||Object.keys(body).filter(k=>!(LAUNCH_BRIEF_BODY_KEYS as readonly string[]).includes(k)&&k!==ORG_CONTEXT_KEY).sort().join(',')!==BASE_CREATE_KEYS
+            ||(Object.hasOwn(body,ORG_CONTEXT_KEY)&&typeof body[ORG_CONTEXT_KEY]!=='boolean')
             ||!isUuid(body.operation_id)||typeof body.content_locale!=='string'||!['en','vi'].includes(body.content_locale)
             ||!Array.isArray(body.source_document_ids)||body.source_document_ids.length<1||body.source_document_ids.length>5
             ||body.source_document_ids.some(id=>!isUuid(id))||new Set(body.source_document_ids).size!==body.source_document_ids.length){failure(400,'WORKSPACE_CREATE_INPUT_INVALID');return;}
           let brief:LessonAuthorLaunchBrief;
           try{brief=parseLaunchBrief(body);}
           catch(error){if(error instanceof LaunchBriefError){failure(400,error.code);return;}throw error;}
-          result=await deps.create(user,{courseId,conversationId,operationId:body.operation_id,locale:body.content_locale as 'en'|'vi',sourceDocumentIds:body.source_document_ids,brief});
+          result=await deps.create(user,{courseId,conversationId,operationId:body.operation_id,locale:body.content_locale as 'en'|'vi',sourceDocumentIds:body.source_document_ids,brief,
+            ...(body[ORG_CONTEXT_KEY]===true?{useOrganizationContext:true}:{})});
         }else{
           result=await deps.db.transaction(async tx=>{
             const a=createWorkspaceAuthority(user),owner={tenantId:user.tenantId!,userId:user.id,courseId,conversationId:''};
@@ -96,6 +105,9 @@ export function createWorkspaceLaunchHandlers(deps:{
         const c=error&&typeof error==='object'?(error as {code?:unknown}).code:undefined;
         const internal=typeof c==='string'&&/^[A-Z][A-Z0-9_]{0,99}$/.test(c)?c:'WORKSPACE_RUNTIME_UNAVAILABLE';
         if(isLaunchBriefErrorCode(internal)){failure(400,internal);return;}
+        // Organization profile requested but not usable for this run, or not confirmed: the author's to fix.
+        if(isOrgContextLaunchErrorCode(internal)){const[status,vi,en]=ORG_CONTEXT_LAUNCH_ERRORS[internal];
+          failure(status,internal,internal,locale==='en'?en:vi);return;}
         // AI points: the run is refused before anything is created, so it goes out as raised (its 429, code and
         // plain message), not as a runtime failure that tells the author to reload and try again.
         if(internal===AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE&&error instanceof AppError){failure(error.statusCode,internal,internal,error.message);return;}

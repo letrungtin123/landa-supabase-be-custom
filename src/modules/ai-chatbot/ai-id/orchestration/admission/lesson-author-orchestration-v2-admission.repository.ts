@@ -4,6 +4,9 @@ import { lessonAuthorSourceSnapshotHash, type LessonAuthorSnapshotDocument } fro
 import { assertLaunchModeAvailable, LaunchBriefStoredInvalidError, readStoredLaunchBrief } from '../../contracts/lesson-author-launch-brief.logic.js';
 import { IDM_PIPELINE_VERSION } from '../../contracts/lesson-author-idm.contract.js';
 import {
+  ORG_CONTEXT_NOT_APPLICABLE, OrgContextLaunchError, readStoredOrganizationContextOr,
+} from '../../contracts/lesson-author-org-context.contract.js';
+import {
   prepareOrchestrationV2Admission,
   type OrchestrationV2AdmissionConfig,
 } from './lesson-author-orchestration-v2-admission.logic.js';
@@ -61,7 +64,9 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
   ): Promise<OrchestrationV2AdmissionReceipt> {
     return deps.db.transaction(async tx => {
       if (!await deps.canEdit(tx, target)) fail('ORCHESTRATION_V2_ADMISSION_FORBIDDEN');
-      const workspace = await tx.query(`SELECT w.id,w.status,w.kb_id,w.source_snapshot_hash,w.source_document_ids,w.launch_brief
+      // organization_context read by name: a database without the column (SQL not applied yet) reads NULL.
+      const workspace = await tx.query(`SELECT w.id,w.status,w.kb_id,w.source_snapshot_hash,w.source_document_ids,w.launch_brief,
+          to_jsonb(w)->'organization_context' AS organization_context
         FROM lesson_author_workspaces w
         JOIN chat_conversations c ON c.id=w.conversation_id AND c.tenant_id=w.tenant_id AND c.user_id=w.requested_by
           AND c.course_id=w.course_id AND c.bot_id=w.bot_id AND c.target='lesson_author'
@@ -85,6 +90,12 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
       // QLT-6: only the IDM pipeline keeps a document as it is; the launch already refused it, this closes the race
       // with a rollout flag change between that check and this admission (the whole Create rolls back).
       if (launchBrief) assertLaunchModeAvailable(launchBrief, config.pipeline === IDM_PIPELINE_VERSION);
+      // Only the IDM pipeline reads a frozen organization context; the same race as above closes here.
+      const organizationContext = readStoredOrganizationContextOr(w.organization_context,
+        () => fail('ORCHESTRATION_V2_ADMISSION_STATE_INVALID'));
+      if (organizationContext && config.pipeline !== IDM_PIPELINE_VERSION) {
+        throw new OrgContextLaunchError(ORG_CONTEXT_NOT_APPLICABLE);
+      }
 
       const documents = await tx.query(`SELECT d.id::text AS document_id,d.name,d.status,d.type,d.updated_at,d.source_info
         FROM kb_documents d WHERE d.tenant_id=$1 AND d.kb_id=$2 AND d.id=ANY($3::uuid[])
@@ -108,6 +119,7 @@ export function createOrchestrationV2AdmissionRepository(deps: Dependencies) {
       const prepared = prepareOrchestrationV2Admission({
         workspace_id: target.workspaceId, tenant_id: target.tenantId, course_id: target.courseId,
         source_snapshot_hash: sourceHash, source_document_ids: sourceDocumentIds, launch_brief: launchBrief,
+        organization_context: organizationContext,
       }, config);
 
       const existing = await tx.query(`SELECT id::text,source_snapshot_id::text,bootstrap_hash,runtime_config_hash,model,

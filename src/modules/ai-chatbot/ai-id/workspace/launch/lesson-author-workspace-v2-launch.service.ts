@@ -9,6 +9,10 @@ import { createWorkspaceAuthority } from '../edit/lesson-author-workspace-author
 import {
   assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief,
 } from '../../contracts/lesson-author-launch-brief.logic.js';
+import {
+  ORG_CONTEXT_NOT_APPLICABLE, ORG_CONTEXT_NOT_CONFIRMED, OrgContextLaunchError, readStoredOrganizationContextOr,
+  sameOrganizationContext, type OrganizationContextV1,
+} from '../../contracts/lesson-author-org-context.contract.js';
 import { UUID_PATTERN } from '../../../../../utils/uuid.js';
 import { createCourseAccessRepository } from '../../../../courses/course-access.repository.js';
 import { isAiIdActor } from '../../shared/lesson-author-ai-id-access.logic.js';
@@ -24,7 +28,15 @@ type ExistingWorkspace = {
   source_document_ids: string[];
   /** QLT-6 stored launch brief (raw jsonb; NULL for a workspace created before it). */
   launch_brief: unknown;
+  /** The frozen organization context (raw jsonb; NULL without one or before the column exists). */
+  organization_context?: unknown;
 };
+
+/**
+ * Read by name through to_jsonb, so the Create keeps working on a database where the SQL file that adds
+ * the column has not run yet (the value is then NULL).
+ */
+const ORGANIZATION_CONTEXT_COLUMN = `to_jsonb(lesson_author_workspaces)->'organization_context' AS organization_context`;
 
 export interface WorkspaceV2LaunchDependencies {
   query: Query;
@@ -44,6 +56,15 @@ export interface WorkspaceV2LaunchDependencies {
    * that can keep a document as it is. Absent means no (fail closed).
    */
   idmPipelineFor?(tenantId: string): boolean;
+  /**
+   * Organization context: whether the feature is on for the tenant, and its confirmed profile as the
+   * frozen wire object (null when none is confirmed); `lock` takes it FOR SHARE in the Create transaction.
+   * Absent means a Create that asks for it is refused (ORG_CONTEXT_NOT_APPLICABLE).
+   */
+  organizationContext?: {
+    enabled(tenantId: string): boolean;
+    confirmed(tenantId: string, lock: boolean): Promise<OrganizationContextV1 | null>;
+  };
   /**
    * AI credits: refuses a new run when the tenant's remaining AI points do not
    * cover its estimated cost (a replay of an admitted run is never refused).
@@ -73,7 +94,8 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
   const report = (event: Record<string, unknown>) => { try { deps.report?.(event); } catch { /* diagnostics never decide commits */ } };
 
   async function findReplay(tenantId: string, userId: string, input: WorkspaceLaunchInput): Promise<ExistingWorkspace | null> {
-    const found = await deps.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief
+    const found = await deps.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief,
+        ${ORGANIZATION_CONTEXT_COLUMN}
       FROM lesson_author_workspaces
       WHERE tenant_id=$1 AND course_id=$2 AND conversation_id=$3 AND requested_by=$4 AND idempotency_key=$5
         AND contract_version=1 AND engine='self_built_rag'`,
@@ -91,13 +113,43 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       && input.sourceDocumentIds.every(value => UUID_PATTERN.test(value))
       && new Set(input.sourceDocumentIds).size === input.sourceDocumentIds.length
       && ['en', 'vi'].includes(input.locale)
+      && (input.useOrganizationContext === undefined || typeof input.useOrganizationContext === 'boolean')
       // QLT-6: the controller already parsed and cleaned the brief; anything else is a caller bug.
       && isNormalizedLaunchBrief(input.brief);
+  }
+
+  /** The context a workspace froze (null without one); another shape is not this request's workspace. */
+  const storedContext = (workspace: ExistingWorkspace) => readStoredOrganizationContextOr(workspace.organization_context,
+    () => fail('WORKSPACE_CREATE_CONFLICT'));
+
+  /**
+   * The confirmed profile a new run asked for. Only a run of the IDM pipeline reads it, and only to design
+   * from raw material: the feature must be on for the tenant, the tenant admitted to IDM and the brief
+   * instructional_design (else ORG_CONTEXT_NOT_APPLICABLE); a confirmed version must exist (else
+   * ORG_CONTEXT_NOT_CONFIRMED). Refused before anything is prepared or written.
+   */
+  async function confirmedForLaunch(tenantId: string, input: WorkspaceLaunchInput): Promise<OrganizationContextV1> {
+    const source = deps.organizationContext;
+    if (!source?.enabled(tenantId) || deps.idmPipelineFor?.(tenantId) !== true
+      || input.brief.design_mode !== 'instructional_design') throw new OrgContextLaunchError(ORG_CONTEXT_NOT_APPLICABLE);
+    const confirmed = await source.confirmed(tenantId, false);
+    if (!confirmed) throw new OrgContextLaunchError(ORG_CONTEXT_NOT_CONFIRMED);
+    return confirmed;
+  }
+
+  /** In the Create transaction: the profile the request was prepared with is still the confirmed one (FOR SHARE). */
+  async function assertStillConfirmed(tenantId: string, prepared: OrganizationContextV1): Promise<void> {
+    const source = deps.organizationContext;
+    if (!source) throw new OrgContextLaunchError(ORG_CONTEXT_NOT_APPLICABLE);
+    const confirmed = await source.confirmed(tenantId, true);
+    if (!confirmed) throw new OrgContextLaunchError(ORG_CONTEXT_NOT_CONFIRMED);
+    if (!sameOrganizationContext(confirmed, prepared)) fail('WORKSPACE_CREATE_CONFLICT');
   }
 
   return async function launch(user: AuthUser, input: WorkspaceLaunchInput): Promise<WorkspaceLaunchResult> {
     if (!validInput(user, input)) fail('WORKSPACE_CREATE_INPUT_INVALID', 400);
     const tenantId = user.tenantId!;
+    const useOrganizationContext = input.useOrganizationContext === true;
     const content = input.locale === 'en'
       ? 'Create lesson content from the selected documents.'
       : 'Tạo nội dung bài học từ tài liệu đã chọn.';
@@ -106,13 +158,19 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
       const replay = await findReplay(tenantId, user.id, input);
       // QLT-6: the same operation with another launch brief is another request (checked again under lock below).
       if (replay && !sameLaunchBrief(replay.launch_brief, input.brief)) fail('WORKSPACE_CREATE_CONFLICT');
+      // A replay uses the context it froze; asking for it now (or no longer) is another request.
+      const replayContext = replay ? storedContext(replay) : null;
+      if (replay && (replayContext !== null) !== useOrganizationContext) fail('WORKSPACE_CREATE_CONFLICT');
       // QLT-6: a new workspace that would keep its document needs the IDM pipeline: refused (a 400 with its own
       // plain message) before anything is prepared or written. A replay of an admitted workspace still replays.
       if (!replay) assertLaunchModeAvailable(input.brief, deps.idmPipelineFor?.(tenantId) === true);
+      const organizationContext = replay ? replayContext
+        : useOrganizationContext ? await confirmedForLaunch(tenantId, input) : null;
       if (!replay) await deps.assertAiCredit?.(tenantId);
       const candidate = await deps.prepareDurableBlueprint(input.conversationId, user.id, tenantId, content, {
         target: 'lesson_author', courseId: input.courseId, mode: 'course_blueprint', locale: input.locale,
         sourceDocuments: input.sourceDocumentIds.map(document_id => ({ document_id })), launchBrief: input.brief,
+        ...(organizationContext ? { organizationContext } : {}),
       }, replay ? { source_document_ids: replay.source_document_ids, user_message_id: null } : undefined);
       if (!candidate) fail('WORKSPACE_ENGINE_UNSUPPORTED');
       const prepared = candidate!;
@@ -139,7 +197,7 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         if (active.rows.length) fail('WORKSPACE_ALREADY_ACTIVE');
 
         const locked = await tx.query(`SELECT id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,
-            launch_brief
+            launch_brief,${ORGANIZATION_CONTEXT_COLUMN}
           FROM lesson_author_workspaces
           WHERE tenant_id=$1 AND course_id=$2 AND conversation_id=$3 AND requested_by=$4 AND idempotency_key=$5
             AND contract_version=1 AND engine='self_built_rag' FOR UPDATE`,
@@ -150,21 +208,26 @@ export function createWorkspaceV2LaunchService(deps: WorkspaceV2LaunchDependenci
         if (workspace) {
           if (workspace.correlation_id !== root || workspace.request_hash !== prepared.identity.requestHash
             || workspace.content_locale !== input.locale || !sameLaunchBrief(workspace.launch_brief, input.brief)
+            || !sameOrganizationContext(storedContext(workspace), organizationContext)
             || !sameIds(workspace.source_document_ids, prepared.identity.sourceDocumentIds)) fail('WORKSPACE_CREATE_CONFLICT');
         } else {
           replayed = false;
           const workspaceId = id();
           if (!UUID_PATTERN.test(workspaceId) || !HASH.test(prepared.identity.requestHash)
             || !HASH.test(prepared.identity.sourceSnapshotHash)) fail('WORKSPACE_CREATE_CONFLICT');
-          // QLT-6: the launch brief is written once here; the workspace guard trigger keeps it immutable.
+          if (organizationContext) await assertStillConfirmed(tenantId, organizationContext);
+          // QLT-6: the launch brief is written once here; the workspace guard trigger keeps it immutable,
+          // and so is the frozen organization context (its column is written only when there is one).
           const inserted = await tx.query(`INSERT INTO lesson_author_workspaces(id,tenant_id,course_id,conversation_id,requested_by,bot_id,kb_id,
-              content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids,status,launch_brief)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[],'queued',$14::jsonb)
+              content_locale,correlation_id,idempotency_key,request_hash,source_snapshot_hash,source_document_ids,status,launch_brief${
+            organizationContext ? ',organization_context' : ''})
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[],'queued',$14::jsonb${organizationContext ? ',$15::jsonb' : ''})
             RETURNING id::text,conversation_id::text,correlation_id::text,content_locale,status,request_hash,source_document_ids,launch_brief`,
           [workspaceId, tenantId, input.courseId, input.conversationId, user.id, prepared.identity.botId,
             prepared.identity.kbId, input.locale, root, input.operationId, prepared.identity.requestHash,
             prepared.identity.sourceSnapshotHash, prepared.identity.sourceDocumentIds,
-            JSON.stringify(storedLaunchBrief(input.brief))]);
+            JSON.stringify(storedLaunchBrief(input.brief)),
+            ...(organizationContext ? [JSON.stringify(organizationContext)] : [])]);
           workspace = inserted.rows[0] as ExistingWorkspace | undefined;
           if (!workspace || workspace.id !== workspaceId || workspace.status !== 'queued') fail('WORKSPACE_CREATE_CONFLICT');
           // The installed workspace guard requires every shell to start queued.

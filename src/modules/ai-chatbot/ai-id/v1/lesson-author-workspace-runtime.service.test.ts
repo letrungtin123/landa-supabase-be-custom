@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createWorkspaceRuntime, type WorkspaceRuntimeDependencies } from './lesson-author-workspace-runtime.service.js';
 import { AppError } from '../../../../middleware/error-handler.js';
+import type { AuthUser } from '../../../../types/express.js';
 
 function fixture(){
   const scheduled: Array<()=>void>=[],logs:object[]=[];
@@ -55,6 +56,19 @@ test('QLT-6 part 2: the V1 create path refuses to keep a document as it is befor
     locale:'vi' as const,brief:{design_mode:'preserve_source' as const,learner_audience:null,course_purpose:null}};
   const queries=f.state.queries;
   await assert.rejects(f.runtime.createLessonAuthorWorkspace(user as any,input),{code:'LESSON_AUTHOR_LAUNCH_MODE_UNAVAILABLE'});
+  assert.equal(f.state.queries,queries);
+  await f.runtime.stopLessonAuthorWorkspaceWorker();
+});
+test('organization context: the V1 create path refuses use_organization_context before preparing anything',async()=>{
+  const f=fixture();f.env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED=true;await f.runtime.startLessonAuthorWorkspaceWorker();
+  const user:AuthUser={id:'00000000-0000-4000-8000-000000000001',tenantId:'00000000-0000-4000-8000-000000000002',role:'staff',
+    username:'author',sessionMode:'normal'};
+  const input={courseId:'course-v1:test+1',conversationId:'00000000-0000-4000-8000-000000000003',
+    operationId:'00000000-0000-4000-8000-000000000004',sourceDocumentIds:['00000000-0000-4000-8000-000000000005'],
+    locale:'vi' as const,brief:{design_mode:'instructional_design' as const,learner_audience:'Nhân viên mới',
+      course_purpose:'Giúp nhân viên mới làm đúng quy trình.'},useOrganizationContext:true};
+  const queries=f.state.queries;
+  await assert.rejects(f.runtime.createLessonAuthorWorkspace(user,input),{code:'ORG_CONTEXT_NOT_APPLICABLE'});
   assert.equal(f.state.queries,queries);
   await f.runtime.stopLessonAuthorWorkspaceWorker();
 });

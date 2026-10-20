@@ -6,6 +6,7 @@ import type { LessonAuthorAction } from '../ai-id/v1/lesson-author-action.logic.
 import type { ReportChatFilterInput } from '../ai-report/report-chat.service.js';
 import { type ReportChatSideEvent } from '../ai-report/report-chat-turn.service.js';
 import { type LessonAuthorLaunchBrief } from '../ai-id/contracts/lesson-author-launch-brief.logic.js';
+import type { OrganizationContextV1 } from '../ai-id/contracts/lesson-author-org-context.contract.js';
 import { LESSON_AUTHOR_TARGET } from './chat.constants.js';
 import type { ChatTarget } from './chat.constants.js';
 import type {
@@ -98,6 +99,8 @@ export interface ChatStreamOptions {
   reportFilters?: ReportChatFilterInput;
   /** QLT-6: the validated workspace launch brief; only part of the request identity hash. */
   launchBrief?: LessonAuthorLaunchBrief;
+  /** The organization context a V2 workspace Create freezes; only part of the request identity hash. */
+  organizationContext?: OrganizationContextV1;
   /** Aborted when the client leaves: the chat answer stops calling the provider. */
   abortSignal?: AbortSignal;
 }

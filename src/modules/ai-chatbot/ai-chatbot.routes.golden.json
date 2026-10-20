@@ -616,6 +616,98 @@
    "methods": [
     "GET"
    ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/documents",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "parseOrgContextUpload",
+    "handleKbUpload"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "DELETE"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/documents/:documentId",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/profile/distill",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "PUT"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/profile",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "POST"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/profile/restore",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
+   "path": "/api/ai-chatbot/chat/lesson-author/org-context/profile/versions/:version",
+   "stack": [
+    "permissionMiddleware",
+    "orgContextRoute",
+    "orgContextRoute"
+   ],
+   "registered_by": "mountOrgContextRoutes(router,{coursePermission:checkPermission('courses','can_edit'),author:lessonAuthorAuthor,service:orgContext})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
    "path": "/api/ai-chatbot/chat/lesson-author/conversations/:conversationId/chapter-checkpoint",
    "stack": [
     "permissionMiddleware",
@@ -1059,5 +1151,5 @@
    "source": "router.post('/chat/conversations/:id/messages',allowRuntimeChatTarget,lessonAuthorCourseEditor,lessonAuthorSessionOwnerOnly('id'),chatCtrl.sendMessage)"
   }
  ],
- "router_code_sha256": "864688032e5a63991ac1e0dd70df6e0cdece56ba8d03dfa02e100fd7d6dcbc90"
+ "router_code_sha256": "0f1939aba54a00e5ea2049dc4d8f7397ce026771e0f531f3f5b282557b24893e"
 }

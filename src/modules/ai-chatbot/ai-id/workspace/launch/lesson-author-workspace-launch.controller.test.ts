@@ -8,6 +8,7 @@ import { createWorkspaceLaunchHandlers, type WorkspaceLaunchInput, type Workspac
 import { LAUNCH_BRIEF_ERROR_MESSAGES, LaunchBriefError } from '../../contracts/lesson-author-launch-brief.logic.js';
 import { AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE } from '../../../../ai-credits/ai-credit.logic.js';
 import { AppError } from '../../../../../utils/errors.js';
+import { ORG_CONTEXT_LAUNCH_ERRORS, OrgContextLaunchError } from '../../contracts/lesson-author-org-context.contract.js';
 
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const user:AuthUser={id:id(1),tenantId:id(2),role:'staff',username:'fixture',sessionMode:'normal'};
@@ -18,7 +19,7 @@ const brief={design_mode:'instructional_design',learner_audience:'Nhân viên m�
 const dto:WorkspaceLaunchResult={workspace_id:id(6),conversation_id:id(3),correlation_id:id(7),content_locale:'vi',status:'designing',launch_brief:brief};
 function fixture(){
   const state={read:true,execution:true,edit:true,allowed:true,coursesModuleOn:true,empty:false,invalid:false,throwCreate:false,logThrows:false,transactions:0,
-    storedBrief:{...brief,version:1} as unknown};
+    storedBrief:{...brief,version:1} as unknown,createError:null as Error|null};
   const logs:Record<string,unknown>[]=[],creates:WorkspaceLaunchInput[]=[],sqlCalls:{sql:string;params:unknown[]}[]=[];
   const operations=new Set<string>();
   const tx:GenerationJobSql={async query<T extends Record<string,unknown>>(sql:string,p:unknown[]=[]){
@@ -36,6 +37,7 @@ function fixture(){
     create:async(actor,input)=>{
       assert.deepEqual(actor,user);creates.push(input);
       if(state.throwCreate)throw Object.assign(new Error('PRIVATE PROVIDER BODY'),{code:'WORKSPACE_ALREADY_ACTIVE'});
+      if(state.createError)throw state.createError;
       const replayed=operations.has(input.operationId);operations.add(input.operationId);
       return{...dto,replayed,...(state.invalid?{workspace_id:'bad'}:{})};
     }});
@@ -235,5 +237,23 @@ test('AI points: the "not enough AI points" refusal keeps its 429, code and mess
   for(const [error,status,code] of cases){
     thrown=error;const r=await create('en');
     assert.equal(r.status,status,code);assert.equal(r.payload.code,code);assert.notEqual(r.payload.message,'x');
+  }
+});
+test('Organization context: use_organization_context is an optional boolean passed through only when true',async()=>{
+  for(const value of ['yes',1,null,{}]){const f=fixture();
+    assert.equal((await f.invoke('create',{body:{...body,use_organization_context:value}})).status,400);assert.equal(f.creates.length,0);}
+  const off=fixture();assert.equal((await off.invoke('create',{body:{...body,use_organization_context:false}})).status,202);
+  assert.equal(Object.hasOwn(off.creates[0]!,'useOrganizationContext'),false);
+  const on=fixture();assert.equal((await on.invoke('create',{body:{...body,use_organization_context:true}})).status,202);
+  assert.equal(on.creates[0]!.useOrganizationContext,true);
+});
+test('Organization context: not applicable (422) and not confirmed (409) are final refusals with plain messages',async()=>{
+  for(const code of ['ORG_CONTEXT_NOT_APPLICABLE','ORG_CONTEXT_NOT_CONFIRMED'] as const){
+    const f=fixture();f.state.createError=new OrgContextLaunchError(code);
+    const en=await f.invoke('create',{body:{...body,use_organization_context:true}});
+    const vi=await f.invoke('create',{body:{...body,use_organization_context:true},query:{ui_locale:'vi'}});
+    const [status,viText,enText]=ORG_CONTEXT_LAUNCH_ERRORS[code];
+    assert.deepEqual([en.status,en.payload.code,en.payload.message],[status,code,enText]);
+    assert.deepEqual([vi.status,vi.payload.message],[status,viText]);
   }
 });

@@ -36,6 +36,7 @@ import {
 } from '../v1/lesson-author-blueprint-acceptance.logic.js';
 import { runStoredInputFilter } from '../../ai-platform/input-filter/input-filter.service.js';
 import { withLaunchBriefIdentity } from '../contracts/lesson-author-launch-brief.logic.js';
+import { withOrganizationContextIdentity } from '../contracts/lesson-author-org-context.contract.js';
 import { hasAiIdCoursePermission } from '../shared/lesson-author-ai-id-access.service.js';
 import {
   MAX_USER_MESSAGE_LENGTH,
@@ -196,10 +197,11 @@ export async function prepareDurableBlueprint(
   const hash = generationSnapshotHash;
   const identity: Omit<PreparedGenerationJob, 'idempotencyKey' | 'correlationId'> = {
     tenantId, userId, conversationId, courseId: ctx.courseId!, botId: ctx.botId, kbId: ctx.botKbId,
-    // QLT-6: the same workspace operation with a different launch brief is a different request.
-    requestHash: hash(withLaunchBriefIdentity({ content: trimmed, locale, editor: editor?.context ?? {}, mentions,
-      sources: sources.map(s => s.document_id), course: ctx.courseId, bot: ctx.botId, kb: ctx.botKbId },
-    options.launchBrief)),
+    // QLT-6: the same workspace operation with a different launch brief is a different request; so is one
+    // with another frozen organization context (absent: the identity is the one before the feature).
+    requestHash: hash(withOrganizationContextIdentity(withLaunchBriefIdentity({ content: trimmed, locale,
+      editor: editor?.context ?? {}, mentions, sources: sources.map(s => s.document_id), course: ctx.courseId,
+      bot: ctx.botId, kb: ctx.botKbId }, options.launchBrief), options.organizationContext)),
     sourceSnapshotHash: createLessonAuthorBlueprintSourceSnapshotHash(ctx, ctx.botKbId, sources),
     courseOutlineHash: createHash('sha256').update(course.outline).digest('hex'),
     runtimeConfigHash: hash({ policy: policy.prompt, history, model: settings.lessonAuthorModel,

@@ -17,6 +17,7 @@ import { generationSnapshotHash as hash, type GenerationJobRow } from '../shared
 import type { GenerationJobSql, GenerationJobDatabase } from '../shared/lesson-author-generation-job.repository.js';
 import { runtimeTenantSql } from '../../../../config/runtime-tenant-fence.js';
 import { assertLaunchModeAvailable, isNormalizedLaunchBrief, readStoredLaunchBrief, sameLaunchBrief, storedLaunchBrief, type LessonAuthorLaunchBrief } from '../contracts/lesson-author-launch-brief.logic.js';
+import { ORG_CONTEXT_NOT_APPLICABLE, OrgContextLaunchError } from '../contracts/lesson-author-org-context.contract.js';
 import { UUID_PATTERN, isUuid } from '../../../../utils/uuid.js';
 import { createCourseAccessRepository } from '../../../courses/course-access.repository.js';
 import { isAiIdActor, isAiIdAuthorRole } from '../shared/lesson-author-ai-id-access.logic.js';
@@ -213,13 +214,15 @@ function admission(){
 /** Creation is atomic with the EXISTING durable Blueprint enqueue/message/token
  * reservation. Same idempotency identity survives an uncertain POST; no second
  * provider call or independent correlation is generated on replay. */
-async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief}){
+async function createLessonAuthorWorkspace(user:AuthUser,input:{courseId:string;conversationId:string;operationId:string;sourceDocumentIds:string[];locale:'en'|'vi';brief:LessonAuthorLaunchBrief;useOrganizationContext?:boolean}){
   if(!ready||!isDurableBlueprintWorkerReady())throw new AppError('Workspace worker is not ready.',503,'WORKSPACE_EXECUTION_DISABLED');
   if(!isAiIdActor(user)||![input.conversationId,input.operationId].every(id=>UUID_PATTERN.test(id))
     ||!input.sourceDocumentIds.length||input.sourceDocumentIds.length>5||new Set(input.sourceDocumentIds).size!==input.sourceDocumentIds.length
     ||input.sourceDocumentIds.some(id=>!UUID_PATTERN.test(id))||!['en','vi'].includes(input.locale)||!isNormalizedLaunchBrief(input.brief))reject('WORKSPACE_CREATE_INPUT_INVALID');
   // QLT-6: this V1 path designs a course with the old blueprint generator; it can never keep a document as it is.
   assertLaunchModeAvailable(input.brief,false);
+  // The organization profile is background for the V2 IDM pipeline only; this path cannot use it.
+  if(input.useOrganizationContext===true)throw new OrgContextLaunchError(ORG_CONTEXT_NOT_APPLICABLE);
   const tenantId=user.tenantId,content=input.locale==='en'?'Create lesson content from the selected documents.':'Tạo nội dung bài học từ tài liệu đã chọn.';
   return withLessonAuthorConversationLock(input.conversationId,async()=>{
     const prior=await query<GenerationJobRow>(`SELECT * FROM lesson_author_generation_jobs WHERE tenant_id=$1 AND conversation_id=$2 AND requested_by=$3 AND idempotency_key=$4`,

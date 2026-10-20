@@ -59,6 +59,8 @@ import {
 } from './ai-id/sessions/lesson-author-session-access.controller.js';
 import { findLessonAuthorSessionOwner } from './ai-id/sessions/lesson-author-session-access.repository.js';
 import { parseLessonAuthorSourceUpload, uploadLessonAuthorSourceDocument } from './ai-id/sources/lesson-author-source-upload.controller.js';
+import { mountOrgContextRoutes } from './ai-id/org-context/lesson-author-org-context.routes.js';
+import { productionOrgContextService } from './ai-id/org-context/lesson-author-org-context-runtime.service.js';
 import {
   deleteLessonAuthorSessionController,
   getLessonAuthorSessionDeleteImpactController,
@@ -283,6 +285,11 @@ router.get('/chat/lesson-author/source-documents/:documentId/stream', allowRunti
     if (event.event === 'source_stream_failed') console.warn(line); else console.info(line);
   },
 }));
+// AI ID organization context (tenant-wide context files + the confirmed organization profile): the
+// authority of the source documents above; default off (LESSON_AUTHOR_ORG_CONTEXT_ENABLED).
+const orgContext = productionOrgContextService();
+mountOrgContextRoutes(router, { coursePermission: checkPermission('courses', 'can_edit'), author: lessonAuthorAuthor,
+  service: orgContext });
 router.get('/chat/lesson-author/conversations/:conversationId/chapter-checkpoint', checkPermission('courses','can_edit'), chatCtrl.getChapterCheckpoint);
 const orchestrationV2IdmPolicy = {
   enabled: env.LESSON_AUTHOR_IDM_PIPELINE_ENABLED,
@@ -312,6 +319,9 @@ const workspaceV2Launch = createWorkspaceV2LaunchService({
   prepareDurableBlueprint, withLessonAuthorConversationLock, admit: orchestrationV2Admit,
   // QLT-6: only a run admitted to the IDM pipeline can keep its document as it is.
   idmPipelineFor: tenantId => selectOrchestrationV2AdmissionPipeline(tenantId, orchestrationV2IdmPolicy) === 'idm-1',
+  // A Create with use_organization_context freezes the confirmed organization profile into the workspace.
+  organizationContext: { enabled: tenantId => orgContext.enabledFor(tenantId),
+    confirmed: (tenantId, lock) => orgContext.confirmedContext(tenantId, lock) },
   assertAiCredit: assertAiCreditForAiIdRun,
   report: event => console.info('[LessonAuthorOrchestrationV2Admission]', JSON.stringify(event)),
 });

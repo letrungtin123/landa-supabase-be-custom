@@ -1,5 +1,8 @@
 import { orchestrationV2Hash } from '../../shared/lesson-author-orchestration-v2.logic.js';
 import { isNormalizedLaunchBrief, type LessonAuthorLaunchBrief } from '../../contracts/lesson-author-launch-brief.logic.js';
+import {
+  readOrganizationContext, withOrganizationContextIdentity, type OrganizationContextV1,
+} from '../../contracts/lesson-author-org-context.contract.js';
 import type { OrchestrationV2RunPipeline } from '../../contracts/lesson-author-idm.contract.js';
 import { UUID_PATTERN } from '../../../../../utils/uuid.js';
 
@@ -11,6 +14,8 @@ export interface OrchestrationV2AdmissionAuthority {
   source_document_ids: readonly string[];
   /** QLT-6: the workspace's launch brief (null for a workspace created before it). */
   launch_brief?: LessonAuthorLaunchBrief | null;
+  /** The organization context the workspace froze (null or absent without one). */
+  organization_context?: OrganizationContextV1 | null;
 }
 
 export interface OrchestrationV2AdmissionConfig {
@@ -63,8 +68,11 @@ export function prepareOrchestrationV2Admission(
     || config.workspace_concurrency_limit > config.tenant_concurrency_limit
     || !integer(config.routing_shard_count, 1, 4_096)
     || (authority.launch_brief != null && !isNormalizedLaunchBrief(authority.launch_brief))) fail();
+  if (authority.organization_context != null) readOrganizationContext(authority.organization_context, 'organization_context', fail);
   const source_document_ids = Object.freeze([...authority.source_document_ids].sort());
-  const bootstrap = {
+  // The run is also bound to the organization context it was admitted with (absent without one, so every
+  // bootstrap hash taken before the feature is unchanged).
+  const bootstrap = withOrganizationContextIdentity({
     contract_version: 2,
     workspace_id: authority.workspace_id,
     tenant_id: authority.tenant_id,
@@ -80,7 +88,7 @@ export function prepareOrchestrationV2Admission(
     ...(authority.launch_brief ? { launch_brief: { design_mode: authority.launch_brief.design_mode,
       learner_audience: authority.launch_brief.learner_audience, course_purpose: authority.launch_brief.course_purpose } }
       : {}),
-  };
+  }, authority.organization_context);
   const sourceTask = {
     contract_version: 2,
     task_key: 'source:snapshot',
