@@ -14,8 +14,10 @@ import { orchestrationV2RecoveryRequestHash } from './lesson-author-orchestratio
 import {
   createOrchestrationV2RecoveryRepository,
   type OrchestrationV2RecoverInput,
+  type OrchestrationV2RecoveryAuditEvent,
 } from './lesson-author-orchestration-v2-recovery.repository.js';
-import { orchestrationV2RecoveryEnabled } from './lesson-author-orchestration-v2-recovery.routes.js';
+import { orchestrationV2RecoveryAuditEntry, orchestrationV2RecoveryEnabled } from './lesson-author-orchestration-v2-recovery.routes.js';
+import { normalizeStructuredAuditEvent } from '../../../../audit-logs/audit-event.contract.js';
 import { createOrchestrationV2RecoveryService } from './lesson-author-orchestration-v2-recovery.service.js';
 import { createOrchestrationV2WorkerRepository } from '../worker/lesson-author-orchestration-v2-worker.repository.js';
 import { orchestrationV2DispatchEnvelope } from '../dispatch/lesson-author-orchestration-v2-dispatch.logic.js';
@@ -80,7 +82,7 @@ interface State {
   scope?: Row | null;
 }
 
-function database(state: State) {
+function database(state: State, audit?: (event: OrchestrationV2RecoveryAuditEvent) => Promise<void>) {
   const calls: Array<{ sql: string; params: unknown[] }> = [];
   const events: string[] = [];
   const counted = (params: unknown[], index: number) => (JSON.parse(String(params[index])) as unknown[]).map(() => ({ id: uuid(1) }));
@@ -90,7 +92,8 @@ function database(state: State) {
     if (/FOR UPDATE OF r,w/.test(sql)) {
       return [{ run_id: RUN, run_status: state.run_status ?? 'needs_action', failure_code: 'RUN_STOPPED_BY_AUTHOR',
         finished_at: '2026-10-20 10:00:00.123456+07', manifest_hash: 'a'.repeat(64), workspace_status: 'needs_action',
-        event_head: String(state.event_head ?? 42), completion_receipt: false, review_receipt: false }];
+        event_head: String(state.event_head ?? 42), completion_receipt: false, review_receipt: false,
+        course_name: 'Khoá điện', session_title: '' }];
     }
     if (/FROM lesson_author_workspace_v2_recoveries\s+WHERE workspace_id=\$1 AND idempotency_key=\$2/.test(sql)) {
       return state.recorded ? [state.recorded] : [];
@@ -134,7 +137,9 @@ function database(state: State) {
   };
   const repository = createOrchestrationV2RecoveryRepository({ db, canEdit: async (scopedTx) => {
     await scopedTx.query(`SET LOCAL lock_timeout='3000ms' /* canEdit fence */`); return true;
-  } }, { retry: noSleep });
+  }, ...(audit ? { audit: async (event: OrchestrationV2RecoveryAuditEvent) => {
+    calls.push({ sql: '/* audit */', params: [] }); await audit(event);
+  } } : {}) }, { retry: noSleep });
   return { calls, events, repository };
 }
 
@@ -261,6 +266,47 @@ test('continue (resume) re-runs free work only: no scope, no AI unit, no cost', 
   assert.deepEqual(recovery.params.slice(7, 10), [2, 0, 0]);
   assert.equal(f.calls.some(call => /FROM lesson_author_workspace_nodes\s+WHERE workspace_id=\$1 AND tenant_id=\$2 AND course_id=\$3 AND id=\$4/
     .test(call.sql)), false);
+});
+
+test('audit: continue and rewrite each write one tenant entry after the run_resumed event, in the same transaction', async () => {
+  const audits: OrchestrationV2RecoveryAuditEvent[] = [];
+  const rewrite = database({ chapters: [['succeeded', 'failed', 'failed'], ['succeeded']] }, async event => { audits.push(event); });
+  await rewrite.repository.recover(owner, WORKSPACE, input());
+  const resume = database({ chapters: [['succeeded'], ['succeeded']], validate: { 1: 'failed' } }, async event => { audits.push(event); });
+  await resume.repository.recover(owner, WORKSPACE, input({ request: { action: 'resume' }, max_ai_unit_count: 0,
+    estimated_cost_usd: 0 }));
+  const base = { tenantId: TENANT, actorId: USER, courseId: COURSE, courseName: 'Khoá điện', conversationId: CONVERSATION,
+    sessionTitle: '' };
+  // Rewrite counts the lessons sent to the AI; continue counts the checks it re-runs. Never content or cost.
+  assert.deepEqual(audits, [{ ...base, action: 'regenerate', affectedCount: 2 }, { ...base, action: 'resume', affectedCount: 2 }]);
+  for (const f of [rewrite, resume]) {
+    const order = f.calls.map(call => call.sql);
+    assert.ok(order.indexOf('/* audit */') > order.findIndex(sql => /'run_resumed'/.test(sql)));
+    assert.deepEqual(f.events, ['BEGIN', 'COMMIT']);
+  }
+  // The tenant row: the session (or course) name, the course and the count only; tenant-visible.
+  const entry = orchestrationV2RecoveryAuditEntry(audits[0]!, 'author');
+  assert.deepEqual(entry, { tenantId: TENANT, actorId: USER, actorUsername: 'author', action: 'UPDATE',
+    entityType: 'lesson_author_session', entityId: CONVERSATION, entityName: 'Khoá điện',
+    event: { code: 'lesson_author.workspace.lessons_rewritten', context: { course_id: COURSE, course_name: 'Khoá điện',
+      affected_count: 2 } } });
+  for (const [action, code] of [['stop', 'lesson_author.workspace.run_stopped'], ['resume', 'lesson_author.workspace.run_resumed'],
+    ['regenerate', 'lesson_author.workspace.lessons_rewritten']] as const) {
+    const normalized = normalizeStructuredAuditEvent(orchestrationV2RecoveryAuditEntry({ ...base, action,
+      sessionTitle: 'Thiết kế', affectedCount: action === 'stop' ? null : 3 }, 'author').event);
+    assert.equal(normalized.eventCode, code);
+    assert.equal(normalized.viewerScope, 'tenant');
+    assert.deepEqual(normalized.metadata, { course_id: COURSE, course_name: 'Khoá điện',
+      ...(action === 'stop' ? {} : { affected_count: 3 }) });
+  }
+  // A replayed operation id writes nothing, so no second audit entry.
+  const hash = orchestrationV2RecoveryRequestHash({ action: 'regenerate', node_id: chapterNode(1), expected_workspace_revision: 42 });
+  const replay = database({ chapters: [['succeeded', 'failed']], recorded: { id: uuid(500), run_id: RUN, action: 'regenerate',
+    request_hash: hash, requested_by: USER, reopened_task_count: 3 } }, async () => assert.fail('a replay is not audited'));
+  assert.equal((await replay.repository.recover(owner, WORKSPACE, input())).replayed, true);
+  // A refused recovery writes no audit entry either.
+  const refused = database({ chapters: [['succeeded', 'failed']], other_active: true }, async () => assert.fail('no audit'));
+  await assert.rejects(refused.repository.recover(owner, WORKSPACE, input()), { code: 'RECOVERY_OTHER_RUN_ACTIVE' });
 });
 
 test('recover retries a deadlock victim from BEGIN, then reports the real refusal', async () => {

@@ -235,6 +235,13 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   },
   // A course editor marked one assessment question held by AI ID as checked.
   'lesson_author.workspace.review_resolved': { context: ['course_id', 'course_name'], changes: [] },
+  // The author of an AI course design stopped it ("Dừng"), continued its free checks
+  // ("Chạy tiếp", affected_count = checks re-run) or had its missing lessons rewritten
+  // ("Viết lại", affected_count = lessons sent to the AI). No content, no cost: the
+  // estimate is in USD, which tenant viewers never see.
+  'lesson_author.workspace.run_stopped': { context: ['course_id', 'course_name'], changes: [] },
+  'lesson_author.workspace.run_resumed': { context: ['course_id', 'course_name', 'affected_count'], changes: [] },
+  'lesson_author.workspace.lessons_rewritten': { context: ['course_id', 'course_name', 'affected_count'], changes: [] },
   'knowledgebase.created': { context: [], changes: [] },
   'knowledgebase.updated': { context: [], changes: ['name'] },
   'knowledgebase.deleted': { context: [], changes: [] },
@@ -356,6 +363,9 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'lesson_author.job.applied',
   'lesson_author.workspace.applied_shared',
   'lesson_author.workspace.review_resolved',
+  'lesson_author.workspace.run_stopped',
+  'lesson_author.workspace.run_resumed',
+  'lesson_author.workspace.lessons_rewritten',
   'knowledgebase.created',
   'knowledgebase.updated',
   'knowledgebase.deleted',

@@ -300,12 +300,40 @@ export interface OrchestrationV2RecoveryRepositoryOptions {
   retry?: OrchestrationV2TransientRetryOptions;
 }
 
+/**
+ * Written in the stop / continue / rewrite transaction, after its last write:
+ * who acted on which course design and how much work it reopened. Never
+ * content and never the cost estimate.
+ */
+export interface OrchestrationV2RecoveryAuditEvent {
+  action: 'stop' | 'resume' | 'regenerate';
+  tenantId: string;
+  actorId: string;
+  courseId: string;
+  courseName: string;
+  conversationId: string;
+  sessionTitle: string;
+  /** resume: checks re-run; regenerate: lessons sent to the AI; stop: null. */
+  affectedCount: number | null;
+}
+
+const text = (value: unknown) => typeof value === 'string' ? value : '';
+
 export function createOrchestrationV2RecoveryRepository(deps: {
   db: GenerationJobDatabase;
   /** Write fence of the authenticated author (createWorkspaceAuthority(user).canEdit). */
   canEdit(tx: GenerationJobSql, owner: Readonly<WorkspaceReadOwner>): Promise<boolean>;
+  /** Same-transaction tenant audit entry of an accepted stop/continue/rewrite (never of a replay). */
+  audit?: (event: OrchestrationV2RecoveryAuditEvent) => Promise<void>;
 }, options: OrchestrationV2RecoveryRepositoryOptions = {}) {
   const db = withOrchestrationV2TransactionRetry(deps.db, options.retry);
+  const audit = async (owner: WorkspaceReadOwner, row: Record<string, unknown>,
+    action: OrchestrationV2RecoveryAuditEvent['action'], affectedCount: number | null) => {
+    if (!deps.audit) return;
+    await deps.audit({ action, tenantId: owner.tenantId, actorId: owner.userId, courseId: owner.courseId,
+      courseName: text(row.course_name), conversationId: owner.conversationId, sessionTitle: text(row.session_title),
+      affectedCount });
+  };
 
   /** One consistent read of the run, its tasks and the course node. No lock, no write. */
   async function snapshot(owner: WorkspaceReadOwner, workspaceId: string,
@@ -375,7 +403,7 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       if (!await deps.canEdit(tx, owner)) fail('RECOVERY_FORBIDDEN');
       await lockWorkspaceLifecycle(tx, owner.tenantId, workspaceId);
       const locked = await tx.query(`SELECT r.id::text AS run_id,r.status AS run_status,r.failure_code,
-          w.status AS workspace_status
+          w.status AS workspace_status,course.display_name AS course_name,c.title AS session_title
         ${OWNED_WORKSPACE}
         JOIN lesson_author_workspace_v2_runs r ON r.workspace_id=w.id AND r.tenant_id=w.tenant_id
           AND r.course_id=w.course_id
@@ -403,6 +431,7 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       const workspace = await tx.query(`SELECT status FROM lesson_author_workspaces
         WHERE id=$1 AND tenant_id=$2 AND course_id=$3`, [workspaceId, owner.tenantId, owner.courseId]);
       if (workspace.rows.length !== 1) unavailable();
+      await audit(owner, row, 'stop', null);
       return { recovery_id: null, run_id: runId, action: 'stop', reopened_task_count: 0,
         workspace_status: oneOf<string>(workspace.rows[0]!.status, WORKSPACE_STATUSES), replayed: false };
     });
@@ -437,7 +466,8 @@ export function createOrchestrationV2RecoveryRepository(deps: {
           EXISTS(SELECT 1 FROM lesson_author_workspace_v2_completion_receipts receipt WHERE receipt.run_id=r.id)
             AS completion_receipt,
           EXISTS(SELECT 1 FROM lesson_author_workspace_v2_review_receipts review WHERE review.run_id=r.id)
-            AS review_receipt
+            AS review_receipt,
+          course.display_name AS course_name,c.title AS session_title
         ${OWNED_WORKSPACE}
         JOIN lesson_author_workspace_v2_runs r ON r.workspace_id=w.id AND r.tenant_id=w.tenant_id
           AND r.course_id=w.course_id
@@ -484,6 +514,7 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       const recoveryId = await applyRecovery(tx, { owner, workspaceId, runId: run.run_id, action, scope, plan, requestHash,
         operationId: input.operation_id, estimatedCostUsd: input.estimated_cost_usd,
         reconcileUnknown: input.reconcileUnknown });
+      await audit(owner, head, action, action === 'regenerate' ? plan.ai_unit_count : plan.items.length);
       return { recovery_id: recoveryId, run_id: run.run_id, action, reopened_task_count: plan.items.length,
         workspace_status: 'drafting', replayed: false };
     });

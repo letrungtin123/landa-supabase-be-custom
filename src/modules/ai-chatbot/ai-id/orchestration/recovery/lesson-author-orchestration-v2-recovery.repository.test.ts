@@ -85,6 +85,35 @@ test('stop: an active run becomes needs_action under the workspace lock and canc
   assert.deepEqual(f.events, ['BEGIN', 'COMMIT']);
 });
 
+test('stop writes one tenant audit entry inside its transaction, after the stop, never on a replay', async () => {
+  const route = stopRoute({ run_status: 'executing' });
+  const f = database((sql, params) => /FOR UPDATE OF r,w/.test(sql)
+    ? route(sql, params)!.map(row => ({ ...row, course_name: 'Khoá điện', session_title: 'Thiết kế An toàn điện' }))
+    : route(sql, params));
+  const audits: unknown[] = [];
+  const repository = createOrchestrationV2RecoveryRepository({ db: f.db, canEdit: async () => true,
+    audit: async event => { audits.push(event); f.calls.push({ sql: '/* audit */', params: [] }); } }, { retry: noSleep });
+  await repository.stop(owner, WORKSPACE, OPERATION);
+  assert.deepEqual(audits, [{ action: 'stop', tenantId: TENANT, actorId: USER, courseId: COURSE, courseName: 'Khoá điện',
+    conversationId: CONVERSATION, sessionTitle: 'Thiết kế An toàn điện', affectedCount: null }]);
+  const order = f.calls.map(call => call.sql);
+  assert.ok(order.indexOf('/* audit */') > order.findIndex(sql => /UPDATE lesson_author_workspace_v2_runs/.test(sql)));
+  assert.deepEqual(f.events, ['BEGIN', 'COMMIT'], 'the audit row commits with the stop');
+  assert.match(f.calls.find(call => /FOR UPDATE OF r,w/.test(call.sql))!.sql,
+    /course\.display_name AS course_name,c\.title AS session_title/);
+
+  // A failed audit write rolls the stop back.
+  const failing = database(stopRoute({ run_status: 'executing' }));
+  await assert.rejects(createOrchestrationV2RecoveryRepository({ db: failing.db, canEdit: async () => true,
+    audit: async () => { throw Object.assign(new Error('quota'), { code: 'P0001' }); } }, { retry: noSleep })
+    .stop(owner, WORKSPACE, OPERATION), { code: 'P0001' });
+  assert.deepEqual(failing.events, ['BEGIN', 'ROLLBACK']);
+
+  const replay = database(stopRoute({ run_status: 'needs_action', failure_code: 'RUN_STOPPED_BY_AUTHOR' }));
+  await createOrchestrationV2RecoveryRepository({ db: replay.db, canEdit: async () => true,
+    audit: async () => assert.fail('a replayed stop is not audited again') }, { retry: noSleep }).stop(owner, WORKSPACE, OPERATION);
+});
+
 test('stop keeps the workspace drafting while in-flight work drains', async () => {
   const f = database(stopRoute({ run_status: 'executing', running: 2 }));
   const repository = createOrchestrationV2RecoveryRepository({ db: f.db, canEdit: async () => true }, { retry: noSleep });

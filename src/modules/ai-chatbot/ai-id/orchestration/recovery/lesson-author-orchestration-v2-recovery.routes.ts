@@ -6,6 +6,7 @@
 import type { Router } from 'express';
 import { withDatabaseTransaction } from '../../../../../config/database.js';
 import { env } from '../../../../../config/env.js';
+import { appendAuditLog, type TransactionalAuditEntry } from '../../../../../middleware/audit-log.js';
 import { hasPermission } from '../../../../../middleware/authorize.js';
 import { orchestrationV2QuotaAccounting } from '../worker/lesson-author-orchestration-v2-accounting.service.js';
 import { isOrchestrationV2RunRuntimeCurrent } from '../lesson-author-orchestration-v2-execution.config.js';
@@ -15,7 +16,10 @@ import {
   orchestrationV2RecoveryRoute,
   type OrchestrationV2AsyncMiddleware,
 } from './lesson-author-orchestration-v2-recovery.controller.js';
-import { createOrchestrationV2RecoveryRepository } from './lesson-author-orchestration-v2-recovery.repository.js';
+import {
+  createOrchestrationV2RecoveryRepository,
+  type OrchestrationV2RecoveryAuditEvent,
+} from './lesson-author-orchestration-v2-recovery.repository.js';
 import { createOrchestrationV2RecoveryService } from './lesson-author-orchestration-v2-recovery.service.js';
 import { createWorkspaceAuthority } from '../../workspace/edit/lesson-author-workspace-authority.repository.js';
 
@@ -35,6 +39,21 @@ export function orchestrationV2RecoveryEnabled(tenantId: string, settings: {
     || settings.tenant_allowlist.some(candidate => candidate.trim().toLowerCase() === tenant);
 }
 
+const AUDIT_EVENT_CODES = {
+  stop: 'lesson_author.workspace.run_stopped',
+  resume: 'lesson_author.workspace.run_resumed',
+  regenerate: 'lesson_author.workspace.lessons_rewritten',
+} as const;
+
+/** Tenant audit row of a stop/continue/rewrite, in the shape of the other AI course design session events. */
+export function orchestrationV2RecoveryAuditEntry(event: OrchestrationV2RecoveryAuditEvent, actorUsername: string)
+  : TransactionalAuditEntry {
+  return { tenantId: event.tenantId, actorId: event.actorId, actorUsername, action: 'UPDATE',
+    entityType: 'lesson_author_session', entityId: event.conversationId, entityName: event.sessionTitle || event.courseName,
+    event: { code: AUDIT_EVENT_CODES[event.action], context: { course_id: event.courseId, course_name: event.courseName,
+      ...(event.affectedCount === null ? {} : { affected_count: event.affectedCount }) } } };
+}
+
 export function mountOrchestrationV2RecoveryRoutes(router: Router, input: {
   workspacePath: string;
   ownerOnly: OrchestrationV2AsyncMiddleware;
@@ -47,6 +66,9 @@ export function mountOrchestrationV2RecoveryRoutes(router: Router, input: {
       repository: user => createOrchestrationV2RecoveryRepository({
         db: { transaction: withDatabaseTransaction },
         canEdit: (tx, owner) => createWorkspaceAuthority(user).canEdit(tx, owner),
+        // Nested withDatabaseTransaction reuses the stop/continue/rewrite transaction's client.
+        audit: event => withDatabaseTransaction(client => appendAuditLog(client,
+          orchestrationV2RecoveryAuditEntry(event, user.username))),
       }),
       canRead: user => hasPermission(user, 'courses', 'can_edit'),
       stopEnabled: () => workspaceWritesEnabled() && env.LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED,
