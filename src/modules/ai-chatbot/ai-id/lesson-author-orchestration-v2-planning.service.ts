@@ -21,6 +21,7 @@ import { IDM_V2_COMPONENT_TYPES, buildIdmModuleContext } from './lesson-author-i
 import { assembleIdmOrchestrationArchitecture, assertIdmShardDesign } from './lesson-author-idm-architecture.logic.js';
 import { idmProviderFailure } from './lesson-author-orchestration-v2-worker.logic.js';
 import { withOrchestrationV2TransientRetry } from './lesson-author-orchestration-v2-lock-order.js';
+import { atOrchestrationV2Stage } from './lesson-author-orchestration-v2-diagnostics.logic.js';
 
 type PlanningRepository = ReturnType<typeof createOrchestrationV2PlanningRepository>;
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
@@ -94,6 +95,29 @@ function common(
   };
 }
 
+/** Planning steps named in worker failure telemetry (`execution_stage`); the innermost step wins. */
+type OrchestrationV2PlanningStage =
+  | 'planning_authority_load'
+  | 'source_request'
+  | 'source_page_persist'
+  | 'source_catalog_load'
+  | 'source_publication'
+  | 'skeleton_input_load'
+  | 'chapter_input_load'
+  | 'idm_module_context'
+  | 'provider_dispatch_fence'
+  | 'provider_request'
+  | 'shard_design_check'
+  | 'skeleton_publication'
+  | 'chapter_publication'
+  | 'architecture_input_load'
+  | 'architecture_assembly'
+  | 'architecture_publication';
+
+function atStage<T>(stage: OrchestrationV2PlanningStage, operation: () => Promise<T> | T): Promise<T> {
+  return atOrchestrationV2Stage(stage, async () => operation());
+}
+
 /** IDM provider calls stop the run on an exhausted key (`idmProviderFailure`); legacy calls are unchanged. */
 async function providerCall<T>(idm: boolean, call: () => Promise<T>): Promise<T> {
   try {
@@ -118,21 +142,22 @@ export async function executeOrchestrationV2PlanningTask(
   // no external side effect, so a deadlock victim is simply re-run.
   const db = <T>(operation: () => Promise<T>) => withTransientTransactionRetry(operation, signal);
   if (lease.kind === 'validate_architecture') {
-    const input = idmRun ? await db(() => planning.loadArchitectureInput(lease, IDM_PIPELINE_VERSION))
-      : await db(() => planning.loadArchitectureInput(lease));
+    const input = await atStage('architecture_input_load', () => idmRun
+      ? db(() => planning.loadArchitectureInput(lease, IDM_PIPELINE_VERSION))
+      : db(() => planning.loadArchitectureInput(lease)));
     if (idmRun && !input.idm_view) throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
-    const assembly = input.idm_view
+    const assembly = await atStage('architecture_assembly', () => input.idm_view
       ? assembleIdmOrchestrationArchitecture(input.skeleton, input.idm_view, input.shard_artifacts)
-      : assembleOrchestrationV2Architecture(input.skeleton, input.scopes, input.shard_artifacts);
-    await withTransientTransactionRetry(
-      () => planning.completeArchitecture(lease, assembly, runtime.budgets.inventory_publish_budget_ms), signal);
+      : assembleOrchestrationV2Architecture(input.skeleton, input.scopes, input.shard_artifacts));
+    await atStage('architecture_publication', () => withTransientTransactionRetry(
+      () => planning.completeArchitecture(lease, assembly, runtime.budgets.inventory_publish_budget_ms), signal));
     return 'validate_architecture';
   }
-  const authority = await db(() => planning.loadAuthority(lease));
+  const authority = await atStage('planning_authority_load', () => db(() => planning.loadAuthority(lease)));
   const execution = { timeoutMs: lease.execution_budget_ms, signal };
   if (lease.kind === 'source_snapshot') {
     let pageAuthority: OrchestrationV2SourceSnapshotPageResponse['source_authority'] | null = null;
-    const response = await clients.source({
+    const response = await atStage('source_request', () => clients.source({
       ...common(lease, authority, runtime, 1), contract_version: 2,
       source_snapshot_hash: lease.source_snapshot_hash,
     }, execution, async (page, startOrdinal) => {
@@ -140,21 +165,21 @@ export async function executeOrchestrationV2PlanningTask(
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
       pageAuthority ??= page.source_authority;
-      await db(() => planning.persistSourcePage(lease, page, startOrdinal));
-    });
+      await atStage('source_page_persist', () => db(() => planning.persistSourcePage(lease, page, startOrdinal)));
+    }));
     const persistedAuthority = pageAuthority as OrchestrationV2SourceSnapshotPageResponse['source_authority'] | null;
     if (!persistedAuthority || response.source_authority.structure_hash !== persistedAuthority.structure_hash) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
-    const scopes = await db(() => planning.loadPersistedSourceCatalog(lease));
-    await planning.completeSource(lease, { ...response, source_authority: persistedAuthority }, scopes,
-      runtime.budgets.skeleton);
+    const scopes = await atStage('source_catalog_load', () => db(() => planning.loadPersistedSourceCatalog(lease)));
+    await atStage('source_publication', () => planning.completeSource(lease,
+      { ...response, source_authority: persistedAuthority }, scopes, runtime.budgets.skeleton));
     return 'source_snapshot';
   }
   if (lease.kind === 'course_skeleton') {
-    const scopes = await db(() => planning.loadSourceCatalog(lease));
-    const sourceAuthority = await db(() => planning.loadSourceAuthority(lease));
-    const idm = runtime.pipeline === IDM_PIPELINE_VERSION ? await (async () => {
+    const scopes = await atStage('skeleton_input_load', () => db(() => planning.loadSourceCatalog(lease)));
+    const sourceAuthority = await atStage('skeleton_input_load', () => db(() => planning.loadSourceAuthority(lease)));
+    const idm = runtime.pipeline === IDM_PIPELINE_VERSION ? await atStage('skeleton_input_load', async () => {
       // Capacity is enforced here, before the dispatch fence, so an oversize
       // snapshot fails the task without any provider call (spec §12.4).
       const input = await db(() => planning.loadIdmSkeletonInput(lease));
@@ -168,9 +193,9 @@ export async function executeOrchestrationV2PlanningTask(
         max_output_tokens: lease.max_output_tokens, provider_max_attempts: lease.provider_max_attempts,
         remaining_ms: input.remaining_ms,
       });
-    })() : undefined;
+    }) : undefined;
     let providerDispatchMarked = false;
-    const response = await providerCall(idm !== undefined, () => clients.skeleton({
+    const response = await atStage('provider_request', () => providerCall(idm !== undefined, () => clients.skeleton({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       source_snapshot_hash: lease.source_snapshot_hash, scope_catalog: scopes, source_authority: sourceAuthority,
       max_attempts: lease.provider_max_attempts as 1 | 2,
@@ -179,31 +204,33 @@ export async function executeOrchestrationV2PlanningTask(
       if (providerDispatchMarked) {
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
-      await db(() => worker.markProviderDispatched(lease));
+      await atStage('provider_dispatch_fence', () => db(() => worker.markProviderDispatched(lease)));
       providerDispatchMarked = true;
-    } }));
+    } })));
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
-    await withTransientTransactionRetry(
+    await atStage('skeleton_publication', () => withTransientTransactionRetry(
       () => planning.completeSkeleton(lease, response, scopes, runtime.budgets, settleProvider,
-        runtime.pipeline, idm?.project_context), signal);
+        runtime.pipeline, idm?.project_context), signal));
     return 'course_skeleton';
   }
   if (lease.kind === 'chapter_blueprint') {
-    const input = idmRun ? await db(() => planning.loadChapterInput(lease, IDM_PIPELINE_VERSION))
-      : await db(() => planning.loadChapterInput(lease));
+    const input = await atStage('chapter_input_load', () => idmRun
+      ? db(() => planning.loadChapterInput(lease, IDM_PIPELINE_VERSION))
+      : db(() => planning.loadChapterInput(lease)));
     if (idmRun && !input.idm) throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     // IDM: the module context is built before the dispatch fence, so an invalid
     // design fails the task without a provider call (spec §7.6.1, §11.2).
-    const idmModuleContext = input.idm ? buildIdmModuleContext({ design: input.idm.design,
-      lessons: input.idm.lessons,
+    const idm = input.idm;
+    const idmModuleContext = idm ? await atStage('idm_module_context', () => buildIdmModuleContext({ design: idm.design,
+      lessons: idm.lessons,
       allowed_component_types: runtime.allowed_component_types ? [...runtime.allowed_component_types]
         : [...IDM_V2_COMPONENT_TYPES],
-      input_tokens: input.idm.input_tokens, max_output_tokens: lease.max_output_tokens,
-      provider_max_attempts: lease.provider_max_attempts, remaining_ms: input.idm.remaining_ms }) : undefined;
+      input_tokens: idm.input_tokens, max_output_tokens: lease.max_output_tokens,
+      provider_max_attempts: lease.provider_max_attempts, remaining_ms: idm.remaining_ms })) : undefined;
     let providerDispatchMarked = false;
-    const response = await providerCall(idmModuleContext !== undefined, () => clients.chapter({
+    const response = await atStage('provider_request', () => providerCall(idmModuleContext !== undefined, () => clients.chapter({
       ...common(lease, authority, runtime, lease.max_output_tokens), contract_version: 2,
       skeleton: input.skeleton, shard_plan: input.shard_plan, source_facts: input.source_facts,
       max_attempts: lease.provider_max_attempts as 1 | 2,
@@ -212,16 +239,17 @@ export async function executeOrchestrationV2PlanningTask(
       if (providerDispatchMarked) {
         throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
       }
-      await db(() => worker.markProviderDispatched(lease));
+      await atStage('provider_dispatch_fence', () => db(() => worker.markProviderDispatched(lease)));
       providerDispatchMarked = true;
-    } }));
+    } })));
     if (!providerDispatchMarked) {
       throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_RUNTIME_INVALID');
     }
     // IDM shards must carry a design that matches the plan and its own V2 projection
     // (IDM_SHARD_DESIGN_INVALID); it is stored inside the chapter_blueprint artifact.
-    if (input.idm) assertIdmShardDesign(response.shard, input.idm.design, input.shard_plan);
-    await withTransientTransactionRetry(() => planning.completeChapter(lease, response, settleProvider), signal);
+    if (idm) await atStage('shard_design_check', () => assertIdmShardDesign(response.shard, idm.design, input.shard_plan));
+    await atStage('chapter_publication',
+      () => withTransientTransactionRetry(() => planning.completeChapter(lease, response, settleProvider), signal));
     return 'chapter_blueprint';
   }
   throw new OrchestrationV2PlanningServiceError('ORCHESTRATION_V2_PLANNING_TASK_UNSUPPORTED');

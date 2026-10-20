@@ -81,6 +81,14 @@ function mediaBrief(brief: WorkspaceApplyWrite['author_metadata']['media_briefs'
 
 const OBJECTIVE_REF = /^lo_([1-9][0-9]*)$/;
 
+/** Lesson-local `lo_<n>` refs resolved against the lesson revision's objectives (unique, bounded). */
+export function workspaceObligationObjectives(refs: readonly string[], lesson: WorkspaceContent | null): string[] {
+  const objectives = stringList(record(lesson?.data)?.learning_objectives);
+  const resolved = refs.slice(0, 24).map(ref => OBJECTIVE_REF.exec(ref)).map(match => match ? objectives[Number(match[1]) - 1] : undefined)
+    .map(value => value?.trim() ? value.trim().slice(0, 2000) : null).filter((value): value is string => !!value);
+  return [...new Set(resolved)];
+}
+
 /**
  * Author-facing projection of a run's open assessment obligations (QLT-3).
  * `lo_<n>` refs are lesson-local (the lesson's n-th objective, see Python
@@ -90,15 +98,12 @@ const OBJECTIVE_REF = /^lo_([1-9][0-9]*)$/;
  */
 export function workspaceAssessmentReviews(rows: readonly WorkspaceAssessmentObligationInput[]): CourseAuthorAssessmentReviewV1[] {
   return rows.flatMap(row => {
-    const objectives = stringList(record(row.lesson?.data)?.learning_objectives);
     const refs = row.learning_objective_refs.slice(0, 24);
-    const resolved = refs.map(ref => OBJECTIVE_REF.exec(ref)).map(match => match ? objectives[Number(match[1]) - 1] : undefined)
-      .map(value => value?.trim() ? value.trim().slice(0, 2000) : null).filter((value): value is string => !!value);
     const title = nullableText(row.unit?.title);
     const review = readCourseAuthorAssessmentReview({
       obligation_id: row.obligation_id, unit_node_id: row.unit_node_id, unit_path: row.unit_path,
       unit_title: title ? title.slice(0, 500) : null, component_index: row.component_index,
-      required_kind: row.required_kind, learning_objective_refs: [...refs], learning_objectives: [...new Set(resolved)],
+      required_kind: row.required_kind, learning_objective_refs: [...refs], learning_objectives: workspaceObligationObjectives(refs, row.lesson),
       unresolved_reason: row.unresolved_reason, evidence_fact_count: row.evidence_fact_count,
     });
     return review ? [review] : [];

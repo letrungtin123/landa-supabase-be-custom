@@ -11,6 +11,7 @@ import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v
 import { editWorkspaceComponent } from './lesson-author-workspace-component.logic.js';
 import { workspaceApplyAuthorReview, workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
+import type { WorkspaceApplyReasonCategory } from './lesson-author-workspace-apply-reason.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed } from './lesson-author-workspace-storyboard.logic.js';
 import { assertWorkspaceDraftApplyReady, readWorkspaceContent, workspaceHashMatches,
   type WorkspaceContent } from './lesson-author-workspace.logic.js';
@@ -24,8 +25,10 @@ const MAX_NODES = 32_768;
 const MAX_BYTES = 64 * 1024 * 1024;
 const same = (a: unknown, b: unknown) => orchestrationV2Hash(a) === orchestrationV2Hash(b);
 const within = (path: string, scope: string) => path === scope || path.startsWith(`${scope}.`);
-const fail = (code: ConstructorParameters<typeof WorkspaceApplyCompileError>[0], path = ''): never => {
-  throw new WorkspaceApplyCompileError(code, path ? [{ code, path }] : []);
+/** `reason` refines only the author-facing explanation; `path` is a canonical node path. */
+const fail = (code: ConstructorParameters<typeof WorkspaceApplyCompileError>[0], path = '',
+  reason: WorkspaceApplyReasonCategory | null = null): never => {
+  throw new WorkspaceApplyCompileError(code, path ? [{ code, path }] : [], reason);
 };
 const record = (value: unknown): Record<string, unknown> | null => value && typeof value === 'object'
   && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -92,15 +95,15 @@ function blockType(node: WorkspaceApplyNode): string {
 }
 
 function readChapterReceipt(input: OrchestrationV2ApplyChapterReceipt, assembly: OrchestrationV2ArchitectureAssembly,
-  inventoryHash: string, expectedArtifactHashes: readonly string[]) {
+  inventoryHash: string, expectedArtifactHashes: readonly string[], chapterPath: string) {
   const payload = record(input.payload);
-  if (!payload) fail('WORKSPACE_APPLY_VALIDATION_FAILED', input.chapter_key);
+  if (!payload) fail('WORKSPACE_APPLY_VALIDATION_FAILED', chapterPath, 'CHAPTER_NOT_COMPLETED');
   const accepted = payload!;
   if (accepted.contract_version !== 2 || accepted.contract !== ORCHESTRATION_V2_CHAPTER_CONTRACT
     || accepted.chapter_key !== input.chapter_key || accepted.source_snapshot_hash !== assembly.source_snapshot_hash
     || accepted.assembly_hash !== assembly.assembly_hash || accepted.inventory_hash !== inventoryHash
     || accepted.receipt_hash !== input.artifact_hash || !HASH.test(input.artifact_hash)) {
-    fail('WORKSPACE_APPLY_VALIDATION_FAILED', input.chapter_key);
+    fail('WORKSPACE_APPLY_VALIDATION_FAILED', chapterPath, 'CHAPTER_NOT_COMPLETED');
   }
   const { contract_version: _version, receipt_hash: _receiptHash, ...base } = accepted;
   if (orchestrationV2Hash(base) !== input.artifact_hash
@@ -108,7 +111,7 @@ function readChapterReceipt(input: OrchestrationV2ApplyChapterReceipt, assembly:
     || accepted.duplicate_fact_count !== 0 || accepted.unresolved_fact_count !== 0
     || accepted.admitted_fact_count !== accepted.allocated_fact_count
     || accepted.allocated_fact_count !== accepted.covered_fact_count) {
-    fail('WORKSPACE_APPLY_VALIDATION_FAILED', input.chapter_key);
+    fail('WORKSPACE_APPLY_VALIDATION_FAILED', chapterPath, 'CHAPTER_NOT_COMPLETED');
   }
 }
 
@@ -133,10 +136,10 @@ function compile(input: OrchestrationV2ApplyInput) {
   }
   const assembly = readOrchestrationV2ArchitectureAssembly(input.architecture);
   if (assembly.assembly_hash !== input.architecture_hash || assembly.source_snapshot_hash !== input.source_snapshot_hash) {
-    fail('WORKSPACE_APPLY_HASH_INVALID');
+    fail('WORKSPACE_APPLY_HASH_INVALID', '', 'STRUCTURE_INVALID');
   }
   const identity = prepareOrchestrationV2InventoryIdentity({ run_id: input.run_id, assembly });
-  if (identity.inventory_hash !== input.inventory_hash) fail('WORKSPACE_APPLY_BINDING_INVALID');
+  if (identity.inventory_hash !== input.inventory_hash) fail('WORKSPACE_APPLY_BINDING_INVALID', '', 'STRUCTURE_INVALID');
   if (input.nodes.length > MAX_NODES || input.request.expected_revision_manifest.length > MAX_NODES
     || Buffer.byteLength(JSON.stringify({ nodes: input.nodes, unit_artifacts: input.unit_artifacts,
       chapter_receipts: input.chapter_receipts, targets: input.targets })) > MAX_BYTES) fail('WORKSPACE_APPLY_LIMIT');
@@ -148,16 +151,16 @@ function compile(input: OrchestrationV2ApplyInput) {
     ?? fail('WORKSPACE_APPLY_SCOPE_INVALID');
   const expectedNodes = identity.nodes.filter(node => node.kind !== 'course'
     && Number(/^chapter_([1-9][0-9]*)/.exec(node.canonical_path)?.[1] ?? 0) <= chapterCount);
-  if (expectedNodes.length !== input.nodes.length) fail('WORKSPACE_APPLY_CONTEXT_INCOMPLETE');
+  if (expectedNodes.length !== input.nodes.length) fail('WORKSPACE_APPLY_CONTEXT_INCOMPLETE', '', 'STRUCTURE_INVALID');
   const byPath = new Map(input.nodes.map(node => [node.canonical_path, node]));
   const byId = new Map(input.nodes.map(node => [node.node_id, node]));
-  if (byPath.size !== input.nodes.length || byId.size !== input.nodes.length) fail('WORKSPACE_APPLY_BINDING_INVALID');
+  if (byPath.size !== input.nodes.length || byId.size !== input.nodes.length) fail('WORKSPACE_APPLY_BINDING_INVALID', '', 'STRUCTURE_INVALID');
 
   const baseline = new Map<string, WorkspaceContent>();
   const current = new Map<string, WorkspaceContent>();
   for (const expected of expectedNodes) {
     const node = byPath.get(expected.canonical_path);
-    if (!node) fail('WORKSPACE_APPLY_BINDING_INVALID', expected.canonical_path);
+    if (!node) fail('WORKSPACE_APPLY_BINDING_INVALID', expected.canonical_path, 'STRUCTURE_INVALID');
     const stored = node!;
     if (stored.node_id !== expected.id || stored.parent_id !== expected.parent_id || stored.kind !== expected.kind
       || stored.sort_order !== expected.sort_order || stored.contract_hash !== expected.contract_hash
@@ -182,7 +185,7 @@ function compile(input: OrchestrationV2ApplyInput) {
         // to revision zero merely because an author changed its display fields.
         current.set(stored.node_id, editWorkspaceStoryboard(seed, live));
       } catch {
-        fail('WORKSPACE_APPLY_VALIDATION_FAILED', stored.canonical_path);
+        fail('WORKSPACE_APPLY_VALIDATION_FAILED', stored.canonical_path, 'CONTENT_EDIT_INVALID');
       }
     }
   }
@@ -195,12 +198,12 @@ function compile(input: OrchestrationV2ApplyInput) {
     const artifact = input.unit_artifacts.find(item => item.node_id === binding.unit_node_id);
     const unitOrdinal = (unitOrdinalByChapter.get(binding.chapter_key) ?? 0) + 1;
     unitOrdinalByChapter.set(binding.chapter_key, unitOrdinal);
-    if (!artifact) fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
+    if (!artifact) fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path, 'UNIT_NOT_GENERATED');
     const acceptedArtifact = artifact!;
     if (artifacts.has(acceptedArtifact.node_id) || !UUID_PATTERN.test(acceptedArtifact.task_id) || !HASH.test(acceptedArtifact.artifact_hash)
       || acceptedArtifact.chapter_key !== binding.chapter_key
       || acceptedArtifact.task_key !== `content:${binding.chapter_key}:unit:${unitOrdinal}`) {
-      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
+      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path, 'CONTENT_CHANGED');
     }
     const payload = record(acceptedArtifact.payload), generated = record(payload?.generated_unit);
     const artifactNodes = Array.isArray(payload?.nodes) ? payload!.nodes as unknown[] : [];
@@ -209,7 +212,7 @@ function compile(input: OrchestrationV2ApplyInput) {
     // validated course payload. Applying it would silently convert diagnostic
     // source text into learner content.
     if (!quality.course_applicable) {
-      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
+      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path, 'UNIT_FALLBACK_NOT_APPLICABLE');
     }
     const generatedComponents = Array.isArray(generated?.components) ? generated!.components : [];
     const architectureUnit = binding.unit as OrchestrationV2ArchitectureAssembly['architecture']['chapters'][number]['lessons'][number]['units'][number];
@@ -218,12 +221,12 @@ function compile(input: OrchestrationV2ApplyInput) {
       || orchestrationV2UnitArtifactHash(payload) !== acceptedArtifact.artifact_hash
       || artifactNodes.length !== architectureUnit.component_plan.length + 1
       || generatedComponents.length !== architectureUnit.component_plan.length) {
-      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path);
+      fail('WORKSPACE_APPLY_VALIDATION_FAILED', binding.unit_path, 'CONTENT_CHANGED');
     }
     const paths = [binding.unit_path, ...architectureUnit.component_plan.map((_plan, index) => `${binding.unit_path}.component_${index + 1}`)];
     for (const [index, path] of paths.entries()) {
       const artifactNode = record(artifactNodes[index]), node = byPath.get(path);
-      if (!node) fail('WORKSPACE_APPLY_BINDING_INVALID', path);
+      if (!node) fail('WORKSPACE_APPLY_BINDING_INVALID', path, 'STRUCTURE_INVALID');
       const stored = node!;
       if (!artifactNode || artifactNode.path !== path || !HASH.test(String(artifactNode.content_hash))
         || orchestrationV2Hash(artifactNode.content) !== artifactNode.content_hash
@@ -245,21 +248,29 @@ function compile(input: OrchestrationV2ApplyInput) {
         || !sourceFactIds || !coveredFactIds || !same(sourceFactIds, coveredFactIds)) {
         fail('WORKSPACE_APPLY_BINDING_INVALID', path);
       }
-      components.set(stored.node_id, editWorkspaceComponent(original, current.get(stored.node_id), input.allowed));
+      try {
+        components.set(stored.node_id, editWorkspaceComponent(original, current.get(stored.node_id), input.allowed));
+      } catch {
+        // Same external answer as before (INPUT_INVALID); the reason names whose content is refused.
+        fail('WORKSPACE_APPLY_INPUT_INVALID', path, stored.current_revision === 0 ? 'CONTENT_CHECK_FAILED' : 'CONTENT_EDIT_INVALID');
+      }
     }
     artifacts.set(acceptedArtifact.node_id, acceptedArtifact);
     artifactsByChapter.set(binding.chapter_key, [...(artifactsByChapter.get(binding.chapter_key) ?? []), acceptedArtifact.artifact_hash]);
   }
   if (artifacts.size !== identity.unit_bindings.filter(item => byPath.has(item.unit_path)).length
-    || input.unit_artifacts.length !== artifacts.size) fail('WORKSPACE_APPLY_VALIDATION_FAILED');
+    || input.unit_artifacts.length !== artifacts.size) fail('WORKSPACE_APPLY_VALIDATION_FAILED', '', 'STRUCTURE_INVALID');
 
   const selectedChapterKeys = assembly.architecture.chapters.slice(0, chapterCount).map(chapter => chapter.chapter_key);
-  if (input.chapter_receipts.length !== selectedChapterKeys.length) fail('WORKSPACE_APPLY_VALIDATION_FAILED');
-  for (const chapterKey of selectedChapterKeys) {
+  // Name the first chapter without a usable receipt before the count check, so
+  // the author learns which chapter did not finish its final check.
+  for (const [index, chapterKey] of selectedChapterKeys.entries()) {
+    const chapterPath = `chapter_${index + 1}`;
     const receipt = input.chapter_receipts.find(item => item.chapter_key === chapterKey);
-    if (!receipt) fail('WORKSPACE_APPLY_VALIDATION_FAILED', chapterKey);
-    readChapterReceipt(receipt!, assembly, input.inventory_hash, artifactsByChapter.get(chapterKey) ?? []);
+    if (!receipt) fail('WORKSPACE_APPLY_VALIDATION_FAILED', chapterPath, 'CHAPTER_NOT_COMPLETED');
+    readChapterReceipt(receipt!, assembly, input.inventory_hash, artifactsByChapter.get(chapterKey) ?? [], chapterPath);
   }
+  if (input.chapter_receipts.length !== selectedChapterKeys.length) fail('WORKSPACE_APPLY_VALIDATION_FAILED', '', 'STRUCTURE_INVALID');
 
   const revisionManifest = sortedRevisions(input.nodes.map(node => ({ node_id: node.node_id,
     revision: node.current_revision!, content_hash: node.current!.content_hash })));

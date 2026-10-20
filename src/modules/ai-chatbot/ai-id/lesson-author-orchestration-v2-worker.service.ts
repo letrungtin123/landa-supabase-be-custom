@@ -13,6 +13,8 @@ import {
   ORCHESTRATION_V2_DB_SERIALIZATION_RETRY_EXHAUSTED,
   orchestrationV2TransientSqlState,
 } from './lesson-author-orchestration-v2-lock-order.js';
+import { orchestrationV2ChapterEvidenceFields, orchestrationV2ErrorSite,
+  orchestrationV2RunOutcomeFields } from './lesson-author-orchestration-v2-diagnostics.logic.js';
 
 type WorkerRepository = ReturnType<typeof createOrchestrationV2WorkerRepository>;
 type ReserveProvider = Parameters<WorkerRepository['claimExact']>[2];
@@ -65,6 +67,8 @@ function definitiveProviderRejection(error: unknown):
   return code === 'AI_PROVIDER_REQUEST_REJECTED' || code === 'AI_PROVIDER_AUTH_REJECTED' ? code : null;
 }
 
+const UNCODED_EXECUTION_FAILURE = 'ORCHESTRATION_V2_TASK_EXECUTION_FAILED';
+
 function executionFailureCode(error: unknown): string {
   const candidate = error && typeof error === 'object'
     ? ((error as { code?: unknown; internal_failure_code?: unknown }).internal_failure_code
@@ -74,7 +78,7 @@ function executionFailureCode(error: unknown): string {
   if (candidate === '40001') return ORCHESTRATION_V2_DB_SERIALIZATION_RETRY_EXHAUSTED;
   if (typeof candidate === 'string' && /^[A-Z][A-Z0-9_]{0,99}$/.test(candidate)) return candidate;
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{0,99}$/.test(error.message)) return error.message;
-  return 'ORCHESTRATION_V2_TASK_EXECUTION_FAILED';
+  return UNCODED_EXECUTION_FAILURE;
 }
 
 function safeExecutionMetadata(error: unknown): Readonly<Record<string, string>> {
@@ -95,10 +99,15 @@ function safeExecutionMetadata(error: unknown): Readonly<Record<string, string>>
     ? String((error as { table: string }).table) : null;
   const databaseMessage = sqlstate && error instanceof Error
     && /^[A-Za-z0-9 _./:()'=-]{1,180}$/.test(error.message) ? error.message : null;
+  // An error without a code (a plain TypeError, a library error) is located by
+  // its top in-repo stack frame (file:line only); its message is never logged.
+  const errorSite = !sqlstate && executionFailureCode(error) === UNCODED_EXECUTION_FAILURE
+    ? orchestrationV2ErrorSite(error) : null;
   return Object.freeze({ ...(sqlstate ? { sqlstate } : {}), ...(errorName ? { error_name: errorName } : {}),
     ...(stage ? { execution_stage: stage } : {}), ...(constraint ? { db_constraint: constraint } : {}),
     ...(table ? { db_table: table } : {}), ...(databaseMessage ? { db_message: databaseMessage } : {}),
-    ...safeAcceptanceReason(error) });
+    ...(errorSite ? { error_site: errorSite } : {}),
+    ...safeAcceptanceReason(error), ...orchestrationV2ChapterEvidenceFields(error) });
 }
 
 /**
@@ -223,9 +232,9 @@ async function executeClaimed(
   const stopHeartbeat = runLeaseHeartbeat(lease, deps.repository, deps.limits, controller, deps.report);
   let disposition: 'claimed_succeeded' | 'claimed_failed';
   try {
-    await deps.execute(lease, controller.signal);
+    const result = await deps.execute(lease, controller.signal);
     reportSafely(deps.report, { event: 'worker_task_succeeded', run_id: lease.run_id, task_id: lease.task_id,
-      task_kind: lease.kind });
+      task_kind: lease.kind, ...orchestrationV2RunOutcomeFields(lease.kind, result) });
     disposition = 'claimed_succeeded';
   } catch (error) {
     const rejection = definitiveProviderRejection(error);

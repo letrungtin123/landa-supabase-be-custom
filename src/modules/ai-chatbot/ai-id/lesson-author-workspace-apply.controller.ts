@@ -4,6 +4,7 @@ import type { AuthUser } from '../../../types/express.js';
 import { WorkspaceApplyConflictError, type WorkspaceApplyConflictDetails } from './lesson-author-workspace-apply-conflict.logic.js';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
 import { isAiIdActor } from './lesson-author-ai-id-access.logic.js';
+import { readWorkspaceApplyReason, workspaceApplyReasonMessage, type WorkspaceApplyReason } from './lesson-author-workspace-apply-reason.logic.js';
 
 const HASH = /^[0-9a-f]{64}$/;
 /** [HTTP status, Vietnamese, English]. Codes stay machine-only; messages are for people. */
@@ -42,16 +43,21 @@ export function createWorkspaceApplyHandler(deps: {
     const user = req.user, { courseId, conversationId, workspaceId, nodeId } = req.params;
     const body = req.body as Record<string, unknown> | null;
     const operationId = body && typeof body.operation_id === 'string' ? body.operation_id : null;
-    const fail = (external: External, internal: string = external, conflict?: WorkspaceApplyConflictDetails) => {
+    const fail = (external: External, internal: string = external, conflict?: WorkspaceApplyConflictDetails,
+      reason: WorkspaceApplyReason | null = null) => {
       const [status, vi, en] = WORKSPACE_APPLY_ERRORS[external];
       try { deps.report({ event: 'workspace_apply_failed', request_id: requestId, correlation_id: null,
         workspace_id: UUID_PATTERN.test(workspaceId ?? '') ? workspaceId : null, node_id: UUID_PATTERN.test(nodeId ?? '') ? nodeId : null,
         course_id_hash: typeof courseId === 'string' ? createHash('sha256').update(courseId).digest('hex') : null,
         operation_id: operationId, failure_stage: 'workspace_apply', internal_failure_code: internal,
         external_failure_code: external, http_status: status, conflict_count: conflict?.total ?? null,
+        reason_category: reason?.category ?? null,
         duration_ms: Math.round(performance.now() - started) }); } catch { /* telemetry never changes commit semantics */ }
+      // `reason` is additive: the code and generic message keep their old meaning.
       res.status(status).json({ success: false, code: external, message: locale === 'en' ? en : vi, request_id: requestId,
-        ...(conflict ? { conflict } : {}) });
+        ...(conflict ? { conflict } : {}),
+        ...(reason ? { reason: { category: reason.category, location: reason.location,
+          message: workspaceApplyReasonMessage(reason, locale) } } : {}) });
     };
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Request-ID', requestId);
     if (!user) { fail('AUTH_REQUIRED'); return; }
@@ -79,7 +85,10 @@ export function createWorkspaceApplyHandler(deps: {
         : internal.includes('CONFLICT') || internal.includes('TARGET_CHANGED') || internal.includes('SOURCE_CHANGED') || internal.includes('REVISION') ? 'WORKSPACE_APPLY_CONFLICT'
         : internal.includes('READY') || internal.includes('DEPENDENCY') || internal.includes('STATE') ? 'WORKSPACE_APPLY_NOT_READY'
         : internal.includes('VALIDATION') ? 'WORKSPACE_APPLY_VALIDATION_FAILED' : 'WORKSPACE_APPLY_UNAVAILABLE';
-      fail(external, internal);
+      // Only a refused compile carries a reason; it never widens another answer.
+      const reason = external === 'WORKSPACE_APPLY_VALIDATION_FAILED' || external === 'WORKSPACE_APPLY_NOT_READY'
+        ? readWorkspaceApplyReason((error as { reason?: unknown } | null)?.reason) : null;
+      fail(external, internal, undefined, reason);
     }
   };
 }
