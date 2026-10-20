@@ -12,7 +12,8 @@ import { editWorkspaceComponent } from './lesson-author-workspace-component.logi
 import { workspaceApplyAuthorReview, workspaceApplyScopeChapter, workspaceApplyTargetHash, WorkspaceApplyCompileError, type WorkspaceApplyMapping,
   type WorkspaceApplyNode, type WorkspaceApplyRevision, type WorkspaceApplyWrite } from './lesson-author-workspace-apply.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed } from './lesson-author-workspace-storyboard.logic.js';
-import { assertWorkspaceDraftApplyReady, readWorkspaceContent, type WorkspaceContent } from './lesson-author-workspace.logic.js';
+import { assertWorkspaceDraftApplyReady, readWorkspaceContent, workspaceHashMatches,
+  type WorkspaceContent } from './lesson-author-workspace.logic.js';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
 
 export const ORCHESTRATION_V2_APPLY_CONTRACT = 'workspace-scoped-apply-2';
@@ -80,7 +81,8 @@ function checkedContent(row: WorkspaceApplyNode, baseline: boolean): WorkspaceCo
     fail('WORKSPACE_APPLY_CONTEXT_INCOMPLETE', row.canonical_path);
   }
   const content = readWorkspaceContent(revision!.content);
-  if (orchestrationV2Hash(content) !== revision!.content_hash) fail('WORKSPACE_APPLY_HASH_INVALID', row.canonical_path);
+  // An author edit's revision carries a generationSnapshotHash, a baseline an orchestrationV2Hash.
+  if (!workspaceHashMatches(content, revision!.content_hash)) fail('WORKSPACE_APPLY_HASH_INVALID', row.canonical_path);
   return content;
 }
 

@@ -1,6 +1,21 @@
 import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
+import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import { workspaceDraftQualityChecksAccepted, type QualityCheckStatus,
   type WorkspaceDraftQualityChecks } from './lesson-author-quality-receipt.logic.js';
+
+/**
+ * Whether a stored workspace hash (a revision content_hash, a node contract_hash, a storyboard
+ * baseline_hash) is the hash of `value`. Two encoders write these hashes: V1 workspaces and author
+ * edits/resets use generationSnapshotHash, V2 inventory and unit baselines use orchestrationV2Hash. They
+ * give the same bytes for JSON without integer-like object keys ("0", "10": JSON.stringify writes those
+ * first, in numeric order, the canonical encoder sorts them as strings). Every reader that re-checks a
+ * workspace hash accepts either encoding, so a V2 baseline whose component data has such a key, and an
+ * author edit of a V2 node checked by V2 Apply, both verify. No stored hash or format changes.
+ */
+export function workspaceHashMatches(value: unknown, storedHash: unknown): boolean {
+  return typeof storedHash === 'string'
+    && (generationSnapshotHash(value) === storedHash || orchestrationV2Hash(value) === storedHash);
+}
 
 /** Draft/revision contract only. Not a provider, payload validator or Apply API. */
 export const WORKSPACE_CONTRACT_VERSION = 1;

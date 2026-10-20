@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { LessonAuthorBlueprint, LessonAuthorBlueprintUnit } from '../chat/chat.service.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
-import { readWorkspaceContent, WorkspaceContractError, type WorkspaceContent, type WorkspaceNodeKind } from './lesson-author-workspace.logic.js';
+import { readWorkspaceContent, workspaceHashMatches, WorkspaceContractError, type WorkspaceContent,
+  type WorkspaceNodeKind } from './lesson-author-workspace.logic.js';
 
 export const WORKSPACE_AGGREGATE_EDIT = 'workspace-aggregate-edit-1';
 export const WORKSPACE_MEDIA_EDIT = 'workspace-media-edit-1';
@@ -63,18 +64,19 @@ export function workspaceStoryboardBoundSeed(input: {
     || parsedBinding.data.canonical_path !== input.canonical_path
     || !Number.isSafeInteger(input.sort_order) || input.sort_order < 0) contract();
   const baseline = readContent(input.kind, input.baseline);
-  if (parsedBinding.data.baseline_hash !== boundBaselineHash(input.kind, baseline)) contract();
+  if (!boundBaselineMatches(input.kind, baseline, parsedBinding.data.baseline_hash)) contract();
   return { kind: input.kind, canonical_path: input.canonical_path, parent_path: input.parent_path,
     sort_order: input.sort_order, binding: parsedBinding.data, baseline };
 }
-/** The hash a storyboard binding authenticates. A unit binding is fixed at
+/** Whether a storyboard binding authenticates this baseline. A unit binding is fixed at
  * inventory time, before generate_unit writes the unit's IDM QA author note
  * (spec §8.4) into revision 0, so it covers every field except that note; the
  * accepted unit artifact hash binds the note instead. Only IDM units carry a
- * note: for every legacy baseline this is exactly hash(baseline). */
-function boundBaselineHash(kind: WorkspaceStoryboardKind, baseline: WorkspaceContent): string {
-  return hash(kind === 'unit' && baseline.implementation_notes !== null
-    ? { ...baseline, implementation_notes: null } : baseline);
+ * note: for every legacy baseline this is exactly hash(baseline). A V1 binding
+ * holds a generationSnapshotHash, a V2 one an orchestrationV2Hash (workspaceHashMatches). */
+function boundBaselineMatches(kind: WorkspaceStoryboardKind, baseline: WorkspaceContent, baselineHash: string): boolean {
+  return workspaceHashMatches(kind === 'unit' && baseline.implementation_notes !== null
+    ? { ...baseline, implementation_notes: null } : baseline, baselineHash);
 }
 function readContent(kind: WorkspaceStoryboardKind, value: unknown) {
   const content = readWorkspaceContent(value);
@@ -189,7 +191,7 @@ export function workspaceStoryboardSeed(blueprint: LessonAuthorBlueprint, kind: 
  */
 export function editWorkspaceStoryboard(seed: WorkspaceStoryboardSeed, value: unknown): WorkspaceContent {
   if (!bindingSchema.safeParse(seed.binding).success || seed.binding.kind !== seed.kind || seed.binding.canonical_path !== seed.canonical_path
-    || seed.binding.baseline_hash !== boundBaselineHash(seed.kind, seed.baseline)) contract();
+    || !boundBaselineMatches(seed.kind, seed.baseline, seed.binding.baseline_hash)) contract();
   const content = readContent(seed.kind, value);
   if (seed.kind === 'chapter') {
     const baselineData = seed.baseline.data as { learning_objectives?: string[]; learning_outcomes?: string[] };

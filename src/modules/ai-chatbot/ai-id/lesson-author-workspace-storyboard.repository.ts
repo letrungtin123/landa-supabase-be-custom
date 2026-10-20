@@ -3,7 +3,7 @@ import type { GenerationJobSql } from './lesson-author-generation-job.repository
 import type { WorkspaceEditAcceptance, WorkspaceEditContext } from './lesson-author-workspace-edit.repository.js';
 import { WorkspaceEditError } from './lesson-author-workspace-edit.repository.js';
 import type { WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
-import { WorkspaceContractError } from './lesson-author-workspace.logic.js';
+import { WorkspaceContractError, workspaceHashMatches } from './lesson-author-workspace.logic.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
 import { editWorkspaceStoryboard, workspaceStoryboardBoundSeed, workspaceStoryboardSeed,
   WORKSPACE_AGGREGATE_EDIT, WORKSPACE_MEDIA_EDIT } from './lesson-author-workspace-storyboard.logic.js';
@@ -57,7 +57,8 @@ export function createWorkspaceStoryboardAcceptance(report: (event: WorkspaceSto
         || (row.parent_path !== null && typeof row.parent_path !== 'string')
         || !Number.isSafeInteger(Number(row.current_revision)) || row.current_revision === null
         || Number(row.current_revision) !== candidate.parent_revision || row.contract_hash !== context.contract_hash
-        || hash(context.protected_contract) !== context.contract_hash || hash(row.protected_contract) !== row.contract_hash) invalid();
+        || !workspaceHashMatches(context.protected_contract, context.contract_hash)
+        || !workspaceHashMatches(row.protected_contract, row.contract_hash)) invalid();
       let seed: ReturnType<typeof workspaceStoryboardSeed>;
       if (row.blueprint_id !== null) {
         const blueprint = await tx.query(`SELECT CASE WHEN octet_length(b.blueprint::text)<=16777216 THEN b.blueprint ELSE NULL END AS blueprint
@@ -100,7 +101,7 @@ export function createWorkspaceStoryboardAcceptance(report: (event: WorkspaceSto
       }
       const parentKind = { course: null, chapter: 'course', lesson: 'chapter', unit: 'lesson', media_brief: 'unit' }[context.node.kind];
       if (!seed || row.parent_path !== seed.parent_path || row.parent_kind !== parentKind || row.sort_order !== seed.sort_order
-        || hash(seed.binding) !== context.contract_hash || hash(seed.baseline) !== hash(context.node.baseline)) invalid();
+        || !workspaceHashMatches(seed.binding, context.contract_hash) || hash(seed.baseline) !== hash(context.node.baseline)) invalid();
       stage = 'workspace_storyboard_payload';
       editWorkspaceStoryboard(seed, context.node.current);
       editWorkspaceStoryboard(seed, candidate.content);

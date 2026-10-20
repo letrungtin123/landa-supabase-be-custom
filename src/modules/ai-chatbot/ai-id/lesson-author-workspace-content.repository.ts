@@ -4,7 +4,7 @@ import type { CourseComponentType } from '../../tenants/tenant-course-components
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import type { WorkspaceEditAcceptance, WorkspaceEditContext } from './lesson-author-workspace-edit.repository.js';
 import type { WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
-import { readWorkspaceContent } from './lesson-author-workspace.logic.js';
+import { readWorkspaceContent, workspaceHashMatches } from './lesson-author-workspace.logic.js';
 import { generationSnapshotHash as hash } from './lesson-author-generation-job.logic.js';
 import { editWorkspaceComponent, hydrateWorkspaceComponent, validateWorkspaceReadyComponentChapter, WorkspaceComponentError } from './lesson-author-workspace-component.logic.js';
 import { readOrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
@@ -47,7 +47,7 @@ const integer = (value: unknown): number => {
 };
 function checkedRevision(row: Row, baseline: boolean) {
   const value = readWorkspaceContent(row[baseline ? 'baseline_content' : 'current_content']);
-  if (hash(value) !== row[baseline ? 'baseline_hash' : 'current_hash']) fail();
+  if (!workspaceHashMatches(value, row[baseline ? 'baseline_hash' : 'current_hash'])) fail();
   return value;
 }
 export interface WorkspaceContentDiagnostic {
@@ -156,7 +156,8 @@ export function createWorkspaceComponentAcceptance(report: (event: WorkspaceCont
       .filter(node => ['chapter', 'lesson', 'unit', 'component'].includes(node.kind))
       .map(node => [node.canonical_path, node])) : null;
     for (const row of result.rows) {
-      if (typeof row.canonical_path !== 'string' || nodes.has(row.canonical_path) || hash(row.protected_contract) !== row.contract_hash) fail();
+      if (typeof row.canonical_path !== 'string' || nodes.has(row.canonical_path)
+        || !workspaceHashMatches(row.protected_contract, row.contract_hash)) fail();
       const expected = v2Expected?.get(row.canonical_path);
       if (v2Expected && (!expected || row.id !== expected.id || row.parent_id !== expected.parent_id
         || row.kind !== expected.kind || integer(row.sort_order) !== expected.sort_order
