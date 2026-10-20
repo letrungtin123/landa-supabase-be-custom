@@ -187,7 +187,7 @@ export async function executeOrchestrationV2PlanningTask(
         // Owner 2026-10-16: the course description is no longer AI ID context; the author's launch brief
         // (learners, purpose) and the course name are.
         locale: authority.locale, course_title: input.course_title, course_description: null,
-        launch_brief: input.launch_brief,
+        launch_brief: input.launch_brief, organization_context: input.organization_context,
         source_documents: authority.source_documents,
         source_facts: input.source_facts, input_tokens: input.input_tokens,
         max_output_tokens: lease.max_output_tokens, provider_max_attempts: lease.provider_max_attempts,

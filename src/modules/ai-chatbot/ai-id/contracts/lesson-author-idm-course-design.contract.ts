@@ -21,6 +21,7 @@ import {
   sha256, text,
 } from './lesson-author-idm-primitives.contract.js';
 import type { Reader } from './lesson-author-idm-primitives.contract.js';
+import { readOrganizationContext } from './lesson-author-org-context.contract.js';
 
 const LOCALES = ['vi', 'en'] as const;
 
@@ -39,14 +40,16 @@ const PROJECT_CONTEXT_BRIEF_KEYS = ['design_mode', 'learner_audience', 'course_p
 /**
  * `shape` pins the contract of a stored design; a module context built from any design takes any. The shape
  * follows the keys: `design_mode` = contract 3 (with the description), `course_description` alone = 2, neither = 1.
+ * Contract 3 may also carry the run's frozen `organization_context` (present or absent, never null).
  */
 export function projectContext(value: unknown, path: string, shape: IdmContractVersion | 'either' = 'either'): IdmProjectContextV1 {
   const described = hasKey(value, 'course_description');
   const briefed = hasKey(value, 'design_mode');
+  const organized = briefed && hasKey(value, 'organization_context');
   const actual: IdmContractVersion = briefed ? 3 : described ? 2 : 1;
   if (shape !== 'either' && shape !== actual) invalid(path);
   const item = object(value, path, [...PROJECT_CONTEXT_KEYS_V1, ...(actual >= 2 ? ['course_description'] : []),
-    ...(briefed ? PROJECT_CONTEXT_BRIEF_KEYS : [])]);
+    ...(briefed ? PROJECT_CONTEXT_BRIEF_KEYS : []), ...(organized ? ['organization_context'] : [])]);
   return {
     locale: oneOf(item.locale, `${path}.locale`, LOCALES),
     course_title_hint: nullableText(item.course_title_hint, `${path}.course_title_hint`, 500),
@@ -62,6 +65,8 @@ export function projectContext(value: unknown, path: string, shape: IdmContractV
       learner_audience: nullableText(item.learner_audience, `${path}.learner_audience`, 300),
       course_purpose: nullableText(item.course_purpose, `${path}.course_purpose`, 500),
     } : {}),
+    ...(organized ? { organization_context: readOrganizationContext(item.organization_context,
+      `${path}.organization_context`, invalid) } : {}),
   };
 };
 

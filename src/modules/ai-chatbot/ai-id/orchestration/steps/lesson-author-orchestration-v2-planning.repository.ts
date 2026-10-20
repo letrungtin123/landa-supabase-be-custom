@@ -31,6 +31,7 @@ import { createSourceSnapshotRepositoryV2 } from './lesson-author-orchestration-
 import {
   LaunchBriefStoredInvalidError, readStoredLaunchBrief, type LessonAuthorLaunchBrief,
 } from '../../contracts/lesson-author-launch-brief.logic.js';
+import { readStoredOrganizationContextOr, type OrganizationContextV1 } from '../../contracts/lesson-author-org-context.contract.js';
 import {
   IDM_CONTRACT_VERSION,
   IDM_LEGACY_PIPELINE_VERSION,
@@ -269,6 +270,8 @@ export function createOrchestrationV2PlanningRepository(
     source_facts: OrchestrationV2SourceFact[];
     course_title: string | null;
     launch_brief: LessonAuthorLaunchBrief | null;
+    /** The frozen organization context (null without one); read by name so a schema without the column works. */
+    organization_context: OrganizationContextV1 | null;
     input_tokens: number;
     remaining_ms: number;
   }> {
@@ -276,7 +279,8 @@ export function createOrchestrationV2PlanningRepository(
     return db.transaction(async tx => {
       const task = await tx.query(`SELECT t.input_tokens,
           floor(extract(epoch FROM (t.deadline_at-clock_timestamp()))*1000)::integer AS remaining_ms,
-          course.display_name AS course_title,workspace.launch_brief
+          course.display_name AS course_title,workspace.launch_brief,
+          to_jsonb(workspace)->'organization_context' AS organization_context
         FROM lesson_author_workspace_v2_tasks t
         JOIN lesson_author_workspaces workspace ON workspace.id=t.workspace_id AND workspace.tenant_id=t.tenant_id
           AND workspace.course_id=t.course_id
@@ -293,6 +297,8 @@ export function createOrchestrationV2PlanningRepository(
           throw error;
         }
       })();
+      const organizationContext = readStoredOrganizationContextOr(row.organization_context,
+        () => fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID'));
       const scope = [lease.source_snapshot_id, lease.workspace_id, lease.tenant_id, lease.course_id];
       const size = await tx.query(`SELECT count(*)::integer AS fact_count,
           coalesce(sum(char_length(fact_text)),0)::bigint AS content_chars
@@ -319,6 +325,7 @@ export function createOrchestrationV2PlanningRepository(
         })),
         course_title: typeof row?.course_title === 'string' ? row.course_title : null,
         launch_brief: launchBrief,
+        organization_context: organizationContext,
         input_tokens: inputTokens,
         remaining_ms: remainingMs,
       };

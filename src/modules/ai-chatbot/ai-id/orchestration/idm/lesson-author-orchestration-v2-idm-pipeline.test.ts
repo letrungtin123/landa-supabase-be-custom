@@ -12,6 +12,7 @@ import {
   idmGoldenCourseDesign,
   idmGoldenSource,
   IDM_FIXTURE_DOCUMENT_ID,
+  IDM_FIXTURE_ORGANIZATION_CONTEXT,
   IDM_FIXTURE_SNAPSHOT_HASH,
 } from './lesson-author-idm.fixture.js';
 import { createOrchestrationV2AdmissionRepository } from '../admission/lesson-author-orchestration-v2-admission.repository.js';
@@ -524,10 +525,11 @@ test('IDM skeleton input loads budget, course title and every fact in snapshot o
   const fixture = idmFixture();
   const rows = fixture.facts.map(fact => ({ ...fact }));
   let storedBrief: unknown = null;
+  let storedContext: unknown = null;
   const handler = (contentChars: number) => (sql: string) => {
     if (sql.includes('SELECT t.input_tokens')) {
       return [{ input_tokens: 1_800_000, remaining_ms: 412_345, course_title: 'Khoá học IDM',
-        launch_brief: storedBrief }];
+        launch_brief: storedBrief, organization_context: storedContext }];
     }
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: rows.length, content_chars: String(contentChars) }];
     if (sql.includes('SELECT document_id::text,fact_key,scope_key,fact_text')) return rows;
@@ -536,7 +538,16 @@ test('IDM skeleton input loads budget, course title and every fact in snapshot o
   const ok = sqlFixture(handler(1_000));
   const input = await ok.repository.loadIdmSkeletonInput(lease());
   assert.deepEqual(input, { source_facts: fixture.facts, course_title: 'Khoá học IDM',
-    launch_brief: null, input_tokens: 1_800_000, remaining_ms: 412_345 });
+    launch_brief: null, organization_context: null, input_tokens: 1_800_000, remaining_ms: 412_345 });
+  // The frozen organization context is read by name (a database without the column reads NULL).
+  assert.match(ok.queries[0]!.sql, /to_jsonb\(workspace\)->'organization_context' AS organization_context/);
+  storedContext = IDM_FIXTURE_ORGANIZATION_CONTEXT;
+  assert.deepEqual((await sqlFixture(handler(1_000)).repository.loadIdmSkeletonInput(lease())).organization_context,
+    IDM_FIXTURE_ORGANIZATION_CONTEXT);
+  storedContext = { ...IDM_FIXTURE_ORGANIZATION_CONTEXT, profile_hash: 'f'.repeat(64) };
+  await assert.rejects(sqlFixture(handler(1_000)).repository.loadIdmSkeletonInput(lease()),
+    { code: 'ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID' });
+  storedContext = null;
   assert.match(ok.queries[0]!.sql, /LEFT JOIN courses course ON course.id=t.course_id AND course.tenant_id=t.tenant_id/);
   // Owner 2026-10-16: the course description is not read for AI ID any more.
   assert.match(ok.queries[0]!.sql, /course\.display_name AS course_title,workspace\.launch_brief/);

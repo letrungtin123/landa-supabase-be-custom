@@ -252,6 +252,9 @@ export function buildIdmUnitBrief(input: {
     // QLT-6 (contract 3): how the author started AI ID reaches the writer; absent for an older design.
     ...(Object.hasOwn(design.project_context, 'design_mode')
       ? { design_mode: design.project_context.design_mode ?? null } : {}),
+    // The run's frozen organization context (background for the writer and the judge); absent without one.
+    ...(design.project_context.organization_context
+      ? { organization_context: design.project_context.organization_context } : {}),
     module_title: idmStripWhitespace(chapter.title),
     lesson_title: idmStripWhitespace(lesson.title),
     lesson_objective: idmStripWhitespace(lesson.objective),

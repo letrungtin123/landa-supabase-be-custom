@@ -1,6 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagSkip } from '../../../../../test-support/ai-rag-python.js';
 import { orchestrationV2Hash } from '../../shared/lesson-author-orchestration-v2.logic.js';
+import {
+  buildOrganizationContext, type OrganizationContextV1, type OrgContextProfileV1,
+} from '../../contracts/lesson-author-org-context.contract.js';
 import type {
   OrchestrationV2CourseSkeleton,
   OrchestrationV2SourceFact,
@@ -52,6 +55,20 @@ export const IDM_FIXTURE_LAUNCH_BRIEF = Object.freeze({
   course_purpose: 'Giúp nhân viên mới hiểu công ty và biết cần liên hệ ai trong tuần đầu.',
 }) as { design_mode: 'instructional_design'; learner_audience: string | null; course_purpose: string | null };
 
+/** A synthetic organization profile (no customer content) and the wire object a run freezes from it. */
+export const IDM_FIXTURE_ORG_PROFILE: OrgContextProfileV1 = Object.freeze({
+  organization_summary: 'Công ty mẫu bán thiết bị văn phòng cho doanh nghiệp nhỏ.\nCó ba chi nhánh ở miền Nam.',
+  products_services: ['Máy in văn phòng', 'Dịch vụ bảo trì'],
+  learner_groups: [{ name: 'Nhân viên bán hàng', description: 'Làm việc trực tiếp với khách hàng.' },
+    { name: 'Kỹ thuật viên', description: '' }],
+  glossary: [{ term: 'Phiếu yêu cầu', meaning: 'Mẫu khách hàng điền khi cần sửa chữa thiết bị.' }],
+  key_processes: ['Tiếp nhận yêu cầu bảo trì trong 24 giờ'],
+  culture_tone: 'Thân thiện, rõ ràng, dùng "bạn" với người học.',
+  design_conventions: ['Mỗi bài có một tình huống tại cửa hàng'],
+}) as OrgContextProfileV1;
+export const IDM_FIXTURE_ORGANIZATION_CONTEXT: OrganizationContextV1 = Object.freeze(
+  buildOrganizationContext(3, IDM_FIXTURE_ORG_PROFILE)) as OrganizationContextV1;
+
 /** The purpose of a contract-3 fixture: the author's purpose is the summary and the strongest evidence. */
 export const IDM_FIXTURE_BRIEFED_PURPOSE: IdmPurposeV1 = Object.freeze({
   ...IDM_FIXTURE_PURPOSE, summary: IDM_FIXTURE_LAUNCH_BRIEF.course_purpose!, evidence: ['purpose', 'title'],
@@ -64,9 +81,10 @@ export const IDM_FIXTURE_BRIEFED_PURPOSE: IdmPurposeV1 = Object.freeze({
  * fact are appended to exercise dispositions outside the course. `contract` 1
  * (the default) is the shape stored before QLT-5; 2 adds the course description
  * and the purpose; 3 (QLT-6) adds the launch brief and the author's audience.
+ * `organizationContext` (contract 3 only) is the run's frozen organization context.
  */
 export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[150], [90, 60]]]],
-  options: { contract?: 1 | 2 | 3 } = {}): IdmFixture {
+  options: { contract?: 1 | 2 | 3; organizationContext?: OrganizationContextV1 } = {}): IdmFixture {
   const contract = options.contract ?? 1;
   const hash = IDM_FIXTURE_SNAPSHOT_HASH;
   const facts: OrchestrationV2SourceFact[] = [];
@@ -128,7 +146,9 @@ export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[
       ...(contract >= 2 ? { course_description: 'Khoá học dành cho nhân viên mới.' } : {}),
       source_documents: [{ document_id: IDM_FIXTURE_DOCUMENT_ID, name: 'nguon.pdf', type: 'file' }],
       target_audience: null, learning_objectives: [], duration_target_minutes: null,
-      ...(contract === 3 ? structuredClone(IDM_FIXTURE_LAUNCH_BRIEF) : {}) },
+      ...(contract === 3 ? structuredClone(IDM_FIXTURE_LAUNCH_BRIEF) : {}),
+      ...(contract === 3 && options.organizationContext
+        ? { organization_context: structuredClone(options.organizationContext) } : {}) },
     ...(contract >= 2 ? { purpose: structuredClone(contract === 3 ? IDM_FIXTURE_BRIEFED_PURPOSE : IDM_FIXTURE_PURPOSE) }
       : {}),
     target_audience: contract === 3

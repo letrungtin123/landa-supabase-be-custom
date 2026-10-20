@@ -54,10 +54,12 @@ const PLANNING_RUNTIME = { embedding_model: 'gemini-embedding-001', embedding_di
   allowed_component_types: new Set<string>(TYPES) };
 const NO_SETTLE = async () => undefined;
 /**
- * A chain variant: held practices (Python module answers), the workspace's stored launch brief (QLT-6) and, to
- * exercise the finalizer's fallback-share rule, every unit counted as a whole source-locked fallback.
+ * A chain variant: held practices (Python module answers), the workspace's stored launch brief (QLT-6), its frozen
+ * organization context and, to exercise the finalizer's fallback-share rule, every unit counted as a whole
+ * source-locked fallback.
  */
-export type Variant = { hold_lessons: string[]; launch_brief?: Row | null; all_units_fallback?: boolean };
+export type Variant = { hold_lessons: string[]; launch_brief?: Row | null; organization_context?: Row | null;
+  all_units_fallback?: boolean };
 
 export function lease(kind: OrchestrationV2TaskLease['kind'], snapshotHash: string,
   overrides: Partial<OrchestrationV2TaskLease> = {}): OrchestrationV2TaskLease {
@@ -183,7 +185,7 @@ export class Chain {
     if (sql.includes('a.artifact_kind=\'source_catalog\'')) return [this.sourceCatalog()];
     if (sql.includes('SELECT t.input_tokens')) return [{ input_tokens: this.current.inputTokens,
       remaining_ms: 590_000, course_title: String(this.golden.project_context.course_title_hint),
-      launch_brief: this.variant.launch_brief ?? null }];
+      launch_brief: this.variant.launch_brief ?? null, organization_context: this.variant.organization_context ?? null }];
     if (sql.includes('count(*)::integer AS fact_count')) return [{ fact_count: this.facts.length,
       content_chars: this.facts.reduce((sum, fact) => sum + idmTextLength(fact.fact_text), 0) }];
     if (sql.includes('fact_key=ANY($5::text[])')) return this.factsFor(params[4] as string[], sql.includes('fact_hash'));

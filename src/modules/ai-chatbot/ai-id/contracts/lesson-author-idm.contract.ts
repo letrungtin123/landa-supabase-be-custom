@@ -1,6 +1,7 @@
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { idmAuthorIntent } from './lesson-author-idm-intent.logic.js';
 import type { LessonAuthorLaunchBrief } from './lesson-author-launch-brief.logic.js';
+import { readOrganizationContext, type OrganizationContextV1 } from './lesson-author-org-context.contract.js';
 import {
   IDM_BLOOMS, IDM_COMPONENT_ROLES, IDM_COMPONENT_TYPES, IDM_CONTENT_KINDS, IDM_CONTRACT_VERSION, IDM_DESIGN_MODES,
   IDM_DISPOSITIONS, IDM_FAQ_ITEM_ORIGINS, IDM_FAQ_QUESTION_TYPES, IDM_INTENTS, IDM_JUDGE_CRITERIA, IDM_JUDGE_SEVERITIES,
@@ -58,6 +59,10 @@ export * from './lesson-author-idm-types.contract.js';
  * the "author" audience origin, the "purpose" purpose evidence and the unit
  * brief's `design_mode`. Contract-1 and contract-2 designs and briefs read
  * unchanged, exactly as stored (no key is added), so their hashes still verify.
+ * Still in contract 3, a run that froze the organization profile at launch
+ * carries it as `project_context.organization_context` and unit brief
+ * `organization_context` (lesson-author-org-context.contract.ts); without one
+ * neither key exists, so every other design and brief reads and hashes as before.
  */
 
 // --- W3/W4 module ------------------------------------------------------------------------------
@@ -287,8 +292,11 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
   const material = hasKey(value, 'faq_material');
   // Contract 3 (QLT-6): a brief built from a contract-3 design carries the design mode.
   const designed = purposeful && hasKey(value, 'design_mode');
+  // Contract 3, optional: the frozen organization context of a design that has one (absent otherwise).
+  const organized = designed && hasKey(value, 'organization_context');
   const keys = [...(purposeful ? UNIT_BRIEF_KEYS : UNIT_BRIEF_KEYS_V1), ...(moded ? ['fidelity_mode'] : []),
-    ...(material ? ['faq_material'] : []), ...(designed ? ['design_mode'] : [])]
+    ...(material ? ['faq_material'] : []), ...(designed ? ['design_mode'] : []),
+    ...(organized ? ['organization_context'] : [])]
     .filter(key => sealed || key !== 'brief_hash');
   const item = object(value, path, keys);
   return {
@@ -303,6 +311,8 @@ function unitBrief(value: unknown, path: string, sealed: boolean): Omit<IdmUnitB
     ...(moded ? { fidelity_mode: nullable(fidelityMode)(item.fidelity_mode, `${path}.fidelity_mode`) } : {}),
     ...(designed ? { design_mode: item.design_mode === null ? null
       : oneOf(item.design_mode, `${path}.design_mode`, IDM_DESIGN_MODES) } : {}),
+    ...(organized ? { organization_context: readOrganizationContext(item.organization_context,
+      `${path}.organization_context`, invalid) } : {}),
     module_title: text(item.module_title, `${path}.module_title`, 1, 500),
     lesson_title: text(item.lesson_title, `${path}.lesson_title`, 1, 180),
     lesson_objective: text(item.lesson_objective, `${path}.lesson_objective`, 1, 500),
@@ -407,8 +417,9 @@ export function boundIdmRemainingBudgetMs(remainingBudgetMs: number, transportTi
  * the snapshot cannot fit one Python course-design task. The CMS course name
  * and description are the author intent (QLT-5), sanitised here; the launch
  * brief (QLT-6) was cleaned once at launch and is sent as stored (null fields
- * for a workspace started before QLT-6). The returned design must carry this
- * exact `project_context` (`completeSkeleton`).
+ * for a workspace started before QLT-6), and so is the organization context the
+ * workspace froze (only when it has one: without it the request is unchanged).
+ * The returned design must carry this exact `project_context` (`completeSkeleton`).
  */
 export function buildIdmCourseSkeletonRequest(input: {
   locale: 'vi' | 'en';
@@ -416,6 +427,8 @@ export function buildIdmCourseSkeletonRequest(input: {
   course_description: string | null;
   /** The workspace launch brief; null (or absent) for a workspace created before QLT-6. */
   launch_brief?: LessonAuthorLaunchBrief | null;
+  /** The workspace's frozen organization context; null (or absent) when the run has none. */
+  organization_context?: OrganizationContextV1 | null;
   source_documents: ReadonlyArray<{ document_id: string; name: string; type: string | null }>;
   source_facts: readonly OrchestrationV2SourceFact[];
   input_tokens: number;
@@ -448,6 +461,7 @@ export function buildIdmCourseSkeletonRequest(input: {
       design_mode: input.launch_brief?.design_mode ?? null,
       learner_audience: input.launch_brief?.learner_audience ?? null,
       course_purpose: input.launch_brief?.course_purpose ?? null,
+      ...(input.organization_context ? { organization_context: input.organization_context } : {}),
     },
     source_facts: facts,
     token_allowance: idmTokenAllowance(input, 'idm.token_allowance'),

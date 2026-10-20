@@ -4,6 +4,7 @@
 
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { LESSON_AUTHOR_DESIGN_MODES } from './lesson-author-launch-brief.logic.js';
+import type { OrganizationContextV1 } from './lesson-author-org-context.contract.js';
 
 export const IDM_PIPELINE_VERSION = 'idm-1' as const;
 export const IDM_LEGACY_PIPELINE_VERSION = 'v2-legacy' as const;
@@ -122,6 +123,11 @@ export interface IdmProjectContextV1 {
   design_mode?: IdmDesignMode | null;
   learner_audience?: string | null;
   course_purpose?: string | null;
+  /**
+   * Contract 3, optional (organization context): the profile the run froze at launch, background only;
+   * absent (never null) without one, so every earlier context reads and hashes as before.
+   */
+  organization_context?: OrganizationContextV1;
   source_documents: IdmSourceDocumentRefV1[];
   target_audience: string | null;
   learning_objectives: string[];
@@ -404,6 +410,8 @@ export interface IdmUnitBriefV1 {
   fidelity_mode?: IdmFidelityMode | null;
   /** Contract 3 (QLT-6): how the author started AI ID (null without a brief); absent in an older brief. */
   design_mode?: IdmDesignMode | null;
+  /** Contract 3, optional: the design's frozen organization context; absent without one. */
+  organization_context?: OrganizationContextV1;
   module_title: string;
   lesson_title: string;
   lesson_objective: string;
