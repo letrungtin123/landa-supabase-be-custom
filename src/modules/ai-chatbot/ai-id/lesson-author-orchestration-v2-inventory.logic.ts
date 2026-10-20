@@ -10,6 +10,7 @@ import {
 } from './lesson-author-orchestration-v2.logic.js';
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { idmAuthorNote, idmChapterLessonDesigns } from './lesson-author-idm-architecture.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
 
 export interface OrchestrationV2StoredTask extends OrchestrationV2PersistedTask { id: string }
@@ -133,8 +134,10 @@ export function prepareOrchestrationV2InventoryIdentity(input: {
       || bytes(candidate.protected_contract) > 1024 * 1024 || (candidate.baseline && bytes(candidate.baseline) > 1024 * 1024)) {
       fail('ORCHESTRATION_V2_INVENTORY_INVALID');
     }
-    const contractHash = orchestrationV2Hash(candidate.protected_contract);
-    const node = { ...candidate, id, parent_id: parentId, contract_hash: contractHash };
+    // Hash exactly what is stored: the contract as jsonb keeps it (lesson-author-orchestration-v2-canonical-json).
+    const protectedContract = toPersistedJson(candidate.protected_contract);
+    const contractHash = orchestrationV2Hash(protectedContract);
+    const node = { ...candidate, protected_contract: protectedContract, id, parent_id: parentId, contract_hash: contractHash };
     inventoryBytes += bytes(node);
     if (nodes.length >= MAX_NODES || inventoryBytes > MAX_INVENTORY_BYTES) fail('ORCHESTRATION_V2_INVENTORY_TOO_LARGE');
     paths.set(candidate.canonical_path, id); siblingOrders.add(sibling); nodes.push(node);
@@ -146,12 +149,14 @@ export function prepareOrchestrationV2InventoryIdentity(input: {
     sortOrder: number, baseline: WorkspaceContent, scopeIds: readonly string[], objectiveRefs: readonly string[] = [],
     extra: { chapter_count?: number; objective_slots?: number; media_type?: 'video' | 'static_infographic' | null;
       brief_format?: 'structured_v2' | null } = {}) => {
-    const protectedContract = { storyboard_version: 1, kind, canonical_path: path, display_title: baseline.title,
-      baseline_hash: orchestrationV2Hash(baseline), chapter_count: extra.chapter_count ?? 0,
+    // The revision-zero content as jsonb keeps it: hashed into the contract, stored as the baseline.
+    const storedBaseline = toPersistedJson(baseline);
+    const protectedContract = { storyboard_version: 1, kind, canonical_path: path, display_title: storedBaseline.title,
+      baseline_hash: orchestrationV2Hash(storedBaseline), chapter_count: extra.chapter_count ?? 0,
       objective_slots: extra.objective_slots ?? 0, media_type: extra.media_type ?? null,
       brief_format: extra.brief_format ?? null, readonly_references: refs(scopeIds, objectiveRefs) };
     add({ canonical_path: path, parent_path: parentPath, kind, sort_order: sortOrder,
-      protected_contract: protectedContract, baseline: kind === 'unit' ? null : baseline });
+      protected_contract: protectedContract, baseline: kind === 'unit' ? null : storedBaseline });
   };
 
   // IDM runs only (spec §8.4): author notes from the course design and the

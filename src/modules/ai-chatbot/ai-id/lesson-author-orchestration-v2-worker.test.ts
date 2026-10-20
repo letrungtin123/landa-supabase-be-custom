@@ -234,7 +234,8 @@ test('provider dispatch marker precedes artifact/accounting success in lease-fen
   assert.match(marker.queries[0]!.sql, /la:v2:workspace/);
   assert.match(marker.queries[1]!.sql, /dispatch_started_at=clock_timestamp\(\)/); marker.done();
 
-  const resultHash = hash('artifact');
+  // The artifact hash of a course_skeleton is the hash of its payload (write-time guard of succeed).
+  const resultHash = orchestrationV2Hash({ contract_version: 2 });
   const success = routedFixture(sql => {
     if (/pg_advisory_xact_lock/.test(sql)) return [];
     if (/SELECT \* FROM lesson_author_workspace_v2_tasks/.test(sql)) {

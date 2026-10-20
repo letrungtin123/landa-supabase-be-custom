@@ -7,6 +7,8 @@ import type {
   OrchestrationV2StoredTask,
 } from './lesson-author-orchestration-v2-inventory.logic.js';
 import { orchestrationV2Hash, type OrchestrationV2TaskKind } from './lesson-author-orchestration-v2.logic.js';
+import { ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH } from './lesson-author-orchestration-v2-artifact-hash.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import type {
   OrchestrationV2TaskLease,
   createOrchestrationV2WorkerRepository,
@@ -22,7 +24,8 @@ export interface OrchestrationV2InventoryInput {
 
 export class OrchestrationV2InventoryRepositoryError extends Error {
   constructor(readonly code: 'ORCHESTRATION_V2_INVENTORY_EVIDENCE_INVALID'
-    | 'ORCHESTRATION_V2_INVENTORY_STATE_INVALID' | 'ORCHESTRATION_V2_INVENTORY_WRITE_UNCONFIRMED') {
+    | 'ORCHESTRATION_V2_INVENTORY_STATE_INVALID' | 'ORCHESTRATION_V2_INVENTORY_WRITE_UNCONFIRMED'
+    | typeof ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH) {
     super(code);
     this.name = 'OrchestrationV2InventoryRepositoryError';
   }
@@ -172,6 +175,14 @@ export function createOrchestrationV2InventoryRepository(
       || publication.manifest.source_snapshot_hash !== lease.source_snapshot_hash
       || publication.manifest.tasks.length < publication.new_tasks.length) {
       fail('ORCHESTRATION_V2_INVENTORY_STATE_INVALID');
+    }
+    // Write-time hash guard for the node and revision-zero rows (the receipt itself is checked by
+    // worker.succeed): every stored protected contract must re-hash to its contract_hash, and every stored
+    // baseline to the baseline_hash its contract binds (the storyboard and edit readers re-check both).
+    if (publication.nodes.some(node => orchestrationV2Hash(toPersistedJson(node.protected_contract)) !== node.contract_hash
+      || (node.baseline !== null
+        && orchestrationV2Hash(toPersistedJson(node.baseline)) !== node.protected_contract.baseline_hash))) {
+      fail(ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH);
     }
     const receipt = { contract_version: 2, contract: publication.contract,
       assembly_hash: publication.assembly_hash, inventory_hash: publication.inventory_hash,

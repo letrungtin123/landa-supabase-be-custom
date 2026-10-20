@@ -83,7 +83,9 @@ test('course design reader rejects extra, missing and mistyped fields with IDM_C
     invalidAt('idm.pipeline_version'));
   assert.throws(() => readIdmCourseDesign(mutated(design => { design.blocks[0].intent = 'Know'; })),
     invalidAt('idm.blocks[0].intent'));
-  assert.throws(() => readIdmCourseDesign(mutated(design => { design.blocks[0].support_role = undefined; })),
+  // Not rehashed: the AI ID suites hash strictly, so hashing an undefined value throws CANONICAL_JSON_INVALID.
+  // The reader rejects the field before it checks design_hash.
+  assert.throws(() => readIdmCourseDesign(mutated(design => { design.blocks[0].support_role = undefined; }, false)),
     invalidAt('idm.blocks[0].support_role'));
   assert.throws(() => readIdmCourseDesign(null), invalidAt('idm'));
   assert.throws(() => readIdmCourseDesign([]), invalidAt('idm'));

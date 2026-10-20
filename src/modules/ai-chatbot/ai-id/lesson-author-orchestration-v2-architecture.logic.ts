@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import type {
   OrchestrationV2ChapterShard,
   OrchestrationV2CourseSkeleton,
@@ -289,13 +290,14 @@ export function assembleOrchestrationV2Architecture(
     assumptions: [...skeleton.assumptions], chapters,
   };
   const assessmentObligationHash = orchestrationV2Hash(assessmentObligations);
-  const base = { contract_version: 2 as const, source_snapshot_hash: skeleton.source_snapshot_hash,
+  // Hash exactly what is stored: the assembly as jsonb keeps it (lesson-author-orchestration-v2-canonical-json).
+  const base = toPersistedJson({ contract_version: 2 as const, source_snapshot_hash: skeleton.source_snapshot_hash,
     skeleton_hash: orchestrationV2Hash(skeleton), shard_hashes: shardHashes,
     admitted_fact_count: admittedFactCount, allocated_fact_count: admittedFactCount,
     duplicate_scope_count: 0 as const, unresolved_scope_count: 0 as const,
     chapter_count: chapters.length, lesson_count: lessonCount, unit_count: unitCount,
     component_plan_count: componentPlanCount, assessment_obligation_count: assessmentObligations.length,
-    assessment_obligation_hash: assessmentObligationHash, assessment_obligations: assessmentObligations, architecture };
+    assessment_obligation_hash: assessmentObligationHash, assessment_obligations: assessmentObligations, architecture });
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_ASSEMBLY_BYTES) {
     fail('ORCHESTRATION_V2_ARCHITECTURE_TOO_LARGE');
   }

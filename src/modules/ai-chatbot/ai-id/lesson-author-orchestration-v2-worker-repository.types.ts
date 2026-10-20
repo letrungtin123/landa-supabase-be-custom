@@ -68,7 +68,9 @@ export class OrchestrationV2WorkerRepositoryError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_TASK_LEASE_LOST'
     | 'ORCHESTRATION_V2_TASK_STATE_INVALID'
-    | 'ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED') {
+    | 'ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED'
+    /** The artifact's stored JSON would not re-hash to its artifact hash (nothing is written). */
+    | 'ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH') {
     super(code);
     this.name = 'OrchestrationV2WorkerRepositoryError';
   }

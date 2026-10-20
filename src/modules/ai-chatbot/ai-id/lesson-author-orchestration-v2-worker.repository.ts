@@ -22,6 +22,7 @@ import {
   type OrchestrationV2TransientRetryOptions,
 } from './lesson-author-orchestration-v2-lock-order.js';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
+import { orchestrationV2StoredArtifactHashMatches } from './lesson-author-orchestration-v2-artifact-hash.logic.js';
 import type {
   HoldUnknown, OrchestrationV2ArtifactCommit, OrchestrationV2CapacityWake, OrchestrationV2ClaimFailureDisposition,
   OrchestrationV2ClaimResult, OrchestrationV2DeferralReason, OrchestrationV2ProviderCompletion,
@@ -356,6 +357,16 @@ export function createOrchestrationV2WorkerRepository(
       fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
     }
     const usage = orchestrationV2ObservedUsage(observedUsage);
+    // Write-time hash guard, before any lock is taken: the payload is stored as this JSON text, and its
+    // readers re-hash what they read back. A payload that would not re-hash to its artifact hash is
+    // refused here instead of failing chapter validation or Apply later. Malformed artifact headers keep
+    // failing inside the transaction below, as before.
+    const payloadJson = artifact ? JSON.stringify(artifact.payload) : null;
+    if (artifact && payloadJson !== null && HASH.test(artifact.artifact_hash) && artifact.artifact_hash === resultHash
+      && artifact.validation_contract === validationContract
+      && !orchestrationV2StoredArtifactHashMatches(artifact.artifact_kind, artifact.artifact_hash, JSON.parse(payloadJson))) {
+      fail('ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH');
+    }
     await db.transaction(async tx => {
       await lockWorkspaceLifecycle(tx, lease.tenant_id, lease.workspace_id);
       const locked = await tx.query(`SELECT * FROM lesson_author_workspace_v2_tasks
@@ -382,7 +393,7 @@ export function createOrchestrationV2WorkerRepository(
             (run_id,workspace_id,tenant_id,course_id,task_id,artifact_kind,artifact_hash,payload,validation_contract)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING id`,
         [lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id, lease.task_id,
-          artifact.artifact_kind, artifact.artifact_hash, JSON.stringify(artifact.payload), artifact.validation_contract]);
+          artifact.artifact_kind, artifact.artifact_hash, payloadJson, artifact.validation_contract]);
         if (inserted.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
       }
       if (attemptTrace.length) {
