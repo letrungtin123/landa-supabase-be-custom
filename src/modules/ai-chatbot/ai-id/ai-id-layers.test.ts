@@ -40,6 +40,7 @@ const AI_ID_LAYERS: Readonly<Record<string, readonly string[]>> = {
   'workspace/edit': ['workspace/read'],
   'workspace/apply': ['workspace/edit', 'sessions'],
   'workspace/launch': ['workspace/edit', 'orchestration/admission'],
+  'orchestration/recovery': ['orchestration/worker', 'workspace/edit', 'sessions'],
   v1: ['workspace/edit'],
   legacy: ['v1'],
 };
