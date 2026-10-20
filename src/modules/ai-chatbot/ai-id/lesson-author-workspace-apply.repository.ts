@@ -20,6 +20,7 @@ import { persistCourseAuthorNotes, persistWorkspaceAuthorNotes, readWorkspaceAss
 import { classifyWorkspaceApplyDrift, WorkspaceApplyConflictError, workspaceApplyConflictDetails, workspaceApplyOverwriteDecision,
   type WorkspaceApplyBlockEvidence, type WorkspaceApplyMappingEvidence } from './lesson-author-workspace-apply-conflict.logic.js';
 import { lessonAuthorSessionOwnerName } from './lesson-author-session-access.logic.js';
+import { workspaceApplyReasonFromCompileError, type WorkspaceApplyReason } from './lesson-author-workspace-apply-reason.logic.js';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
 
 const HASH = /^[0-9a-f]{64}$/;
@@ -27,7 +28,10 @@ export type WorkspaceApplyCode = 'WORKSPACE_APPLY_FORBIDDEN' | 'WORKSPACE_APPLY_
   | 'WORKSPACE_APPLY_SOURCE_CHANGED' | 'WORKSPACE_APPLY_REVISION_CONFLICT' | 'WORKSPACE_APPLY_TARGET_CHANGED'
   | 'WORKSPACE_APPLY_NOT_READY' | 'WORKSPACE_APPLY_DEPENDENCY_REQUIRED' | 'WORKSPACE_APPLY_VALIDATION_FAILED'
   | 'WORKSPACE_APPLY_UNAVAILABLE' | 'WORKSPACE_APPLY_COURSE_BUSY';
-export class WorkspaceApplyError extends Error { constructor(readonly code: WorkspaceApplyCode) { super(code); this.name = 'WorkspaceApplyError'; } }
+/** `reason` (category + human location) refines only the author-facing answer of a refused compile. */
+export class WorkspaceApplyError extends Error {
+  constructor(readonly code: WorkspaceApplyCode, readonly reason: WorkspaceApplyReason | null = null) { super(code); this.name = 'WorkspaceApplyError'; }
+}
 /** `userId` is the authenticated actor; the session creator is resolved inside the transaction. */
 export interface WorkspaceApplyTarget { tenantId: string; userId: string; courseId: string; conversationId: string; workspaceId: string; nodeId: string; operationId: string; }
 export interface WorkspaceApplyOptions {
@@ -67,6 +71,8 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
     const overwriteConfirmation = typeof options.overwriteConfirmation === 'string' && isHash(options.overwriteConfirmation) ? options.overwriteConfirmation : null;
     let cacheIds: string[] = [];
     let failureStage = 'transaction_open';
+    // Nodes the compiler saw, only to name the refused chapter/lesson in its answer.
+    let compiledNodes: readonly WorkspaceApplyNode[] = [];
     try {
       const receipt = await deps.db.transaction(async tx => {
         failureStage = 'authorization';
@@ -266,6 +272,7 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         const request = { scope_node_id: target.nodeId, expected_workspace_revision: expectedWorkspaceRevision,
           expected_revision_manifest: manifest, expected_target_snapshot_hash: workspaceApplyTargetHash(targets) };
         failureStage = 'compile';
+        compiledNodes = nodes;
         const compiled = isV1 ? compileWorkspaceApply({ workspace_id: target.workspaceId, course_node_id: courseNodeId,
           content_locale: workspaceLocale(w.content_locale), event_head: expectedWorkspaceRevision,
           source_snapshot_hash: w.source_snapshot_hash, runtime_config_hash: w.runtime_config_hash,
@@ -441,16 +448,18 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
       if (error instanceof WorkspaceApplyError || error instanceof WorkspaceApplyConflictError) throw error;
       if (error instanceof WorkspaceAuthorNotesTargetChanged) throw new WorkspaceApplyError('WORKSPACE_APPLY_TARGET_CHANGED');
       if (error instanceof WorkspaceApplyCompileError) {
+        const reason = failureStage === 'compile' ? workspaceApplyReasonFromCompileError(error, compiledNodes) : null;
         console.warn('[LessonAuthorWorkspaceApply] compile rejected', {
           workspace_id: target.workspaceId,
           node_id: target.nodeId,
           operation_id: target.operationId,
           failure_stage: failureStage,
           compile_code: error.code,
+          reason_category: reason?.category ?? null,
           finding_paths: error.findings.slice(0, 8).map(finding => finding.path),
           finding_count: error.findings.length,
         });
-        throw new WorkspaceApplyError(error.code.includes('VALIDATION') ? 'WORKSPACE_APPLY_VALIDATION_FAILED' : error.code.includes('REVISION') ? 'WORKSPACE_APPLY_REVISION_CONFLICT' : error.code.includes('TARGET') ? 'WORKSPACE_APPLY_TARGET_CHANGED' : error.code.includes('DEPENDENCY') ? 'WORKSPACE_APPLY_DEPENDENCY_REQUIRED' : 'WORKSPACE_APPLY_NOT_READY');
+        throw new WorkspaceApplyError(error.code.includes('VALIDATION') ? 'WORKSPACE_APPLY_VALIDATION_FAILED' : error.code.includes('REVISION') ? 'WORKSPACE_APPLY_REVISION_CONFLICT' : error.code.includes('TARGET') ? 'WORKSPACE_APPLY_TARGET_CHANGED' : error.code.includes('DEPENDENCY') ? 'WORKSPACE_APPLY_DEPENDENCY_REQUIRED' : 'WORKSPACE_APPLY_NOT_READY', reason);
       }
       const authorityCode = error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
         ? (error as { code: string }).code : null;

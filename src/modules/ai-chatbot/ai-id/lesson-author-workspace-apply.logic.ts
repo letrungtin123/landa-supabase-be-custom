@@ -8,6 +8,7 @@ import { buildWorkspaceInventory } from './lesson-author-workspace-inventory.log
 import { workspaceStoryboardSeed, editWorkspaceStoryboard } from './lesson-author-workspace-storyboard.logic.js';
 import { hydrateWorkspaceComponent, editWorkspaceComponent, workspaceAuthorComponentContent, validateWorkspaceComponentChapter } from './lesson-author-workspace-component.logic.js';
 import { detectLessonAuthorGeneratedContentDuplicates } from './lesson-author-pedagogical-validator.logic.js';
+import type { WorkspaceApplyReasonCategory } from './lesson-author-workspace-apply-reason.logic.js';
 
 export const WORKSPACE_SCOPED_APPLY_CONTRACT = 'workspace-scoped-apply-1';
 export const WORKSPACE_APPLY_MAX_PAIRS = 131_072;
@@ -16,7 +17,9 @@ export type WorkspaceApplyCompileCode = 'WORKSPACE_APPLY_INPUT_INVALID' | 'WORKS
   | 'WORKSPACE_APPLY_BINDING_INVALID' | 'WORKSPACE_APPLY_VALIDATION_FAILED' | 'WORKSPACE_APPLY_DEPENDENCY_REQUIRED'
   | 'WORKSPACE_APPLY_TARGET_CHANGED' | 'WORKSPACE_APPLY_LIMIT';
 export class WorkspaceApplyCompileError extends Error {
-  constructor(readonly code: WorkspaceApplyCompileCode, readonly findings: Array<{ code: string; path: string }> = []) {
+  /** `reason` refines the author-facing explanation only; `code` stays the decision. */
+  constructor(readonly code: WorkspaceApplyCompileCode, readonly findings: Array<{ code: string; path: string }> = [],
+    readonly reason: WorkspaceApplyReasonCategory | null = null) {
     super(code); this.name = 'WorkspaceApplyCompileError';
   }
 }
