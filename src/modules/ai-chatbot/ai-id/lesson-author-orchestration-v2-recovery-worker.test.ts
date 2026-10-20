@@ -7,6 +7,7 @@ import test from 'node:test';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { createOrchestrationV2ChapterRepository } from './lesson-author-orchestration-v2-chapter.repository.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import { createOrchestrationV2UnitRepository } from './lesson-author-orchestration-v2-unit.repository.js';
 import {
   createOrchestrationV2WorkerRepository,
@@ -119,9 +120,13 @@ test('stopped run: an in-flight AI call that already crossed the fence still com
     if (/SET status='succeeded'/.test(sql)) return [{ id: TASK }];
     return undefined;
   });
-  await f.worker.succeed(lease(), hash('artifact'), 'orchestration-unit-baseline-v2',
+  // A complete unit payload whose artifact hash is its own (write-time guard of succeed).
+  const payload = { contract_version: 2, unit_path: 'chapter_1.lesson_1.unit_1', source_snapshot_hash: hash('source'),
+    contract_hash: hash('contract'), nodes: [], generated_unit: { components: [] } };
+  const artifactHash = orchestrationV2UnitArtifactHash(payload);
+  await f.worker.succeed(lease(), artifactHash, 'orchestration-unit-baseline-v2',
     { inputTokens: 1, outputTokens: 2, embeddingTokens: 0, totalTokens: 3 },
-    { artifact_kind: 'unit_baseline', artifact_hash: hash('artifact'), payload: { contract_version: 2 },
+    { artifact_kind: 'unit_baseline', artifact_hash: artifactHash, payload,
       validation_contract: 'orchestration-unit-baseline-v2' },
     async (_tx, current) => { settled.push(current.task_id); });
   assert.deepEqual(settled, [TASK]);
