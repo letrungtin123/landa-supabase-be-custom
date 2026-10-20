@@ -178,6 +178,39 @@ export const aiIdEnv = {
     1,
     10_000,
   ),
+  // AI ID organization context ("Ngữ cảnh doanh nghiệp", needs SQL 20261020_2200): tenant-wide context
+  // files and the confirmed organization profile a new V2 run can freeze. Allow-list of tenant UUIDs;
+  // empty = every tenant once enabled. None of these settings is part of the V2 runtime hash.
+  LESSON_AUTHOR_ORG_CONTEXT_ENABLED: optionalBoolean('LESSON_AUTHOR_ORG_CONTEXT_ENABLED', false),
+  LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST: optionalUuidCsv('LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST'),
+  // Total size of a tenant's context files (bytes).
+  LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES: optionalBoundedInt(
+    'LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES',
+    52_428_800,
+    1_048_576,
+    1_073_741_824,
+  ),
+  // Background process: how often the profile drafting worker looks for a queued request.
+  LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS: optionalBoundedInt(
+    'LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS',
+    5_000,
+    1_000,
+    300_000,
+  ),
+  // How long one profile drafting call to the AI service may take (its lease adds 60 s).
+  LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS: optionalBoundedInt(
+    'LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS',
+    600_000,
+    60_000,
+    1_800_000,
+  ),
+  // Most source characters the AI service reads for one profile draft (it samples evenly beyond).
+  LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS: optionalBoundedInt(
+    'LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS',
+    1_500_000,
+    10_000,
+    5_000_000,
+  ),
 
   // Lesson-author video transcription. The upload route streams to a private
   // bucket; these limits are enforced before expensive media processing.

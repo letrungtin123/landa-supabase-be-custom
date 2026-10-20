@@ -12,6 +12,7 @@ const noAiFlags = {
   LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED: "false",
   LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED: "false",
   LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "false",
+  LESSON_AUTHOR_ORG_CONTEXT_ENABLED: "false",
   // No AI features on 226 yet (owner, 2026-10-20): the background process starts none of the
   // AI workers. These values win over 226's .env.production (dotenv does not override).
   KB_OPERATION_WORKER_ENABLED: "false",

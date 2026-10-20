@@ -152,6 +152,12 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS",
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE",
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY",
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS",
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS",
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS",
+          "LESSON_AUTHOR_ORG_CONTEXT_ENABLED",
+          "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES",
+          "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST",
           "LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR",
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE",
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_CONCURRENCY",
@@ -365,6 +371,12 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS": 30,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE": 25,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY": 4,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": 1500000,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": 5000,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": 600000,
+          "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": false,
+          "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": 52428800,
+          "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": [],
           "LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR": "./tmp/lesson-author-transcription",
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE": 2,
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_CONCURRENCY": 1,
@@ -728,7 +740,13 @@
         "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "true",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED": "true",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST": " 33333333-3333-4333-8333-33333333333A , 33333333-3333-4333-8333-33333333333a",
-        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "16"
+        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "16",
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "true",
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": " 44444444-4444-4444-8444-44444444444A , 44444444-4444-4444-8444-44444444444a",
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "52428801",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "  5001  ",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "600001",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "1500001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env.production"],
@@ -865,6 +883,12 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS": 31,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_RECOVERY_BATCH_SIZE": 26,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY": 5,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": 1500001,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": 5001,
+          "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": 600001,
+          "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": true,
+          "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": 52428801,
+          "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": ["44444444-4444-4444-8444-44444444444a"],
           "LESSON_AUTHOR_TRANSCRIPTION_TEMP_DIR": "fake-lesson-author-transcription-temp-dir",
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_BATCH_SIZE": 3,
           "LESSON_AUTHOR_TRANSCRIPTION_WORKER_CONCURRENCY": 2,
@@ -1664,7 +1688,13 @@
         "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "   ",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED": "   ",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST": "   ",
-        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "   "
+        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "   ",
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": "   "
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -1883,7 +1913,13 @@
         "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED": "",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST": "",
-        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": ""
+        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "",
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": ""
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -2655,7 +2691,13 @@
         "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "maybe",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED": "maybe",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST": "not-a-uuid",
-        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "10001"
+        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "10001",
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "maybe",
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": "not-a-uuid",
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "1048575",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "300001",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "59999",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -3453,6 +3495,78 @@
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
         "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
         "error": "Error: [ENV] LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST must be a comma-separated list of UUIDs, received: \"not-a-uuid\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS must be between 10000 and 5000000, received: \"5000001\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "59999"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS must be between 60000 and 1800000, received: \"59999\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "300001"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS must be between 1000 and 300000, received: \"300001\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "1048575"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES must be between 1048576 and 1073741824, received: \"1048575\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": "not-a-uuid"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST must be a comma-separated list of UUIDs, received: \"not-a-uuid\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_ENABLED",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "maybe"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_ENABLED must be a boolean, received: \"maybe\""
       }
     },
     {
@@ -5213,7 +5327,13 @@
         "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "maybe",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED": "maybe",
         "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST": "not-a-uuid",
-        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "10001"
+        "LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS": "10001",
+        "LESSON_AUTHOR_ORG_CONTEXT_ENABLED": "maybe",
+        "LESSON_AUTHOR_ORG_CONTEXT_TENANT_ALLOWLIST": "not-a-uuid",
+        "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "1048575",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "300001",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "59999",
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],

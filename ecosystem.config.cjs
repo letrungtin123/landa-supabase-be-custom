@@ -53,7 +53,10 @@ const sharedEnv = {
   // Author recovery of a V2 design: Dừng / Chạy tiếp / Viết lại (needs SQL 20261020_1500).
   // Empty tenant allowlist = every tenant.
   LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED: "true",
-  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED: "true"
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED: "true",
+  // AI ID organization context: context files + confirmed profile (needs SQL 20261020_2200).
+  // Empty tenant allowlist = every tenant.
+  LESSON_AUTHOR_ORG_CONTEXT_ENABLED: "true"
 };
 
 // The API is one PM2 process in fork mode, the in-app cluster primary
