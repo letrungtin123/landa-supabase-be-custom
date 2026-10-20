@@ -308,6 +308,9 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
       const connectionKey = `${source}->${target}`;
       if (seenConnections.has(connectionKey)) return null;
       seenConnections.add(connectionKey);
+      // An edge without a label has no label key at all: stored JSON drops
+      // undefined values, and the unit hash must match the stored payload.
+      const label = normalizeDiagramDisplayText(readString(edge.label, '', 120), 120);
       return {
         id: `edge_${index + 1}`,
         source,
@@ -315,7 +318,7 @@ function normalizeDiagramComponent(component: Record<string, unknown>, fallbackT
         sourceHandle: 'right' as const,
         targetHandle: 'left' as const,
         type: 'deletable',
-        label: normalizeDiagramDisplayText(readString(edge.label, '', 120), 120) || undefined,
+        ...(label ? { label } : {}),
         style: { stroke: '#64748B', strokeWidth: 2 },
         markerEnd: { type: 'arrowclosed', color: '#64748B' },
       };
