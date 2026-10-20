@@ -24,18 +24,18 @@ import { cleanupStaleReportExportSpools } from './modules/reports/report-export-
 import { startUploadWorker } from './modules/ai-chatbot/kb/upload.worker.js';
 import { startRestoreWorker } from './modules/ai-chatbot/kb/restore.worker.js';
 import { startKbOperationWorker } from './modules/ai-chatbot/kb/kb-operation.worker.js';
-import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/ai-id/lesson-author-transcription.worker.js';
-import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/ai-id/lesson-author-durable-blueprint.service.js';
-import { startLessonAuthorWorkspaceWorker, stopLessonAuthorWorkspaceWorker } from './modules/ai-chatbot/ai-id/lesson-author-workspace-runtime.service.js';
-import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/ai-id/lesson-author-chapter-runtime.service.js';
+import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/ai-id/sources/lesson-author-transcription.worker.js';
+import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/ai-id/v1/lesson-author-durable-blueprint.service.js';
+import { startLessonAuthorWorkspaceWorker, stopLessonAuthorWorkspaceWorker } from './modules/ai-chatbot/ai-id/v1/lesson-author-workspace-runtime.service.js';
+import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/ai-id/v1/lesson-author-chapter-runtime.service.js';
 import { shutdownReportPdfRenderer } from './modules/ai-chatbot/ai-report/report-pdf-renderer.service.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-platform/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
 import { startUserDeletionWorker } from './modules/users/user-deletion.worker.js';
-import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/ai-id/lesson-author-session-deletion.worker.js';
+import { startLessonAuthorSessionDeletionWorker } from './modules/ai-chatbot/ai-id/sessions/lesson-author-session-deletion.worker.js';
 import { startEmailOutboxRabbitConsumer, startEmailOutboxWorker, stopEmailOutboxWorker } from './modules/assignments/email-outbox.service.js';
-import { workspaceCommitHub } from './modules/ai-chatbot/ai-id/lesson-author-workspace-stream.service.js';
-import { sourceDocumentHub } from './modules/ai-chatbot/ai-id/lesson-author-source-stream.service.js';
+import { workspaceCommitHub } from './modules/ai-chatbot/ai-id/workspace/stream/lesson-author-workspace-stream.service.js';
+import { sourceDocumentHub } from './modules/ai-chatbot/ai-id/sources/lesson-author-source-stream.service.js';
 import { startCourseProgressRecalculationWorker } from './modules/learner/progress-recalculation.worker.js';
 import {
   assertAuthRevocationRedisReady,

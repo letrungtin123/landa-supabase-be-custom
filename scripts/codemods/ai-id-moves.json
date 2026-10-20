@@ -1,5 +1,5 @@
 {
-  "description": "Proposed folder layout of src/modules/ai-chatbot/ai-id for scripts/codemods/split-ai-chatbot.mjs --map scripts/codemods/ai-id-moves.json. Move only: file names do not change. \"moves\" lists, per folder, the files directly in ai-id/ that go there; tests and goldens go with the code they test. Import direction between the folders: src/modules/ai-chatbot/ai-id/ai-id-layers.test.ts (see README.md).",
+  "description": "Folder layout of src/modules/ai-chatbot/ai-id (applied) for scripts/codemods/split-ai-chatbot.mjs --map scripts/codemods/ai-id-moves.json. Move only: file names do not change. \"moves\" lists, per folder, the files directly in ai-id/ that go there; tests and goldens go with the code they test. Import direction between the folders: src/modules/ai-chatbot/ai-id/ai-id-layers.test.ts (see README.md).",
   "module": "src/modules/ai-chatbot/ai-id",
   "folders": {
     "shared": "Primitives every AI ID folder uses: canonical JSON and the V2 hash, generation job errors and the database types of generation-job.repository, lesson-author command and intent parsing, AI ID access rules, LISTEN retry, source snapshot hash.",

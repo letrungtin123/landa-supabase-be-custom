@@ -4,16 +4,16 @@ import {
   type LessonAuthorComponentType,
   type LessonAuthorProposal,
 } from '../../../course-authoring/course-authoring.service.js';
-import { type LessonAuthorBlueprintMediaReview } from '../lesson-author-media-review.logic.js';
+import { type LessonAuthorBlueprintMediaReview } from '../v1/lesson-author-media-review.logic.js';
 import {
   type LessonAuthorContentContractPlan,
   type LessonAuthorStructuredArtifactRequirement,
-} from '../lesson-author-content-contract.logic.js';
-import { type SemanticLearningBlock } from '../lesson-author-component-registry.logic.js';
+} from '../content/lesson-author-content-contract.logic.js';
+import { type SemanticLearningBlock } from '../content/lesson-author-component-registry.logic.js';
 import {
   type BlueprintArchitectureValidationResult,
   type LessonAuthorSourceMap,
-} from '../lesson-author-blueprint-validator.logic.js';
+} from '../v1/lesson-author-blueprint-validator.logic.js';
 import type { LessonAuthorSourceDocument } from '../../chat/chat.types.js';
 
 export interface LessonAuthorOutlineMention {
@@ -115,8 +115,8 @@ export interface LessonAuthorBlueprintQualityReport {
 }
 
 export interface LessonAuthorBlueprint {
-  source_chapter_policy?: import('../lesson-author-blueprint-validator.logic.js').SourceChapterPolicy;
-  component_capabilities?: import('../lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
+  source_chapter_policy?: import('../v1/lesson-author-blueprint-validator.logic.js').SourceChapterPolicy;
+  component_capabilities?: import('../content/lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
   architecture_contract_version?: 3 | 4 | 5;
   content_contract_version?: 1;
   title: string;

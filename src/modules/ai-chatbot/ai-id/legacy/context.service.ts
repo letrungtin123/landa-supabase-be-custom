@@ -1,6 +1,6 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { lessonAuthorSourceInfoSummary as getSourceInfoSummary } from '../lesson-author-source-snapshot.logic.js';
+import { lessonAuthorSourceInfoSummary as getSourceInfoSummary } from '../shared/lesson-author-source-snapshot.logic.js';
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import { type RagWorkflowDiagnostics } from '../../ai-platform/ai-rag-client.service.js';

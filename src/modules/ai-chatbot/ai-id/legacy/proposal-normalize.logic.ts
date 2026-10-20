@@ -1,6 +1,6 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { ComponentCapabilityError } from '../lesson-author-capabilities.logic.js';
+import { ComponentCapabilityError } from '../content/lesson-author-capabilities.logic.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import {
   type LessonAuthorChapterProposal,
@@ -12,18 +12,18 @@ import { type CourseComponentType } from '../../../tenants/tenant-course-compone
 import {
   normalizeLessonAuthorMediaReview as normalizeMediaReviewArtifact,
   type LessonAuthorBlueprintMediaReview,
-} from '../lesson-author-media-review.logic.js';
+} from '../v1/lesson-author-media-review.logic.js';
 import {
   completeLessonAuthorContentContract,
   validateLessonAuthorContentContractUnit,
-} from '../lesson-author-content-contract.logic.js';
+} from '../content/lesson-author-content-contract.logic.js';
 import {
   deriveSemanticLearningBlocksFromLegacyComponentPlan,
   normalizeSemanticLearningBlocks,
   planSemanticLearningBlocks,
   readServerOwnedSourceFactIds,
   type ComponentPlannerDiagnostic,
-} from '../lesson-author-component-registry.logic.js';
+} from '../content/lesson-author-component-registry.logic.js';
 import {
   MAX_PROPOSAL_CHAPTERS,
   MAX_PROPOSAL_LESSONS,

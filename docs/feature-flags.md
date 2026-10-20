@@ -118,7 +118,7 @@ removed or changed by this page. Audit references: BE-S11 and §3.4 of
 | `COURSE_PROGRESS_RECALC_WORKER_ENABLED` | `true` | – | – | `learner/progress-recalculation.worker.ts` | yes (always `true`) | remove the flag, keep the behavior (`LANDA_PROCESS_ROLE` decides) | – |
 | `KB_OPERATION_WORKER_ENABLED` | `true` | – | – | `kb/kb-operation.worker.ts` | yes (always `true`) | remove the flag, keep the behavior, unless #4 wants it off on 226 | #4 |
 | `AI_ENGINE_TRANSITION_WORKER_ENABLED` | `true` | – | – | `ai-platform/ai-engine-transition.worker.ts` | yes (always `true`) | as above | #4 |
-| `LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED` | `true` | – | – | `ai-id/lesson-author-transcription.worker.ts` | yes (always `true`) | as above | #4 |
+| `LESSON_AUTHOR_TRANSCRIPTION_WORKER_ENABLED` | `true` | – | – | `ai-id/sources/lesson-author-transcription.worker.ts` | yes (always `true`) | as above | #4 |
 | `REPORT_PDF_STORAGE_ENABLED` | `false` | – | – | `ai-report/report-pdf-export.service.ts` | off everywhere | owner: release or remove the behavior (audit perf L3) | #5 |
 | `REPORT_PDF_AI_NARRATIVE_ENABLED` | `false` | – | – | `ai-report/report-pdf-narrative.service.ts` | off everywhere | owner: release or remove the behavior | #5 |
 | `REPORT_PDF_BROWSER_CHANNEL` | `msedge` | – | – | `ai-report/report-pdf-renderer.service.ts` | – | keep (host specific) | #7 |

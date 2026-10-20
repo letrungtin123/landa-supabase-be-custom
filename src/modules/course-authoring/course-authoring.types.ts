@@ -4,7 +4,7 @@
 // course-authoring.service.ts, which still re-exports every one.
 // ═══════════════════════════════════════════════════════════════
 
-import type { LessonAuthorIntentPlan } from '../ai-chatbot/ai-id/lesson-author-intent.logic.js';
+import type { LessonAuthorIntentPlan } from '../ai-chatbot/ai-id/shared/lesson-author-intent.logic.js';
 
 export interface BlockNode {
   id: string;

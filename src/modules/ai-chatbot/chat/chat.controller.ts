@@ -13,9 +13,9 @@ import { recordAiChatAdmissionRefused, registerAiChatAdmissionGauge } from '../.
 import { CHAT_ANSWER_STOPPED_BY_CLIENT } from './chat-provider-turn.logic.js';
 import { env } from '../../../config/env.js';
 import { trackShutdownWork } from '../../../config/process-lifecycle.js';
-import { tryEnqueueDurableBlueprint } from '../ai-id/lesson-author-durable-blueprint.service.js';
-import { respondToGenerationAdmission } from '../ai-id/lesson-author-generation-admission.logic.js';
-import { resolveLessonAuthorAction } from '../ai-id/lesson-author-action.logic.js';
+import { tryEnqueueDurableBlueprint } from '../ai-id/v1/lesson-author-durable-blueprint.service.js';
+import { respondToGenerationAdmission } from '../ai-id/v1/lesson-author-generation-admission.logic.js';
+import { resolveLessonAuthorAction } from '../ai-id/v1/lesson-author-action.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../middleware/audit-log.js';
 import { query } from '../../../config/database.js';
 import { invalidateBlockReadCaches, invalidateCourseReadCaches } from '../../../config/cache-invalidation.js';

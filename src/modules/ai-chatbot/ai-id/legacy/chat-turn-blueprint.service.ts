@@ -6,8 +6,8 @@
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
-import { ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from '../lesson-author-capabilities.logic.js';
-import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts } from '../lesson-author-blueprint-acceptance.logic.js';
+import { ComponentCapabilityError, createComponentCapabilities, readComponentCapabilities } from '../content/lesson-author-capabilities.logic.js';
+import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts } from '../v1/lesson-author-blueprint-acceptance.logic.js';
 import type { AiUsage } from '../../ai-platform/ai-engine.types.js';
 import { normalizeAiUsage } from '../../ai-platform/ai-token-quota.service.js';
 import {

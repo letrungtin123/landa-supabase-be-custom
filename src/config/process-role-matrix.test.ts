@@ -123,9 +123,9 @@ const CLUSTER_BUS = ['config/cluster-bus.ts every 30000 ms'];
 const QUEUE_WORKERS = [
   'modules/ai-chatbot/ai-platform/ai-engine-transition.worker.ts every 15000 ms',
   'modules/ai-chatbot/kb/kb-operation.worker.ts every 10000 ms',
-  'modules/ai-chatbot/ai-id/lesson-author-session-deletion.worker.ts every 30000 ms',
-  'modules/ai-chatbot/ai-id/lesson-author-transcription.worker.ts every 10000 ms',
-  'modules/ai-chatbot/ai-id/lesson-author-transcription.worker.ts every 21600000 ms',
+  'modules/ai-chatbot/ai-id/sessions/lesson-author-session-deletion.worker.ts every 30000 ms',
+  'modules/ai-chatbot/ai-id/sources/lesson-author-transcription.worker.ts every 10000 ms',
+  'modules/ai-chatbot/ai-id/sources/lesson-author-transcription.worker.ts every 21600000 ms',
   'modules/ai-chatbot/kb/restore.worker.ts every 30000 ms',
   'modules/course-deletion/course-deletion.worker.ts every 30000 ms',
   'modules/learner/progress-recalculation.worker.ts every 60000 ms',

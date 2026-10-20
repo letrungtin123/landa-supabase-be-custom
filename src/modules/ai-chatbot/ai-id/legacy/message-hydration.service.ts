@@ -5,7 +5,7 @@ import { type LessonAuthorProposal } from '../../../course-authoring/course-auth
 import {
   formatLessonAuthorApprovalMessage,
   LESSON_AUTHOR_PROPOSAL_HYDRATION_QUERY,
-} from '../lesson-author-message.logic.js';
+} from '../v1/lesson-author-message.logic.js';
 import type { LessonAuthorSourceDocument, ChatMessage, ConversationContext } from '../../chat/chat.types.js';
 import { isValidUUID } from '../../chat/chat-turn-runtime.service.js';
 import { readOptionalNonNegativeInteger } from './component-normalize.logic.js';

@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { ORCHESTRATION_V2_GUARDS } from '../../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-schema.repository.js';
+import { ORCHESTRATION_V2_GUARDS } from '../../modules/ai-chatbot/ai-id/orchestration/lesson-author-orchestration-v2-schema.repository.js';
 import {
   WORKSPACE_EXECUTION_GUARDS,
   WORKSPACE_FOUNDATION_GUARDS,
   WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES,
-} from '../../modules/ai-chatbot/ai-id/lesson-author-workspace-schema.repository.js';
+} from '../../modules/ai-chatbot/ai-id/workspace/read/lesson-author-workspace-schema.repository.js';
 import { COURSE_PUBLISH_GOVERNANCE_FUNCTIONS } from '../../modules/course-authoring/course-publish-governance-schema.repository.js';
 import { MANUAL_SQL_DIRECTORY } from '../../test-support/manual-sql.js';
 
@@ -105,7 +105,7 @@ function sourceText(relative: string): string {
 
 /** The chapter checkpoint guards are pinned inline (`const expected = {name: hash}`, zero-argument functions). */
 function chapterCheckpointPins(): Pin[] {
-  const text = sourceText('../../modules/ai-chatbot/ai-id/lesson-author-chapter-runtime.service.ts');
+  const text = sourceText('../../modules/ai-chatbot/ai-id/v1/lesson-author-chapter-runtime.service.ts');
   const block = /const expected:Record<string,string>=\{([^}]*)\}/.exec(text);
   assert.ok(block, 'the expected chapter guard hashes were not found in lesson-author-chapter-runtime.service.ts');
   return [...block[1].matchAll(/(\w+):'([0-9a-f]{32})'/g)].map(([, name, md5]) => ({
@@ -117,7 +117,7 @@ function chapterCheckpointPins(): Pin[] {
 
 /** The durable Blueprint gate pins one guard inline (`row.guard_hash !== '<hash>'`). */
 function durableBlueprintPins(): Pin[] {
-  const text = sourceText('../../modules/ai-chatbot/ai-id/lesson-author-durable-blueprint.service.ts');
+  const text = sourceText('../../modules/ai-chatbot/ai-id/v1/lesson-author-durable-blueprint.service.ts');
   const hash = /row\.guard_hash !== '([0-9a-f]{32})'/.exec(text);
   const fn = /WHERE p\.oid=to_regprocedure\('public\.(\w+\([^)]*\))'\)/.exec(text);
   assert.ok(hash && fn, 'the durable Blueprint guard pin was not found in lesson-author-durable-blueprint.service.ts');

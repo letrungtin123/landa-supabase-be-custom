@@ -8,7 +8,7 @@ moved file is rewritten. No other code changes.
 | `split-ai-chatbot.mjs`          | The codemod (CLI). Default map: `split-ai-chatbot.map.json` (the done split of `ai-chatbot`). |
 | `path-moves.mjs`                | The path rewriting it uses.                                                                   |
 | `split-ai-chatbot.map.json`     | Rules map: each name directly under `src/modules/ai-chatbot` goes to the first matching rule. |
-| `ai-id-moves.json`              | Moves map (proposal, not applied): every file of `src/modules/ai-chatbot/ai-id` per folder.   |
+| `ai-id-moves.json`              | Moves map (applied): every file of `src/modules/ai-chatbot/ai-id` per folder.                 |
 | `split-ai-chatbot.selftest.mjs` | Runs a map on a throwaway copy of the repository and checks the result there.                 |
 | `split-ai-chatbot.test.mjs`     | Tests of the codemod on a scratch repository (suite `test:ai-id-structure`).                  |
 

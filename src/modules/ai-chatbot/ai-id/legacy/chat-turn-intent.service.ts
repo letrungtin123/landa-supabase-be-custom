@@ -8,8 +8,8 @@ import {
   type LessonAuthorOperationPlan,
   type LessonAuthorProposal,
 } from '../../../course-authoring/course-authoring.service.js';
-import { classifyLessonAuthorIntent, detectLessonAuthorInputLocale } from '../lesson-author-intent.logic.js';
-import { buildNormalizedLessonAuthorCommand, isSimpleDeterministicLessonAuthorCommand } from '../lesson-author-command.logic.js';
+import { classifyLessonAuthorIntent, detectLessonAuthorInputLocale } from '../shared/lesson-author-intent.logic.js';
+import { buildNormalizedLessonAuthorCommand, isSimpleDeterministicLessonAuthorCommand } from '../shared/lesson-author-command.logic.js';
 import { LESSON_AUTHOR_TARGET } from '../../chat/chat.constants.js';
 import { logLessonAuthorFlow } from '../../chat/chat-turn-runtime.service.js';
 import { estimateAiTurnUsage } from '../../chat/chat-turn-settle.service.js';
