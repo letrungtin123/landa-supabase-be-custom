@@ -56,6 +56,14 @@ const DEFAULT_CATEGORY: Readonly<Record<WorkspaceApplyCompileCode, WorkspaceAppl
 
 const isControl = (code: number, allowLineBreaks: boolean) => (code < 0x20 || code === 0x7f)
   && !(allowLineBreaks && (code === 0x09 || code === 0x0a || code === 0x0d));
+/**
+ * Invisible formatting characters that can reorder or hide text where a title
+ * is shown: bidi embeddings/overrides (U+202A-U+202E), bidi isolates
+ * (U+2066-U+2069), zero-width space/joiners and direction marks
+ * (U+200B-U+200F) and the byte order mark (U+FEFF).
+ */
+const isInvisibleFormat = (code: number) => (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)
+  || (code >= 0x200b && code <= 0x200f) || code === 0xfeff;
 
 /** True when the text holds an ASCII control character (tab and line breaks allowed on request). */
 export function hasControlCharacter(text: string, allowLineBreaks = false): boolean {
@@ -63,10 +71,16 @@ export function hasControlCharacter(text: string, allowLineBreaks = false): bool
   return false;
 }
 
-/** Author-visible title as one plain line: control characters become spaces, bounded length. */
+/**
+ * Author-visible title as one plain line: control characters become spaces,
+ * invisible bidi/zero-width characters are removed, bounded length.
+ */
 export function workspacePlainTitle(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  const clean = Array.from(value, character => isControl(character.charCodeAt(0), false) ? ' ' : character).join('').trim();
+  const clean = Array.from(value, character => {
+    const code = character.charCodeAt(0);
+    return isControl(code, false) ? ' ' : isInvisibleFormat(code) ? '' : character;
+  }).join('').trim();
   return clean ? (clean.length > TITLE_MAX ? `${clean.slice(0, TITLE_MAX - 1)}…` : clean) : null;
 }
 
@@ -151,9 +165,18 @@ export function workspaceApplyLocationText(location: WorkspaceApplyLocation | nu
 }
 
 const capitalize = (text: string) => text.charAt(0).toLocaleUpperCase() + text.slice(1);
-// 'Viết lại chương' / 'Rewrite chapter' must stay the label of the recovery lane's chapter rewrite action.
+// The advice names only what the recovery lane can actually do for each case
+// (orchestration/recovery): 'Viết lại chương' / 'Rewrite chapter' rewrites the
+// lessons of a chapter that have no content; 'Chạy tiếp' / 'Continue' re-runs
+// the free checks whose lessons are all done. Both must stay the labels of
+// those actions in the dashboard. A lesson that has content (a source-copy
+// draft, or content whose checked evidence no longer matches) cannot be
+// rewritten by this design, and editing it in the design does not change that
+// evidence, so those cases point to the course or a new design.
 const REWRITE = { vi: "Bạn có thể dùng 'Viết lại chương' hoặc tự soạn phần này trong khoá học.",
   en: "You can use 'Rewrite chapter' or write this part yourself in the course." } as const;
+const ELSEWHERE = { vi: 'bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.',
+  en: 'you can write this part yourself in the course, or create a new course design.' } as const;
 
 /** Plain VI/EN sentence telling the author what happened and what to do next. */
 export function workspaceApplyReasonMessage(reason: WorkspaceApplyReason, locale: Locale): string {
@@ -161,19 +184,19 @@ export function workspaceApplyReasonMessage(reason: WorkspaceApplyReason, locale
   const vi = locale === 'vi';
   switch (reason.category) {
     case 'CHAPTER_NOT_COMPLETED': return vi
-      ? `${where ? capitalize(where) : 'Một chương'} chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. ${REWRITE.vi}`
-      : `${where ? capitalize(where) : 'A chapter'} did not finish its final check, so it cannot be applied yet. ${REWRITE.en}`;
+      ? `${where ? capitalize(where) : 'Một chương'} đã soạn xong các bài học nhưng chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. Nếu việc tạo nội dung đã dừng, hãy dùng 'Chạy tiếp' để chạy lại bước kiểm tra này (không dùng điểm AI); nếu chưa dừng, hãy chờ bước này chạy xong. Nếu vẫn không được, ${ELSEWHERE.vi}`
+      : `${where ? capitalize(where) : 'A chapter'} has all its lessons written but did not finish its final check, so it cannot be applied yet. If creating content has stopped, use 'Continue' to run this check again (this does not use AI points); otherwise, wait for it to finish. If it still fails, ${ELSEWHERE.en}`;
     case 'UNIT_NOT_GENERATED': return vi
       ? `${where ? capitalize(where) : 'Một số bài học'} chưa được AI soạn xong, nên chưa áp dụng được. ${REWRITE.vi}`
       : where ? `${capitalize(where)} was not finished by the AI, so it cannot be applied yet. ${REWRITE.en}`
         : `Some lessons were not finished by the AI, so they cannot be applied yet. ${REWRITE.en}`;
     case 'UNIT_FALLBACK_NOT_APPLICABLE': return vi
-      ? `${where ? capitalize(where) : 'Một số bài học'} chỉ có bản nháp chép từ tài liệu nguồn vì AI chưa soạn được, nên không đưa vào khoá học. ${REWRITE.vi}`
-      : where ? `${capitalize(where)} only has a draft copied from the source because the AI could not write it, so it is not added to the course. ${REWRITE.en}`
-        : `Some lessons only have a draft copied from the source because the AI could not write them, so they are not added to the course. ${REWRITE.en}`;
+      ? `${where ? capitalize(where) : 'Một số bài học'} chỉ có bản nháp chép từ tài liệu nguồn vì AI chưa soạn được, nên không đưa vào khoá học được. Bản thiết kế này không thể soạn lại phần đó, nên ${ELSEWHERE.vi}`
+      : where ? `${capitalize(where)} only has a draft copied from the source because the AI could not write it, so it cannot be added to the course. This design cannot write it again, so ${ELSEWHERE.en}`
+        : `Some lessons only have a draft copied from the source because the AI could not write them, so they cannot be added to the course. This design cannot write them again, so ${ELSEWHERE.en}`;
     case 'CONTENT_CHANGED': return vi
-      ? `Nội dung của ${where ?? 'một phần bản thiết kế'} không còn khớp với bản đã được kiểm tra. Hãy tải lại bản thiết kế rồi thử lại. Nếu vẫn không được, bạn có thể dùng 'Viết lại chương' hoặc tự soạn phần này trong khoá học.`
-      : `The content of ${where ?? 'part of the design'} no longer matches the checked version. Reload the design and try again. If it still fails, you can use 'Rewrite chapter' or write this part yourself in the course.`;
+      ? `Nội dung của ${where ?? 'một phần bản thiết kế'} không còn khớp với bản đã được kiểm tra. Hãy tải lại bản thiết kế rồi thử lại. Nếu vẫn không được, ${ELSEWHERE.vi}`
+      : `The content of ${where ?? 'part of the design'} no longer matches the checked version. Reload the design and try again. If it still fails, ${ELSEWHERE.en}`;
     case 'CONTENT_INCOMPLETE': return vi
       ? `${where ? capitalize(where) : 'Một phần bản thiết kế'} chưa có nội dung hoàn chỉnh, nên chưa áp dụng được. Hãy chờ AI soạn xong, hoặc dùng 'Viết lại chương'.`
       : `${where ? capitalize(where) : 'Part of the design'} does not have complete content yet, so it cannot be applied. Wait for the AI to finish, or use 'Rewrite chapter'.`;

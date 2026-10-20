@@ -16,7 +16,7 @@ import { workspaceApplyMaterializationPlan, workspaceApplyTargetHash, type Works
 import { workspaceApplyBlockMetadata } from './lesson-author-workspace-author-notes.logic.js';
 import { WorkspaceApplyCompileError } from './lesson-author-workspace-apply.logic.js';
 import { readWorkspaceApplyReason, WORKSPACE_APPLY_REASON_CATEGORIES, workspaceApplyLocation, workspaceApplyReasonFromCompileError,
-  workspaceApplyReasonMessage } from './lesson-author-workspace-apply-reason.logic.js';
+  workspaceApplyReasonMessage, workspacePlainTitle } from './lesson-author-workspace-apply-reason.logic.js';
 import { COURSE_AUTHOR_NOTES_KEY, readCourseAuthorNotes } from '../../../../course-authoring/course-author-notes.logic.js';
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, '0')}`;
@@ -443,17 +443,83 @@ test('Apply reason: structural refusals carry no location; conflicts keep their 
   assert.deepEqual(refusal(target), { code: 'WORKSPACE_APPLY_TARGET_CHANGED', reason: null });
 });
 
+/**
+ * Every refusal sentence, per category, with and without a location. The
+ * dashboard composes the same sentences (landa-dashboard
+ * src/api/workspace-apply-reason.test.mjs holds the same table). The advice
+ * names only what the product can do: 'Chạy tiếp' / 'Continue' when only the
+ * free chapter check is left, 'Viết lại chương' / 'Rewrite chapter' when
+ * lessons have no content, the course or a new design otherwise.
+ */
+const WORKSPACE_APPLY_REASON_SENTENCES: Record<string, string> = {
+  'CHAPTER_NOT_COMPLETED:none:vi': "Một chương đã soạn xong các bài học nhưng chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. Nếu việc tạo nội dung đã dừng, hãy dùng 'Chạy tiếp' để chạy lại bước kiểm tra này (không dùng điểm AI); nếu chưa dừng, hãy chờ bước này chạy xong. Nếu vẫn không được, bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.",
+  'CHAPTER_NOT_COMPLETED:none:en': "A chapter has all its lessons written but did not finish its final check, so it cannot be applied yet. If creating content has stopped, use 'Continue' to run this check again (this does not use AI points); otherwise, wait for it to finish. If it still fails, you can write this part yourself in the course, or create a new course design.",
+  'CHAPTER_NOT_COMPLETED:where:vi': "Chương 4 «An toàn điện» đã soạn xong các bài học nhưng chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. Nếu việc tạo nội dung đã dừng, hãy dùng 'Chạy tiếp' để chạy lại bước kiểm tra này (không dùng điểm AI); nếu chưa dừng, hãy chờ bước này chạy xong. Nếu vẫn không được, bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.",
+  'CHAPTER_NOT_COMPLETED:where:en': "Chapter 4 \"An toàn điện\" has all its lessons written but did not finish its final check, so it cannot be applied yet. If creating content has stopped, use 'Continue' to run this check again (this does not use AI points); otherwise, wait for it to finish. If it still fails, you can write this part yourself in the course, or create a new course design.",
+  'UNIT_NOT_GENERATED:none:vi': "Một số bài học chưa được AI soạn xong, nên chưa áp dụng được. Bạn có thể dùng 'Viết lại chương' hoặc tự soạn phần này trong khoá học.",
+  'UNIT_NOT_GENERATED:none:en': "Some lessons were not finished by the AI, so they cannot be applied yet. You can use 'Rewrite chapter' or write this part yourself in the course.",
+  'UNIT_NOT_GENERATED:where:vi': "Bài học «Đo điện trở» (Chương 2) chưa được AI soạn xong, nên chưa áp dụng được. Bạn có thể dùng 'Viết lại chương' hoặc tự soạn phần này trong khoá học.",
+  'UNIT_NOT_GENERATED:where:en': "Lesson \"Đo điện trở\" (Chapter 2) was not finished by the AI, so it cannot be applied yet. You can use 'Rewrite chapter' or write this part yourself in the course.",
+  'UNIT_FALLBACK_NOT_APPLICABLE:none:vi': 'Một số bài học chỉ có bản nháp chép từ tài liệu nguồn vì AI chưa soạn được, nên không đưa vào khoá học được. Bản thiết kế này không thể soạn lại phần đó, nên bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.',
+  'UNIT_FALLBACK_NOT_APPLICABLE:none:en': 'Some lessons only have a draft copied from the source because the AI could not write them, so they cannot be added to the course. This design cannot write them again, so you can write this part yourself in the course, or create a new course design.',
+  'UNIT_FALLBACK_NOT_APPLICABLE:where:vi': 'Bài học «Đo điện trở» (Chương 2) chỉ có bản nháp chép từ tài liệu nguồn vì AI chưa soạn được, nên không đưa vào khoá học được. Bản thiết kế này không thể soạn lại phần đó, nên bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.',
+  'UNIT_FALLBACK_NOT_APPLICABLE:where:en': 'Lesson "Đo điện trở" (Chapter 2) only has a draft copied from the source because the AI could not write it, so it cannot be added to the course. This design cannot write it again, so you can write this part yourself in the course, or create a new course design.',
+  'CONTENT_CHANGED:none:vi': 'Nội dung của một phần bản thiết kế không còn khớp với bản đã được kiểm tra. Hãy tải lại bản thiết kế rồi thử lại. Nếu vẫn không được, bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.',
+  'CONTENT_CHANGED:none:en': 'The content of part of the design no longer matches the checked version. Reload the design and try again. If it still fails, you can write this part yourself in the course, or create a new course design.',
+  'CONTENT_CHANGED:where:vi': 'Nội dung của bài học «Đo điện trở» (Chương 2) không còn khớp với bản đã được kiểm tra. Hãy tải lại bản thiết kế rồi thử lại. Nếu vẫn không được, bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.',
+  'CONTENT_CHANGED:where:en': 'The content of lesson "Đo điện trở" (Chapter 2) no longer matches the checked version. Reload the design and try again. If it still fails, you can write this part yourself in the course, or create a new course design.',
+  'CONTENT_INCOMPLETE:none:vi': "Một phần bản thiết kế chưa có nội dung hoàn chỉnh, nên chưa áp dụng được. Hãy chờ AI soạn xong, hoặc dùng 'Viết lại chương'.",
+  'CONTENT_INCOMPLETE:none:en': "Part of the design does not have complete content yet, so it cannot be applied. Wait for the AI to finish, or use 'Rewrite chapter'.",
+  'CONTENT_INCOMPLETE:where:vi': "Bài học «Đo điện trở» (Chương 2) chưa có nội dung hoàn chỉnh, nên chưa áp dụng được. Hãy chờ AI soạn xong, hoặc dùng 'Viết lại chương'.",
+  'CONTENT_INCOMPLETE:where:en': "Lesson \"Đo điện trở\" (Chapter 2) does not have complete content yet, so it cannot be applied. Wait for the AI to finish, or use 'Rewrite chapter'.",
+  'CONTENT_EDIT_INVALID:none:vi': 'Phần bạn đã sửa ở bản thiết kế chưa hợp lệ. Hãy mở mục này, kiểm tra lại các ô bắt buộc rồi lưu lại trước khi áp dụng.',
+  'CONTENT_EDIT_INVALID:none:en': 'Your changes to the design are not valid. Open it, check the required fields and save again before applying.',
+  'CONTENT_EDIT_INVALID:where:vi': 'Phần bạn đã sửa ở bài học «Đo điện trở» (Chương 2) chưa hợp lệ. Hãy mở mục này, kiểm tra lại các ô bắt buộc rồi lưu lại trước khi áp dụng.',
+  'CONTENT_EDIT_INVALID:where:en': 'Your changes to lesson "Đo điện trở" (Chapter 2) are not valid. Open it, check the required fields and save again before applying.',
+  'CONTENT_CHECK_FAILED:none:vi': 'Nội dung này chưa đạt bước kiểm tra trước khi áp dụng. Hãy mở mục này để xem và sửa, hoặc tự soạn trong khoá học.',
+  'CONTENT_CHECK_FAILED:none:en': 'This content did not pass the check before applying. Open it to review and fix it, or write it yourself in the course.',
+  'CONTENT_CHECK_FAILED:where:vi': 'Bài học «Đo điện trở» (Chương 2) chưa đạt bước kiểm tra trước khi áp dụng. Hãy mở mục này để xem và sửa, hoặc tự soạn trong khoá học.',
+  'CONTENT_CHECK_FAILED:where:en': 'Lesson "Đo điện trở" (Chapter 2) did not pass the check before applying. Open it to review and fix it, or write it yourself in the course.',
+  'STRUCTURE_INVALID:none:vi': 'Cấu trúc của bản thiết kế khoá học này không còn hợp lệ để áp dụng. Hãy tạo một bản thiết kế mới cho phần này.',
+  'STRUCTURE_INVALID:none:en': 'The structure of this course design is no longer valid to apply. Create a new course design for this part.',
+  'STRUCTURE_INVALID:where:vi': 'Cấu trúc của bản thiết kế khoá học này không còn hợp lệ để áp dụng. Hãy tạo một bản thiết kế mới cho phần này.',
+  'STRUCTURE_INVALID:where:en': 'The structure of this course design is no longer valid to apply. Create a new course design for this part.',
+};
+
 test('Apply reason messages are plain VI/EN sentences that say what to do next', () => {
   const chapter = { category: 'CHAPTER_NOT_COMPLETED' as const,
     location: { chapter: { number: 4, title: 'An toàn điện' }, lesson: null, unit: null, component: null } };
   assert.equal(workspaceApplyReasonMessage(chapter, 'vi'),
-    "Chương 4 «An toàn điện» chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. Bạn có thể dùng 'Viết lại chương' hoặc tự soạn phần này trong khoá học.");
+    "Chương 4 «An toàn điện» đã soạn xong các bài học nhưng chưa hoàn tất bước kiểm tra cuối, nên chưa áp dụng được. Nếu việc tạo nội dung đã dừng, hãy dùng 'Chạy tiếp' để chạy lại bước kiểm tra này (không dùng điểm AI); nếu chưa dừng, hãy chờ bước này chạy xong. Nếu vẫn không được, bạn có thể tự soạn phần này trong khoá học, hoặc tạo bản thiết kế mới.");
   assert.equal(workspaceApplyReasonMessage(chapter, 'en'),
-    "Chapter 4 \"An toàn điện\" did not finish its final check, so it cannot be applied yet. You can use 'Rewrite chapter' or write this part yourself in the course.");
+    "Chapter 4 \"An toàn điện\" has all its lessons written but did not finish its final check, so it cannot be applied yet. If creating content has stopped, use 'Continue' to run this check again (this does not use AI points); otherwise, wait for it to finish. If it still fails, you can write this part yourself in the course, or create a new course design.");
   const unit = { category: 'UNIT_FALLBACK_NOT_APPLICABLE' as const, location: { chapter: { number: 2, title: 'C' },
     lesson: { number: 1, title: 'S' }, unit: { number: 3, title: 'Đo điện trở' }, component: null } };
   assert.match(workspaceApplyReasonMessage(unit, 'vi'), /^Bài học «Đo điện trở» \(Chương 2\) chỉ có bản nháp chép từ tài liệu nguồn/);
   assert.match(workspaceApplyReasonMessage(unit, 'en'), /^Lesson "Đo điện trở" \(Chapter 2\) only has a draft copied from the source/);
+  for (const category of WORKSPACE_APPLY_REASON_CATEGORIES) {
+    // A chapter check names its chapter; every other category is shown here on a lesson.
+    for (const location of [null, category === 'CHAPTER_NOT_COMPLETED' ? chapter.location : unit.location]) {
+      for (const locale of ['vi', 'en'] as const) {
+        assert.equal(workspaceApplyReasonMessage({ category, location }, locale),
+          WORKSPACE_APPLY_REASON_SENTENCES[`${category}:${location ? 'where' : 'none'}:${locale}`], `${category} ${locale}`);
+      }
+    }
+  }
+  // Each advice names a recovery action only where that action can help.
+  const advice = (category: typeof WORKSPACE_APPLY_REASON_CATEGORIES[number], locale: 'vi' | 'en') =>
+    workspaceApplyReasonMessage({ category, location: null }, locale);
+  assert.match(advice('CHAPTER_NOT_COMPLETED', 'vi'), /'Chạy tiếp'/);
+  assert.match(advice('CHAPTER_NOT_COMPLETED', 'en'), /'Continue'/);
+  for (const category of ['CHAPTER_NOT_COMPLETED', 'UNIT_FALLBACK_NOT_APPLICABLE', 'CONTENT_CHANGED'] as const) {
+    assert.doesNotMatch(advice(category, 'vi'), /Viết lại chương/, category);
+    assert.doesNotMatch(advice(category, 'en'), /Rewrite chapter/, category);
+  }
+  for (const category of ['UNIT_FALLBACK_NOT_APPLICABLE', 'CONTENT_CHANGED'] as const) {
+    assert.doesNotMatch(advice(category, 'vi'), /Chạy tiếp/, category);
+    assert.doesNotMatch(advice(category, 'en'), /'Continue'/, category);
+  }
+  assert.match(advice('UNIT_NOT_GENERATED', 'vi'), /'Viết lại chương'/);
   for (const category of WORKSPACE_APPLY_REASON_CATEGORIES) {
     for (const location of [null, unit.location]) {
       for (const locale of ['vi', 'en'] as const) {
@@ -465,6 +531,31 @@ test('Apply reason messages are plain VI/EN sentences that say what to do next',
       }
     }
   }
+});
+
+test('plain title: control characters become spaces, invisible bidi and zero-width characters are removed', () => {
+  // Written as code points so the source itself holds no invisible character.
+  const char = (code: number) => String.fromCharCode(code);
+  const invisible = [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+    0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0xfeff];
+  for (const code of invisible) {
+    assert.equal(workspacePlainTitle(`An toàn${char(code)} điện`), 'An toàn điện', `U+${code.toString(16)}`);
+  }
+  // A right-to-left override cannot flip what the author reads, and a BOM or zero-width space cannot hide a title.
+  assert.equal(workspacePlainTitle(`${char(0x202e)}Đo điện trở${char(0x202c)}`), 'Đo điện trở');
+  assert.equal(workspacePlainTitle(`${char(0xfeff)}${char(0x200b)}${char(0x2067)}${char(0x2069)}`), null);
+  assert.equal(workspacePlainTitle(`Đo${char(0)}điện${char(9)}trở${char(10)}`), 'Đo điện trở');
+  // Vietnamese letters, composed or with combining marks, and ordinary punctuation are kept as written.
+  assert.equal(workspacePlainTitle('Chương 1: Sơ cứu – Hướng dẫn «cơ bản»'), 'Chương 1: Sơ cứu – Hướng dẫn «cơ bản»');
+  const decomposed = `Tie${char(0x302)}${char(0x301)}ng Vie${char(0x323)}${char(0x302)}t`;
+  assert.equal(workspacePlainTitle(decomposed), decomposed);
+  assert.equal(workspacePlainTitle(decomposed.normalize('NFC')), 'Tiếng Việt');
+  assert.equal(workspacePlainTitle(`  ${'Đ'.repeat(300)}${char(0x200b)}`)!.length, 200);
+  assert.equal(workspacePlainTitle(42), null);
+  // The location shown in an Apply refusal reads its titles through the same rule.
+  assert.deepEqual(workspaceApplyLocation('chapter_1', [{ canonical_path: 'chapter_1', baseline: null,
+    current: { content: { title: `${char(0x2066)}An toàn điện${char(0x2069)}` }, content_hash: hash('x') } }])?.chapter,
+  { number: 1, title: 'An toàn điện' });
 });
 
 test('Apply reason reader keeps only a well-formed category and location', () => {
