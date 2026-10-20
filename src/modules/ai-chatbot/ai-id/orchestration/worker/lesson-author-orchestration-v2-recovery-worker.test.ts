@@ -162,6 +162,7 @@ test('stopped run: a dispatched call that fails late is held as unknown and neve
 
 function recoveryRoute(candidate: Record<string, unknown> | null, locked: Record<string, unknown> | null): Route {
   return sql => {
+    if (/^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) la_v2_finished_run_unknown$/.test(sql)) return [];
     if (/t\.status IN \('failed','timed_out','outcome_unknown'\)/.test(sql)) return [];
     if (/r\.status='needs_action' AND w\.status IN/.test(sql)) return [];
     if (/WHERE t\.status='running' AND \(t\.lease_expires_at/.test(sql)) return [];
@@ -208,6 +209,99 @@ test('finished runs: a held unknown outcome is settled once at the upper bound',
   const legacy = database(recoveryRoute(candidate, unknown));
   assert.equal(await legacy.worker.recoverOne(async () => undefined, async () => undefined), null);
   assert.equal(legacy.calls.some(call => /FROM ai_token_reservations reservation/.test(call.sql)), false);
+});
+
+test('finished runs: a settlement that fails is skipped with a backoff and the stalled-run check still runs', async () => {
+  const STALLED_RUN = uuid(20);
+  const candidate = { task_id: TASK, run_id: RUN, workspace_id: WORKSPACE, tenant_id: TENANT };
+  const unknown = taskRow({ status: 'outcome_unknown', accounting_state: 'pending_reconciliation', lease_token: null,
+    model: 'model', dispatch_started_at: new Date() });
+  const base = recoveryRoute(candidate, unknown);
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
+  const route: Route = (sql, params) => {
+    // The scan honours its exclusion list like PostgreSQL would (t.id<>ALL($1::uuid[])).
+    if (/FROM ai_token_reservations reservation\s+JOIN/.test(sql)) {
+      assert.match(sql, /AND t\.id<>ALL\(\$1::uuid\[\]\)/);
+      return (params[0] as string[]).includes(TASK) ? [] : [candidate];
+    }
+    // The stalled recovered run of another workspace, found once the failing settlement is skipped.
+    if (/WHERE r\.status='executing'\s+AND EXISTS\(SELECT 1 FROM lesson_author_workspace_v2_recoveries/.test(sql)) {
+      return [{ run_id: STALLED_RUN, workspace_id: uuid(21), tenant_id: TENANT }];
+    }
+    if (/AS failure_code\s+FROM lesson_author_workspace_v2_runs r/.test(sql)) {
+      return [{ run_id: STALLED_RUN, workspace_id: uuid(21), tenant_id: TENANT, course_id: COURSE,
+        failure_code: 'ORCHESTRATION_V2_UNIT_FALLBACK_INVALID' }];
+    }
+    if (/SELECT status,failure_code FROM lesson_author_workspace_v2_runs/.test(sql)) return [{ status: 'executing' }];
+    if (/UPDATE lesson_author_workspace_v2_runs\s+SET status='needs_action'/.test(sql)) return [{ id: STALLED_RUN }];
+    if (/SET status='canceled'/.test(sql)) return [];
+    if (/count\(\*\)::integer AS count/.test(sql)) return [{ count: 0 }];
+    if (/UPDATE lesson_author_workspaces SET status='needs_action'/.test(sql)) return [{ id: uuid(21) }];
+    if (/INSERT INTO lesson_author_workspace_events/.test(sql)) return [{ sequence: 7 }];
+    return base(sql, params);
+  };
+  const tx: GenerationJobSql = { async query<T extends Record<string, unknown>>(sql: string, params: unknown[] = []) {
+    calls.push({ sql, params });
+    const rows = route(sql, params);
+    assert.notEqual(rows, undefined, `unexpected SQL: ${sql}`);
+    return { rows: rows as T[], rowCount: rows!.length };
+  } };
+  let clock = 1_000_000;
+  const reports: Array<Record<string, unknown>> = [];
+  const report = (event: Record<string, unknown>) => { reports.push(event); };
+  const worker = createOrchestrationV2WorkerRepository({ transaction: async work => work(tx) }, () => uuid(50),
+    { retry: noSleep, reconcileBackoff: { base_ms: 1_000, max_ms: 4_000, now: () => clock, report } });
+  let attempts = 0;
+  const failing = async () => { attempts += 1; throw Object.assign(new Error('ledger row missing'),
+    { code: 'ORCHESTRATION_V2_ACCOUNTING_READBACK_INVALID' }); };
+  const scans = () => calls.filter(call => /FROM ai_token_reservations reservation\s+JOIN/.test(call.sql));
+
+  // The failing task is rolled back to before its locks, logged, and the stalled run is stopped in the same cycle.
+  assert.equal(await worker.recoverOne(async () => undefined, async () => undefined, failing), 'reconciled');
+  const order = calls.map(call => call.sql);
+  const at = (pattern: RegExp) => order.findIndex(sql => pattern.test(sql));
+  assert.ok(at(/^SAVEPOINT la_v2_finished_run_unknown$/) < at(/pg_advisory_xact_lock/));
+  assert.ok(at(/SELECT t\.\*,r\.model/) < at(/^ROLLBACK TO SAVEPOINT la_v2_finished_run_unknown$/));
+  assert.ok(at(/^ROLLBACK TO SAVEPOINT la_v2_finished_run_unknown$/) < at(/WHERE r\.status='executing'\s+AND EXISTS/));
+  assert.deepEqual(calls.find(call => /SET status='needs_action',failure_code=\$2/.test(call.sql))!.params,
+    [STALLED_RUN, 'ORCHESTRATION_V2_UNIT_FALLBACK_INVALID']);
+  assert.deepEqual(reports, [{ event: 'worker_finished_run_unknown_reconcile_failed', task_id: TASK, run_id: RUN,
+    tenant_id: TENANT, failure_code: 'ORCHESTRATION_V2_ACCOUNTING_READBACK_INVALID', retry_after_ms: 1_000 }]);
+  assert.doesNotMatch(JSON.stringify(reports), /ledger row missing/, 'only the code is logged');
+  assert.deepEqual(scans()[0]!.params, [[]]);
+
+  // While it waits, the same task is excluded from the scan (no tight loop on one bad row).
+  assert.equal(await worker.recoverOne(async () => undefined, async () => undefined, failing), 'reconciled');
+  assert.deepEqual(scans()[1]!.params, [[TASK]]);
+  assert.equal(attempts, 1);
+  // After the wait it is tried again; each failure doubles the wait up to the maximum.
+  for (const expected of [2_000, 4_000, 4_000]) {
+    clock += 5_000;
+    await worker.recoverOne(async () => undefined, async () => undefined, failing);
+    assert.equal(reports.at(-1)!.retry_after_ms, expected);
+  }
+  assert.equal(attempts, 4);
+  // A success clears the task from the list.
+  clock += 5_000;
+  assert.equal(await worker.recoverOne(async () => undefined, async () => undefined, async () => undefined), 'reconciled');
+  assert.ok(calls.at(-1)!.sql === 'RELEASE SAVEPOINT la_v2_finished_run_unknown');
+  await worker.recoverOne(async () => undefined, async () => undefined, async () => undefined);
+  assert.deepEqual(scans().at(-1)!.params, [[]]);
+
+  // A deadlock victim is not skipped: the whole transaction re-runs from BEGIN.
+  let deadlocks = 0;
+  const settled: string[] = [];
+  const victim = createOrchestrationV2WorkerRepository({ transaction: async work => work(tx) }, () => uuid(50),
+    { retry: noSleep, reconcileBackoff: { base_ms: 1_000, max_ms: 4_000, now: () => clock, report } });
+  const reportsBefore = reports.length;
+  assert.equal(await victim.recoverOne(async () => undefined, async () => undefined, async (_tx, task) => {
+    if (deadlocks++ === 0) throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+    settled.push(String(task.id));
+  }), 'reconciled');
+  assert.deepEqual(settled, [TASK]);
+  assert.equal(reports.length, reportsBefore, 'a retried deadlock is not a skipped settlement');
+  assert.throws(() => createOrchestrationV2WorkerRepository({ transaction: async work => work(tx) }, () => uuid(50),
+    { reconcileBackoff: { base_ms: 0, max_ms: 1 } }), /ORCHESTRATION_V2_RECONCILE_BACKOFF_INVALID/);
 });
 
 test('released validation and finalizer dispatch at their own epoch (reopened tasks are not epoch 0)', async () => {

@@ -40,7 +40,9 @@ export function createOrchestrationV2WorkerRuntimeDependencies(
   db: GenerationJobDatabase = orchestrationV2Database,
   report: OrchestrationV2WorkerRuntimeDependencies['report'] = orchestrationV2RuntimeReporter,
 ): OrchestrationV2WorkerRuntimeDependencies {
-  const worker = createOrchestrationV2WorkerRepository(db);
+  // A failed settlement of a finished run's unknown outcome waits like any V2 retry (RETRY_BASE_MS .. RETRY_MAX_MS).
+  const worker = createOrchestrationV2WorkerRepository(db, undefined, { reconcileBackoff: {
+    base_ms: config.outbox.retry_base_ms, max_ms: config.outbox.retry_max_ms, report } });
   const planning = createOrchestrationV2PlanningRepository(db, worker);
   const inventory = createOrchestrationV2InventoryRepository(db, worker);
   const unit = createOrchestrationV2UnitRepository(db, worker);

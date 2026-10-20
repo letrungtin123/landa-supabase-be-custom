@@ -4,6 +4,7 @@
 
 import type { GenerationJobSql } from '../shared/lesson-author-generation-job.repository.js';
 import type { OrchestrationV2TaskKind } from '../shared/lesson-author-orchestration-v2.logic.js';
+import type { OrchestrationV2TransientRetryOptions } from './lesson-author-orchestration-v2-lock-order.js';
 
 export interface OrchestrationV2TaskLease {
   task_id: string;
@@ -85,6 +86,23 @@ export type SettleProvider = (tx: GenerationJobSql, lease: OrchestrationV2TaskLe
   usage: Readonly<Record<string, number>>, usageSource?: OrchestrationV2ProviderUsageSource) => Promise<void>;
 export type HoldUnknown = (tx: GenerationJobSql, task: Record<string, unknown>) => Promise<void>;
 export type ReconcileUnknown = (tx: GenerationJobSql, task: Record<string, unknown>) => Promise<void>;
+/** Wait bounds of a finished-run unknown outcome whose settlement failed (worker-steps backoff). */
+export interface OrchestrationV2ReconcileBackoffOptions {
+  base_ms: number;
+  max_ms: number;
+  /** Tests inject the clock. */
+  now?: () => number;
+  /** One structured line per skipped settlement (task id + code); console by default. */
+  report?: (event: Record<string, unknown>) => void;
+}
+
+/** Options of createOrchestrationV2WorkerRepository (moved here to keep the repository file within its size limit). */
+export interface OrchestrationV2WorkerRepositoryOptions {
+  /** Bounded 40P01/40001 retry of every whole transaction (tests inject sleep/random). */
+  retry?: OrchestrationV2TransientRetryOptions;
+  /** Per-process backoff of a finished-run unknown outcome whose settlement failed. */
+  reconcileBackoff?: OrchestrationV2ReconcileBackoffOptions;
+}
 export type ReleaseUndispatched = (tx: GenerationJobSql, task: Record<string, unknown>) => Promise<void>;
 export type ReleaseRejected = (tx: GenerationJobSql, task: Record<string, unknown>) => Promise<void>;
 export type OrchestrationV2ClaimFailureDisposition = 'requeued' | 'failed' | 'outcome_unknown' | 'stale';

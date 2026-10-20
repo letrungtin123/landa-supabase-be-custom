@@ -7,7 +7,10 @@ import type { OrchestrationV2TaskKind } from '../../shared/lesson-author-orchest
 import { ORCHESTRATION_V2_RUN_STOPPING_FAILURES } from '../lesson-author-orchestration-v2-worker.logic.js';
 import { UUID_PATTERN, isUuid } from '../../../../../utils/uuid.js';
 import { OrchestrationV2WorkerRepositoryError } from '../lesson-author-orchestration-v2-worker-repository.types.js';
-import type { OrchestrationV2TaskLease, ReconcileUnknown } from '../lesson-author-orchestration-v2-worker-repository.types.js';
+import type {
+  OrchestrationV2ReconcileBackoffOptions, OrchestrationV2TaskLease, ReconcileUnknown,
+} from '../lesson-author-orchestration-v2-worker-repository.types.js';
+import { isOrchestrationV2TransientTransactionError } from '../lesson-author-orchestration-v2-lock-order.js';
 
 export const HASH = /^[0-9a-f]{64}$/;
 export const providerKinds = `('course_skeleton','chapter_blueprint','generate_unit')`;
@@ -107,6 +110,62 @@ export async function stopRunAfterTerminalTask(
   await syncNeedsActionWorkspace(tx, task);
 }
 
+/** Same backoff bounds as the V2 retry defaults (LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS / _MAX_MS). */
+export const ORCHESTRATION_V2_RECONCILE_BACKOFF_DEFAULTS: Readonly<OrchestrationV2ReconcileBackoffOptions> =
+  Object.freeze({ base_ms: 1_000, max_ms: 60_000 });
+/** Bound of the per-process skip list (oldest entry dropped first). */
+export const ORCHESTRATION_V2_RECONCILE_BACKOFF_MAX_ENTRIES = 500;
+const RECONCILE_SAVEPOINT = 'la_v2_finished_run_unknown';
+const LOGGED_CODE = /^(?:[0-9A-Z]{5}|[A-Z][A-Z0-9_]{0,99})$/;
+
+export type OrchestrationV2ReconcileBackoff = ReturnType<typeof createOrchestrationV2ReconcileBackoff>;
+
+/**
+ * Per-process skip list of finished-run unknown outcomes whose settlement
+ * failed: each failure doubles the wait (base, 2 x base, ... up to max) before
+ * the same task is tried again, so one bad row is never retried in a tight
+ * loop and cannot hide the next candidate or the stalled-run check. It is a
+ * local pacing hint, not shared state: another worker process keeps its own
+ * list and the database row stays the only authority.
+ */
+export function createOrchestrationV2ReconcileBackoff(
+  options: OrchestrationV2ReconcileBackoffOptions = ORCHESTRATION_V2_RECONCILE_BACKOFF_DEFAULTS,
+) {
+  const { base_ms: base, max_ms: max } = options;
+  if (!Number.isSafeInteger(base) || base < 1 || !Number.isSafeInteger(max) || max < base) {
+    throw new Error('ORCHESTRATION_V2_RECONCILE_BACKOFF_INVALID');
+  }
+  const now = options.now ?? Date.now;
+  const report = options.report
+    ?? ((event: Record<string, unknown>) => console.warn('[LessonAuthorOrchestrationV2]', JSON.stringify(event)));
+  const entries = new Map<string, { failures: number; retry_at: number }>();
+  return {
+    report(event: Record<string, unknown>): void {
+      try { report(event); } catch { /* Logging never changes the recovery cycle. */ }
+    },
+    /** Task ids still waiting out their backoff. */
+    waiting(): string[] {
+      const at = now();
+      return [...entries].filter(([, entry]) => entry.retry_at > at).map(([taskId]) => taskId);
+    },
+    /** Records one more failure; returns the wait before the next try. */
+    failed(taskId: string): number {
+      const failures = Math.min((entries.get(taskId)?.failures ?? 0) + 1, 32);
+      const delay = Math.min(max, base * 2 ** (failures - 1));
+      entries.delete(taskId);
+      entries.set(taskId, { failures, retry_at: now() + delay });
+      while (entries.size > ORCHESTRATION_V2_RECONCILE_BACKOFF_MAX_ENTRIES) entries.delete(entries.keys().next().value!);
+      return delay;
+    },
+    succeeded(taskId: string): void { entries.delete(taskId); },
+  };
+}
+
+function loggedCode(error: unknown): string {
+  const code = error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && LOGGED_CODE.test(code) ? code : 'UNEXPECTED_ERROR';
+}
+
 /**
  * An outcome-unknown provider task of a run that already ended (needs_action
  * or canceled) is never replayed, so nothing else would ever settle its held
@@ -118,11 +177,17 @@ export async function stopRunAfterTerminalTask(
  * set of reserved reservations (partial index) and only selects a row whose
  * reservation still matches the task budget exactly, so a malformed row is
  * left for an operator instead of failing every recovery cycle.
+ *
+ * A settlement that fails for one task (anything but a deadlock/serialization
+ * victim, which re-runs the whole transaction) is rolled back to a savepoint
+ * taken before its locks, logged with the task id and code, and skipped with a
+ * backoff: the caller then runs the stalled-run check in the same cycle.
  * Lock order: W -> run, task -> (reconcile) C -> reservation -> M.
  */
 export async function reconcileFinishedRunUnknown(
   tx: GenerationJobSql,
   reconcileUnknown?: ReconcileUnknown,
+  backoff: OrchestrationV2ReconcileBackoff = createOrchestrationV2ReconcileBackoff(),
 ): Promise<'reconciled' | null> {
   if (!reconcileUnknown) return null;
   const candidate = await tx.query(`SELECT t.id::text AS task_id,t.run_id::text,
@@ -134,21 +199,37 @@ export async function reconcileFinishedRunUnknown(
     WHERE reservation.status='reserved' AND t.status='outcome_unknown'
       AND t.accounting_state='pending_reconciliation' AND r.status IN ('needs_action','canceled')
       AND reservation.estimated_tokens=t.input_tokens+t.embedding_tokens+t.max_output_tokens*t.provider_max_attempts
-    ORDER BY t.finished_at,t.id LIMIT 1`);
+      AND t.id<>ALL($1::uuid[])
+    ORDER BY t.finished_at,t.id LIMIT 1`, [backoff.waiting()]);
   const found = candidate.rows[0];
   if (!found) return null;
-  await lockWorkspaceLifecycle(tx, found.tenant_id, found.workspace_id);
-  const locked = await tx.query(`SELECT t.*,r.model
-    FROM lesson_author_workspace_v2_runs r
-    JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id AND t.id=$2
-      AND t.status='outcome_unknown' AND t.accounting_state='pending_reconciliation'
-    JOIN ai_token_reservations reservation ON reservation.id=t.ai_reservation_id
-      AND reservation.tenant_id=t.tenant_id AND reservation.status='reserved'
-    WHERE r.id=$1 AND r.status IN ('needs_action','canceled')
-    FOR UPDATE OF r,t`, [found.run_id, found.task_id]);
-  if (!locked.rows[0]) return null;
-  await reconcileUnknown(tx, locked.rows[0]);
-  return 'reconciled';
+  const taskId = String(found.task_id);
+  await tx.query(`SAVEPOINT ${RECONCILE_SAVEPOINT}`);
+  try {
+    await lockWorkspaceLifecycle(tx, found.tenant_id, found.workspace_id);
+    const locked = await tx.query(`SELECT t.*,r.model
+      FROM lesson_author_workspace_v2_runs r
+      JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id AND t.id=$2
+        AND t.status='outcome_unknown' AND t.accounting_state='pending_reconciliation'
+      JOIN ai_token_reservations reservation ON reservation.id=t.ai_reservation_id
+        AND reservation.tenant_id=t.tenant_id AND reservation.status='reserved'
+      WHERE r.id=$1 AND r.status IN ('needs_action','canceled')
+      FOR UPDATE OF r,t`, [found.run_id, found.task_id]);
+    if (locked.rows[0]) await reconcileUnknown(tx, locked.rows[0]);
+    await tx.query(`RELEASE SAVEPOINT ${RECONCILE_SAVEPOINT}`);
+    backoff.succeeded(taskId);
+    return locked.rows[0] ? 'reconciled' : null;
+  } catch (error) {
+    if (isOrchestrationV2TransientTransactionError(error)) throw error;
+    // Back to before this task's locks: nothing of it stays held or written.
+    await tx.query(`ROLLBACK TO SAVEPOINT ${RECONCILE_SAVEPOINT}`);
+    await tx.query(`RELEASE SAVEPOINT ${RECONCILE_SAVEPOINT}`);
+    const retryAfterMs = backoff.failed(taskId);
+    backoff.report({ event: 'worker_finished_run_unknown_reconcile_failed', task_id: taskId,
+      run_id: String(found.run_id), tenant_id: String(found.tenant_id), failure_code: loggedCode(error),
+      retry_after_ms: retryAfterMs });
+    return null;
+  }
 }
 
 /**

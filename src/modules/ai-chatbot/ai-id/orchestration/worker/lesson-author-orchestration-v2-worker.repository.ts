@@ -19,7 +19,6 @@ import {
   isOrchestrationV2TransientDbFailureCode,
   orchestrationV2TransientDbRequeueDelayMs,
   withOrchestrationV2TransactionRetry,
-  type OrchestrationV2TransientRetryOptions,
 } from '../lesson-author-orchestration-v2-lock-order.js';
 import { UUID_PATTERN } from '../../../../../utils/uuid.js';
 import { orchestrationV2StoredArtifactHashMatches } from '../steps/lesson-author-orchestration-v2-artifact-hash.logic.js';
@@ -27,23 +26,19 @@ import type {
   HoldUnknown, OrchestrationV2ArtifactCommit, OrchestrationV2CapacityWake, OrchestrationV2ClaimFailureDisposition,
   OrchestrationV2ClaimResult, OrchestrationV2DeferralReason, OrchestrationV2ProviderCompletion,
   OrchestrationV2SuccessHooks, OrchestrationV2TaskLease, ReconcileUnknown, ReleaseRejected, ReleaseUndispatched,
-  ReserveProvider, SettleProvider,
+  ReserveProvider, SettleProvider, OrchestrationV2WorkerRepositoryOptions,
 } from '../lesson-author-orchestration-v2-worker-repository.types.js';
 import {
-  HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, reconcileFinishedRunUnknown,
-  stopRunAfterTerminalTask, stopStalledRecoveredRun, syncNeedsActionWorkspace, terminal,
+  HASH, activeRun, createOrchestrationV2ReconcileBackoff, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds,
+  reconcileFinishedRunUnknown, stopRunAfterTerminalTask, stopStalledRecoveredRun, syncNeedsActionWorkspace, terminal,
 } from './lesson-author-orchestration-v2-worker-steps.repository.js';
 export { OrchestrationV2WorkerRepositoryError } from '../lesson-author-orchestration-v2-worker-repository.types.js';
 export type {
   OrchestrationV2TaskLease, OrchestrationV2ClaimResult, OrchestrationV2DeferralReason, OrchestrationV2CapacityWake,
   OrchestrationV2ArtifactCommit, OrchestrationV2ProviderUsageSource, ReleaseUndispatched,
   OrchestrationV2ClaimFailureDisposition, OrchestrationV2SuccessHooks, OrchestrationV2ProviderCompletion,
+  OrchestrationV2WorkerRepositoryOptions,
 } from '../lesson-author-orchestration-v2-worker-repository.types.js';
-
-export interface OrchestrationV2WorkerRepositoryOptions {
-  /** Bounded 40P01/40001 retry of every whole transaction (tests inject sleep/random). */
-  retry?: OrchestrationV2TransientRetryOptions;
-}
 
 /**
  * Every function below is one complete transaction that follows the global
@@ -60,6 +55,7 @@ export function createOrchestrationV2WorkerRepository(
   options: OrchestrationV2WorkerRepositoryOptions = {},
 ) {
   const db = withOrchestrationV2TransactionRetry(rawDb, options.retry);
+  const reconcileBackoff = createOrchestrationV2ReconcileBackoff(options.reconcileBackoff);
   async function claimExact(
     envelope: OrchestrationV2DispatchEnvelope,
     limitsInput: OrchestrationV2WorkerLimits,
@@ -714,7 +710,7 @@ export function createOrchestrationV2WorkerRepository(
         WHERE t.status='running' AND (t.lease_expires_at<=clock_timestamp() OR t.deadline_at<=clock_timestamp())
         ORDER BY t.deadline_at,t.id LIMIT 1`);
       if (!expiredCandidate.rows[0]) {
-        return (await reconcileFinishedRunUnknown(tx, reconcileUnknown)) ?? stopStalledRecoveredRun(tx);
+        return (await reconcileFinishedRunUnknown(tx, reconcileUnknown, reconcileBackoff)) ?? stopStalledRecoveredRun(tx);
       }
       const candidate = expiredCandidate.rows[0];
       await lockWorkspaceLifecycle(tx, candidate.tenant_id, candidate.workspace_id);
