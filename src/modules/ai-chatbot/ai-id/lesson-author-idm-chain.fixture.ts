@@ -229,7 +229,7 @@ export class Chain {
     if (sql.includes('parent.kind=\'generate_unit\'')) {
       return this.unitArtifacts.filter(unit => unit.chapter_key === params[2]);
     }
-    if (sql.includes('r.revision=n.current_revision')) {
+    if (sql.includes('AND r.revision=0') && sql.includes('n.current_revision IS NOT NULL')) {
       return (params[3] as string[]).map(path => this.revisions.get(path)).filter(Boolean) as Row[];
     }
     if (sql.includes('r.task_count,r.chapter_count,r.admitted_fact_count')) return [this.current.finalAuthority];

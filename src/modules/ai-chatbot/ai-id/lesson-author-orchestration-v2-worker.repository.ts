@@ -29,8 +29,8 @@ import type {
   ReserveProvider, SettleProvider,
 } from './lesson-author-orchestration-v2-worker-repository.types.js';
 import {
-  HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, stopRunAfterTerminalTask,
-  syncNeedsActionWorkspace, terminal,
+  HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, reconcileFinishedRunUnknown,
+  stopRunAfterTerminalTask, syncNeedsActionWorkspace, terminal,
 } from './lesson-author-orchestration-v2-worker-steps.repository.js';
 export { OrchestrationV2WorkerRepositoryError } from './lesson-author-orchestration-v2-worker-repository.types.js';
 export type {
@@ -331,13 +331,21 @@ export function createOrchestrationV2WorkerRepository(
   async function markProviderDispatched(lease: OrchestrationV2TaskLease): Promise<void> {
     if (!isOrchestrationV2ProviderTask(lease.kind) || !lease.ai_reservation_id) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
     await db.transaction(async tx => {
+      // The workspace lifecycle lock serializes this fence with an author stop:
+      // a run stopped before this point dispatches nothing new, while a call
+      // that already crossed the fence finishes and settles normally.
       await lockWorkspaceLifecycle(tx, lease.tenant_id, lease.workspace_id);
       const result = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET dispatch_started_at=clock_timestamp()
         WHERE id=$1 AND run_id=$2 AND status='running' AND lease_token=$3::uuid
           AND lease_expires_at>clock_timestamp() AND deadline_at>clock_timestamp()
-          AND dispatch_started_at IS NULL AND accounting_state='reserved' RETURNING id`,
+          AND dispatch_started_at IS NULL AND accounting_state='reserved'
+          AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_runs run
+            WHERE run.id=$2 AND run.status IN ('planning','executing','finalizing')) RETURNING id`,
       [lease.task_id, lease.run_id, lease.lease_token]);
-      if (result.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_LEASE_LOST');
+      if (result.rows.length === 1) return;
+      const run = await tx.query(`SELECT status FROM lesson_author_workspace_v2_runs WHERE id=$1`, [lease.run_id]);
+      if (run.rows.length === 1 && !activeRun.has(String(run.rows[0]?.status))) fail('ORCHESTRATION_V2_RUN_NOT_ACTIVE');
+      fail('ORCHESTRATION_V2_TASK_LEASE_LOST');
     });
   }
 
@@ -685,7 +693,7 @@ export function createOrchestrationV2WorkerRepository(
         FROM lesson_author_workspace_v2_tasks t
         WHERE t.status='running' AND (t.lease_expires_at<=clock_timestamp() OR t.deadline_at<=clock_timestamp())
         ORDER BY t.deadline_at,t.id LIMIT 1`);
-      if (!expiredCandidate.rows[0]) return null;
+      if (!expiredCandidate.rows[0]) return reconcileFinishedRunUnknown(tx, reconcileUnknown);
       const candidate = expiredCandidate.rows[0];
       await lockWorkspaceLifecycle(tx, candidate.tenant_id, candidate.workspace_id);
       const locked = await tx.query(`SELECT t.*,r.status AS run_status,

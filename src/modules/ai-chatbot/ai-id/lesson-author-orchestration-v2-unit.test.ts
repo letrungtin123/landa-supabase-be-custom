@@ -751,7 +751,7 @@ test('unit completion writes all revision-zero baselines and only then unlocks c
       { node_id: lease.node_id, revision: 0 }, { node_id: componentId, revision: 0 },
     ];
     else if (sql.includes('INSERT INTO lesson_author_workspace_events')) rows = [{ sequence: 1 }];
-    else if (sql.includes("candidate.kind='validate_chapter'")) rows = [{ id: '00000000-0000-4000-8000-000000000029' }];
+    else if (sql.includes("candidate.kind='validate_chapter'")) rows = [{ id: '00000000-0000-4000-8000-000000000029', dispatch_epoch: 0 }];
     else if (sql.includes('INSERT INTO lesson_author_workspace_v2_dispatch_outbox')) rows = [
       { id: '00000000-0000-4000-8000-000000000030' },
     ];

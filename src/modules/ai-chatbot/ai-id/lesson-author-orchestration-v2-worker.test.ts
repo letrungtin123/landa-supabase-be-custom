@@ -584,7 +584,8 @@ test('needs-action recovery cancels stranded queued work and publishes workspace
   });
   assert.equal(await f.repo.recoverOne(async () => assert.fail('no release'), async () => assert.fail('no hold')),
     'reconciled');
-  assert.ok(f.queries.some(query => /RUN_STOPPED_AFTER_TASK_FAILURE/.test(query.sql)));
+  assert.ok(f.queries.some(query => /SET status='canceled'/.test(query.sql)
+    && query.params.includes('RUN_STOPPED_AFTER_TASK_FAILURE')));
   assert.ok(f.queries.some(query => /run_needs_action/.test(query.sql)));
   assert.doesNotMatch(f.queries.map(query => query.sql).join('\n'), /INSERT INTO lesson_author_workspace_v2_dispatch_outbox/);
 });

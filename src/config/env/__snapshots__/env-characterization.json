@@ -143,6 +143,7 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS",
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS",
           "LESSON_AUTHOR_ORCHESTRATION_V2_ROLE",
+          "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED",
           "LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY",
           "LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS",
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS",
@@ -352,6 +353,7 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS": 1000,
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS": 60000,
           "LESSON_AUTHOR_ORCHESTRATION_V2_ROLE": "disabled",
+          "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": false,
           "LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY": 16,
           "LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS": 45000,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS": 30,
@@ -716,7 +718,8 @@
         "GEMINI_CHAT_MODEL": "fake-gemini-chat-model",
         "GEMINI_LESSON_AUTHOR_MODEL": "  fake-gemini-lesson-author-model  ",
         "GEMINI_TEMP_DIR": "fake-gemini-temp-dir",
-        "GEMINI_STORE_CREATE_TIMEOUT_MS": "60001"
+        "GEMINI_STORE_CREATE_TIMEOUT_MS": "60001",
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "true"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env.production"],
@@ -844,6 +847,7 @@
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_BASE_MS": 1001,
           "LESSON_AUTHOR_ORCHESTRATION_V2_RETRY_MAX_MS": 60001,
           "LESSON_AUTHOR_ORCHESTRATION_V2_ROLE": "worker",
+          "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": true,
           "LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY": 17,
           "LESSON_AUTHOR_ORCHESTRATION_V2_UNIT_SOFT_DEADLINE_MS": 45001,
           "LESSON_AUTHOR_ORCHESTRATION_V2_WORKER_LEASE_SECONDS": 31,
@@ -1644,7 +1648,8 @@
         "GEMINI_CHAT_MODEL": "   ",
         "GEMINI_LESSON_AUTHOR_MODEL": "   ",
         "GEMINI_TEMP_DIR": "   ",
-        "GEMINI_STORE_CREATE_TIMEOUT_MS": "   "
+        "GEMINI_STORE_CREATE_TIMEOUT_MS": "   ",
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "   "
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -1859,7 +1864,8 @@
         "GEMINI_CHAT_MODEL": "",
         "GEMINI_LESSON_AUTHOR_MODEL": "",
         "GEMINI_TEMP_DIR": "",
-        "GEMINI_STORE_CREATE_TIMEOUT_MS": ""
+        "GEMINI_STORE_CREATE_TIMEOUT_MS": "",
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": ""
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -2627,7 +2633,8 @@
         "REPORT_PDF_TENANT_ACTIVE_JOBS": "51",
         "REPORT_CHAT_ROUTER_TIMEOUT_MS": "30001",
         "REPORT_CHAT_NARRATIVE_TIMEOUT_MS": "60001",
-        "GEMINI_STORE_CREATE_TIMEOUT_MS": "600001"
+        "GEMINI_STORE_CREATE_TIMEOUT_MS": "600001",
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "maybe"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -3425,6 +3432,18 @@
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
         "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
         "error": "Error: [ENV] LESSON_AUTHOR_IDM_PIPELINE_TENANT_ALLOWLIST must be a comma-separated list of UUIDs, received: \"not-a-uuid\""
+      }
+    },
+    {
+      "name": "invalid/LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED",
+      "base": "required",
+      "set": {
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "maybe"
+      },
+      "expect": {
+        "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
+        "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
+        "error": "Error: [ENV] LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED must be a boolean, received: \"maybe\""
       }
     },
     {
@@ -5133,7 +5152,8 @@
         "REPORT_PDF_TENANT_ACTIVE_JOBS": "51",
         "REPORT_CHAT_ROUTER_TIMEOUT_MS": "30001",
         "REPORT_CHAT_NARRATIVE_TIMEOUT_MS": "60001",
-        "GEMINI_STORE_CREATE_TIMEOUT_MS": "600001"
+        "GEMINI_STORE_CREATE_TIMEOUT_MS": "600001",
+        "LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED": "maybe"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],

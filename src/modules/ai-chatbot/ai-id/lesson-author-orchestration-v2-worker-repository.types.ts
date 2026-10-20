@@ -68,7 +68,10 @@ export class OrchestrationV2WorkerRepositoryError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_TASK_LEASE_LOST'
     | 'ORCHESTRATION_V2_TASK_STATE_INVALID'
-    | 'ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED') {
+    | 'ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED'
+    // The run was stopped (needs_action/canceled) before this claim crossed the
+    // provider boundary: no paid call is made and the claim releases its credit.
+    | 'ORCHESTRATION_V2_RUN_NOT_ACTIVE') {
     super(code);
     this.name = 'OrchestrationV2WorkerRepositoryError';
   }

@@ -164,6 +164,9 @@ export const aiIdEnv = {
     30_000,
     300_000,
   ),
+  // Author "Stop" of a running AI ID V2 design (stop and keep what is done). Also needs the
+  // workspace read, edit and execution gates. No SQL change; default off.
+  LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED: optionalBoolean('LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED', false),
 
   // Lesson-author video transcription. The upload route streams to a private
   // bucket; these limits are enforced before expensive media processing.
