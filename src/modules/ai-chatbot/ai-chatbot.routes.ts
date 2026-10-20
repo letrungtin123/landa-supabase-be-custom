@@ -23,6 +23,8 @@ import { createWorkspaceV2LaunchService } from './ai-id/lesson-author-workspace-
 import { createWorkspaceEditHandlers } from './ai-id/lesson-author-workspace-edit.controller.js';
 import { createWorkspaceApplyHandler } from './ai-id/lesson-author-workspace-apply.controller.js';
 import { createWorkspaceApplyRepository } from './ai-id/lesson-author-workspace-apply.repository.js';
+import { createWorkspaceReviewHandlers } from './ai-id/lesson-author-workspace-review.controller.js';
+import { createWorkspaceReviewRepository } from './ai-id/lesson-author-workspace-review.repository.js';
 import { createWorkspaceAcceptance } from './ai-id/lesson-author-workspace-storyboard.repository.js';
 import { createOrchestrationV2AdmissionRepository } from './ai-id/lesson-author-orchestration-v2-admission.repository.js';
 import { createOrchestrationV2AdmissionService } from './ai-id/lesson-author-orchestration-v2-admission.service.js';
@@ -398,6 +400,30 @@ const workspaceApply = createWorkspaceApplyHandler({
   report: event => console.info('[LessonAuthorWorkspace] ' + JSON.stringify(event)),
 });
 router.post(`${workspaceReadPath}/nodes/:nodeId/apply`, workspaceApply);
+// "Chờ duyệt": assessment questions an AI ID run held for the author. Reads use
+// the read gate; a decision uses Apply's gates and permission model.
+const workspaceReviewRepository = createWorkspaceReviewRepository({ db: { transaction: withDatabaseTransaction },
+  // Nested withDatabaseTransaction reuses the resolve transaction's client.
+  audit: event => withDatabaseTransaction(client => appendAuditLog(client, {
+    tenantId: event.tenantId, actorId: event.actorId, actorUsername: event.actorUsername, action: 'UPDATE',
+    entityType: 'lesson_author_session', entityId: event.conversationId, entityName: event.sessionTitle || event.courseName,
+    event: { code: 'lesson_author.workspace.review_resolved', context: { course_id: event.courseId, course_name: event.courseName } },
+  })) });
+const workspaceReview = createWorkspaceReviewHandlers({
+  readEnabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED,
+  resolveEnabled: () => env.LESSON_AUTHOR_WORKSPACE_READ_ENABLED && env.LESSON_AUTHOR_WORKSPACE_EDIT_ENABLED
+    && env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED && env.LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED,
+  canRead: user => hasPermission(user, 'courses', 'can_edit'),
+  resolveSessionOwner: resolveLessonAuthorSessionOwner,
+  list: (owner, workspaceId) => workspaceReviewRepository.list(owner, workspaceId),
+  resolve: (user, target, obligationId, input) => workspaceReviewRepository.resolve(user, target, obligationId, input),
+  report: event => {
+    const line = '[LessonAuthorWorkspaceReview] ' + JSON.stringify(event);
+    if (event.event === 'workspace_review_failed') console.warn(line); else console.info(line);
+  },
+});
+router.get(`${workspaceReadPath}/review-items`, (req, res, next) => { workspaceReview.list(req, res).catch(next); });
+router.post(`${workspaceReadPath}/review-items/:obligationId/resolve`, (req, res, next) => { workspaceReview.resolve(req, res).catch(next); });
 const generationJobRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
 router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId', createGenerationStatusHandler({
   enabled: () => env.LESSON_AUTHOR_GENERATION_STATUS_ENABLED || env.LESSON_AUTHOR_GENERATION_ENABLED,

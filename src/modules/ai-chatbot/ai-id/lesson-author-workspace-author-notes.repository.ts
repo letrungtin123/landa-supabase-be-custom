@@ -15,7 +15,7 @@ const HASH = /^[0-9a-f]{64}$/;
 
 /** A stored revision's content only when its hash verifies (V1 generation
  * snapshot hash or V2 orchestration hash); otherwise null, never a throw. */
-function verifiedWorkspaceContent(content: unknown, contentHash: unknown): WorkspaceContent | null {
+export function verifiedWorkspaceContent(content: unknown, contentHash: unknown): WorkspaceContent | null {
   if (content === null || content === undefined || typeof contentHash !== 'string' || !HASH.test(contentHash)) return null;
   try {
     const parsed = readWorkspaceContent(content);

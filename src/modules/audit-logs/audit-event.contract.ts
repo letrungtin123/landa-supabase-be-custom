@@ -233,6 +233,8 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   'lesson_author.workspace.applied_shared': {
     context: ['course_id', 'course_name', 'related_entity_name', 'related_entity_type', 'affected_count'], changes: [],
   },
+  // A course editor marked one assessment question held by AI ID as checked.
+  'lesson_author.workspace.review_resolved': { context: ['course_id', 'course_name'], changes: [] },
   'knowledgebase.created': { context: [], changes: [] },
   'knowledgebase.updated': { context: [], changes: ['name'] },
   'knowledgebase.deleted': { context: [], changes: [] },
@@ -353,6 +355,7 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'knowledgebase.assignment.updated',
   'lesson_author.job.applied',
   'lesson_author.workspace.applied_shared',
+  'lesson_author.workspace.review_resolved',
   'knowledgebase.created',
   'knowledgebase.updated',
   'knowledgebase.deleted',
