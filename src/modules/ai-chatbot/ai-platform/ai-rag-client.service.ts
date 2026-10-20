@@ -285,6 +285,39 @@ export interface RagIndexResponse {
   diagnostics?: Record<string, unknown>;
   usage?: Partial<AiUsage>;
   error_reason?: string;
+  /**
+   * Present (true) only when the document's active index already held exactly what this request
+   * would build: the AI service kept it, made no provider call and reports zero usage.
+   */
+  skipped?: boolean;
+  skip_reason?: string;
+}
+
+/**
+ * The AI service kept the document's unchanged active index, so there is nothing to charge. A skipped
+ * answer that still reports usage is not trusted as free: it is charged like any other.
+ */
+export function ragIndexKeptUnchangedIndex(result: RagIndexResponse): boolean {
+  if (result.status !== 'learned' || result.skipped !== true) return false;
+  const usage = result.usage ?? {};
+  return [usage.inputTokens, usage.outputTokens, usage.embeddingTokens, usage.totalTokens, usage.cachedInputTokens]
+    .every(tokens => tokens === undefined || tokens === 0);
+}
+
+/**
+ * Settles the AI credit reservation of one index request: released when the unchanged index was kept
+ * (no provider call), otherwise finalized with the usage the AI service reported.
+ */
+export async function settleRagIndexReservation(
+  result: RagIndexResponse,
+  settle: { finalize: () => Promise<void>; release: () => Promise<void> },
+): Promise<'released' | 'finalized'> {
+  if (ragIndexKeptUnchangedIndex(result)) {
+    await settle.release();
+    return 'released';
+  }
+  await settle.finalize();
+  return 'finalized';
 }
 
 /** `signal` stops the request (the chat answer was stopped by the client or its deadline). */
@@ -501,6 +534,11 @@ export interface RagIndexDocumentInput {
    * A bearer credential: never log it. Omitted for text-only documents.
    */
   sourceDownloadUrl?: string | null;
+  /**
+   * Rebuild even when the document's active index is unchanged (an operator "learn again"). Without it
+   * the AI service keeps an unchanged index and answers `skipped` with zero usage.
+   */
+  force?: boolean;
 }
 
 export function buildRagIndexRequestBody(input: RagIndexDocumentInput, apiKey: string): Record<string, unknown> {
@@ -512,6 +550,7 @@ export function buildRagIndexRequestBody(input: RagIndexDocumentInput, apiKey: s
     embedding_model: input.embeddingModel,
     embedding_dimensions: input.embeddingDimensions,
     ...(input.sourceDownloadUrl ? { source_download_url: input.sourceDownloadUrl } : {}),
+    ...(input.force === true ? { force: true } : {}),
   };
 }
 
