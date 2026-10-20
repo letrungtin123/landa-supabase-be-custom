@@ -9,7 +9,12 @@ import { getSessionClient, query } from '../../../config/database.js';
 import { deleteFile, downloadToTempFile } from '../../../config/storage.js';
 import { deleteFromStore, ensureStore, getGeminiApiKeyFingerprint, getGeminiClient, uploadToStore } from '../ai-platform/gemini.service.js';
 import { getTenantAiRuntimeSettings, getGoogleAiStudioApiKey } from '../ai-platform/ai-settings.service.js';
-import { deleteRagDocument, deleteRagKnowledgebase, indexRagDocument } from '../ai-platform/ai-rag-client.service.js';
+import {
+  deleteRagDocument,
+  deleteRagKnowledgebase,
+  indexRagDocument,
+  settleRagIndexReservation,
+} from '../ai-platform/ai-rag-client.service.js';
 import {
   estimateTokensFromText,
   finalizeTenantAiTokens,
@@ -169,27 +174,33 @@ async function uploadDocumentToRag(job: KbOperationJob): Promise<void> {
       embeddingModel: settings.embeddingModel,
       embeddingDimensions: settings.embeddingDimensions,
       sourceDownloadUrl,
+      force: job.payload?.force === true,
     });
     if (result.status !== 'learned') {
       throw new Error(result.error_reason || 'AI RAG không thể học tài liệu này');
     }
     await assertLease(job);
-    await finalizeTenantAiTokens({
-      reservationId,
-      tenantId: job.tenant_id,
-      embeddingModel: settings.embeddingModel,
-      usage: {
-        inputTokens: result.usage?.inputTokens ?? 0,
-        outputTokens: result.usage?.outputTokens ?? 0,
-        embeddingTokens: result.usage?.embeddingTokens ?? 0,
-        totalTokens: result.usage?.totalTokens ?? result.usage?.embeddingTokens ?? 0,
-      },
-      source: { kb_id: job.kb_id, document_id: doc.id, operation_id: job.id },
-      metadata: {
-        chunk_count: result.chunk_count,
-        engine: 'self_built_rag',
-        extraction_diagnostics: result.diagnostics ?? null,
-      },
+    const settledReservationId = reservation.id;
+    // An unchanged document keeps its active index (no provider call): its reservation is released.
+    await settleRagIndexReservation(result, {
+      release: () => releaseTenantAiTokenReservation(settledReservationId, job.tenant_id),
+      finalize: () => finalizeTenantAiTokens({
+        reservationId: settledReservationId,
+        tenantId: job.tenant_id,
+        embeddingModel: settings.embeddingModel,
+        usage: {
+          inputTokens: result.usage?.inputTokens ?? 0,
+          outputTokens: result.usage?.outputTokens ?? 0,
+          embeddingTokens: result.usage?.embeddingTokens ?? 0,
+          totalTokens: result.usage?.totalTokens ?? result.usage?.embeddingTokens ?? 0,
+        },
+        source: { kb_id: job.kb_id, document_id: doc.id, operation_id: job.id },
+        metadata: {
+          chunk_count: result.chunk_count,
+          engine: 'self_built_rag',
+          extraction_diagnostics: result.diagnostics ?? null,
+        },
+      }),
     });
     const previous = previousFilePath(job);
     if (job.operation === 'document_reupload' && previous && previous !== doc.file_path) {

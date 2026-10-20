@@ -27,7 +27,7 @@ import {
   releaseTenantAiTokenReservation,
   reserveTenantAiTokens,
 } from './ai-token-quota.service.js';
-import { indexRagDocument } from './ai-rag-client.service.js';
+import { indexRagDocument, settleRagIndexReservation } from './ai-rag-client.service.js';
 import { swallowAndLog } from '../../../utils/best-effort.js';
 import {
   cappedExponentialBackoffSeconds,
@@ -327,13 +327,18 @@ async function indexDocumentToRag(job: AiEngineTransitionJob, doc: TransitionDoc
     if (result.status !== 'learned') {
       throw new Error(result.error_reason || `Không thể index RAG cho tài liệu ${doc.id}`);
     }
-    await finalizeTenantAiTokens({
-      reservationId,
-      tenantId: job.tenant_id,
-      embeddingModel: settings.embeddingModel,
-      usage: normalizeAiUsage(result.usage ?? { embeddingTokens: estimateDocumentIndexTokens(doc) }),
-      source: { transition_job_id: job.id, kb_id: doc.kb_id, document_id: doc.id },
-      metadata: { transition: true, engine: 'self_built_rag', chunk_count: result.chunk_count },
+    const settledReservationId = reservation.id;
+    // A document indexed meanwhile keeps its unchanged index (no provider call): nothing to charge.
+    await settleRagIndexReservation(result, {
+      release: () => releaseTenantAiTokenReservation(settledReservationId, job.tenant_id),
+      finalize: () => finalizeTenantAiTokens({
+        reservationId: settledReservationId,
+        tenantId: job.tenant_id,
+        embeddingModel: settings.embeddingModel,
+        usage: normalizeAiUsage(result.usage ?? { embeddingTokens: estimateDocumentIndexTokens(doc) }),
+        source: { transition_job_id: job.id, kb_id: doc.kb_id, document_id: doc.id },
+        metadata: { transition: true, engine: 'self_built_rag', chunk_count: result.chunk_count },
+      }),
     });
   } catch (error) {
     await releaseTenantAiTokenReservation(reservationId, job.tenant_id).catch(swallowAndLog('ai_tokens.reservation_release'));
