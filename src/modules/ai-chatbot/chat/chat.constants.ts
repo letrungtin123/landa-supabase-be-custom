@@ -9,6 +9,11 @@ export const MAX_USER_MESSAGE_LENGTH = 5000;
 export const RATE_LIMIT_MS = 3_000;              // 1 message per 3 seconds per user
 export const CHAT_TARGETS = ['admin', 'learner', 'lesson_author'] as const;
 export const LESSON_AUTHOR_TARGET = 'lesson_author' as const;
+/**
+ * tenant_kb_assignments.target of the AI ID organization context knowledge base (one per tenant). That
+ * knowledge base is hidden from every knowledge base management route and from bot/lesson-author choices.
+ */
+export const LESSON_AUTHOR_CONTEXT_KB_TARGET = 'lesson_author_context' as const;
 export const RAG_CHAT_MIN_OUTPUT_TOKENS = 256;
 export const RAG_CHAT_MAX_OUTPUT_TOKENS = 2048;
 export const RAG_LESSON_AUTHOR_MIN_OUTPUT_TOKENS = 1024;

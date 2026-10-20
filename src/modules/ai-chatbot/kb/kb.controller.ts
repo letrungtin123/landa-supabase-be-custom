@@ -100,8 +100,10 @@ export async function updateKb(req: Request, res: Response): Promise<void> {
   let previous: Awaited<ReturnType<typeof kbService.getKnowledgebase>> | undefined;
   const kb = await runAuditedTransaction(
     async () => {
-      // Audit snapshots must be read from the same transaction as the write.
+      // Audit snapshots must be read from the same transaction as the write. A knowledge base this
+      // route cannot see (another tenant's, or the hidden AI ID organization context one) is not found.
       previous = await kbService.getKnowledgebase(req.params.id, tenantId);
+      if (!previous) return null;
       return kbService.updateKnowledgebase(req.params.id, tenantId, parsed.data);
     },
     (updated) => updated ? createTransactionalAuditEntry(
@@ -162,6 +164,8 @@ export async function listDocuments(req: Request, res: Response): Promise<void> 
   const tenantId = req.user!.tenantId!;
   const page = parseInt(req.query.page as string) || 1;
   const pageSize = ([5, 10, 20].includes(parseInt(req.query.page_size as string)) ? parseInt(req.query.page_size as string) : 10);
+  // The hidden AI ID organization context knowledge base (and any other this route cannot see) is not found.
+  if (!await kbService.getKnowledgebase(req.params.kbId, tenantId)) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
 
   const result = await kbService.listDocuments({
     kbId: req.params.kbId,
@@ -293,6 +297,7 @@ export async function retryDocuments(req: Request, res: Response): Promise<void>
 
   try {
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
+    if (!kb) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
     const result = await runAuditedTransaction(
       () => kbService.queueDocumentRetry(docIds, kbId, tenantId),
       (retried) => retried.retried > 0 ? createTransactionalAuditEntry(
@@ -423,7 +428,8 @@ export async function updateArticle(req: Request, res: Response): Promise<void> 
     const previous = await kbService.getDocument(docId, tenantId);
     if (!previous || previous.type !== 'article' || previous.kb_id !== kbId) { sendError(res, 'Article không tồn tại', 404); return; }
     const kb = await kbService.getKnowledgebase(kbId, tenantId);
-    staged = await kbService.stageArticleSource(
+    if (!kb) { sendError(res, 'Article không tồn tại', 404); return; }
+    staged =await kbService.stageArticleSource(
       kbId,
       tenantId,
       { title: parsed.data.title ?? previous.name, content: parsed.data.content ?? previous.content ?? '' },

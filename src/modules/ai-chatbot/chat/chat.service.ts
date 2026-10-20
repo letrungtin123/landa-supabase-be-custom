@@ -10,6 +10,7 @@ import { CACHE_TTL, cacheKeys, cacheVersions } from '../../../config/cache-keys.
 import { invalidateTenantAiCaches } from '../../../config/cache-invalidation.js';
 import { AppError } from '../../../middleware/error-handler.js';
 import { CHAT_TARGETS, LESSON_AUTHOR_TARGET } from './chat.constants.js';
+import { visibleKnowledgebaseSql } from '../kb/kb.repository.js';
 import type { ChatTarget } from './chat.constants.js';
 import type {
   ChatMessage,
@@ -390,7 +391,7 @@ export async function assignLessonAuthorKb(tenantId: string, kbId: string): Prom
   if (!isValidUUID(kbId)) throw new AppError('kb_id không hợp lệ', 400);
 
   const kbCheck = await query<{ id: string }>(
-    `SELECT id FROM knowledgebases WHERE id = $1 AND tenant_id = $2`,
+    `SELECT kb.id FROM knowledgebases kb WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}`,
     [kbId, tenantId],
   );
   if (!kbCheck.rowCount || kbCheck.rowCount === 0) {

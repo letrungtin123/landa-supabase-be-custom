@@ -10,6 +10,7 @@ import { invalidateBotCaches, invalidateTenantAiCaches } from '../../../config/c
 import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl, deleteTenantFileByUrl } from '../../../config/storage.js';
 import type { CreateBotInput, UpdateBotInput } from './bot.validator.js';
 import { AppError } from '../../../middleware/error-handler.js';
+import { visibleKnowledgebaseSql } from '../kb/kb.repository.js';
 import {
   INPUT_FILTER_CONFIG_KEY,
   ensureInputFilterInBotConfig,
@@ -136,7 +137,7 @@ export async function createBot(tenantId: string, input: CreateBotInput, userId:
   // Validate kb_id belongs to same tenant (if provided)
   if (input.kb_id) {
     const kbCheck = await query<{ id: string }>(
-      `SELECT id FROM knowledgebases WHERE id = $1 AND tenant_id = $2`,
+      `SELECT kb.id FROM knowledgebases kb WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}`,
       [input.kb_id, tenantId],
     );
     if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
@@ -169,7 +170,7 @@ export async function updateBot(id: string, tenantId: string, input: UpdateBotIn
   // Validate kb_id if being changed
   if (input.kb_id !== undefined && input.kb_id !== null) {
     const kbCheck = await query<{ id: string }>(
-      `SELECT id FROM knowledgebases WHERE id = $1 AND tenant_id = $2`,
+      `SELECT kb.id FROM knowledgebases kb WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}`,
       [input.kb_id, tenantId],
     );
     if (!kbCheck.rowCount || kbCheck.rowCount === 0) {

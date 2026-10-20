@@ -7,6 +7,22 @@
 // ═══════════════════════════════════════════════════════════════
 
 import type { QueryResult, QueryResultRow } from 'pg';
+import { LESSON_AUTHOR_CONTEXT_KB_TARGET } from '../chat/chat.constants.js';
+
+/**
+ * SQL condition: the knowledge base `alias` is not the hidden AI ID organization context knowledge base.
+ * Every /kb/:kbId… route, the knowledge base list, the bot and lesson-author knowledge base choices use it,
+ * so that knowledge base reads as not found there (its documents are managed by the org-context routes).
+ */
+export function visibleKnowledgebaseSql(alias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(alias)) throw new Error('Invalid knowledge base SQL alias');
+  return `NOT EXISTS (
+       SELECT 1 FROM tenant_kb_assignments hidden_kb
+       WHERE hidden_kb.tenant_id = ${alias}.tenant_id
+         AND hidden_kb.kb_id = ${alias}.id
+         AND hidden_kb.target = '${LESSON_AUTHOR_CONTEXT_KB_TARGET}'
+     )`;
+}
 
 /** The pool query() (joins the current transaction) or a transaction client. */
 export interface KbDb {
@@ -166,6 +182,7 @@ export function createKbRepository(db: KbDb) {
          AND operation_job.operation = 'knowledgebase_delete'
          AND operation_job.status IN ('queued', 'running')
      )`,
+        visibleKnowledgebaseSql('kb'),
       ];
       const params: unknown[] = [tenantId, currentFingerprint];
       let idx = 3;
@@ -238,7 +255,7 @@ export function createKbRepository(db: KbDb) {
      LEFT JOIN kb_restore_jobs j ON j.id = kb.active_restore_job_id
      LEFT JOIN tenant_ai_settings tas ON tas.tenant_id = kb.tenant_id
      LEFT JOIN ai_engine_transition_jobs aitj ON aitj.id = tas.active_transition_job_id
-     WHERE kb.id = $1 AND kb.tenant_id = $2
+     WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}
      LIMIT 1`,
         [id, tenantId, currentFingerprint],
       );
