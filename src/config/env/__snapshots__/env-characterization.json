@@ -2697,7 +2697,7 @@
         "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "1048575",
         "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "300001",
         "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "59999",
-        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "2000001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
@@ -3501,12 +3501,12 @@
       "name": "invalid/LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS",
       "base": "required",
       "set": {
-        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "2000001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],
         "dotenvCalls": ["<ROOT>/.env", "<ROOT>/.env.development.local {\"override\":true}"],
-        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS must be between 10000 and 5000000, received: \"5000001\""
+        "error": "Error: [ENV] LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS must be between 10000 and 2000000, received: \"2000001\""
       }
     },
     {
@@ -5333,7 +5333,7 @@
         "LESSON_AUTHOR_ORG_CONTEXT_MAX_BYTES": "1048575",
         "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_POLL_MS": "300001",
         "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_TIMEOUT_MS": "59999",
-        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "5000001"
+        "LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS": "2000001"
       },
       "expect": {
         "logs": ["log: [Env] Loaded .env", "log: [Env] Loaded .env.development.local overrides"],

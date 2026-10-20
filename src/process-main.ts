@@ -28,6 +28,7 @@ import { startLessonAuthorTranscriptionWorker } from './modules/ai-chatbot/ai-id
 import { startDurableBlueprintWorker, stopDurableBlueprintWorker } from './modules/ai-chatbot/ai-id/v1/lesson-author-durable-blueprint.service.js';
 import { startLessonAuthorWorkspaceWorker, stopLessonAuthorWorkspaceWorker } from './modules/ai-chatbot/ai-id/v1/lesson-author-workspace-runtime.service.js';
 import { startChapterCheckpointMaintenance, stopChapterCheckpointMaintenance } from './modules/ai-chatbot/ai-id/v1/lesson-author-chapter-runtime.service.js';
+import { startOrgContextDistillWorker, stopOrgContextDistillWorker } from './modules/ai-chatbot/ai-id/org-context/lesson-author-org-context-distill.worker.js';
 import { shutdownReportPdfRenderer } from './modules/ai-chatbot/ai-report/report-pdf-renderer.service.js';
 import { startAiEngineTransitionWorker } from './modules/ai-chatbot/ai-platform/ai-engine-transition.worker.js';
 import { startCourseDeletionWorker } from './modules/course-deletion/course-deletion.worker.js';
@@ -232,6 +233,8 @@ async function runStartupCleanups(): Promise<void> {
 function startBackgroundTimers(): void {
   // Expired AI token/point reservations are returned in the background (never in the AI call path).
   stopOnShutdown(startAiTokenReservationSweeper());
+  // AI ID organization profile drafts (default off: LESSON_AUTHOR_ORG_CONTEXT_ENABLED).
+  if (env.LESSON_AUTHOR_ORG_CONTEXT_ENABLED) stopOnShutdown(startOrgContextDistillWorker());
   // (The inline email outbox worker, when enabled, is started by startInlineEmailOutbox in this role.)
 
   if (processRolePlan.sharesStateAcrossProcesses) {
@@ -404,6 +407,7 @@ const gracefulShutdown = createGracefulShutdown({
       { name: 'lesson-author workspace worker', run: stopLessonAuthorWorkspaceWorker },
       { name: 'durable Blueprint worker', run: stopDurableBlueprintWorker },
       { name: 'chapter checkpoint maintenance', run: stopChapterCheckpointMaintenance },
+      { name: 'organization context distill worker', run: stopOrgContextDistillWorker },
       { name: 'inline email outbox worker', run: stopEmailOutboxWorker },
     ],
     consumers: { name: 'RabbitMQ consumers', run: cancelConsumers },

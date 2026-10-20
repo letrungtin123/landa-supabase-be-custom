@@ -45,7 +45,7 @@ export interface ProcessStarters {
   authRevocation(): Promise<void>;
   /** Durable Blueprint, workspace and chapter checkpoint runtimes: `loop: false` only accepts work. */
   lessonAuthor(options: { loop: boolean }): Promise<void>;
-  /** Sweepers and maintenance timers (AI token reservations, retention, temp residue). */
+  /** Sweepers and maintenance timers (AI token reservations, retention, temp residue, AI ID profile drafts when on). */
   backgroundTimers(): void;
   tempDirectories(): Promise<void>;
   /** Resolves once the HTTP server listens. */

@@ -523,6 +523,33 @@ export async function generateRagLessonAuthorUnitV2(
   return readOrchestrationV2UnitProviderResponse(response, request.unit_contract);
 }
 
+/**
+ * `POST /v1/lesson-author/org-context/distill` (AI service `RagOrgContextDistillRequest`, extra keys
+ * forbidden; `api_key` is added here like on the index route): the learned context documents (1..50,
+ * read in this order), the most source characters to read (1000..2000000), the tenant's lesson-author
+ * model and the operational correlation id. The answer is read by readOrgContextDistillResponse
+ * (ai-id/contracts/lesson-author-org-context.contract.ts).
+ */
+export interface RagOrgContextDistillRequest {
+  tenant_id: string;
+  kb_id: string;
+  document_ids: string[];
+  locale: 'vi' | 'en';
+  max_source_chars: number;
+  model: string;
+  correlation_id?: string;
+}
+
+/** One bounded drafting call of the organization profile (map-reduce over the documents in the AI service). */
+export async function distillRagOrgContext(
+  request: RagOrgContextDistillRequest,
+  execution: { timeoutMs: number; signal: AbortSignal },
+): Promise<unknown> {
+  const apiKey = await getGoogleAiStudioApiKey(request.tenant_id);
+  return postRagJson<unknown>('/v1/lesson-author/org-context/distill', { ...request, api_key: apiKey },
+    execution.timeoutMs, execution.signal);
+}
+
 export interface RagIndexDocumentInput {
   tenantId: string;
   kbId: string;

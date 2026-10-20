@@ -209,7 +209,7 @@ export const aiIdEnv = {
     'LESSON_AUTHOR_ORG_CONTEXT_DISTILL_MAX_SOURCE_CHARS',
     1_500_000,
     10_000,
-    5_000_000,
+    2_000_000,
   ),
 
   // Lesson-author video transcription. The upload route streams to a private

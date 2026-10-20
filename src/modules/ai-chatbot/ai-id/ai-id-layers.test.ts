@@ -35,6 +35,9 @@ const AI_ID_LAYERS: Readonly<Record<string, readonly string[]>> = {
   'orchestration/worker': ['orchestration/finalize', 'orchestration/dispatch'],
   'orchestration/admission': ['orchestration'],
   sources: ['sessions'],
+  // Organization context: tenant-wide context files and the organization profile (routes, worker); the
+  // V2 launch reaches it only through injected functions.
+  'org-context': ['sessions', 'orchestration'],
   'workspace/read': ['orchestration/steps'],
   'workspace/stream': ['workspace/read'],
   'workspace/edit': ['workspace/read'],

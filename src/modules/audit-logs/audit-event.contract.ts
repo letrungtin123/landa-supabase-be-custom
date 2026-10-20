@@ -242,6 +242,13 @@ const AUDIT_EVENT_RULES: Record<string, AuditEventRule> = {
   'lesson_author.workspace.run_stopped': { context: ['course_id', 'course_name'], changes: [] },
   'lesson_author.workspace.run_resumed': { context: ['course_id', 'course_name', 'affected_count'], changes: [] },
   'lesson_author.workspace.lessons_rewritten': { context: ['course_id', 'course_name', 'affected_count'], changes: [] },
+  // AI ID organization context ("Ngữ cảnh doanh nghiệp"): an author asked AI to draft the profile from the
+  // context files, saved a new profile version, confirmed one or restored an earlier one (entity name =
+  // the version). The files themselves are audited as knowledgebase.document.created / .deleted.
+  'lesson_author.org_context.distill_requested': { context: [], changes: [] },
+  'lesson_author.org_context.profile_saved': { context: [], changes: [] },
+  'lesson_author.org_context.profile_confirmed': { context: [], changes: [] },
+  'lesson_author.org_context.profile_restored': { context: [], changes: [] },
   'knowledgebase.created': { context: [], changes: [] },
   'knowledgebase.updated': { context: [], changes: ['name'] },
   'knowledgebase.deleted': { context: [], changes: [] },
@@ -366,6 +373,10 @@ const TENANT_VISIBLE_AUDIT_EVENT_CODES = new Set<string>([
   'lesson_author.workspace.run_stopped',
   'lesson_author.workspace.run_resumed',
   'lesson_author.workspace.lessons_rewritten',
+  'lesson_author.org_context.distill_requested',
+  'lesson_author.org_context.profile_saved',
+  'lesson_author.org_context.profile_confirmed',
+  'lesson_author.org_context.profile_restored',
   'knowledgebase.created',
   'knowledgebase.updated',
   'knowledgebase.deleted',
