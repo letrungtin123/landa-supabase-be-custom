@@ -49,7 +49,11 @@ const sharedEnv = {
   LESSON_AUTHOR_WORKSPACE_APPLY_ENABLED: "true",
   COURSE_PUBLISH_GOVERNANCE_ENABLED: "true",
   LESSON_AUTHOR_ORCHESTRATION_V2_TENANT_CONCURRENCY: "4",
-  LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "4"
+  LESSON_AUTHOR_ORCHESTRATION_V2_WORKSPACE_CONCURRENCY: "4",
+  // Author recovery of a V2 design: Dừng / Chạy tiếp / Viết lại (needs SQL 20261020_1500).
+  // Empty tenant allowlist = every tenant.
+  LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED: "true",
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED: "true"
 };
 
 // The API is one PM2 process in fork mode, the in-app cluster primary
