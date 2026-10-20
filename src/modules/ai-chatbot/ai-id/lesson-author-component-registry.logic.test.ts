@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import pg from 'pg';
 import { acceptAndPersistLessonAuthorBlueprint } from './lesson-author-blueprint-acceptance.logic.js';
 import { validateLessonAuthorPedagogicalQuality } from './lesson-author-pedagogical-validator.logic.js';
@@ -75,8 +73,8 @@ test('Python compiler/allocation → Node plan → staged Python generation → 
     return timer;
   });
   const { normalizeLessonAuthorBlueprint, blueprintDraftArchitecture, normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('../chat/chat.service.js');
-  const ragDir = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = process.platform === 'win32' ? resolve(ragDir, '.venv-dev/Scripts/python.exe') : resolve(ragDir, '.venv-dev/bin/python');
+  const ragDir = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   function pythonBoundary(payload: unknown) {
     const result = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_component_instance_contract'], {
       cwd: ragDir, input: JSON.stringify(payload), encoding: 'utf8', timeout: 20_000, maxBuffer: 4_000_000,
@@ -245,8 +243,8 @@ test('real Python Blueprint endpoint depth repair → Node acceptance → chapte
     const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
   });
   const { normalizeLessonAuthorBlueprint, blueprintDraftArchitecture, normalizeLessonAuthorProposal, lockProposalToBlueprintChapter } = await import('../chat/chat.service.js');
-  const cwd = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(cwd, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
+  const cwd = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const response = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.test_v5_repair_contract_integration', '--node-fixture'], {
     cwd, encoding: 'utf8', timeout: 20_000, maxBuffer: 4_000_000,
   });
@@ -578,8 +576,8 @@ test('ordered semantic HTML retains heading/table/list adjacency with Python acc
     { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'paragraph', text: 'x'.repeat(2001) }] }] },
     { version: 2, sections: [{ heading: 'H', blocks: [{ kind: 'bullets', items: Array(21).fill('x') }] }] },
   ];
-  const ragDir = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(ragDir, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
+  const ragDir = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const result = spawnSync(python, ['-X', 'utf8', '-B', '-c',
     'import json,sys; from app.main import semantic_learning_visible_text; print(json.dumps([semantic_learning_visible_text(v)[1] is None for v in json.load(sys.stdin)]))'],
     { cwd: ragDir, input: JSON.stringify(cases), encoding: 'utf8' });

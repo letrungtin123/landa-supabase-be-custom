@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import type { CourseComponentType } from '../../tenants/tenant-course-components.constants.js';
 import type { LessonAuthorProposal } from '../../course-authoring/course-authoring.service.js';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
@@ -22,13 +20,6 @@ import { createOrchestrationV2UnitRepository } from './lesson-author-orchestrati
 import type { OrchestrationV2TaskLease } from './lesson-author-orchestration-v2-worker.repository.js';
 
 const hash = (value: string) => orchestrationV2Hash(value);
-
-function resolveAiRagDevPython(root: string): string {
-  return resolve(
-    root,
-    process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python',
-  );
-}
 
 function fixture() {
   const source = hash('unit-source');
@@ -104,8 +95,8 @@ test('CP3B sends table and visual relations through the real Python writer adapt
   }));
   const contract = prepareOrchestrationV2UnitGenerationContract({ assembly,
     unit_path: 'chapter_1.lesson_1.unit_1', source_facts: evidenceFacts });
-  const root = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolveAiRagDevPython(root);
+  const root = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.cp3b_writer_evidence_bridge'], {
     cwd: root, input: JSON.stringify({ unit_contract: contract, locale: 'vi' }),
     encoding: 'utf8', timeout: 20_000, maxBuffer: 8_000_000,
@@ -377,8 +368,8 @@ test('Python deterministic fallback for every component type passes the producti
     const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
   });
   const { normalizeLessonAuthorProposal } = await import('../chat/chat.service.js');
-  const root = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolveAiRagDevPython(root);
+  const root = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const base = fixture().contract;
   const evidenceTexts = [
     'Bước 1: Kiểm tra điều kiện an toàn trước khi bắt đầu công việc.',
@@ -449,8 +440,8 @@ test('density-v3 Python fallback preserves supporting-only interaction evidence 
     const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
   });
   const { normalizeLessonAuthorProposal } = await import('../chat/chat.service.js');
-  const root = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolveAiRagDevPython(root);
+  const root = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const { assembly: baseAssembly, sourceFacts: baseFacts } = fixture();
   const assembly = structuredClone(baseAssembly);
   assembly.architecture.chapters[0]!.lessons[0]!.units[0]!.component_plan.push({
@@ -507,8 +498,8 @@ test('CP2A frozen reviewer candidates survive Python schema/binding and the prod
     const timer = nativeInterval(...args); timer.unref(); t.after(() => clearInterval(timer)); return timer;
   });
   const { normalizeLessonAuthorProposal } = await import('../chat/chat.service.js');
-  const root = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolveAiRagDevPython(root);
+  const root = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const out = spawnSync(python, ['-X', 'utf8', '-B', '-m', 'tests.cp2a_boundary_replay_bridge'], {
     cwd: root, input: '{}', encoding: 'utf8', timeout: 20_000, maxBuffer: 8_000_000,
   });

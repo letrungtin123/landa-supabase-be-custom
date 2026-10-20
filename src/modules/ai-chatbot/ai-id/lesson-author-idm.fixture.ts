@@ -1,7 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagSkip } from '../../../test-support/ai-rag-python.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
 import type {
   OrchestrationV2CourseSkeleton,
@@ -166,11 +164,11 @@ export function idmFixture(shape: IdmFixtureShape = [[[[120, 80]], [[200]]], [[[
 }
 
 // --- Python bridge (spec §15.3) ------------------------------------------------------------------
-const RAG_ROOT = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-const PYTHON = resolve(RAG_ROOT, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
+const RAG_ROOT = AI_RAG_ROOT;
+const PYTHON = AI_RAG_DEV_PYTHON;
 
-/** True when the sibling `landa-ai-rag` checkout and its dev virtualenv are available. */
-export const IDM_PYTHON_AVAILABLE = existsSync(PYTHON) && existsSync(resolve(RAG_ROOT, 'tests/idm_golden.py'));
+/** True when the sibling `landa-ai-rag` checkout and its dev virtualenv are available (LANDA_REQUIRE_CROSS_LANGUAGE=1: throws instead of false). */
+export const IDM_PYTHON_AVAILABLE = aiRagSkip('tests/idm_golden.py') === false;
 
 const GOLDEN_SOURCE = `
 import json, sys
@@ -244,8 +242,7 @@ export function idmGoldenCourseDesign(request: Record<string, unknown>): {
 }
 
 /** True when `landa-ai-rag/tests/idm_contract_bridge.py` can be spawned. */
-export const IDM_BRIDGE_AVAILABLE = IDM_PYTHON_AVAILABLE
-  && existsSync(resolve(RAG_ROOT, 'tests/idm_contract_bridge.py'));
+export const IDM_BRIDGE_AVAILABLE = aiRagSkip('tests/idm_golden.py', 'tests/idm_contract_bridge.py') === false;
 
 export interface IdmBridgeMessage {
   stage: 'course_skeleton' | 'chapter_shard' | 'unit' | 'golden_unit' | 'acceptance' | 'preserve_source'

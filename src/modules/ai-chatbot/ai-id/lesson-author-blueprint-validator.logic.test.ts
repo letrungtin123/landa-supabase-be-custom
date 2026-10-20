@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
+import { AI_RAG_DEV_PYTHON, AI_RAG_ROOT, aiRagPythonSkip } from '../../../test-support/ai-rag-python.js';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import { acceptAndPersistLessonAuthorBlueprint, BlueprintAcceptanceError, blueprintBoundaryCounts, blueprintValidationDiagnostics } from './lesson-author-blueprint-acceptance.logic.js';
 import {
   normalizeLessonAuthorSourceMap,
@@ -97,8 +95,8 @@ function mixedObjectiveFixture(locale: 'en' | 'vi' = 'en') {
 }
 
 function pythonCoherenceCodes(candidate: BlueprintArchitecture): string[] {
-  const cwd = fileURLToPath(new URL('../../../../../landa-ai-rag/', import.meta.url));
-  const python = resolve(cwd, process.platform === 'win32' ? '.venv-dev/Scripts/python.exe' : '.venv-dev/bin/python');
+  const cwd = AI_RAG_ROOT;
+  const python = AI_RAG_DEV_PYTHON;
   const response = spawnSync(python, ['-X', 'utf8', '-B', '-c',
     'import json,sys; from app.main import validate_v5_instructional_coherence; r=validate_v5_instructional_coherence(json.load(sys.stdin)); print(json.dumps([i["code"] for i in r.errors]))'],
   { cwd, input: JSON.stringify(candidate), encoding: 'utf8', timeout: 20_000 });
