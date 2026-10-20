@@ -3,7 +3,8 @@ import { generationSnapshotHash } from './lesson-author-generation-job.logic.js'
 import type { WorkspaceReadOwner } from './lesson-author-workspace-read.repository.js';
 import { WorkspaceComponentError } from './lesson-author-workspace-component.logic.js';
 import { WORKSPACE_AGGREGATE_EDIT, WORKSPACE_MEDIA_EDIT } from './lesson-author-workspace-storyboard.logic.js';
-import { prepareWorkspaceEdit, prepareWorkspaceReset, readWorkspaceContent, workspaceLocale, WorkspaceContractError,
+import { prepareWorkspaceEdit, prepareWorkspaceReset, readWorkspaceContent, workspaceHashMatches, workspaceLocale,
+  WorkspaceContractError,
   type WorkspaceNodeSnapshot, type WorkspaceRevisionCandidate } from './lesson-author-workspace.logic.js';
 import { isUuid } from '../../../utils/uuid.js';
 import { createCourseAccessRepository } from '../../courses/course-access.repository.js';
@@ -81,7 +82,8 @@ function freeze<T>(value: T): T {
 type Row = Record<string, unknown>;
 function checkedContent(row: Row) {
   const content = readWorkspaceContent(row.content);
-  if (generationSnapshotHash(content) !== row.content_hash) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
+  // V2 baselines carry an orchestrationV2Hash, author edits a generationSnapshotHash (workspaceHashMatches).
+  if (!workspaceHashMatches(content, row.content_hash)) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
   return content;
 }
 
@@ -133,7 +135,7 @@ export function createWorkspaceEditRepository(deps: {
         const n = nodes.rows[0];
         if (!n || nodes.rows.length !== 1) fail('WORKSPACE_EDIT_NOT_FOUND');
         if (!KINDS.includes(String(n.kind)) || !n.protected_contract || typeof n.protected_contract !== 'object' || Array.isArray(n.protected_contract)
-          || generationSnapshotHash(n.protected_contract) !== n.contract_hash) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
+          || !workspaceHashMatches(n.protected_contract, n.contract_hash)) fail('WORKSPACE_EDIT_CONTRACT_INVALID');
         // The live workspace may expose hierarchy/media metadata for review and
         // scope Apply, but author editing is intentionally limited to generated
         // interactive components. This server gate mirrors the UI and prevents

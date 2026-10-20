@@ -15,6 +15,7 @@ import {
 import { createOrchestrationV2OutboxRepository } from './lesson-author-orchestration-v2-outbox.repository.js';
 import { runOrchestrationV2WorkerRecoveryLoop } from './lesson-author-orchestration-v2-rabbit.service.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { orchestrationV2UnitArtifactHash } from './lesson-author-orchestration-v2-unit.logic.js';
 import {
   createOrchestrationV2WorkerRepository,
   type OrchestrationV2TaskLease,
@@ -411,8 +412,12 @@ test('every worker, dispatcher and accounting transaction acquires G -> T -> W -
   await capture('wakeOneCapacityDeferred', () => worker.wakeOneCapacityDeferred(limits));
   await capture('renew', () => worker.renew(lease(), limits.lease_seconds));
   await capture('markProviderDispatched', () => worker.markProviderDispatched(lease()));
-  await capture('succeed(provider unit)', () => worker.succeed(lease(), hash('artifact'), 'orchestration-unit-baseline-v2',
-    usage, { artifact_kind: 'unit_baseline', artifact_hash: hash('artifact'), payload: { contract_version: 2 },
+  // A unit artifact whose payload re-hashes to its artifact hash (write-time guard of succeed).
+  const unitPayload = { contract_version: 2, unit_path: 'chapter_1.lesson_1.unit_1', source_snapshot_hash: hash('source'),
+    contract_hash: hash('contract'), nodes: [], generated_unit: { components: [] } };
+  const unitArtifactHash = orchestrationV2UnitArtifactHash(unitPayload);
+  await capture('succeed(provider unit)', () => worker.succeed(lease(), unitArtifactHash, 'orchestration-unit-baseline-v2',
+    usage, { artifact_kind: 'unit_baseline', artifact_hash: unitArtifactHash, payload: unitPayload,
       validation_contract: 'orchestration-unit-baseline-v2' }, accounting.settleProvider, unitHooks));
   await capture('failProviderRejected', () => worker.failProviderRejected(lease(), 'AI_PROVIDER_REQUEST_REJECTED',
     accounting.releaseRejected));

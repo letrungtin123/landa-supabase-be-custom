@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { UUID_PATTERN } from '../../../utils/uuid.js';
+import { canonicalJsonForHash } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 
 export const LESSON_AUTHOR_ORCHESTRATION_V2 = 2 as const;
 export const LESSON_AUTHOR_PROVIDER_MAX_OUTPUT_TOKENS = 65_536;
@@ -145,14 +146,9 @@ function fail(code: OrchestrationV2ErrorCode): never { throw new OrchestrationV2
 function safeInteger(value: number, minimum: number, maximum: number): boolean {
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
-function canonical(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
-}
+/** sha256 of the canonical JSON of `value` (lesson-author-orchestration-v2-canonical-json.logic.ts). */
 export function orchestrationV2Hash(value: unknown): string {
-  return createHash('sha256').update(canonical(value)).digest('hex');
+  return createHash('sha256').update(canonicalJsonForHash(value)).digest('hex');
 }
 function budget(value: OrchestrationV2Budget, provider: boolean): Readonly<OrchestrationV2Budget> {
   if (!value || !safeInteger(value.input_tokens, provider ? 1 : 0, 2_000_000)

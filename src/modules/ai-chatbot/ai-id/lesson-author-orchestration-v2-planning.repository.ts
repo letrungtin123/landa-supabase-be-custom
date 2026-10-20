@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import { orchestrationV2DeterministicUuid } from './lesson-author-orchestration-v2-inventory.logic.js';
 import type {
   OrchestrationV2ArchitectureAssembly,
@@ -175,8 +176,9 @@ export function createOrchestrationV2PlanningRepository(
         return fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
       }
     })();
-    const payload = { contract_version: 2, source_snapshot_hash: response.source_snapshot_hash,
-      source_authority: sourceAuthority, scopes };
+    // Every artifact payload below is the value as jsonb keeps it: hashed and stored as that same value.
+    const payload = toPersistedJson({ contract_version: 2, source_snapshot_hash: response.source_snapshot_hash,
+      source_authority: sourceAuthority, scopes });
     const catalogHash = orchestrationV2Hash(payload);
     const skeleton = buildOrchestrationV2SkeletonTask(lease.source_snapshot_hash, catalogHash, skeletonBudget);
     await worker.succeed(lease, catalogHash, 'source-catalog-v2', {}, {
@@ -393,10 +395,10 @@ export function createOrchestrationV2PlanningRepository(
     })();
     const skeletonHash = orchestrationV2Hash({ skeleton: response.skeleton, idm: design });
     const plan = planIdmChapterShards(response.skeleton, design, budgets, skeletonHash);
-    const payload = { contract_version: 2, skeleton: response.skeleton, scopes: view.scopeCatalog,
+    const payload = toPersistedJson({ contract_version: 2, skeleton: response.skeleton, scopes: view.scopeCatalog,
       shard_plans: plan.chapter_tasks.map(task => task.shard_plan),
       content_origin: response.content_origin ?? 'provider_validated',
-      quality_state: response.quality_state ?? 'validated', idm: design };
+      quality_state: response.quality_state ?? 'validated', idm: design });
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'course-skeleton-v2', response.usage ?? {}, {
       artifact_kind: 'course_skeleton', artifact_hash: artifactHash, payload, validation_contract: 'course-skeleton-v2',
@@ -422,10 +424,10 @@ export function createOrchestrationV2PlanningRepository(
     if (pipeline !== IDM_LEGACY_PIPELINE_VERSION) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
     const skeletonHash = orchestrationV2Hash(response.skeleton);
     const plan = planOrchestrationV2ChapterShards(response.skeleton, scopes, budgets, skeletonHash);
-    const payload = { contract_version: 2, skeleton: response.skeleton, scopes,
+    const payload = toPersistedJson({ contract_version: 2, skeleton: response.skeleton, scopes,
       shard_plans: plan.chapter_tasks.map(task => task.shard_plan),
       content_origin: response.content_origin ?? 'provider_validated',
-      quality_state: response.quality_state ?? 'validated' };
+      quality_state: response.quality_state ?? 'validated' });
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'course-skeleton-v2', response.usage ?? {}, {
       artifact_kind: 'course_skeleton', artifact_hash: artifactHash, payload, validation_contract: 'course-skeleton-v2',
@@ -583,9 +585,9 @@ export function createOrchestrationV2PlanningRepository(
   ): Promise<void> {
     if (lease.kind !== 'chapter_blueprint' || response.shard.source_snapshot_hash !== lease.source_snapshot_hash
       || response.shard.chapter_key !== lease.chapter_key) fail('ORCHESTRATION_V2_PLANNING_ARTIFACT_INVALID');
-    const payload = { contract_version: 2, shard: response.shard,
+    const payload = toPersistedJson({ contract_version: 2, shard: response.shard,
       content_origin: response.content_origin ?? 'provider_validated',
-      quality_state: response.quality_state ?? 'validated' };
+      quality_state: response.quality_state ?? 'validated' });
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'chapter-blueprint-shard-v2', response.usage ?? {}, {
       artifact_kind: 'chapter_blueprint', artifact_hash: artifactHash, payload,

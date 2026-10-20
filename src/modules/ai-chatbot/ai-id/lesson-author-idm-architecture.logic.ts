@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import {
   assembleOrchestrationV2Architecture,
   type OrchestrationV2ArchitectureAssembly,
@@ -112,7 +113,8 @@ export function assembleIdmOrchestrationArchitecture(
     chapters,
   };
   const { assembly_hash: _legacyHash, ...base } = legacy;
-  const withIdm = { ...base, idm };
+  // Hash exactly what is stored: the assembly as jsonb keeps it (lesson-author-orchestration-v2-canonical-json).
+  const withIdm = toPersistedJson({ ...base, idm });
   if (Buffer.byteLength(JSON.stringify(withIdm), 'utf8') > MAX_ASSEMBLY_BYTES) {
     throw new IdmError('IDM_SHARD_DESIGN_INVALID');
   }

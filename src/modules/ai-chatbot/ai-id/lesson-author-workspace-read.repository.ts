@@ -1,7 +1,6 @@
 import type { GenerationJobSql } from './lesson-author-generation-job.repository.js';
-import { generationSnapshotHash } from './lesson-author-generation-job.logic.js';
 import {
-  readWorkspaceContent, workspaceEventCursor, workspaceLocale,
+  readWorkspaceContent, workspaceEventCursor, workspaceHashMatches, workspaceLocale,
   WORKSPACE_CONTRACT_VERSION, WORKSPACE_EVENT_PAGE_SIZE, WorkspaceContractError,
 } from './lesson-author-workspace.logic.js';
 import { buildWorkspaceArchitecturePreview } from './lesson-author-workspace-preview.logic.js';
@@ -399,7 +398,7 @@ export function createWorkspaceReadRepository(deps: {
       let content = null;
       if (revision !== null) {
         content = readWorkspaceContent(row.content);
-        if (generationSnapshotHash(content) !== row.content_hash || typeof row.user_modified !== 'boolean'
+        if (!workspaceHashMatches(content, row.content_hash) || typeof row.user_modified !== 'boolean'
           || typeof row.validation_contract !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(row.validation_contract)) invalid();
       } else if (row.content !== null || row.content_hash !== null) invalid();
       const componentType = row.component_type == null ? null : enumeration(row.component_type, COMPONENT_TYPES);

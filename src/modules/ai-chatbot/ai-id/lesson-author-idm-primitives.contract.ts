@@ -8,10 +8,10 @@ import { IDM_SCOPE_KEY_PREFIX, IdmError } from './lesson-author-idm-types.contra
 
 // --- Canonical hash ------------------------------------------------------------------------
 /**
- * Same canonical encoding as Python `canonical_hash`
- * (`json.dumps(sort_keys=True, ensure_ascii=False, separators=(",", ":"))` → sha256):
- * the shared V2 hash. Key order differs from Python only for keys containing
- * astral-plane characters; every IDM key is ASCII.
+ * The shared V2 hash (lesson-author-orchestration-v2-canonical-json.logic.ts). Python mirrors it byte for
+ * byte with `js_canonical_hash` (app/hashing.py) wherever a hash crosses the languages: the design hash,
+ * the unit brief hash and the unit contract hash. Python's own `canonical_hash` differs only in number
+ * layout (1.0, 5e-05, 1e+16) and in the order of keys mixing astral-plane characters with U+E000..U+FFFF.
  */
 export function idmHash(value: unknown): string {
   return orchestrationV2Hash(value);

@@ -7,6 +7,8 @@ import { remapFactsToBlockScopes } from './lesson-author-idm-scope-view.logic.js
 import { idmScopeFactKeys, loadIdmRunScopeView,
   loadIdmSnapshotFacts } from './lesson-author-idm-scope-view.repository.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH } from './lesson-author-orchestration-v2-artifact-hash.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import { prepareOrchestrationV2UnitGenerationContract, ORCHESTRATION_V2_UNIT_CONTRACT,
   type OrchestrationV2UnitGenerationContract, type OrchestrationV2UnitPublication } from './lesson-author-orchestration-v2-unit.logic.js';
@@ -40,7 +42,8 @@ export class OrchestrationV2UnitRepositoryError extends Error {
     | 'ORCHESTRATION_V2_UNIT_AUTHORITY_INVALID'
     | 'ORCHESTRATION_V2_UNIT_EVIDENCE_INVALID'
     | 'ORCHESTRATION_V2_UNIT_STATE_INVALID'
-    | 'ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED') {
+    | 'ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED'
+    | typeof ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH) {
     super(code);
     this.name = 'OrchestrationV2UnitRepositoryError';
   }
@@ -190,6 +193,11 @@ export function createOrchestrationV2UnitRepository(
       || publication.source_snapshot_hash !== lease.source_snapshot_hash
       || publication.validation_contract !== ORCHESTRATION_V2_UNIT_CONTRACT) {
       fail('ORCHESTRATION_V2_UNIT_STATE_INVALID');
+    }
+    // Write-time hash guard for the revision-zero rows (the artifact itself is checked by worker.succeed):
+    // chapter validation requires each stored revision content to re-hash to its content_hash.
+    if (publication.nodes.some(node => orchestrationV2Hash(toPersistedJson(node.content)) !== node.content_hash)) {
+      fail(ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH);
     }
     const artifactPayload = { contract_version: 2, unit_path: publication.unit_path,
       source_snapshot_hash: publication.source_snapshot_hash, contract_hash: publication.contract_hash,

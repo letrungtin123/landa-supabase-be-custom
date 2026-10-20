@@ -10,6 +10,7 @@ import { readWorkspaceContent, type WorkspaceContent } from './lesson-author-wor
 import type { OrchestrationV2ArchitectureAssembly } from './lesson-author-orchestration-v2-architecture.logic.js';
 import { orchestrationV2ComponentPlanId } from './lesson-author-orchestration-v2-inventory.logic.js';
 import { orchestrationV2Hash } from './lesson-author-orchestration-v2.logic.js';
+import { toPersistedJson } from './lesson-author-orchestration-v2-canonical-json.logic.js';
 import { orchestrationV2QualityPolicy } from './lesson-author-orchestration-v2-quality.logic.js';
 import type { OrchestrationV2SourceFact } from './lesson-author-orchestration-v2-rag-contract.logic.js';
 import {
@@ -574,15 +575,22 @@ export function acceptOrchestrationV2GeneratedUnit(input: {
   }
   const unitContent = readWorkspaceContent({ title: contract.unit_title, purpose: contract.unit_purpose,
     data: {}, implementation_notes: quality === null ? null : idmAuthorNote([quality.author_note], IDM_UNIT_NOTE_MAX_CHARS) });
+  // Hash exactly what is stored. jsonb keeps the JSON round trip of a value (an undefined property is
+  // dropped, an array hole becomes null), and chapter validation and Apply re-hash what they read back, so
+  // each revision content and the artifact envelope are normalised first and that same value is hashed,
+  // stored and returned (a normalizer that leaves `label: undefined` on a diagram edge no longer matters).
   const nodes = [{ path: contract.unit_path, content: unitContent }, ...componentContents.map((content, index) => ({
     path: `${contract.unit_path}.component_${index + 1}`, content,
-  }))].map(node => ({ ...node, content_hash: orchestrationV2Hash(node.content) }));
+  }))].map(node => {
+    const content = toPersistedJson(node.content);
+    return { path: node.path, content, content_hash: orchestrationV2Hash(content) };
+  });
   const generatedUnit = { ...response.unit, components };
-  const base = orchestrationV2UnitArtifactBase({
+  const base = toPersistedJson(orchestrationV2UnitArtifactBase({
     unit_path: contract.unit_path,
     source_snapshot_hash: contract.source_snapshot_hash, contract_hash: contract.contract_hash,
     nodes, generated_unit: generatedUnit, content_origin: response.content_origin, quality_state: response.quality_state,
-    ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) });
+    ...(response.semantic_review ? { semantic_review: response.semantic_review } : {}) }));
   if (Buffer.byteLength(JSON.stringify(base), 'utf8') > MAX_PUBLICATION_BYTES) {
     fail('ORCHESTRATION_V2_UNIT_CONTEXT_TOO_LARGE', { check: 'publication', code: 'PUBLICATION_TOO_LARGE', path: 'unit' });
   }
