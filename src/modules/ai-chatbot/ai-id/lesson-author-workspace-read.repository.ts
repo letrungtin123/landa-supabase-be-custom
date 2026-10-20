@@ -32,7 +32,9 @@ const FAILURE_STAGES = ['source_snapshot', 'course_skeleton', 'chapter_blueprint
 export const WORKSPACE_GRAPH_PAGE_SIZE = 100;
 const EVENTS = ['workspace_created', 'architecture_started', 'architecture_progressed', 'overview_ready', 'structure_ready',
   'unit_started', 'unit_ready', 'node_revision_saved', 'node_reset', 'scope_apply_started',
-  'scope_applied', 'run_needs_action', 'run_ready', 'run_failed', 'run_canceled'] as const;
+  'scope_applied', 'run_needs_action', 'run_ready', 'run_failed', 'run_canceled',
+  // An author recovery moved a stopped run back to generation (SQL 20261020_1500).
+  'run_resumed'] as const;
 
 // One SELECT statement per read: ownership, payload/counts and cursor share the
 // same PostgreSQL statement snapshot, without locking a running worker.

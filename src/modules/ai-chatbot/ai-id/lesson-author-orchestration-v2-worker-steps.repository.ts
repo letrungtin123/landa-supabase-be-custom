@@ -7,7 +7,7 @@ import type { OrchestrationV2TaskKind } from './lesson-author-orchestration-v2.l
 import { ORCHESTRATION_V2_RUN_STOPPING_FAILURES } from './lesson-author-orchestration-v2-worker.logic.js';
 import { UUID_PATTERN, isUuid } from '../../../utils/uuid.js';
 import { OrchestrationV2WorkerRepositoryError } from './lesson-author-orchestration-v2-worker-repository.types.js';
-import type { OrchestrationV2TaskLease } from './lesson-author-orchestration-v2-worker-repository.types.js';
+import type { OrchestrationV2TaskLease, ReconcileUnknown } from './lesson-author-orchestration-v2-worker-repository.types.js';
 
 export const HASH = /^[0-9a-f]{64}$/;
 export const providerKinds = `('course_skeleton','chapter_blueprint','generate_unit')`;
@@ -34,10 +34,11 @@ export async function lockWorkspaceLifecycle(
 export async function syncNeedsActionWorkspace(
   tx: GenerationJobSql,
   task: Record<string, unknown>,
+  cancelCode: 'RUN_STOPPED_AFTER_TASK_FAILURE' | 'RUN_STOPPED_BY_AUTHOR' = 'RUN_STOPPED_AFTER_TASK_FAILURE',
 ): Promise<void> {
   await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET status='canceled',
-      failure_code='RUN_STOPPED_AFTER_TASK_FAILURE',finished_at=clock_timestamp()
-    WHERE run_id=$1 AND status IN ('blocked','queued')`, [task.run_id]);
+      failure_code=$2,finished_at=clock_timestamp()
+    WHERE run_id=$1 AND status IN ('blocked','queued')`, [task.run_id, cancelCode]);
   const live = await tx.query(`SELECT count(*)::integer AS count
     FROM lesson_author_workspace_v2_tasks WHERE run_id=$1 AND status='running'`, [task.run_id]);
   if (live.rows.length !== 1 || !Number.isSafeInteger(Number(live.rows[0]?.count))) {
@@ -104,6 +105,89 @@ export async function stopRunAfterTerminalTask(
     WHERE id=$1 AND status IN ('planning','executing','finalizing') RETURNING id`, [task.run_id, failureCode]);
   if (run.rows.length > 1) fail('ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED');
   await syncNeedsActionWorkspace(tx, task);
+}
+
+/**
+ * An outcome-unknown provider task of a run that already ended (needs_action
+ * or canceled) is never replayed, so nothing else would ever settle its held
+ * reservation. Settle it once at the pessimistic upper bound (the provider
+ * call may have been paid): the reservation moves reserved -> finalized with
+ * its single ledger row, and later scans no longer select it. The task keeps
+ * its terminal evidence (pending_reconciliation is the only accounting state
+ * an outcome_unknown task may hold). The candidate is driven by the small
+ * set of reserved reservations (partial index) and only selects a row whose
+ * reservation still matches the task budget exactly, so a malformed row is
+ * left for an operator instead of failing every recovery cycle.
+ * Lock order: W -> run, task -> (reconcile) C -> reservation -> M.
+ */
+export async function reconcileFinishedRunUnknown(
+  tx: GenerationJobSql,
+  reconcileUnknown?: ReconcileUnknown,
+): Promise<'reconciled' | null> {
+  if (!reconcileUnknown) return null;
+  const candidate = await tx.query(`SELECT t.id::text AS task_id,t.run_id::text,
+      t.workspace_id::text,t.tenant_id::text
+    FROM ai_token_reservations reservation
+    JOIN lesson_author_workspace_v2_tasks t ON t.ai_reservation_id=reservation.id
+      AND t.tenant_id=reservation.tenant_id
+    JOIN lesson_author_workspace_v2_runs r ON r.id=t.run_id AND r.workspace_id=t.workspace_id
+    WHERE reservation.status='reserved' AND t.status='outcome_unknown'
+      AND t.accounting_state='pending_reconciliation' AND r.status IN ('needs_action','canceled')
+      AND reservation.estimated_tokens=t.input_tokens+t.embedding_tokens+t.max_output_tokens*t.provider_max_attempts
+    ORDER BY t.finished_at,t.id LIMIT 1`);
+  const found = candidate.rows[0];
+  if (!found) return null;
+  await lockWorkspaceLifecycle(tx, found.tenant_id, found.workspace_id);
+  const locked = await tx.query(`SELECT t.*,r.model
+    FROM lesson_author_workspace_v2_runs r
+    JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id AND t.id=$2
+      AND t.status='outcome_unknown' AND t.accounting_state='pending_reconciliation'
+    JOIN ai_token_reservations reservation ON reservation.id=t.ai_reservation_id
+      AND reservation.tenant_id=t.tenant_id AND reservation.status='reserved'
+    WHERE r.id=$1 AND r.status IN ('needs_action','canceled')
+    FOR UPDATE OF r,t`, [found.run_id, found.task_id]);
+  if (!locked.rows[0]) return null;
+  await reconcileUnknown(tx, locked.rows[0]);
+  return 'reconciled';
+}
+
+/**
+ * A recovered run whose reopened work drained while some task is still not
+ * done (a lesson nobody asked to rewrite, a validation it blocks) would stay
+ * executing forever: no live task is left to stop it. Publish needs_action
+ * again with the most relevant remaining failure, so the author sees what is
+ * left and can recover it next. Only runs with recovery evidence qualify; the
+ * normal lifecycle never leaves an executing run without live work.
+ */
+export async function stopStalledRecoveredRun(tx: GenerationJobSql): Promise<'reconciled' | null> {
+  const candidate = await tx.query(`SELECT r.id::text AS run_id,r.workspace_id::text,r.tenant_id::text
+    FROM lesson_author_workspace_v2_runs r
+    WHERE r.status='executing'
+      AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_recoveries recovery WHERE recovery.run_id=r.id)
+      AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks live
+        WHERE live.run_id=r.id AND live.status IN ('blocked','queued','running'))
+      AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks open
+        WHERE open.run_id=r.id AND open.status<>'succeeded')
+    ORDER BY r.created_at,r.id LIMIT 1`);
+  const found = candidate.rows[0];
+  if (!found) return null;
+  await lockWorkspaceLifecycle(tx, found.tenant_id, found.workspace_id);
+  const locked = await tx.query(`SELECT r.id::text AS run_id,r.workspace_id::text,r.tenant_id::text,r.course_id,
+      (SELECT left_over.failure_code FROM lesson_author_workspace_v2_tasks left_over
+        WHERE left_over.run_id=r.id AND left_over.status IN ('failed','timed_out','outcome_unknown','canceled')
+        ORDER BY CASE WHEN left_over.status='canceled' THEN 1 ELSE 0 END,left_over.finished_at DESC NULLS LAST,
+          left_over.ordinal LIMIT 1) AS failure_code
+    FROM lesson_author_workspace_v2_runs r
+    WHERE r.id=$1 AND r.status='executing'
+      AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks live
+        WHERE live.run_id=r.id AND live.status IN ('blocked','queued','running'))
+    FOR UPDATE OF r`, [found.run_id]);
+  const run = locked.rows[0];
+  if (!run) return null;
+  // Not a unit: stops the run (no isolated-unit continuation) and syncs the workspace.
+  await stopRunAfterTerminalTask(tx, { id: run.run_id, run_id: run.run_id, workspace_id: run.workspace_id,
+    tenant_id: run.tenant_id, course_id: run.course_id, kind: 'finalize_course', failure_code: run.failure_code });
+  return 'reconciled';
 }
 
 export function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {

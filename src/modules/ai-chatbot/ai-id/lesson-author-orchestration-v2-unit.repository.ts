@@ -251,16 +251,20 @@ export function createOrchestrationV2UnitRepository(
         AND candidate.status='blocked' AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_dependencies d
           JOIN lesson_author_workspace_v2_tasks parent ON parent.id=d.depends_on_task_id AND parent.run_id=d.run_id
           WHERE d.run_id=candidate.run_id AND d.task_id=candidate.id AND parent.status<>'succeeded')
-      RETURNING candidate.id::text`, [lease.run_id, lease.chapter_key]);
+      RETURNING candidate.id::text,candidate.dispatch_epoch`, [lease.run_id, lease.chapter_key]);
     if (!ready.rows.length) return;
     if (ready.rows.length !== 1) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
+    // The outbox identity is the task's own epoch: 0 for a first run, the
+    // reopen epoch for a validation reopened by an author recovery.
+    const epoch = Number(ready.rows[0].dispatch_epoch);
+    if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 100) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
     const outboxId = id();
     if (!UUID_PATTERN.test(outboxId)) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
     const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
         (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
-      VALUES($1,$2,$3,$4,$5,$6,0,$7) RETURNING id::text`,
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text`,
     [outboxId, lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id,
-      ready.rows[0].id, lease.routing_shard]);
+      ready.rows[0].id, epoch, lease.routing_shard]);
     if (outbox.rows.length !== 1) fail('ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED');
   }
 

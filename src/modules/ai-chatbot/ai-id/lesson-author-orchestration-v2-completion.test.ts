@@ -234,7 +234,7 @@ test('chapter completion publishes receipt before releasing the finalizer', asyn
   const queries: string[] = [];
   const tx = { async query<T extends Record<string, unknown>>(sql: string) {
     queries.push(sql);
-    const rows = sql.includes("candidate.kind='finalize_course'") ? [{ id: id(40) }]
+    const rows = sql.includes("candidate.kind='finalize_course'") ? [{ id: id(40), dispatch_epoch: 0 }]
       : sql.includes('INSERT INTO lesson_author_workspace_v2_dispatch_outbox') ? [{ id: id(41) }] : [];
     return { rows: rows as unknown as T[], rowCount: rows.length };
   } } as GenerationJobSql;

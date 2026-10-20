@@ -30,8 +30,8 @@ import type {
   ReserveProvider, SettleProvider,
 } from './lesson-author-orchestration-v2-worker-repository.types.js';
 import {
-  HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, stopRunAfterTerminalTask,
-  syncNeedsActionWorkspace, terminal,
+  HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, reconcileFinishedRunUnknown,
+  stopRunAfterTerminalTask, stopStalledRecoveredRun, syncNeedsActionWorkspace, terminal,
 } from './lesson-author-orchestration-v2-worker-steps.repository.js';
 export { OrchestrationV2WorkerRepositoryError } from './lesson-author-orchestration-v2-worker-repository.types.js';
 export type {
@@ -86,7 +86,12 @@ export function createOrchestrationV2WorkerRepository(
           o.status AS outbox_status,o.routing_shard,
           EXISTS(SELECT 1 FROM lesson_author_workspace_v2_attempt_events prior_attempt
             WHERE prior_attempt.task_id=t.id AND prior_attempt.run_id=t.run_id
-              AND prior_attempt.provider_dispatched) AS provider_replay_required
+              AND prior_attempt.provider_dispatched
+              -- An author rewrite reopens the task with a fresh budget: only calls
+              -- made after its latest reopen count (same rule as the SQL guards).
+              AND prior_attempt.dispatch_epoch>COALESCE((SELECT max(reopened.reopen_epoch)
+                FROM lesson_author_workspace_v2_recovery_tasks reopened WHERE reopened.task_id=t.id),-1))
+            AS provider_replay_required
         FROM lesson_author_workspace_v2_dispatch_outbox o
         JOIN lesson_author_workspace_v2_tasks t ON t.id=o.task_id AND t.run_id=o.run_id
         JOIN lesson_author_workspace_v2_runs r ON r.id=t.run_id AND r.workspace_id=t.workspace_id
@@ -332,13 +337,21 @@ export function createOrchestrationV2WorkerRepository(
   async function markProviderDispatched(lease: OrchestrationV2TaskLease): Promise<void> {
     if (!isOrchestrationV2ProviderTask(lease.kind) || !lease.ai_reservation_id) fail('ORCHESTRATION_V2_TASK_STATE_INVALID');
     await db.transaction(async tx => {
+      // The workspace lifecycle lock serializes this fence with an author stop:
+      // a run stopped before this point dispatches nothing new, while a call
+      // that already crossed the fence finishes and settles normally.
       await lockWorkspaceLifecycle(tx, lease.tenant_id, lease.workspace_id);
       const result = await tx.query(`UPDATE lesson_author_workspace_v2_tasks SET dispatch_started_at=clock_timestamp()
         WHERE id=$1 AND run_id=$2 AND status='running' AND lease_token=$3::uuid
           AND lease_expires_at>clock_timestamp() AND deadline_at>clock_timestamp()
-          AND dispatch_started_at IS NULL AND accounting_state='reserved' RETURNING id`,
+          AND dispatch_started_at IS NULL AND accounting_state='reserved'
+          AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_runs run
+            WHERE run.id=$2 AND run.status IN ('planning','executing','finalizing')) RETURNING id`,
       [lease.task_id, lease.run_id, lease.lease_token]);
-      if (result.rows.length !== 1) fail('ORCHESTRATION_V2_TASK_LEASE_LOST');
+      if (result.rows.length === 1) return;
+      const run = await tx.query(`SELECT status FROM lesson_author_workspace_v2_runs WHERE id=$1`, [lease.run_id]);
+      if (run.rows.length === 1 && !activeRun.has(String(run.rows[0]?.status))) fail('ORCHESTRATION_V2_RUN_NOT_ACTIVE');
+      fail('ORCHESTRATION_V2_TASK_LEASE_LOST');
     });
   }
 
@@ -617,6 +630,10 @@ export function createOrchestrationV2WorkerRepository(
         JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id
           AND t.status IN ('failed','timed_out','outcome_unknown')
         WHERE r.status IN ('planning','executing','finalizing')
+          -- A failure that ended the run before its latest author recovery is not
+          -- a new failure: it stays until the reopened work drains (stopStalledRecoveredRun).
+          AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_recoveries recovery
+            WHERE recovery.run_id=r.id AND recovery.created_at>=t.finished_at)
           AND NOT (t.kind='generate_unit'
             AND coalesce(t.failure_code,'') NOT IN ('AI_PROVIDER_AUTH_REJECTED','AI_PROVIDER_QUOTA_EXHAUSTED')
             AND NOT (t.status='outcome_unknown' AND t.attempt_count<t.max_attempts)
@@ -696,7 +713,9 @@ export function createOrchestrationV2WorkerRepository(
         FROM lesson_author_workspace_v2_tasks t
         WHERE t.status='running' AND (t.lease_expires_at<=clock_timestamp() OR t.deadline_at<=clock_timestamp())
         ORDER BY t.deadline_at,t.id LIMIT 1`);
-      if (!expiredCandidate.rows[0]) return null;
+      if (!expiredCandidate.rows[0]) {
+        return (await reconcileFinishedRunUnknown(tx, reconcileUnknown)) ?? stopStalledRecoveredRun(tx);
+      }
       const candidate = expiredCandidate.rows[0];
       await lockWorkspaceLifecycle(tx, candidate.tenant_id, candidate.workspace_id);
       const locked = await tx.query(`SELECT t.*,r.status AS run_status,

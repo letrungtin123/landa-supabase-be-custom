@@ -164,6 +164,20 @@ export const aiIdEnv = {
     30_000,
     300_000,
   ),
+  // Author "Stop" of a running AI ID V2 design (stop and keep what is done). Also needs the
+  // workspace read, edit and execution gates. No SQL change; default off.
+  LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED: optionalBoolean('LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED', false),
+  // Author "Continue" / "Rewrite" of a stopped AI ID V2 design (needs SQL 20261020_1500). Also needs the
+  // workspace read, edit and execution gates. Allow-list of tenant UUIDs; empty = every tenant once enabled.
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED: optionalBoolean('LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED', false),
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST: optionalUuidCsv('LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST'),
+  // Rewrite cost estimate per lesson (US cents) when fewer than 3 recent lessons were measured anywhere.
+  LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS: optionalBoundedInt(
+    'LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS',
+    15,
+    1,
+    10_000,
+  ),
 
   // Lesson-author video transcription. The upload route streams to a private
   // bucket; these limits are enforced before expensive media processing.

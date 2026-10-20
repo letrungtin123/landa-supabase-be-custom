@@ -227,6 +227,28 @@ export async function loadOrchestrationV2AdmissionRuntime(
   return runtimeFor(selectOrchestrationV2AdmissionPipeline(tenantId, idm), settings, allowed);
 }
 
+/**
+ * True when the tenant's current AI settings still execute this stored run
+ * exactly (same model, same runtime hash). An author recovery is refused
+ * otherwise: every reopened task would fail at its claim with
+ * ORCHESTRATION_V2_EXECUTION_RUNTIME_CHANGED.
+ */
+export async function isOrchestrationV2RunRuntimeCurrent(
+  tenantId: string,
+  run: { runtime_config_hash: string; model: string },
+  readers: OrchestrationV2RuntimeAuthorityReaders = DEFAULT_AUTHORITY_READERS,
+): Promise<boolean> {
+  try {
+    const { settings, allowed } = await loadRuntimeInputs(tenantId, readers);
+    if (settings.lessonAuthorModel !== run.model) return false;
+    resolveOrchestrationV2RunPipeline(run.runtime_config_hash, { settings, allowed_component_types: allowed });
+    return true;
+  } catch (error) {
+    if (error instanceof OrchestrationV2ExecutionConfigError) return false;
+    throw error;
+  }
+}
+
 export async function loadOrchestrationV2ExecutionRuntime(
   lease: OrchestrationV2TaskLease,
   readers: OrchestrationV2RuntimeAuthorityReaders = DEFAULT_AUTHORITY_READERS,

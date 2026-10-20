@@ -53,13 +53,14 @@ function catalog(overrides: Overrides = {}): GenerationJobSql {
 }
 
 test('catalog contract pins all private tables, guards and triggers while keeping runtime disabled', async () => {
-  assert.equal(ORCHESTRATION_V2_TABLES.length, 12);
-  assert.equal(Object.keys(ORCHESTRATION_V2_GUARDS).length, 23);
-  assert.equal(ORCHESTRATION_V2_TRIGGERS.length, 65);
+  // 12 + the author recovery log (SQL 20261020_1500): recoveries and recovery_tasks.
+  assert.equal(ORCHESTRATION_V2_TABLES.length, 14);
+  assert.equal(Object.keys(ORCHESTRATION_V2_GUARDS).length, 26);
+  assert.equal(ORCHESTRATION_V2_TRIGGERS.length, 76);
   const result = await verifyOrchestrationV2Schema(catalog());
   assert.deepEqual(result, {
-    status: 'CATALOG_VERIFIED', contract_version: 2, table_count: 12, guard_count: 23,
-    trigger_count: 67, runtime_enabled: false, concurrency_verified: false,
+    status: 'CATALOG_VERIFIED', contract_version: 2, table_count: 14, guard_count: 26,
+    trigger_count: 78, runtime_enabled: false, concurrency_verified: false,
   });
 });
 
@@ -122,7 +123,7 @@ test('catalog accepts only the complete exact CP5 publish evidence fence set', a
   }));
 
   const result = await verifyOrchestrationV2Schema(catalog({ triggers: [...baseRows, ...publishRows] }));
-  assert.equal(result.trigger_count, 70);
+  assert.equal(result.trigger_count, 81);
 
   await assert.rejects(
     verifyOrchestrationV2Schema(catalog({ triggers: [...baseRows, publishRows[0]] })),

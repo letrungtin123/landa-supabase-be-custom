@@ -68,8 +68,12 @@ export function createOrchestrationV2ChapterRepository(
           AND r.status='executing' AND s.status='sealed' FOR SHARE OF w,r,s,n,c`,
       [lease.task_id, lease.run_id, lease.workspace_id, lease.tenant_id, lease.lease_token]);
       const row = authority.rows[0];
+      // The author may already have edited the chapter title (revision > 0);
+      // the receipt is about the AI baselines, so any accepted revision is valid.
       if (authority.rows.length !== 1 || !row || row.kind !== 'chapter' || row.content_state !== 'content_ready'
-        || Number(row.current_revision) !== 0 || !HASH.test(String(row.manifest_hash))) {
+        || row.current_revision === null || row.current_revision === undefined
+        || !Number.isSafeInteger(Number(row.current_revision)) || Number(row.current_revision) < 0
+        || !HASH.test(String(row.manifest_hash))) {
         fail('ORCHESTRATION_V2_CHAPTER_AUTHORITY_INVALID');
       }
       const artifacts = await tx.query(`SELECT a.artifact_kind,a.artifact_hash,a.payload
@@ -133,13 +137,17 @@ export function createOrchestrationV2ChapterRepository(
       if (!paths.length || new Set(paths).size !== paths.length || paths.some(path => !path)) {
         evidenceInvalid('UNIT_PATHS_INVALID');
       }
+      // Revision 0 is the immutable AI baseline the receipt certifies. An author
+      // edit (revision > 0) made while other chapters were still generating, or
+      // before a recovery re-validates the chapter, must not invalidate it.
       const baselines = await tx.query(`SELECT n.canonical_path,n.kind,r.content_hash,r.revision,r.operation_id::text
         FROM lesson_author_workspace_nodes n
         JOIN lesson_author_workspace_revisions r ON r.workspace_id=n.workspace_id AND r.node_id=n.id
-          AND r.revision=n.current_revision
+          AND r.revision=0
         WHERE n.workspace_id=$1 AND n.tenant_id=$2 AND n.course_id=$3
           AND n.canonical_path=ANY($4::text[]) AND n.kind IN ('unit','component')
-          AND n.content_state='content_ready' AND n.current_revision=0 ORDER BY n.canonical_path FOR SHARE OF n,r`,
+          AND n.content_state='content_ready' AND n.current_revision IS NOT NULL
+        ORDER BY n.canonical_path FOR SHARE OF n,r`,
       [lease.workspace_id, lease.tenant_id, lease.course_id, paths]);
       return validateOrchestrationV2Chapter({ run_id: lease.run_id, assembly,
         inventory_hash: String(inventoryPayload.inventory_hash), chapter_key: lease.chapter_key!,
@@ -172,16 +180,20 @@ export function createOrchestrationV2ChapterRepository(
         AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_dependencies d
           JOIN lesson_author_workspace_v2_tasks parent ON parent.id=d.depends_on_task_id AND parent.run_id=d.run_id
           WHERE d.run_id=candidate.run_id AND d.task_id=candidate.id AND parent.status<>'succeeded')
-      RETURNING candidate.id::text`, [lease.run_id]);
+      RETURNING candidate.id::text,candidate.dispatch_epoch`, [lease.run_id]);
     if (!ready.rows.length) return;
     if (ready.rows.length !== 1) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
+    // The outbox identity is the finalizer's own epoch: 0 for a first run, the
+    // reopen epoch for a finalizer reopened by an author recovery.
+    const epoch = Number(ready.rows[0].dispatch_epoch);
+    if (!Number.isSafeInteger(epoch) || epoch < 0 || epoch > 100) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
     const outboxId = id();
     if (!UUID_PATTERN.test(outboxId)) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
     const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
         (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
-      VALUES($1,$2,$3,$4,$5,$6,0,$7) RETURNING id::text`,
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text`,
     [outboxId, lease.run_id, lease.workspace_id, lease.tenant_id, lease.course_id,
-      ready.rows[0].id, lease.routing_shard]);
+      ready.rows[0].id, epoch, lease.routing_shard]);
     if (outbox.rows.length !== 1) fail('ORCHESTRATION_V2_CHAPTER_WRITE_UNCONFIRMED');
   }
 

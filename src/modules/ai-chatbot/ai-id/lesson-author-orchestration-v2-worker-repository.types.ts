@@ -70,7 +70,10 @@ export class OrchestrationV2WorkerRepositoryError extends Error {
     | 'ORCHESTRATION_V2_TASK_STATE_INVALID'
     | 'ORCHESTRATION_V2_TASK_WRITE_UNCONFIRMED'
     /** The artifact's stored JSON would not re-hash to its artifact hash (nothing is written). */
-    | 'ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH') {
+    | 'ORCHESTRATION_V2_ARTIFACT_HASH_MISMATCH'
+    // The run was stopped (needs_action/canceled) before this claim crossed the
+    // provider boundary: no paid call is made and the claim releases its credit.
+    | 'ORCHESTRATION_V2_RUN_NOT_ACTIVE') {
     super(code);
     this.name = 'OrchestrationV2WorkerRepositoryError';
   }

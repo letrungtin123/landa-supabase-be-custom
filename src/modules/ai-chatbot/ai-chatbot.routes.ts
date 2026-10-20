@@ -32,6 +32,7 @@ import {
   loadOrchestrationV2AdmissionRuntime, orchestrationV2IdmAdmissionWarning, selectOrchestrationV2AdmissionPipeline,
 } from './ai-id/lesson-author-orchestration-v2-execution.config.js';
 import { verifyOrchestrationV2Schema } from './ai-id/lesson-author-orchestration-v2-schema.repository.js';
+import { mountOrchestrationV2RecoveryRoutes } from './ai-id/lesson-author-orchestration-v2-recovery.routes.js';
 import { createWorkspaceAuthority } from './ai-id/lesson-author-workspace-authority.repository.js';
 import { prepareDurableBlueprint, withLessonAuthorConversationLock } from './chat/chat.service.js';
 import { sendError } from '../../utils/response.js';
@@ -424,6 +425,9 @@ const workspaceReview = createWorkspaceReviewHandlers({
 });
 router.get(`${workspaceReadPath}/review-items`, (req, res, next) => { workspaceReview.list(req, res).catch(next); });
 router.post(`${workspaceReadPath}/review-items/:obligationId/resolve`, (req, res, next) => { workspaceReview.resolve(req, res).catch(next); });
+// Author recovery: stop a running design, continue it, rewrite missing lessons (owner only).
+mountOrchestrationV2RecoveryRoutes(router, { workspacePath: workspaceReadPath,
+  ownerOnly: lessonAuthorSessionOwnerOnly('conversationId', { courseParam: 'courseId' }) });
 const generationJobRepository = createGenerationJobRepository({ transaction: withDatabaseTransaction });
 router.get('/chat/lesson-author/conversations/:conversationId/generation-jobs/:jobId', createGenerationStatusHandler({
   enabled: () => env.LESSON_AUTHOR_GENERATION_STATUS_ENABLED || env.LESSON_AUTHOR_GENERATION_ENABLED,

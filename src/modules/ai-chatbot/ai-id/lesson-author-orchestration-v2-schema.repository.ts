@@ -13,14 +13,17 @@ export const ORCHESTRATION_V2_TABLES = [
   'lesson_author_workspace_v2_attempt_events',
   'lesson_author_workspace_v2_assessment_obligations',
   'lesson_author_workspace_v2_review_receipts',
+  // Author recovery log (SQL 20261020_1500).
+  'lesson_author_workspace_v2_recoveries',
+  'lesson_author_workspace_v2_recovery_tasks',
 ] as const;
 
 /** Exact hashes of reviewed SECURITY INVOKER function bodies in the manual artifact. */
 export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_source_snapshot_v2()': '9c7df8552236baa01eb3fe517e2d145a',
   'guard_lesson_author_workspace_source_fact_v2()': '6e1aa7fd21af9c229bebc7388718cbfd',
-  'guard_lesson_author_workspace_v2_run()': '5d4828cdad69bded21a4a55f4c2bb124',
-  'guard_lesson_author_workspace_v2_task()': '41929858fa2887bbe83d36d2555acf55',
+  'guard_lesson_author_workspace_v2_run()': '797d3b3440446a96a27ce68855507b50',
+  'guard_lesson_author_workspace_v2_task()': 'e485690b8e42fe5a4d755bbcb86aadd2',
   'guard_lesson_author_workspace_v2_dependency()': 'dd347f4d6cb80814bb57d87e136f9c3e',
   'guard_lesson_author_workspace_v2_artifact()': '4cf67dccee7c7e00c87041b4ae5a2bbe',
   'guard_lesson_author_workspace_v2_outbox()': 'e4fde4589943cd935ba9099582311fc8',
@@ -29,7 +32,7 @@ export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_node()': '3e6fecf88368b46c1ee93b112056f026',
   'guard_lesson_author_workspace_revision()': 'b13f1a1a13b37e1e62e31b69ebf92e52',
   'guard_lesson_author_workspace_event()': '3e03bacb3ee2ac53749286fa133a4e1e',
-  'fence_lesson_author_workspace_baseline()': '2849f826f369316db05ec64a4b17cf76',
+  'fence_lesson_author_workspace_baseline()': '641b44ca42a8363783d9ce9fe4406c83',
   'assert_lesson_author_workspace_unit_commit()': '2dd603d20d5c19c4678468479ddecae9',
   'assert_lesson_author_workspace_run_commit()': '4f218179c17e8a1503104f3490e6dd18',
   'assert_lesson_author_workspace_v2_completion_commit()': 'c15968c86517171607deaa74e04a672d',
@@ -40,6 +43,9 @@ export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_apply_quality_v2()': '5f83d38c95906246ed4b184bef2642ac',
   'guard_lesson_author_workspace_v2_assessment_obligation()': '2a6558622c93fbab24922ab945ea702c',
   'guard_lesson_author_workspace_v2_review_receipt()': '203201138945fe9913fc82cf7bbd9aea',
+  'guard_lesson_author_workspace_v2_recovery()': '2caa0d4300c5f70bb3b42059e5123113',
+  'guard_lesson_author_workspace_v2_recovery_task()': 'ab343201149e008276311796abd53593',
+  'assert_lesson_author_workspace_v2_recovery_commit()': 'e3ad484e7ac2030ec12cac8dff7e0b84',
 } as const;
 
 type TriggerContract = {
@@ -68,6 +74,9 @@ const guardTriggers: ReadonlyArray<TriggerContract> = [
     'guard_lesson_author_workspace_v2_assessment_obligation'],
   ['lesson_author_workspace_v2_review_receipts', 'trg_la_ws_v2_review_receipt_guard',
     'guard_lesson_author_workspace_v2_review_receipt'],
+  ['lesson_author_workspace_v2_recoveries', 'trg_la_ws_v2_recovery_guard', 'guard_lesson_author_workspace_v2_recovery'],
+  ['lesson_author_workspace_v2_recovery_tasks', 'trg_la_ws_v2_recovery_task_guard',
+    'guard_lesson_author_workspace_v2_recovery_task'],
 ].map(([table, name, fn]) => ({
   table: table as TriggerContract['table'], name, fn, type: 31, deferrable: false, deferred: false,
   oldTable: null, newTable: null,
@@ -99,6 +108,9 @@ export const ORCHESTRATION_V2_TRIGGERS: ReadonlyArray<TriggerContract> = [
     oldTable: null, newTable: null },
   { table: 'lesson_author_workspace_quality_receipts', name: 'trg_la_workspace_quality_commit',
     fn: 'assert_lesson_author_workspace_quality_commit', type: 5, deferrable: true, deferred: true,
+    oldTable: null, newTable: null },
+  { table: 'lesson_author_workspace_v2_recovery_tasks', name: 'trg_la_ws_v2_recovery_commit',
+    fn: 'assert_lesson_author_workspace_v2_recovery_commit', type: 5, deferrable: true, deferred: true,
     oldTable: null, newTable: null },
 ];
 
@@ -177,6 +189,9 @@ export async function verifyOrchestrationV2Schema(db: GenerationJobSql) {
         to_regclass('public.idx_la_ws_v2_task_running_capacity') IS NOT NULL
       WHEN c.relname='lesson_author_workspace_v2_attempt_events' THEN
         to_regclass('public.idx_la_ws_v2_attempt_task') IS NOT NULL
+      WHEN c.relname='lesson_author_workspace_v2_recovery_tasks' THEN
+        to_regclass('public.idx_la_ws_v2_recovery_task_reopen') IS NOT NULL
+        AND to_regclass('public.idx_la_ws_v2_recovery_task_recovery') IS NOT NULL
       ELSE true END AS runtime_columns_ready
       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
       WHERE n.nspname='public' AND c.relkind='r' AND c.relname=ANY($1::text[])`, [ORCHESTRATION_V2_TABLES]);
