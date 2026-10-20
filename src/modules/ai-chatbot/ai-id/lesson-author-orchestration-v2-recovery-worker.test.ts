@@ -165,6 +165,8 @@ function recoveryRoute(candidate: Record<string, unknown> | null, locked: Record
     }
     if (/pg_advisory_xact_lock/.test(sql)) return [{}];
     if (/SELECT t\.\*,r\.model/.test(sql)) return locked ? [locked] : [];
+    // No recovered run left without live work in these cases.
+    if (/WHERE r\.status='executing'\s+AND EXISTS\(SELECT 1 FROM lesson_author_workspace_v2_recoveries/.test(sql)) return [];
     return undefined;
   };
 }

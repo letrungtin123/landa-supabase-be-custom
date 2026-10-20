@@ -7,7 +7,9 @@ import type { Router } from 'express';
 import { withDatabaseTransaction } from '../../../config/database.js';
 import { env } from '../../../config/env.js';
 import { hasPermission } from '../../../middleware/authorize.js';
+import { orchestrationV2QuotaAccounting } from './lesson-author-orchestration-v2-accounting.service.js';
 import { isOrchestrationV2RunRuntimeCurrent } from './lesson-author-orchestration-v2-execution.config.js';
+import { createOrchestrationV2RecoveryCredit } from './lesson-author-orchestration-v2-recovery-credit.service.js';
 import {
   createOrchestrationV2RecoveryHandlers,
   orchestrationV2RecoveryRoute,
@@ -23,10 +25,23 @@ function workspaceWritesEnabled(): boolean {
     && env.LESSON_AUTHOR_WORKSPACE_EXECUTION_ENABLED;
 }
 
+/** Continue/rewrite gate (SQL 20261020_1500): empty allow-list = every tenant, like the IDM pipeline switch. */
+export function orchestrationV2RecoveryEnabled(tenantId: string, settings: {
+  writes: boolean; enabled: boolean; tenant_allowlist: readonly string[];
+}): boolean {
+  if (!settings.writes || !settings.enabled) return false;
+  const tenant = tenantId.trim().toLowerCase();
+  return !settings.tenant_allowlist.length
+    || settings.tenant_allowlist.some(candidate => candidate.trim().toLowerCase() === tenant);
+}
+
 export function mountOrchestrationV2RecoveryRoutes(router: Router, input: {
   workspacePath: string;
   ownerOnly: OrchestrationV2AsyncMiddleware;
 }): void {
+  const credit = createOrchestrationV2RecoveryCredit({
+    fallbackUnitCostUsd: () => env.LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_UNIT_COST_FALLBACK_CENTS / 100,
+  });
   const handlers = createOrchestrationV2RecoveryHandlers({
     service: createOrchestrationV2RecoveryService({
       repository: user => createOrchestrationV2RecoveryRepository({
@@ -35,9 +50,12 @@ export function mountOrchestrationV2RecoveryRoutes(router: Router, input: {
       }),
       canRead: user => hasPermission(user, 'courses', 'can_edit'),
       stopEnabled: () => workspaceWritesEnabled() && env.LESSON_AUTHOR_ORCHESTRATION_V2_STOP_ENABLED,
-      // Continue/rewrite ship with SQL 20261020_1500 (recovery log + guards).
-      recoveryEnabled: () => false,
+      recoveryEnabled: tenantId => orchestrationV2RecoveryEnabled(tenantId, { writes: workspaceWritesEnabled(),
+        enabled: env.LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_ENABLED,
+        tenant_allowlist: env.LESSON_AUTHOR_ORCHESTRATION_V2_RECOVERY_TENANT_ALLOWLIST }),
       runtimeCurrent: (tenantId, run) => isOrchestrationV2RunRuntimeCurrent(tenantId, run),
+      assertAffordable: (tenantId, unitCount) => credit.assertAffordable(tenantId, unitCount),
+      reconcileUnknown: orchestrationV2QuotaAccounting.reconcileUnknownAsBudget,
     }),
     report: record => {
       const line = '[LessonAuthorWorkspaceRecovery] ' + JSON.stringify(record);
@@ -47,4 +65,7 @@ export function mountOrchestrationV2RecoveryRoutes(router: Router, input: {
   const ownerOnly = orchestrationV2RecoveryRoute(input.ownerOnly);
   router.get(`${input.workspacePath}/recovery`, ownerOnly, orchestrationV2RecoveryRoute(handlers.describe));
   router.post(`${input.workspacePath}/stop`, ownerOnly, orchestrationV2RecoveryRoute(handlers.stop));
+  router.post(`${input.workspacePath}/resume`, ownerOnly, orchestrationV2RecoveryRoute(handlers.resume));
+  router.post(`${input.workspacePath}/nodes/:nodeId/regenerate`, ownerOnly,
+    orchestrationV2RecoveryRoute(handlers.regenerate));
 }

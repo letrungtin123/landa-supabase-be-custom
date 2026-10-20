@@ -163,6 +163,7 @@ test('snapshot: one read-only repeatable-read view of the run, its tasks and the
     }
     if (/FROM lesson_author_workspace_v2_dependencies/.test(sql)) return [{ task_id: uuid(30), depends_on_task_id: uuid(29) }];
     if (/kind='course'/.test(sql)) return [{ node_id: uuid(40), canonical_path: 'course' }];
+    if (/FROM lesson_author_workspace_v2_recovery_tasks WHERE task_id=ANY/.test(sql)) return [{ task_id: uuid(30), reopens: 2 }];
     return undefined;
   });
   const snapshot = await createOrchestrationV2RecoveryRepository({ db: f.db,
@@ -171,7 +172,9 @@ test('snapshot: one read-only repeatable-read view of the run, its tasks and the
   assert.equal(snapshot.run?.event_head, 42);
   assert.equal(snapshot.run?.manifest_sealed, true);
   assert.deepEqual(snapshot.tasks[0]!.depends_on, [uuid(29)]);
-  assert.equal(snapshot.tasks[0]!.generation, 0);
+  assert.equal(snapshot.tasks[0]!.generation, 2);
+  assert.equal(snapshot.recorded, false);
+  assert.equal(snapshot.scope_node, null);
   assert.deepEqual(snapshot.course_node, { node_id: uuid(40), path: 'course' });
   assert.deepEqual(snapshot.runtime, { runtime_config_hash: 'b'.repeat(64), model: 'gemini-test' });
   assert.match(f.calls[0]!.sql, /REPEATABLE READ, READ ONLY/);

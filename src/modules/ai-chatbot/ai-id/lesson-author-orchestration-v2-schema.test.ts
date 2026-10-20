@@ -20,6 +20,7 @@ const workConservingCapacityWake = readManualSql('20261006_1500_lesson_author_v2
 const providerReplayEvidenceFence = readManualSql('20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql');
 const needsActionNodeEditGuard = readManualSql('20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql');
 const cp2bAssessmentObligations = readManualSql('20261005_1930_lesson_author_cp2b_assessment_obligations.sql');
+const authorRecovery = readManualSql('20261020_1500_lesson_author_v2_recovery.sql');
 const executable = sql
   .split(/\r?\n/)
   .filter((line) => !line.trimStart().startsWith('--'))
@@ -49,7 +50,8 @@ test('reviewed guard hashes exactly match the manual SQL bodies', { skip: manual
     const needsActionNodeGuard = needsActionNodeEditGuard.includes(`FUNCTION public.${name}()`);
     const cp2bGuard = cp2bAssessmentObligations.includes(`FUNCTION public.${name}()`);
     const cp1Guard = cp1QualityEvidence.includes(`FUNCTION public.${name}()`);
-    const source = needsActionNodeGuard ? needsActionNodeEditGuard
+    const recoveryGuard = authorRecovery.includes(`FUNCTION public.${name}()`);
+    const source = recoveryGuard ? authorRecovery : needsActionNodeGuard ? needsActionNodeEditGuard
       : replayEvidenceGuard ? providerReplayEvidenceFence
       : capacityWakeGuard ? workConservingCapacityWake
       : assessmentAuthorityGuard ? assessmentAuthorityBackpressureHotfix
@@ -304,12 +306,12 @@ test('outcome replay guard requires pessimistic accounting before one bounded re
   assert.match(executableCorrection, /COMMIT;\s*$/);
 });
 
-test('deterministic unit fallback is the only undispatched provider success admitted by the current guard', { skip: manualSqlSkip }, () => {
+test('deterministic unit fallback is the only undispatched provider success admitted by the 20261006_1530 guard', { skip: manualSqlSkip }, () => {
   const pattern = /CREATE (?:OR REPLACE )?FUNCTION public\.guard_lesson_author_workspace_v2_task\(\)[\s\S]*?AS \$guard\$\r?\n([\s\S]*?)\r?\n\$guard\$;/;
   const body = providerReplayEvidenceFence.match(pattern)?.[1];
   assert.ok(body);
   assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'),
-    ORCHESTRATION_V2_GUARDS['guard_lesson_author_workspace_v2_task()']);
+    '41929858fa2887bbe83d36d2555acf55');
   assert.match(body, /deterministic_fallback:=NEW\.kind='generate_unit' AND NEW\.status='succeeded'/);
   assert.match(body, /OLD\.attempt_count>=2 AND OLD\.dispatch_epoch>=2/);
   assert.match(body, /prior_attempt\.provider_dispatched AND prior_attempt\.dispatch_epoch<OLD\.dispatch_epoch/);
@@ -328,7 +330,7 @@ test('baseline fence admits only an evidenced deterministic fallback while prese
   const body = providerReplayEvidenceFence.match(pattern)?.[1];
   assert.ok(body);
   assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'),
-    ORCHESTRATION_V2_GUARDS['fence_lesson_author_workspace_baseline()']);
+    '2849f826f369316db05ec64a4b17cf76');
   assert.match(providerReplayEvidenceFence,
     /baseline_hash IS DISTINCT FROM '56a4bd1e8ab5bc88288e9b3ec187ade4'/);
   assert.match(providerReplayEvidenceFence,

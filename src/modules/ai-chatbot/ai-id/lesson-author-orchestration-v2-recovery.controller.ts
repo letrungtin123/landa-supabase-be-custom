@@ -1,6 +1,9 @@
 // HTTP boundary of the author recovery actions on an AI course design run:
 //   GET  …/workspaces/:workspaceId/recovery  what can be stopped, continued or rewritten now
 //   POST …/workspaces/:workspaceId/stop      stop the running design, keep what is done
+//   POST …/workspaces/:workspaceId/resume    re-run the free validations/finalizer of a stopped design
+//   POST …/workspaces/:workspaceId/nodes/:nodeId/regenerate
+//                                            rewrite the lessons without content of a lesson/chapter/course
 // Mount after authenticate + tenantContext + the session-owner guard. Input is
 // validated here (zod); the service and repository own every rule.
 
@@ -191,6 +194,20 @@ export function createOrchestrationV2RecoveryHandlers(deps: OrchestrationV2Recov
       if (!parsed.success) throw new OrchestrationV2RecoveryError('RECOVERY_INPUT_INVALID');
       const result = await deps.service.stop(user, target, parsed.data.operation_id);
       return { data: result, run_id: result.run_id, recovery_id: null, reopened_task_count: 0, replayed: result.replayed };
+    }),
+    resume: createOrchestrationV2RecoveryHandler(deps, 'resume', async ({ user, target, body }) => {
+      const parsed = RECOVERY_BODY.safeParse(body);
+      if (!parsed.success) throw new OrchestrationV2RecoveryError('RECOVERY_INPUT_INVALID');
+      const result = await deps.service.recover(user, target, { action: 'resume' }, parsed.data);
+      return { data: result, run_id: result.run_id, recovery_id: result.recovery_id,
+        reopened_task_count: result.reopened_task_count, replayed: result.replayed };
+    }),
+    regenerate: createOrchestrationV2RecoveryHandler(deps, 'regenerate', async ({ user, target, nodeId, body }) => {
+      const parsed = RECOVERY_BODY.safeParse(body);
+      if (!parsed.success || !nodeId) throw new OrchestrationV2RecoveryError('RECOVERY_INPUT_INVALID');
+      const result = await deps.service.recover(user, target, { action: 'regenerate', node_id: nodeId }, parsed.data);
+      return { data: result, run_id: result.run_id, recovery_id: result.recovery_id,
+        reopened_task_count: result.reopened_task_count, replayed: result.replayed };
     }),
   };
 }

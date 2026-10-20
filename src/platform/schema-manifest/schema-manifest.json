@@ -135,6 +135,19 @@
         }
       ]
     },
+    "assert_lesson_author_workspace_v2_recovery_commit()": {
+      "latest": {
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "e3ad484e7ac2030ec12cac8dff7e0b84",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "e3ad484e7ac2030ec12cac8dff7e0b84"
+        }
+      ]
+    },
     "begin_course_publish_candidate(uuid,uuid,character varying,uuid,uuid)": {
       "latest": {
         "file": "20261006_0900_course_publish_governance_cp5.sql",
@@ -271,8 +284,8 @@
     },
     "fence_lesson_author_workspace_baseline()": {
       "latest": {
-        "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
-        "md5": "2849f826f369316db05ec64a4b17cf76",
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "641b44ca42a8363783d9ce9fe4406c83",
         "security_definer": false
       },
       "definitions": [
@@ -291,6 +304,15 @@
         {
           "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
           "md5": "2849f826f369316db05ec64a4b17cf76"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "641b44ca42a8363783d9ce9fe4406c83"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery_ROLLBACK.sql",
+          "md5": "2849f826f369316db05ec64a4b17cf76",
+          "rollback": true
         }
       ]
     },
@@ -735,6 +757,32 @@
         }
       ]
     },
+    "guard_lesson_author_workspace_v2_recovery()": {
+      "latest": {
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "2caa0d4300c5f70bb3b42059e5123113",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "2caa0d4300c5f70bb3b42059e5123113"
+        }
+      ]
+    },
+    "guard_lesson_author_workspace_v2_recovery_task()": {
+      "latest": {
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "ab343201149e008276311796abd53593",
+        "security_definer": false
+      },
+      "definitions": [
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "ab343201149e008276311796abd53593"
+        }
+      ]
+    },
     "guard_lesson_author_workspace_v2_review_receipt()": {
       "latest": {
         "file": "20261005_1930_lesson_author_cp2b_assessment_obligations.sql",
@@ -750,21 +798,30 @@
     },
     "guard_lesson_author_workspace_v2_run()": {
       "latest": {
-        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
-        "md5": "5d4828cdad69bded21a4a55f4c2bb124",
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "797d3b3440446a96a27ce68855507b50",
         "security_definer": false
       },
       "definitions": [
         {
           "file": "20261001_1100_lesson_author_orchestration_v2.sql",
           "md5": "5d4828cdad69bded21a4a55f4c2bb124"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "797d3b3440446a96a27ce68855507b50"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery_ROLLBACK.sql",
+          "md5": "5d4828cdad69bded21a4a55f4c2bb124",
+          "rollback": true
         }
       ]
     },
     "guard_lesson_author_workspace_v2_task()": {
       "latest": {
-        "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
-        "md5": "41929858fa2887bbe83d36d2555acf55",
+        "file": "20261020_1500_lesson_author_v2_recovery.sql",
+        "md5": "e485690b8e42fe5a4d755bbcb86aadd2",
         "security_definer": false
       },
       "definitions": [
@@ -787,6 +844,15 @@
         {
           "file": "20261006_1530_lesson_author_v2_provider_replay_evidence_fence.sql",
           "md5": "41929858fa2887bbe83d36d2555acf55"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery.sql",
+          "md5": "e485690b8e42fe5a4d755bbcb86aadd2"
+        },
+        {
+          "file": "20261020_1500_lesson_author_v2_recovery_ROLLBACK.sql",
+          "md5": "41929858fa2887bbe83d36d2555acf55",
+          "rollback": true
         }
       ]
     },

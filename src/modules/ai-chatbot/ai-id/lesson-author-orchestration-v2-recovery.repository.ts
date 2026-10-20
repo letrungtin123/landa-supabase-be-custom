@@ -1,5 +1,5 @@
-// SQL of the author recovery actions on an orchestration V2 run (stop, and
-// the read-only snapshot the recovery options are computed from).
+// SQL of the author recovery actions on an orchestration V2 run (stop,
+// continue/rewrite, and the read-only snapshot the options are computed from).
 //
 // Lock order of every write transaction, matching recoverOne and
 // lesson-author-orchestration-v2-lock-order.ts: the caller's permission rows
@@ -7,8 +7,10 @@
 // -> tasks (by ordinal) -> course fence (C) -> AI token rows. Course-scoped
 // writes then take C/Q implicitly through their triggers.
 
+import { randomUUID } from 'node:crypto';
 import type { GenerationJobDatabase, GenerationJobSql } from './lesson-author-generation-job.repository.js';
 import {
+  lockOrchestrationV2CourseFence,
   withOrchestrationV2TransactionRetry,
   type OrchestrationV2TransientRetryOptions,
 } from './lesson-author-orchestration-v2-lock-order.js';
@@ -16,10 +18,17 @@ import {
   ACTIVE_RUN_STATUSES,
   ORCHESTRATION_V2_RUN_STOPPED_BY_AUTHOR,
   OrchestrationV2RecoveryError,
+  orchestrationV2RecoveryErrorFor,
+  orchestrationV2RecoveryRequestHash,
+  planOrchestrationV2Recovery,
   type OrchestrationV2RecoveryErrorCode,
+  type OrchestrationV2RecoveryPlan,
   type OrchestrationV2RecoveryRun,
+  type OrchestrationV2RecoveryScope,
+  type OrchestrationV2RecoveryScopeKind,
   type OrchestrationV2RecoveryTask,
 } from './lesson-author-orchestration-v2-recovery.logic.js';
+import type { ReconcileUnknown } from './lesson-author-orchestration-v2-worker-repository.types.js';
 import { lockWorkspaceLifecycle, syncNeedsActionWorkspace } from './lesson-author-orchestration-v2-worker-steps.repository.js';
 import type { WorkspaceReadOwner } from './lesson-author-workspace-read.repository.js';
 import { UUID_PATTERN, isUuid } from '../../../utils/uuid.js';
@@ -32,6 +41,10 @@ export interface OrchestrationV2RecoverySnapshot {
   course_node: { node_id: string; path: string } | null;
   /** Run authority used to refuse a recovery after the AI settings changed. */
   runtime: { runtime_config_hash: string; model: string } | null;
+  /** The requested rewrite scope node, when one was asked for and exists in this workspace. */
+  scope_node: OrchestrationV2RecoveryScope | null;
+  /** A recovery with this operation id is already recorded (the POST replays it). */
+  recorded: boolean;
 }
 
 export interface OrchestrationV2RecoveryActionResult {
@@ -155,6 +168,134 @@ export const RECOVERY_TASKS_SQL = `SELECT t.id::text AS task_id,t.ordinal,t.kind
 export const RECOVERY_DEPENDENCIES_SQL = `SELECT task_id::text,depends_on_task_id::text
   FROM lesson_author_workspace_v2_dependencies WHERE run_id=$1 ORDER BY task_id,depends_on_task_id`;
 
+/** Reopens already recorded per task (its rewrite generation), batched for the whole run. */
+async function readGenerations(tx: GenerationJobSql, rows: Record<string, unknown>[]): Promise<Map<string, number>> {
+  const ids = rows.map(row => nullableId(row.task_id)).filter((value): value is string => value !== null);
+  if (!ids.length) return new Map();
+  const result = await tx.query(`SELECT task_id::text,count(*)::integer AS reopens
+    FROM lesson_author_workspace_v2_recovery_tasks WHERE task_id=ANY($1::uuid[]) GROUP BY task_id`, [ids]);
+  return new Map(result.rows.map(row => [nullableId(row.task_id)!, integer(row.reopens, 0, 10)]));
+}
+
+const SCOPE_KINDS: readonly OrchestrationV2RecoveryScopeKind[] = ['unit', 'lesson', 'chapter', 'course'];
+
+/** A node of this workspace that can scope a rewrite; null when absent; NOTHING_TO_DO for other kinds. */
+async function readScopeNode(tx: GenerationJobSql, owner: WorkspaceReadOwner, workspaceId: string, nodeId: string)
+  : Promise<OrchestrationV2RecoveryScope | null> {
+  const result = await tx.query(`SELECT id::text AS node_id,kind,canonical_path FROM lesson_author_workspace_nodes
+    WHERE workspace_id=$1 AND tenant_id=$2 AND course_id=$3 AND id=$4`, [workspaceId, owner.tenantId, owner.courseId, nodeId]);
+  const row = result.rows[0];
+  if (!row) return null;
+  if (!SCOPE_KINDS.includes(row.kind as OrchestrationV2RecoveryScopeKind)) fail('RECOVERY_NOTHING_TO_DO');
+  return { node_id: nullableId(row.node_id)!, kind: row.kind as OrchestrationV2RecoveryScopeKind,
+    path: String(row.canonical_path) };
+}
+
+export type OrchestrationV2RecoveryRequestInput =
+  | { action: 'resume' }
+  | { action: 'regenerate'; node_id: string };
+
+export interface OrchestrationV2RecoverInput {
+  operation_id: string;
+  expected_workspace_revision: number;
+  request: OrchestrationV2RecoveryRequestInput;
+  /** AI units the caller checked credit for; more under the lock means the run changed. */
+  max_ai_unit_count: number;
+  estimated_cost_usd: number;
+  reconcileUnknown: ReconcileUnknown;
+}
+
+interface ApplyRecoveryContext {
+  owner: WorkspaceReadOwner;
+  workspaceId: string;
+  runId: string;
+  action: 'resume' | 'regenerate';
+  scope: OrchestrationV2RecoveryScope | null;
+  plan: OrchestrationV2RecoveryPlan;
+  requestHash: string;
+  operationId: string;
+  estimatedCostUsd: number;
+  reconcileUnknown: ReconcileUnknown;
+}
+
+/** The writes of one accepted recovery, in guard order (log -> run -> tasks -> dispatch -> workspace -> event). */
+async function applyRecovery(tx: GenerationJobSql, context: ApplyRecoveryContext): Promise<string> {
+  for (const item of context.plan.items.filter(candidate => candidate.needs_reconcile)) {
+    const unknown = await tx.query(`SELECT t.*,r.model FROM lesson_author_workspace_v2_tasks t
+      JOIN lesson_author_workspace_v2_runs r ON r.id=t.run_id
+      WHERE t.id=$1 AND t.run_id=$2 AND t.status='outcome_unknown' AND t.accounting_state='pending_reconciliation'`,
+    [item.task_id, context.runId]);
+    if (unknown.rows.length !== 1) fail('RECOVERY_STATE_CHANGED');
+    await context.reconcileUnknown(tx, unknown.rows[0]!);
+  }
+  const shards = await tx.query(`SELECT DISTINCT routing_shard FROM lesson_author_workspace_v2_dispatch_outbox
+    WHERE run_id=$1`, [context.runId]);
+  if (shards.rows.length !== 1) unavailable();
+  const routingShard = integer(shards.rows[0]!.routing_shard, 0, 4_095);
+
+  const recoveryId = randomUUID();
+  const inserted = await tx.query(`INSERT INTO lesson_author_workspace_v2_recoveries
+      (id,run_id,workspace_id,tenant_id,course_id,action,scope_kind,scope_node_id,requested_by,idempotency_key,
+       request_hash,prior_status,prior_failure_code,prior_finished_at,reopened_task_count,ai_unit_count,estimated_cost_usd)
+    SELECT $1,r.id,r.workspace_id,r.tenant_id,r.course_id,$2,$3,$4,$5,$6,$7,'needs_action',r.failure_code,r.finished_at,
+      $8,$9,$10
+    FROM lesson_author_workspace_v2_runs r WHERE r.id=$11 AND r.status='needs_action' RETURNING id::text`,
+  [recoveryId, context.action, context.scope?.kind ?? null, context.scope?.node_id ?? null, context.owner.userId,
+    context.operationId, context.requestHash, context.plan.items.length, context.plan.ai_unit_count,
+    context.action === 'regenerate' ? context.estimatedCostUsd : 0, context.runId]);
+  if (inserted.rows.length !== 1) unavailable();
+  const reopenRows = context.plan.items.map(item => ({ task_id: item.task_id, generation: item.generation,
+    prior_status: item.prior_status, prior_failure_code: item.prior_failure_code,
+    prior_attempt_count: item.prior_attempt_count, prior_dispatch_epoch: item.prior_dispatch_epoch,
+    reopen_epoch: item.reopen_epoch, reopened_status: item.reopened_status,
+    prior_ai_reservation_id: item.prior_ai_reservation_id }));
+  const logged = await tx.query(`INSERT INTO lesson_author_workspace_v2_recovery_tasks
+      (recovery_id,task_id,run_id,workspace_id,tenant_id,course_id,generation,prior_status,prior_failure_code,
+       prior_attempt_count,prior_dispatch_epoch,reopen_epoch,reopened_status,prior_ai_reservation_id)
+    SELECT $1,x.task_id,$2,$3,$4,$5,x.generation,x.prior_status,x.prior_failure_code,x.prior_attempt_count,
+      x.prior_dispatch_epoch,x.reopen_epoch,x.reopened_status,x.prior_ai_reservation_id
+    FROM jsonb_to_recordset($6::jsonb) AS x(task_id uuid,generation smallint,prior_status text,prior_failure_code text,
+      prior_attempt_count smallint,prior_dispatch_epoch integer,reopen_epoch integer,reopened_status text,
+      prior_ai_reservation_id uuid)
+    RETURNING task_id::text`, [recoveryId, context.runId, context.workspaceId, context.owner.tenantId,
+    context.owner.courseId, JSON.stringify(reopenRows)]);
+  if (logged.rows.length !== reopenRows.length) unavailable();
+
+  const resumed = await tx.query(`UPDATE lesson_author_workspace_v2_runs
+    SET status='executing',failure_code=NULL,finished_at=NULL
+    WHERE id=$1 AND status='needs_action' RETURNING id`, [context.runId]);
+  if (resumed.rows.length !== 1) unavailable();
+  const reopened = await tx.query(`UPDATE lesson_author_workspace_v2_tasks t SET status=x.reopened_status,
+      attempt_count=0,dispatch_epoch=x.reopen_epoch,failure_code=NULL,finished_at=NULL,started_at=NULL,
+      deadline_at=NULL,dispatch_started_at=NULL,ai_reservation_id=NULL,accounting_state='not_required',
+      observed_usage='{}'::jsonb,result_hash=NULL,validation_contract=NULL,next_attempt_at=clock_timestamp()
+    FROM jsonb_to_recordset($2::jsonb) AS x(task_id uuid,prior_status text,prior_dispatch_epoch integer,
+      reopen_epoch integer,reopened_status text)
+    WHERE t.run_id=$1 AND t.id=x.task_id AND t.status=x.prior_status AND t.dispatch_epoch=x.prior_dispatch_epoch
+    RETURNING t.id::text,t.status,t.dispatch_epoch`, [context.runId, JSON.stringify(reopenRows)]);
+  if (reopened.rows.length !== reopenRows.length) unavailable();
+  const queued = context.plan.items.filter(item => item.reopened_status === 'queued');
+  if (queued.length) {
+    const outbox = await tx.query(`INSERT INTO lesson_author_workspace_v2_dispatch_outbox
+        (id,run_id,workspace_id,tenant_id,course_id,task_id,dispatch_epoch,routing_shard)
+      SELECT x.id,$1,$2,$3,$4,x.task_id,x.dispatch_epoch,$5
+      FROM jsonb_to_recordset($6::jsonb) AS x(id uuid,task_id uuid,dispatch_epoch integer) RETURNING id`,
+    [context.runId, context.workspaceId, context.owner.tenantId, context.owner.courseId, routingShard,
+      JSON.stringify(queued.map(item => ({ id: randomUUID(), task_id: item.task_id, dispatch_epoch: item.reopen_epoch })))]);
+    if (outbox.rows.length !== queued.length) unavailable();
+  }
+  const workspace = await tx.query(`UPDATE lesson_author_workspaces SET status='drafting',updated_at=clock_timestamp()
+    WHERE id=$1 AND tenant_id=$2 AND course_id=$3 AND status='needs_action' RETURNING status`,
+  [context.workspaceId, context.owner.tenantId, context.owner.courseId]);
+  if (workspace.rows.length !== 1) unavailable();
+  const event = await tx.query(`INSERT INTO lesson_author_workspace_events
+      (workspace_id,tenant_id,course_id,event_kind,operation_id)
+    VALUES($1,$2,$3,'run_resumed',$4) RETURNING sequence`,
+  [context.workspaceId, context.owner.tenantId, context.owner.courseId, context.operationId]);
+  if (event.rows.length !== 1) unavailable();
+  return recoveryId;
+}
+
 export interface OrchestrationV2RecoveryRepositoryOptions {
   retry?: OrchestrationV2TransientRetryOptions;
 }
@@ -167,8 +308,11 @@ export function createOrchestrationV2RecoveryRepository(deps: {
   const db = withOrchestrationV2TransactionRetry(deps.db, options.retry);
 
   /** One consistent read of the run, its tasks and the course node. No lock, no write. */
-  async function snapshot(owner: WorkspaceReadOwner, workspaceId: string): Promise<OrchestrationV2RecoverySnapshot> {
+  async function snapshot(owner: WorkspaceReadOwner, workspaceId: string,
+    options: { scopeNodeId?: string; operationId?: string } = {}): Promise<OrchestrationV2RecoverySnapshot> {
     const params = ownerParams(owner, workspaceId);
+    if ((options.scopeNodeId !== undefined && !isUuid(options.scopeNodeId))
+      || (options.operationId !== undefined && !isUuid(options.operationId))) fail('RECOVERY_INPUT_INVALID');
     return db.transaction(async tx => {
       await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
       const head = await tx.query(`SELECT w.status AS workspace_status,w.event_head,
@@ -187,9 +331,14 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       const run = readRecoveryRun(row);
       const workspaceStatus = oneOf<string>(row.workspace_status, WORKSPACE_STATUSES);
       const eventHead = integer(row.event_head, 0, Number.MAX_SAFE_INTEGER);
+      const recorded = options.operationId === undefined ? false : (await tx.query(`SELECT 1 AS recorded
+        FROM lesson_author_workspace_v2_recoveries WHERE workspace_id=$1 AND idempotency_key=$2`,
+      [workspaceId, options.operationId])).rows.length > 0;
+      const scopeNode = options.scopeNodeId === undefined ? null
+        : await readScopeNode(tx, owner, workspaceId, options.scopeNodeId);
       if (!run) {
         return { run: null, workspace_status: workspaceStatus, event_head: eventHead, tasks: [],
-          course_node: null, runtime: null };
+          course_node: null, runtime: null, scope_node: scopeNode, recorded };
       }
       const taskParams = [run.run_id, workspaceId, owner.tenantId, owner.courseId];
       const tasks = await tx.query(RECOVERY_TASKS_SQL, taskParams);
@@ -201,9 +350,10 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       if (!HASH.test(String(row.runtime_config_hash)) || typeof row.model !== 'string' || !row.model) unavailable();
       return {
         run, workspace_status: workspaceStatus, event_head: eventHead,
-        tasks: readRecoveryTasks(tasks.rows, dependencies.rows),
+        tasks: readRecoveryTasks(tasks.rows, dependencies.rows, await readGenerations(tx, tasks.rows)),
         course_node: courseRow ? { node_id: nullableId(courseRow.node_id)!, path: String(courseRow.canonical_path) } : null,
         runtime: { runtime_config_hash: String(row.runtime_config_hash), model: String(row.model) },
+        scope_node: scopeNode, recorded,
       };
     });
   }
@@ -258,7 +408,88 @@ export function createOrchestrationV2RecoveryRepository(deps: {
     });
   }
 
-  return { snapshot, stop };
+  /**
+   * Continue or rewrite a stopped run in ONE transaction: settle unknown
+   * outcomes being reopened (upper bound, exactly once), record the recovery
+   * and every task reopen, move the run back to executing, reopen the tasks
+   * with a fresh attempt budget at epoch + 1, dispatch the runnable ones,
+   * resume the workspace and append run_resumed. The SQL guards re-check each
+   * step and a deferred check refuses a partial commit. The same operation id
+   * replays the stored result; with another body it is refused.
+   */
+  async function recover(owner: WorkspaceReadOwner, workspaceId: string, input: OrchestrationV2RecoverInput)
+    : Promise<OrchestrationV2RecoveryActionResult> {
+    const params = ownerParams(owner, workspaceId);
+    const scopeNodeId = input.request.action === 'regenerate' ? input.request.node_id : null;
+    if (!isUuid(input.operation_id) || (scopeNodeId !== null && !isUuid(scopeNodeId))
+      || !Number.isSafeInteger(input.expected_workspace_revision) || input.expected_workspace_revision < 0
+      || !Number.isSafeInteger(input.max_ai_unit_count) || input.max_ai_unit_count < 0
+      || !Number.isFinite(input.estimated_cost_usd) || input.estimated_cost_usd < 0) fail('RECOVERY_INPUT_INVALID');
+    const action = input.request.action;
+    const requestHash = orchestrationV2RecoveryRequestHash({ action, node_id: scopeNodeId,
+      expected_workspace_revision: input.expected_workspace_revision });
+    return db.transaction(async tx => {
+      await tx.query(`SET LOCAL lock_timeout='3000ms'`);
+      if (!await deps.canEdit(tx, owner)) fail('RECOVERY_FORBIDDEN');
+      await lockWorkspaceLifecycle(tx, owner.tenantId, workspaceId);
+      const locked = await tx.query(`SELECT r.id::text AS run_id,r.status AS run_status,r.failure_code,
+          r.finished_at::text AS finished_at,r.manifest_hash,w.status AS workspace_status,w.event_head,
+          EXISTS(SELECT 1 FROM lesson_author_workspace_v2_completion_receipts receipt WHERE receipt.run_id=r.id)
+            AS completion_receipt,
+          EXISTS(SELECT 1 FROM lesson_author_workspace_v2_review_receipts review WHERE review.run_id=r.id)
+            AS review_receipt
+        ${OWNED_WORKSPACE}
+        JOIN lesson_author_workspace_v2_runs r ON r.workspace_id=w.id AND r.tenant_id=w.tenant_id
+          AND r.course_id=w.course_id
+        WHERE ${OWNED_WHERE} AND w.blueprint_id IS NULL
+        FOR UPDATE OF r,w`, params);
+      if (locked.rows.length !== 1) fail('RECOVERY_NOT_FOUND');
+      const head = locked.rows[0]!;
+      const run = readRecoveryRun(head)!;
+
+      const recorded = await tx.query(`SELECT id::text,run_id::text,action,request_hash,requested_by::text,
+          reopened_task_count FROM lesson_author_workspace_v2_recoveries
+        WHERE workspace_id=$1 AND idempotency_key=$2`, [workspaceId, input.operation_id]);
+      if (recorded.rows.length) {
+        const prior = recorded.rows[0]!;
+        if (prior.request_hash !== requestHash || prior.action !== action || prior.run_id !== run.run_id
+          || prior.requested_by !== owner.userId) fail('RECOVERY_IDEMPOTENCY_CONFLICT');
+        return { recovery_id: nullableId(prior.id)!, run_id: run.run_id, action,
+          reopened_task_count: integer(prior.reopened_task_count, 1, 32_768),
+          workspace_status: run.workspace_status, replayed: true };
+      }
+      await assertSessionNotDeleting(tx, owner);
+      if (run.event_head !== input.expected_workspace_revision) fail('RECOVERY_STATE_CHANGED');
+
+      const tasks = await tx.query(`${RECOVERY_TASKS_SQL} FOR UPDATE OF t`,
+        [run.run_id, workspaceId, owner.tenantId, owner.courseId]);
+      const dependencies = await tx.query(RECOVERY_DEPENDENCIES_SQL, [run.run_id]);
+      const snapshotTasks = readRecoveryTasks(tasks.rows, dependencies.rows, await readGenerations(tx, tasks.rows));
+      const scope = scopeNodeId === null ? null : await readScopeNode(tx, owner, workspaceId, scopeNodeId);
+      if (scopeNodeId !== null && !scope) fail('RECOVERY_NOT_FOUND');
+      const planned = planOrchestrationV2Recovery({ run, tasks: snapshotTasks,
+        request: scope ? { action: 'regenerate', scope } : { action: 'resume' } });
+      if (!planned.ok) fail(orchestrationV2RecoveryErrorFor(planned.reason));
+      const plan = planned.ok ? planned.plan : fail('RECOVERY_UNAVAILABLE');
+      if (plan.ai_unit_count > input.max_ai_unit_count) fail('RECOVERY_STATE_CHANGED');
+
+      // Course fence (C) before any AI token write and before reading other drafts of this course.
+      await lockOrchestrationV2CourseFence(tx, owner.courseId);
+      const otherActive = await tx.query(`SELECT id FROM lesson_author_workspaces
+        WHERE tenant_id=$1 AND course_id=$2 AND requested_by=$3 AND id<>$4
+          AND status IN ('queued','designing','drafting') LIMIT 1`,
+      [owner.tenantId, owner.courseId, owner.userId, workspaceId]);
+      if (otherActive.rows.length) fail('RECOVERY_OTHER_RUN_ACTIVE');
+
+      const recoveryId = await applyRecovery(tx, { owner, workspaceId, runId: run.run_id, action, scope, plan, requestHash,
+        operationId: input.operation_id, estimatedCostUsd: input.estimated_cost_usd,
+        reconcileUnknown: input.reconcileUnknown });
+      return { recovery_id: recoveryId, run_id: run.run_id, action, reopened_task_count: plan.items.length,
+        workspace_status: 'drafting', replayed: false };
+    });
+  }
+
+  return { snapshot, stop, recover };
 }
 
 /** A session being deleted accepts no new work (same rule as edits and launches). */

@@ -30,7 +30,7 @@ import type {
 } from './lesson-author-orchestration-v2-worker-repository.types.js';
 import {
   HASH, activeRun, fail, leaseFrom, lockWorkspaceLifecycle, providerKinds, reconcileFinishedRunUnknown,
-  stopRunAfterTerminalTask, syncNeedsActionWorkspace, terminal,
+  stopRunAfterTerminalTask, stopStalledRecoveredRun, syncNeedsActionWorkspace, terminal,
 } from './lesson-author-orchestration-v2-worker-steps.repository.js';
 export { OrchestrationV2WorkerRepositoryError } from './lesson-author-orchestration-v2-worker-repository.types.js';
 export type {
@@ -85,7 +85,12 @@ export function createOrchestrationV2WorkerRepository(
           o.status AS outbox_status,o.routing_shard,
           EXISTS(SELECT 1 FROM lesson_author_workspace_v2_attempt_events prior_attempt
             WHERE prior_attempt.task_id=t.id AND prior_attempt.run_id=t.run_id
-              AND prior_attempt.provider_dispatched) AS provider_replay_required
+              AND prior_attempt.provider_dispatched
+              -- An author rewrite reopens the task with a fresh budget: only calls
+              -- made after its latest reopen count (same rule as the SQL guards).
+              AND prior_attempt.dispatch_epoch>COALESCE((SELECT max(reopened.reopen_epoch)
+                FROM lesson_author_workspace_v2_recovery_tasks reopened WHERE reopened.task_id=t.id),-1))
+            AS provider_replay_required
         FROM lesson_author_workspace_v2_dispatch_outbox o
         JOIN lesson_author_workspace_v2_tasks t ON t.id=o.task_id AND t.run_id=o.run_id
         JOIN lesson_author_workspace_v2_runs r ON r.id=t.run_id AND r.workspace_id=t.workspace_id
@@ -614,6 +619,10 @@ export function createOrchestrationV2WorkerRepository(
         JOIN lesson_author_workspace_v2_tasks t ON t.run_id=r.id
           AND t.status IN ('failed','timed_out','outcome_unknown')
         WHERE r.status IN ('planning','executing','finalizing')
+          -- A failure that ended the run before its latest author recovery is not
+          -- a new failure: it stays until the reopened work drains (stopStalledRecoveredRun).
+          AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_recoveries recovery
+            WHERE recovery.run_id=r.id AND recovery.created_at>=t.finished_at)
           AND NOT (t.kind='generate_unit'
             AND coalesce(t.failure_code,'') NOT IN ('AI_PROVIDER_AUTH_REJECTED','AI_PROVIDER_QUOTA_EXHAUSTED')
             AND NOT (t.status='outcome_unknown' AND t.attempt_count<t.max_attempts)
@@ -693,7 +702,9 @@ export function createOrchestrationV2WorkerRepository(
         FROM lesson_author_workspace_v2_tasks t
         WHERE t.status='running' AND (t.lease_expires_at<=clock_timestamp() OR t.deadline_at<=clock_timestamp())
         ORDER BY t.deadline_at,t.id LIMIT 1`);
-      if (!expiredCandidate.rows[0]) return reconcileFinishedRunUnknown(tx, reconcileUnknown);
+      if (!expiredCandidate.rows[0]) {
+        return (await reconcileFinishedRunUnknown(tx, reconcileUnknown)) ?? stopStalledRecoveredRun(tx);
+      }
       const candidate = expiredCandidate.rows[0];
       await lockWorkspaceLifecycle(tx, candidate.tenant_id, candidate.workspace_id);
       const locked = await tx.query(`SELECT t.*,r.status AS run_status,

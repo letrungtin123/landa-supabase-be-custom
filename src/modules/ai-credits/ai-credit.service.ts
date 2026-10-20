@@ -102,18 +102,27 @@ export async function estimateAiIdRunCostUsd(tenantId: string): Promise<number> 
 }
 
 /**
+ * USD still available in the tenant's current credit month (budget - used -
+ * reserved; may be negative after an allowed overdraft), or null when the month
+ * is unlimited or not valued in points. Creates the month row like admission.
+ */
+export async function availableAiCreditUsd(tenantId: string): Promise<number | null> {
+  const settings = await getTenantAiRuntimeSettings(tenantId);
+  const periodStart = currentAiUsagePeriodStart(settings.tokenTimezone);
+  await ensureCreditMonth(tenantId, periodStart);
+  const month = await loadCreditMonth(tenantId, periodStart);
+  if (!month || month.is_unlimited || month.budget_usd === null) return null;
+  return num(month.budget_usd) - num(month.used_usd) - num(month.reserved_usd);
+}
+
+/**
  * Refuses a new AI ID run when the month's remaining points do not cover its
  * estimated cost (owner: "only block when the estimate says not enough", no
  * number shown). Admitted runs then finish even past the budget.
  */
 export async function assertAiCreditForAiIdRun(tenantId: string): Promise<void> {
-  const settings = await getTenantAiRuntimeSettings(tenantId);
-  const periodStart = currentAiUsagePeriodStart(settings.tokenTimezone);
-  await ensureCreditMonth(tenantId, periodStart);
-  const month = await loadCreditMonth(tenantId, periodStart);
-  if (!month || month.is_unlimited || month.budget_usd === null) return;
-  const available = num(month.budget_usd) - num(month.used_usd) - num(month.reserved_usd);
-  if (available >= await estimateAiIdRunCostUsd(tenantId)) return;
+  const available = await availableAiCreditUsd(tenantId);
+  if (available === null || available >= await estimateAiIdRunCostUsd(tenantId)) return;
   throw new AppError('Không đủ điểm AI để tạo khoá học. Liên hệ quản trị viên để mua thêm điểm.', 429,
     AI_CREDIT_INSUFFICIENT_FOR_RUN_CODE);
 }

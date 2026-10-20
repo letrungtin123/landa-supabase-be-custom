@@ -27,6 +27,9 @@ async function server(service: Record<string, (...args: never[]) => Promise<unkn
   app.use((req, _res, next) => { if (user) req.user = user; next(); });
   app.get('/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/recovery', orchestrationV2RecoveryRoute(handlers.describe));
   app.post('/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/stop', orchestrationV2RecoveryRoute(handlers.stop));
+  app.post('/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/resume', orchestrationV2RecoveryRoute(handlers.resume));
+  app.post('/courses/:courseId/conversations/:conversationId/workspaces/:workspaceId/nodes/:nodeId/regenerate',
+    orchestrationV2RecoveryRoute(handlers.regenerate));
   const listener = app.listen(0);
   await new Promise(resolve => listener.once('listening', resolve));
   const url = `http://127.0.0.1:${(listener.address() as AddressInfo).port}`;
@@ -125,6 +128,50 @@ test('input, actor and service errors map to the localized table', async () => {
     try {
       const response = await refused.call('POST', `${base}/stop`, { operation_id: OPERATION });
       assert.equal(response.status, user ? 403 : 401);
+    } finally { await refused.close(); }
+  }
+});
+
+test('continue and rewrite: strict body, node only on rewrite, result logged with its recovery id', async () => {
+  const seen: unknown[][] = [];
+  const result = (action: string) => ({ recovery_id: uuid(30), run_id: uuid(20), action, reopened_task_count: 4,
+    workspace_status: 'drafting', replayed: false });
+  const app = await server({
+    describe: async () => assert.fail('never'), stop: async () => assert.fail('never'),
+    recover: async (...args: never[]) => { seen.push(args); return result((args[2] as { action: string }).action); },
+  });
+  const body = { operation_id: OPERATION, expected_workspace_revision: 42 };
+  try {
+    const resumed = await app.call('POST', `${base}/resume`, body);
+    assert.equal(resumed.status, 200);
+    assert.deepEqual(resumed.json.data, result('resume'));
+    const rewritten = await app.call('POST', `${base}/nodes/${uuid(40)}/regenerate`, body);
+    assert.equal(rewritten.status, 200);
+    assert.deepEqual(seen.map(args => args.slice(2)), [[{ action: 'resume' }, body],
+      [{ action: 'regenerate', node_id: uuid(40) }, body]]);
+    assert.deepEqual(app.logs.map(log => [log.operation, log.recovery_id, log.reopened_task_count, log.node_id]),
+      [['resume', uuid(30), 4, null], ['regenerate', uuid(30), 4, uuid(40)]]);
+    for (const [path, invalid] of [[`${base}/resume`, { operation_id: OPERATION }],
+      [`${base}/resume`, { ...body, expected_workspace_revision: -1 }],
+      [`${base}/resume`, { ...body, expected_workspace_revision: 1.5 }],
+      [`${base}/resume`, { ...body, node_id: uuid(40) }],
+      [`${base}/nodes/not-a-node/regenerate`, body]] as const) {
+      const refused = await app.call('POST', path, invalid);
+      assert.equal(refused.status, 400, JSON.stringify(invalid));
+      assert.equal(refused.json.code, 'RECOVERY_INPUT_INVALID');
+    }
+    assert.equal(seen.length, 2);
+  } finally { await app.close(); }
+
+  for (const [code, status] of [['RECOVERY_LIMIT_REACHED', 409], ['AI_CREDIT_INSUFFICIENT_FOR_RECOVERY', 429],
+    ['RECOVERY_IDEMPOTENCY_CONFLICT', 409], ['RECOVERY_NOT_FOUND', 404]] as const) {
+    const refused = await server({ describe: async () => assert.fail('never'), stop: async () => assert.fail('never'),
+      recover: async () => { throw new OrchestrationV2RecoveryError(code); } });
+    try {
+      const response = await refused.call('POST', `${base}/nodes/${uuid(40)}/regenerate`, body, { 'X-UI-Locale': 'en' });
+      assert.equal(response.status, status);
+      assert.equal(response.json.message, ORCHESTRATION_V2_RECOVERY_ERRORS[code][2]);
+      assert.equal(refused.logs[0]!.external_failure_code, code);
     } finally { await refused.close(); }
   }
 });

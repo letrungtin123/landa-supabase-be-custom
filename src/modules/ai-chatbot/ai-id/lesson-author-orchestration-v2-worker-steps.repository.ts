@@ -151,6 +151,45 @@ export async function reconcileFinishedRunUnknown(
   return 'reconciled';
 }
 
+/**
+ * A recovered run whose reopened work drained while some task is still not
+ * done (a lesson nobody asked to rewrite, a validation it blocks) would stay
+ * executing forever: no live task is left to stop it. Publish needs_action
+ * again with the most relevant remaining failure, so the author sees what is
+ * left and can recover it next. Only runs with recovery evidence qualify; the
+ * normal lifecycle never leaves an executing run without live work.
+ */
+export async function stopStalledRecoveredRun(tx: GenerationJobSql): Promise<'reconciled' | null> {
+  const candidate = await tx.query(`SELECT r.id::text AS run_id,r.workspace_id::text,r.tenant_id::text
+    FROM lesson_author_workspace_v2_runs r
+    WHERE r.status='executing'
+      AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_recoveries recovery WHERE recovery.run_id=r.id)
+      AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks live
+        WHERE live.run_id=r.id AND live.status IN ('blocked','queued','running'))
+      AND EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks open
+        WHERE open.run_id=r.id AND open.status<>'succeeded')
+    ORDER BY r.created_at,r.id LIMIT 1`);
+  const found = candidate.rows[0];
+  if (!found) return null;
+  await lockWorkspaceLifecycle(tx, found.tenant_id, found.workspace_id);
+  const locked = await tx.query(`SELECT r.id::text AS run_id,r.workspace_id::text,r.tenant_id::text,r.course_id,
+      (SELECT left_over.failure_code FROM lesson_author_workspace_v2_tasks left_over
+        WHERE left_over.run_id=r.id AND left_over.status IN ('failed','timed_out','outcome_unknown','canceled')
+        ORDER BY CASE WHEN left_over.status='canceled' THEN 1 ELSE 0 END,left_over.finished_at DESC NULLS LAST,
+          left_over.ordinal LIMIT 1) AS failure_code
+    FROM lesson_author_workspace_v2_runs r
+    WHERE r.id=$1 AND r.status='executing'
+      AND NOT EXISTS(SELECT 1 FROM lesson_author_workspace_v2_tasks live
+        WHERE live.run_id=r.id AND live.status IN ('blocked','queued','running'))
+    FOR UPDATE OF r`, [found.run_id]);
+  const run = locked.rows[0];
+  if (!run) return null;
+  // Not a unit: stops the run (no isolated-unit continuation) and syncs the workspace.
+  await stopRunAfterTerminalTask(tx, { id: run.run_id, run_id: run.run_id, workspace_id: run.workspace_id,
+    tenant_id: run.tenant_id, course_id: run.course_id, kind: 'finalize_course', failure_code: run.failure_code });
+  return 'reconciled';
+}
+
 export function leaseFrom(row: Record<string, unknown>): OrchestrationV2TaskLease {
   const lease: OrchestrationV2TaskLease = {
     task_id: String(row.id), run_id: String(row.run_id), workspace_id: String(row.workspace_id),
