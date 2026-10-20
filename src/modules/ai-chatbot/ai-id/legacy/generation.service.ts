@@ -8,8 +8,8 @@ import {
 } from '../../../course-authoring/course-authoring.service.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
 import { getGeminiClient } from '../../ai-platform/gemini.service.js';
-import { shouldUseBoundedLessonAuthorGeneration } from '../lesson-author-content-contract.logic.js';
-import { readServerOwnedSourceFactIds } from '../lesson-author-component-registry.logic.js';
+import { shouldUseBoundedLessonAuthorGeneration } from '../content/lesson-author-content-contract.logic.js';
+import { readServerOwnedSourceFactIds } from '../content/lesson-author-component-registry.logic.js';
 import {
   RAG_LESSON_AUTHOR_MAX_OUTPUT_TOKENS,
   BLUEPRINT_MAX_GENERATION_ATTEMPTS,

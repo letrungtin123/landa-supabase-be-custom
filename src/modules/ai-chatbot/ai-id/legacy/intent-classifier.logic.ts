@@ -5,7 +5,7 @@ import {
   detectLessonAuthorInputLocale,
   type LessonAuthorIntentPlan,
   type LessonAuthorCreationContext,
-} from '../lesson-author-intent.logic.js';
+} from '../shared/lesson-author-intent.logic.js';
 import type { LessonAuthorIntent, IntentSignal, LessonAuthorOutlineMention } from './types.js';
 
 interface IntentClassificationResult {

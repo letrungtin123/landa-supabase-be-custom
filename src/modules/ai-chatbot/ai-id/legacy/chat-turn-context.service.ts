@@ -5,8 +5,8 @@
 
 import { env } from '../../../../config/env.js';
 import { AppError } from '../../../../middleware/error-handler.js';
-import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../lesson-author-intent.logic.js';
-import { selectEditorContextTarget } from '../lesson-author-command.logic.js';
+import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../shared/lesson-author-intent.logic.js';
+import { selectEditorContextTarget } from '../shared/lesson-author-command.logic.js';
 import { LESSON_AUTHOR_TARGET } from '../../chat/chat.constants.js';
 import { logLessonAuthorFlow } from '../../chat/chat-turn-runtime.service.js';
 import type { ChatTurnBase } from '../../chat/chat-turn.types.js';

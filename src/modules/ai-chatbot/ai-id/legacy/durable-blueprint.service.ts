@@ -1,9 +1,9 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { projectBlueprintDraftArchitecture } from '../lesson-author-blueprint-draft-architecture.logic.js';
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
-import { composeV5BlueprintPolicy } from '../lesson-author-prompt-policy.logic.js';
-import { createComponentCapabilities, readComponentCapabilities } from '../lesson-author-capabilities.logic.js';
+import { projectBlueprintDraftArchitecture } from '../v1/lesson-author-blueprint-draft-architecture.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../shared/lesson-author-source-snapshot.logic.js';
+import { composeV5BlueprintPolicy } from '../v1/lesson-author-prompt-policy.logic.js';
+import { createComponentCapabilities, readComponentCapabilities } from '../content/lesson-author-capabilities.logic.js';
 import { createHash } from 'crypto';
 import { query } from '../../../../config/database.js';
 import {
@@ -11,9 +11,9 @@ import {
   generationSnapshotHash,
   hasCompleteGenerationUsage,
   type GenerationJobRow,
-} from '../lesson-author-generation-job.logic.js';
-import type { PreparedGenerationJob } from '../lesson-author-generation-job.repository.js';
-import type { GenerationAdmissionStage } from '../lesson-author-generation-admission.logic.js';
+} from '../shared/lesson-author-generation-job.logic.js';
+import type { PreparedGenerationJob } from '../shared/lesson-author-generation-job.repository.js';
+import type { GenerationAdmissionStage } from '../v1/lesson-author-generation-admission.logic.js';
 import { env } from '../../../../config/env.js';
 import { getRedisClient } from '../../../../config/redis.js';
 import { type DistributedStreamLock } from '../../chat/chat-stream-lock.js';
@@ -24,19 +24,19 @@ import { isCourseComponentType } from '../../../tenants/tenant-course-components
 import { getTenantAiRuntimeSettings } from '../../ai-platform/ai-settings.service.js';
 import { finalizeTenantAiTokens, normalizeAiUsage, reserveTenantAiTokens } from '../../ai-platform/ai-token-quota.service.js';
 import { generateRagLessonAuthorBlueprint, type RagLessonAuthorRequest } from '../../ai-platform/ai-rag-client.service.js';
-import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../lesson-author-intent.logic.js';
+import { buildLessonAuthorCreationContext, resolveLessonAuthorOutputLocale } from '../shared/lesson-author-intent.logic.js';
 import {
   buildNormalizedLessonAuthorCommand,
   isSimpleDeterministicLessonAuthorCommand,
-} from '../lesson-author-command.logic.js';
-import { AI_COMPONENT_REGISTRY } from '../lesson-author-component-registry.logic.js';
+} from '../shared/lesson-author-command.logic.js';
+import { AI_COMPONENT_REGISTRY } from '../content/lesson-author-component-registry.logic.js';
 import {
   acceptAndPersistLessonAuthorBlueprint,
   blueprintBoundaryCounts,
-} from '../lesson-author-blueprint-acceptance.logic.js';
+} from '../v1/lesson-author-blueprint-acceptance.logic.js';
 import { runStoredInputFilter } from '../../ai-platform/input-filter/input-filter.service.js';
-import { withLaunchBriefIdentity } from '../lesson-author-launch-brief.logic.js';
-import { hasAiIdCoursePermission } from '../lesson-author-ai-id-access.service.js';
+import { withLaunchBriefIdentity } from '../contracts/lesson-author-launch-brief.logic.js';
+import { hasAiIdCoursePermission } from '../shared/lesson-author-ai-id-access.service.js';
 import {
   MAX_USER_MESSAGE_LENGTH,
   HISTORY_CONTEXT_LIMIT,

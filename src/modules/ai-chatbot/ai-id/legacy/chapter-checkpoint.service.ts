@@ -1,28 +1,28 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
-import { resolveLessonAuthorDraftLocale } from '../lesson-author-intent.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../shared/lesson-author-source-snapshot.logic.js';
+import { resolveLessonAuthorDraftLocale } from '../shared/lesson-author-intent.logic.js';
 import { createHash, randomUUID } from 'crypto';
 import { query } from '../../../../config/database.js';
-import { generationSnapshotHash } from '../lesson-author-generation-job.logic.js';
+import { generationSnapshotHash } from '../shared/lesson-author-generation-job.logic.js';
 import {
   chapterCheckpointRepository,
   assertChapterCheckpointReady,
   logChapterCheckpoint,
-} from '../lesson-author-chapter-runtime.service.js';
+} from '../v1/lesson-author-chapter-runtime.service.js';
 import {
   ChapterCheckpointError,
   assertChapterSnapshot,
   type ChapterUnitPayload,
   type ChapterCheckpointOwner,
-} from '../lesson-author-chapter-checkpoint.logic.js';
+} from '../v1/lesson-author-chapter-checkpoint.logic.js';
 import {
   runChapterCheckpoint,
   ChapterWorkflowTimeout,
   chapterExternalFailureCode,
   chapterFailureMessage,
   type ChapterUsageLedger,
-} from '../lesson-author-chapter-runner.logic.js';
+} from '../v1/lesson-author-chapter-runner.logic.js';
 import { AppError } from '../../../../middleware/error-handler.js';
 import { type LessonAuthorProposal } from '../../../course-authoring/course-authoring.service.js';
 import { getTenantAllowedCourseComponentTypeSet } from '../../../tenants/tenant-course-components.service.js';
@@ -44,8 +44,8 @@ import {
 import {
   assertLessonAuthorProposalComponentsValid,
   AI_COMPONENT_REGISTRY,
-} from '../lesson-author-component-registry.logic.js';
-import { assertLessonAuthorPedagogicalQuality } from '../lesson-author-pedagogical-validator.logic.js';
+} from '../content/lesson-author-component-registry.logic.js';
+import { assertLessonAuthorPedagogicalQuality } from '../content/lesson-author-pedagogical-validator.logic.js';
 import { HISTORY_CONTEXT_LIMIT, HISTORY_MESSAGE_MAX_CHARS } from '../../chat/chat.constants.js';
 import type { ConversationContext, ChatStreamOptions, ChatStreamSideEvent } from '../../chat/chat.types.js';
 import {

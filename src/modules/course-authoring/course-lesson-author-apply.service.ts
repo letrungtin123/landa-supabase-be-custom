@@ -10,7 +10,7 @@ import {
   assertCourseComponentTypeAllowed,
   getTenantAllowedCourseComponentTypeSet,
 } from '../tenants/tenant-course-components.service.js';
-import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/ai-id/lesson-author-component-registry.logic.js';
+import { assertLessonAuthorProposalComponentsValid } from '../ai-chatbot/ai-id/content/lesson-author-component-registry.logic.js';
 import { applyGeneratedUnitComponents, ComponentApplyError, type StoredComponentRow } from './lesson-author-component-apply.logic.js';
 import type { ApplyLessonAuthorProposalInput, ApplyLessonAuthorProposalResult } from './course-authoring.types.js';
 import {

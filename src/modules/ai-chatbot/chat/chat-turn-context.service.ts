@@ -9,7 +9,7 @@ import { env } from '../../../config/env.js';
 import { getRedisClient } from '../../../config/redis.js';
 import { AppError } from '../../../middleware/error-handler.js';
 import { errorKind } from '../../../utils/best-effort.js';
-import { ChapterCheckpointError } from '../ai-id/lesson-author-chapter-checkpoint.logic.js';
+import { ChapterCheckpointError } from '../ai-id/v1/lesson-author-chapter-checkpoint.logic.js';
 import { executeChapterCheckpoint } from '../ai-id/legacy/chapter-checkpoint.service.js';
 import { resolveLessonAuthorTurnContext } from '../ai-id/legacy/chat-turn-context.service.js';
 import { getTenantAiRuntimeSettings } from '../ai-platform/ai-settings.service.js';

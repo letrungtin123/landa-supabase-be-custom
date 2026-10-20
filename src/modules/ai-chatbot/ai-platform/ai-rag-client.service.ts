@@ -3,7 +3,7 @@ import { AppError } from '../../../middleware/error-handler.js';
 import type { AiChatTarget, AiUsage } from './ai-engine.types.js';
 import { getGoogleAiStudioApiKey } from './ai-settings.service.js';
 import { assertRagChapterCheckpointRequest, readRagChapterCheckpointResponse,
-  type RagChapterCheckpointRequest, type RagChapterCheckpointResponse } from '../ai-id/lesson-author-chapter-rag-contract.logic.js';
+  type RagChapterCheckpointRequest, type RagChapterCheckpointResponse } from '../ai-id/v1/lesson-author-chapter-rag-contract.logic.js';
 import {
   readOrchestrationV2ChapterShardResponse,
   readOrchestrationV2CourseSkeletonResponse,
@@ -16,12 +16,12 @@ import {
   type OrchestrationV2SourceAuthority,
   type OrchestrationV2SourceSnapshotPageResponse,
   type OrchestrationV2SourceScope,
-} from '../ai-id/lesson-author-orchestration-v2-rag-contract.logic.js';
+} from '../ai-id/contracts/lesson-author-orchestration-v2-rag-contract.logic.js';
 import { boundIdmRemainingBudgetMs, IDM_CONTRACT_VERSION, IDM_PIPELINE_VERSION, IDM_PROMPT_POLICY_VERSION,
-  type IdmCourseSkeletonRequestV1, type IdmModuleContextV1 } from '../ai-id/lesson-author-idm.contract.js';
+  type IdmCourseSkeletonRequestV1, type IdmModuleContextV1 } from '../ai-id/contracts/lesson-author-idm.contract.js';
 import { readOrchestrationV2UnitProviderResponse,
   type OrchestrationV2UnitGenerationContract,
-  type OrchestrationV2UnitProviderResponse } from '../ai-id/lesson-author-orchestration-v2-unit.logic.js';
+  type OrchestrationV2UnitProviderResponse } from '../ai-id/orchestration/steps/lesson-author-orchestration-v2-unit.logic.js';
 import { asRecord, postRagJson, prepareRagRequest, sendRagJson } from './ai-rag-client.transport.js';
 export { RagServiceError, createRagHttpAgents, buildRagHmacHeaders } from './ai-rag-client.transport.js';
 
@@ -150,7 +150,7 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
   generation_mode?: 'auto' | 'staged' | 'single';
   max_attempts?: number;
   blueprint_architecture?: {
-    component_capabilities?: import('../ai-id/lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
+    component_capabilities?: import('../ai-id/content/lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
     architecture_contract_version?: 4 | 5;
     chapter_title: string;
     source_refs?: string[];
@@ -204,7 +204,7 @@ export interface RagLessonAuthorRequest extends RagChatRequest {
 }
 
 export interface RagLessonAuthorBlueprintRequest extends RagChatRequest {
-  component_capabilities?: import('../ai-id/lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
+  component_capabilities?: import('../ai-id/content/lesson-author-capabilities.logic.js').LessonAuthorComponentCapabilities;
   outline_context: string;
   blueprint_schema_hint: string;
   max_attempts?: number;

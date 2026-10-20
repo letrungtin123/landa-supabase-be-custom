@@ -76,8 +76,8 @@ const KNOWN_SESSION_USERS = [
   'config/cluster-bus.ts',
   'process-main.ts',
   'modules/ai-chatbot/kb/kb-operation.worker.ts',
-  'modules/ai-chatbot/ai-id/lesson-author-source-stream.service.ts',
-  'modules/ai-chatbot/ai-id/lesson-author-workspace-stream.service.ts',
+  'modules/ai-chatbot/ai-id/sources/lesson-author-source-stream.service.ts',
+  'modules/ai-chatbot/ai-id/workspace/stream/lesson-author-workspace-stream.service.ts',
   'modules/assignments/email-outbox.repository.ts',
   'workers/tenant-data-quota.worker.ts',
 ];

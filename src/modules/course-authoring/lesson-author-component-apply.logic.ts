@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import { assertComponentInstancePlan } from '../ai-chatbot/ai-id/lesson-author-capabilities.logic.js';
+import { assertComponentInstancePlan } from '../ai-chatbot/ai-id/content/lesson-author-capabilities.logic.js';
 import { isLessonAuthorGeneratedContentOwned, isLessonAuthorMediaProtectedBlock } from './lesson-author-components.logic.js';
 
 export interface GeneratedComponentWrite {

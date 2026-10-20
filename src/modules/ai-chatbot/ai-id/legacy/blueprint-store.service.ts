@@ -1,7 +1,7 @@
 // AI ID V1 / lesson-author legacy code, moved unchanged out of chat.service.ts.
 // chat.service.ts re-exports its public symbols, so existing imports keep working.
-import { projectBlueprintDraftArchitecture } from '../lesson-author-blueprint-draft-architecture.logic.js';
-import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../lesson-author-source-snapshot.logic.js';
+import { projectBlueprintDraftArchitecture } from '../v1/lesson-author-blueprint-draft-architecture.logic.js';
+import { lessonAuthorSourceSnapshotHash as createLessonAuthorBlueprintSourceSnapshotHash } from '../shared/lesson-author-source-snapshot.logic.js';
 import { createHash } from 'crypto';
 import { query } from '../../../../config/database.js';
 import { AppError } from '../../../../middleware/error-handler.js';
@@ -15,10 +15,10 @@ import {
   extractLessonAuthorTargetNumberPath,
   isLessonAuthorNewChapterDraftRequest,
   matchesLessonAuthorBlueprintChapterDraft,
-} from '../lesson-author-intent.logic.js';
-import { getNextBlueprintChapterIndex } from '../lesson-author-blueprint-sequencing.logic.js';
-import { validateLessonAuthorGeneratedUnitCoverage } from '../lesson-author-content-contract.logic.js';
-import { readServerOwnedSourceFactIds } from '../lesson-author-component-registry.logic.js';
+} from '../shared/lesson-author-intent.logic.js';
+import { getNextBlueprintChapterIndex } from '../v1/lesson-author-blueprint-sequencing.logic.js';
+import { validateLessonAuthorGeneratedUnitCoverage } from '../content/lesson-author-content-contract.logic.js';
+import { readServerOwnedSourceFactIds } from '../content/lesson-author-component-registry.logic.js';
 import { swallowAndLog } from '../../../../utils/best-effort.js';
 import type {
   ConversationContext,

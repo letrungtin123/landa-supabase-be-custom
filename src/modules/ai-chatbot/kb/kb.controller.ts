@@ -19,7 +19,7 @@ import { withKbTempUploadCleanup } from './kb-upload-storage.js';
 import { KB_FAQ_SHEET_READ_CODE_PREFIX, KB_FAQ_SHEET_READ_ERRORS, KbFaqSheetReadError } from './kb-faq-sheet.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../middleware/audit-log.js';
 import { describeKbDocumentDeletionFailure } from './kb-document-deletion.logic.js';
-import { syncLessonAuthorTranscriptMessagesById } from '../ai-id/lesson-author-transcription.service.js';
+import { syncLessonAuthorTranscriptMessagesById } from '../ai-id/sources/lesson-author-transcription.service.js';
 
 function logKbDocumentDeletionFailure(
   error: unknown,

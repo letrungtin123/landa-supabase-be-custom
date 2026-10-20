@@ -12,7 +12,7 @@ import {
   orderLessonAuthorComponents,
 } from './lesson-author-components.logic.js';
 import { normalizeDiagramData } from './diagram-data.logic.js';
-import { stripLessonAuthorSourceRangeSuffix } from '../ai-chatbot/ai-id/lesson-author-intent.logic.js';
+import { stripLessonAuthorSourceRangeSuffix } from '../ai-chatbot/ai-id/shared/lesson-author-intent.logic.js';
 import type {
   LessonAuthorComponentProposal,
   LessonAuthorComponentType,

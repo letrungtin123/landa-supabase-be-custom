@@ -3,6 +3,6 @@
 // orchestrationV2Hash or idmHash throws CANONICAL_JSON_INVALID with its JSON path, so a producer that builds
 // one fails its tests. Production logs the violation and hashes the value as persisted instead
 // (lesson-author-orchestration-v2-canonical-json.logic.ts).
-import { setCanonicalJsonHashPolicy } from '../modules/ai-chatbot/ai-id/lesson-author-orchestration-v2-canonical-json.logic.js';
+import { setCanonicalJsonHashPolicy } from '../modules/ai-chatbot/ai-id/shared/lesson-author-orchestration-v2-canonical-json.logic.js';
 
 setCanonicalJsonHashPolicy({ mode: 'throw' });

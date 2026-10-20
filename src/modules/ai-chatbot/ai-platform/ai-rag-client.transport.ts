@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { readSafeBlueprintFailure } from '../ai-id/lesson-author-capabilities.logic.js';
+import { readSafeBlueprintFailure } from '../ai-id/content/lesson-author-capabilities.logic.js';
 import https from 'node:https';
 import { env } from '../../../config/env.js';
 import { AppError } from '../../../middleware/error-handler.js';

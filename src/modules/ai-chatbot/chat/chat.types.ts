@@ -1,11 +1,11 @@
 // Chat types shared by chat.service.ts and the AI ID legacy code (ai-id/legacy/).
-import { chapterCheckpointRepository } from '../ai-id/lesson-author-chapter-runtime.service.js';
+import { chapterCheckpointRepository } from '../ai-id/v1/lesson-author-chapter-runtime.service.js';
 import type { UserRole } from '../../../types/index.js';
 import { type LessonAuthorProposal } from '../../course-authoring/course-authoring.service.js';
-import type { LessonAuthorAction } from '../ai-id/lesson-author-action.logic.js';
+import type { LessonAuthorAction } from '../ai-id/v1/lesson-author-action.logic.js';
 import type { ReportChatFilterInput } from '../ai-report/report-chat.service.js';
 import { type ReportChatSideEvent } from '../ai-report/report-chat-turn.service.js';
-import { type LessonAuthorLaunchBrief } from '../ai-id/lesson-author-launch-brief.logic.js';
+import { type LessonAuthorLaunchBrief } from '../ai-id/contracts/lesson-author-launch-brief.logic.js';
 import { LESSON_AUTHOR_TARGET } from './chat.constants.js';
 import type { ChatTarget } from './chat.constants.js';
 import type {

@@ -11,7 +11,7 @@ import { assertCourseComponentTypeAllowed } from '../tenants/tenant-course-compo
 import type { CourseComponentType } from '../tenants/tenant-course-components.constants.js';
 import { isLessonAuthorMediaProtectedBlock } from './lesson-author-components.logic.js';
 import { ComponentApplyError } from './lesson-author-component-apply.logic.js';
-import { formatChapterTitle } from '../ai-chatbot/ai-id/lesson-author-intent.logic.js';
+import { formatChapterTitle } from '../ai-chatbot/ai-id/shared/lesson-author-intent.logic.js';
 import { UUID_PATTERN } from '../../utils/uuid.js';
 import type {
   ApplyLessonAuthorProposalInput,

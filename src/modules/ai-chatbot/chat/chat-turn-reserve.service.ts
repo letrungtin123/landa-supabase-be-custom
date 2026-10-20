@@ -4,8 +4,8 @@
 // Moved from sendMessageStream (chat.service.ts).
 
 import { query } from '../../../config/database.js';
-import { composeV5BlueprintPolicy } from '../ai-id/lesson-author-prompt-policy.logic.js';
-import { resolveLessonAuthorDraftLocale } from '../ai-id/lesson-author-intent.logic.js';
+import { composeV5BlueprintPolicy } from '../ai-id/v1/lesson-author-prompt-policy.logic.js';
+import { resolveLessonAuthorDraftLocale } from '../ai-id/shared/lesson-author-intent.logic.js';
 import { buildCurrentTurnText } from '../ai-id/legacy/context.service.js';
 import { getLessonAuthorBlueprintSystemInstruction } from '../ai-id/legacy/generation-schema.logic.js';
 import type { AiOperation } from '../ai-platform/ai-engine.types.js';
