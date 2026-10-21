@@ -12,11 +12,13 @@ import { AppError } from '../../../middleware/error-handler.js';
 import { CHAT_TARGETS, LESSON_AUTHOR_TARGET } from './chat.constants.js';
 import { visibleKnowledgebaseSql } from '../kb/kb.repository.js';
 import { kbUsageGuard } from './kb-usage.service.js';
+import { findSourceDocumentsInActiveRuns } from '../ai-id/sources/lesson-author-source-in-use.repository.js';
 import type { ChatTarget } from './chat.constants.js';
 import type {
   ChatMessage,
   KbAssignment,
   LessonAuthorSourceDocument,
+  LessonAuthorSourceDocumentListItem,
   ChatStreamOptions,
   ChatStreamSideEvent,
 } from './chat.types.js';
@@ -59,6 +61,7 @@ export type {
   ChatMessage,
   LessonAuthorSourceDocumentInput,
   LessonAuthorSourceDocument,
+  LessonAuthorSourceDocumentListItem,
   KbAssignment,
   ChatStreamOptions,
   ChatStreamSideEvent,
@@ -360,7 +363,7 @@ async function getLessonAuthorSettingsFromDb(tenantId: string): Promise<LessonAu
 export async function listLessonAuthorSourceDocuments(
   tenantId: string,
   options: ListLessonAuthorSourceDocumentsOptions = {},
-): Promise<LessonAuthorSourceDocument[]> {
+): Promise<LessonAuthorSourceDocumentListItem[]> {
   const [activeBot, activeKb] = await Promise.all([
     getActiveBot(tenantId, LESSON_AUTHOR_TARGET),
     getActiveKbAssignment(tenantId),
@@ -389,7 +392,11 @@ export async function listLessonAuthorSourceDocuments(
      LIMIT $4`,
     [tenantId, activeKb.kb_id, search, limit],
   );
-  return result.rows;
+  // One more bounded read for the page: which of these documents an active AI ID run still designs from.
+  const inUse = new Set((await findSourceDocumentsInActiveRuns({ query }, {
+    tenantId, kbId: activeKb.kb_id, documentIds: result.rows.map(row => row.document_id),
+  })).map(row => row.document_id));
+  return result.rows.map(row => ({ ...row, in_use_by_ai_id: inUse.has(row.document_id) }));
 }
 
 export async function assignLessonAuthorKb(tenantId: string, kbId: string): Promise<void> {

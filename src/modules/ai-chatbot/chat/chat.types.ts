@@ -51,6 +51,12 @@ export interface LessonAuthorSourceDocument {
   content_excerpt: string | null;
 }
 
+/** A row of GET /chat/lesson-author/source-documents (the AI ID knowledge base documents). */
+export interface LessonAuthorSourceDocumentListItem extends LessonAuthorSourceDocument {
+  /** AI ID is still designing a course from it (a workspace with an active V2 run): deleting it is refused. */
+  in_use_by_ai_id: boolean;
+}
+
 export interface KbAssignment {
   id: string;
   tenant_id: string;

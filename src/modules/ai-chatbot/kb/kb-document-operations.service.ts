@@ -21,6 +21,8 @@ import { createKbRepository } from './kb.repository.js';
 import { assertKnowledgebaseMutable, assertNoActiveAiEngineTransition } from './kb-mutability.service.js';
 import { isRestoreActiveState } from './kb-restore.logic.js';
 import type { KbDocument } from './kb.types.js';
+import { KbDocumentInUseByAiIdError } from './kb-document-deletion.logic.js';
+import { findSourceDocumentsInActiveRuns } from '../ai-id/sources/lesson-author-source-in-use.repository.js';
 
 const kbRepository = createKbRepository({ query });
 
@@ -286,6 +288,16 @@ async function detachTranscriptJobsForKnowledgebaseDocuments(
   }
 }
 
+/**
+ * A document that is the source of an AI ID workspace with an active V2 run is not deleted (409
+ * KB_DOCUMENT_IN_USE_BY_AI_ID). The callers lock the document rows FOR UPDATE first, which closes the
+ * race with a run admission (it locks them FOR SHARE).
+ */
+export async function assertDocumentsNotInUseByAiId(tenantId: string, kbId: string, documentIds: readonly string[]): Promise<void> {
+  const inUse = await findSourceDocumentsInActiveRuns({ query }, { tenantId, kbId, documentIds });
+  if (inUse.length > 0) throw new KbDocumentInUseByAiIdError(inUse);
+}
+
 export async function queueDocumentDeletion(docId: string, kbId: string, tenantId: string): Promise<QueuedDocumentDeletion | null> {
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   const document = (await kbRepository.lockDocument(docId, kbId, tenantId)) || null;
@@ -293,6 +305,7 @@ export async function queueDocumentDeletion(docId: string, kbId: string, tenantI
   if (document.status === 'learning') {
     throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409, 'KB_DOCUMENT_LEARNING');
   }
+  await assertDocumentsNotInUseByAiId(tenantId, kbId, [docId]);
   const mappings = await kbRepository.selectDocumentMappingPaths(docId);
   const detachedTranscriptJobIds = await detachTranscriptJobsForKnowledgebaseDocuments(tenantId, kbId, [docId]);
   await supersedeLessonAuthorBlueprintsForDocuments(tenantId, kbId, [docId]);
@@ -320,6 +333,8 @@ export async function queueBulkDocumentDeletion(
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   const documents = await kbRepository.lockDeletableDocuments(docIds, kbId, tenantId);
   if (documents.length === 0) return { deleted: 0, documents: [], detachedTranscriptJobIds: [] };
+  // All or nothing: one document AI ID still uses refuses the whole request (the UI names it).
+  await assertDocumentsNotInUseByAiId(tenantId, kbId, documents.map(document => document.id));
   const mappings = await kbRepository.selectMappingPathsOfDocuments(documents.map(document => document.id));
   const pathsByDocument = new Map<string, string[]>();
   for (const mapping of mappings) {

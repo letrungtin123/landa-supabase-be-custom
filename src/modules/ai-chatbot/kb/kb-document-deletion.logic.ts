@@ -12,12 +12,56 @@ export type KbDocumentDeletionFailure = {
   statusCode: number;
   code: string;
   message: string;
+  /** KB_DOCUMENT_IN_USE_BY_AI_ID: the refused documents (sent as `document_ids`). */
+  documentIds?: string[];
 };
 
 type ErrorWithCode = Error & { code?: unknown };
 
+export const KB_DOCUMENT_IN_USE_BY_AI_ID_CODE = 'KB_DOCUMENT_IN_USE_BY_AI_ID';
+/** Names listed in the refusal; the rest are counted. */
+const IN_USE_NAMES_SHOWN = 5;
+
+function inUseMessage(documents: ReadonlyArray<{ name: string }>, locale: 'vi' | 'en'): string {
+  const shown = documents.slice(0, IN_USE_NAMES_SHOWN).map(document => `“${document.name}”`);
+  const more = documents.length - shown.length;
+  if (locale === 'en') {
+    const list = shown.join(', ') + (more > 0 ? ` and ${more} more` : '');
+    return documents.length > 1
+      ? `AI ID is designing a course from these documents, so they cannot be deleted yet: ${list}. Please try again when AI ID has finished.`
+      : `AI ID is designing a course from this document, so it cannot be deleted yet: ${list}. Please try again when AI ID has finished.`;
+  }
+  const list = shown.join(', ') + (more > 0 ? ` và ${more} tài liệu khác` : '');
+  return documents.length > 1
+    ? `AI ID đang dùng các tài liệu này để soạn khoá học nên chưa xoá được: ${list}. Vui lòng thử lại khi AI ID soạn xong.`
+    : `AI ID đang dùng tài liệu này để soạn khoá học nên chưa xoá được: ${list}. Vui lòng thử lại khi AI ID soạn xong.`;
+}
+
+/**
+ * A deletion refused because AI ID is still designing a course from the documents (a source of a
+ * workspace whose V2 run is active). A bulk deletion is refused as a whole: nothing is deleted.
+ */
+export class KbDocumentInUseByAiIdError extends AppError {
+  constructor(readonly documents: ReadonlyArray<{ document_id: string; name: string }>) {
+    super(inUseMessage(documents, 'vi'), 409, KB_DOCUMENT_IN_USE_BY_AI_ID_CODE);
+    this.name = 'KbDocumentInUseByAiIdError';
+  }
+
+  localized(locale: 'vi' | 'en'): string {
+    return inUseMessage(this.documents, locale);
+  }
+}
+
 /** Keeps database diagnostics server-side while the UI receives a stable error contract. */
-export function describeKbDocumentDeletionFailure(error: unknown): KbDocumentDeletionFailure {
+export function describeKbDocumentDeletionFailure(error: unknown, locale: 'vi' | 'en' = 'vi'): KbDocumentDeletionFailure {
+  if (error instanceof KbDocumentInUseByAiIdError) {
+    return {
+      statusCode: 409,
+      code: KB_DOCUMENT_IN_USE_BY_AI_ID_CODE,
+      message: error.localized(locale),
+      documentIds: error.documents.map(document => document.document_id),
+    };
+  }
   if (error instanceof AppError) {
     return {
       statusCode: error.statusCode,

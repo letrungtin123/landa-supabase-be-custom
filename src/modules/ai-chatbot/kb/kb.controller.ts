@@ -253,10 +253,22 @@ export async function deleteDocument(req: Request, res: Response): Promise<void>
     await synchronizeDetachedTranscriptCards(queued.detachedTranscriptJobIds);
     sendSuccess(res, { queued: true }, 'Đã đưa tài liệu vào hàng đợi xoá an toàn', 202);
   } catch (error) {
-    logKbDocumentDeletionFailure(error, { tenantId, kbId, docId });
-    const failure = describeKbDocumentDeletionFailure(error);
-    res.status(failure.statusCode).json({ success: false, code: failure.code, message: failure.message });
+    sendKbDocumentDeletionFailure(req, res, error, { tenantId, kbId, docId });
   }
+}
+
+/** The refusal of a document deletion; KB_DOCUMENT_IN_USE_BY_AI_ID also names the refused `document_ids`. */
+function sendKbDocumentDeletionFailure(
+  req: Request,
+  res: Response,
+  error: unknown,
+  context: { tenantId: string; kbId: string; docId?: string; documentCount?: number },
+): void {
+  const failure = describeKbDocumentDeletionFailure(error, requestUiLocaleOf(req));
+  // An expected refusal (AI ID still uses the documents) is not a failure to log.
+  if (!failure.documentIds) logKbDocumentDeletionFailure(error, context);
+  res.status(failure.statusCode).json({ success: false, code: failure.code, message: failure.message,
+    ...(failure.documentIds ? { document_ids: failure.documentIds } : {}) });
 }
 
 export async function bulkDeleteDocuments(req: Request, res: Response): Promise<void> {
@@ -279,9 +291,7 @@ export async function bulkDeleteDocuments(req: Request, res: Response): Promise<
     await synchronizeDetachedTranscriptCards(result.detachedTranscriptJobIds);
     sendSuccess(res, { deleted: result.deleted, queued: result.deleted }, undefined, 202);
   } catch (error) {
-    logKbDocumentDeletionFailure(error, { tenantId, kbId, documentCount: docIds.length });
-    const failure = describeKbDocumentDeletionFailure(error);
-    res.status(failure.statusCode).json({ success: false, code: failure.code, message: failure.message });
+    sendKbDocumentDeletionFailure(req, res, error, { tenantId, kbId, documentCount: docIds.length });
   }
 }
 

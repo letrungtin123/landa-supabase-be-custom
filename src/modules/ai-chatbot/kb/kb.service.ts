@@ -27,7 +27,7 @@ import {
 import { logSwallowedError } from '../../../utils/best-effort.js';
 import { createKbRepository } from './kb.repository.js';
 import { assertKnowledgebaseMutable } from './kb-mutability.service.js';
-import { supersedeLessonAuthorBlueprintsForDocuments } from './kb-document-operations.service.js';
+import { assertDocumentsNotInUseByAiId, supersedeLessonAuthorBlueprintsForDocuments } from './kb-document-operations.service.js';
 import type { KbDocument, Knowledgebase } from './kb.types.js';
 
 export type {
@@ -237,6 +237,7 @@ export async function deleteDocument(docId: string, kbId: string, tenantId: stri
   if (doc.kb_id !== kbId) return false;
   await assertKnowledgebaseMutable(kbId, tenantId, 'xoa tai lieu');
   if (doc.status === 'learning') throw new AppError('Không thể xoá tài liệu đang được huấn luyện', 409);
+  await assertDocumentsNotInUseByAiId(tenantId, kbId, [docId]);
 
   // 2. Delete from Gemini FIRST (synchronous, not queue)
   await deleteDocumentGeminiMappingsStrict([docId], tenantId);
@@ -275,6 +276,7 @@ export async function bulkDeleteDocuments(
     if (learningIds.length > 0) throw new AppError('Tất cả tài liệu đang được huấn luyện, không thể xoá', 409);
     return { deleted: 0 };
   }
+  await assertDocumentsNotInUseByAiId(tenantId, kbId, safeIds);
 
   // 2. Get all file paths in a single query
   const filePaths = await kbRepository.selectDocumentFilePaths(safeIds, kbId, tenantId);

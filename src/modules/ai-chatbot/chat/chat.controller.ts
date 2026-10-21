@@ -317,8 +317,12 @@ export async function listLessonAuthorSourceDocuments(req: Request, res: Respons
   const limit = Number.isFinite(rawLimit) ? rawLimit : undefined;
 
   try {
-    const documents = await chatService.listLessonAuthorSourceDocuments(tenantId, { search, limit });
-    sendSuccess(res, documents);
+    const [documents, canDelete] = await Promise.all([
+      chatService.listLessonAuthorSourceDocuments(tenantId, { search, limit }),
+      // The knowledge base page's delete permission (DELETE /kb/:kbId/documents/:docId and bulk-delete).
+      hasPermission(req.user!, 'ai_chatbot', 'can_delete'),
+    ]);
+    sendSuccess(res, documents.map(document => ({ ...document, can_delete: canDelete })));
   } catch (err) { sendClientError(req, res, err, 'Chat'); }
 }
 

@@ -145,7 +145,9 @@ const both =
 const MUTABLE_KB = /FROM knowledgebases kb\s+LEFT JOIN kb_google_store kgs ON kgs.kb_id = kb.id\s+WHERE kb.id = \$1 AND kb.tenant_id = \$2\s+LIMIT 1$/;
 const DELETION_QUEUED = /AS exists/;
 const TRANSITION = /FROM tenant_ai_settings\s+WHERE tenant_id = \$1\s+AND transition_state IN/;
-const mutable: Answer = both(noRowsWhen(TRANSITION), rowsWhen(DELETION_QUEUED, [{ exists: false }]));
+// The documents an active AI ID run designs from (refused deletions): none unless a case says so.
+const IN_USE_BY_AI_ID = /FROM lesson_author_workspace_v2_runs r/;
+const mutable: Answer = both(noRowsWhen(TRANSITION), rowsWhen(DELETION_QUEUED, [{ exists: false }]), noRowsWhen(IN_USE_BY_AI_ID));
 const withMutable = (...answers: Answer[]): Answer => both(...answers, mutable);
 const MAPPINGS = /FROM kb_doc_gemini_mapping m\s+JOIN kb_documents d/;
 const BLUEPRINTS = /UPDATE lesson_author_blueprints/;
@@ -361,6 +363,15 @@ add('queue bulk deletion', () =>
 add('queue bulk deletion empty', () => kb.queueBulkDocumentDeletion([], KB, TENANT));
 add('queue bulk deletion none deletable', () => kb.queueBulkDocumentDeletion([DOC], KB, TENANT), withMutable(noRowsWhen(/AND status <> 'learning'/)));
 add('queue bulk deletion lost race', () => kb.queueBulkDocumentDeletion([DOC], KB, TENANT), withMutable(rowsWhen(/DELETE FROM kb_documents/, [], 0)));
+// A document an active AI ID run designs from: refused before anything is deleted or queued.
+const inUseByAiId = rowsWhen(IN_USE_BY_AI_ID, [{ document_id: DOC, name: 'Tài liệu A.pdf' }]);
+add('queue document deletion in use by AI ID', () => kb.queueDocumentDeletion(DOC, KB, TENANT), withMutable(inUseByAiId));
+add('queue bulk deletion in use by AI ID', () =>
+  kb.queueBulkDocumentDeletion([DOC, DOC_2], KB, TENANT),
+  withMutable(inUseByAiId, rowsWhen(/WHERE id = ANY\(\$1\) AND kb_id = \$2 AND tenant_id = \$3\s+AND status <> 'learning'/, [ROW, { ...ROW, id: DOC_2 }])),
+);
+add('delete document in use by AI ID', () => kb.deleteDocument(DOC, KB, TENANT), withMutable(inUseByAiId));
+add('bulk delete in use by AI ID', () => kb.bulkDeleteDocuments([DOC, DOC_2], KB, TENANT), withMutable(inUseByAiId));
 add('queue retry', () => kb.queueDocumentRetry([DOC, DOC_2], KB, TENANT), mutable);
 add('queue retry none', () => kb.queueDocumentRetry([DOC], KB, TENANT), withMutable(noRowsWhen(/SET status = 'learning', error_reason = NULL/)));
 add('queue retry empty', () => kb.queueDocumentRetry([], KB, TENANT));
