@@ -111,7 +111,9 @@ test('Apply answers busy and edited-course conflicts with plain localized messag
   await handler(applyReq({ operation_id: OPERATION, expected_workspace_revision: 3 }, 'en'), busy as unknown as Response);
   assert.equal(busy.statusCode, 409);
   assert.equal((busy.body as { code: string }).code, 'WORKSPACE_APPLY_COURSE_BUSY');
-  assert.equal((busy.body as { message: string }).message, 'Someone else is adding content to this course right now. Please try again in a few minutes.');
+  assert.equal((busy.body as { message: string }).message, 'Another chapter of this course is being applied. Wait a few seconds, then try again.');
+  assert.equal(WORKSPACE_APPLY_ERRORS.WORKSPACE_APPLY_COURSE_BUSY[1], 'Một chương khác của khoá học đang được áp dụng. Hãy đợi vài giây rồi bấm lại.',
+    'busy names another chapter of the course, never "someone else"');
   assert.deepEqual(seen[0], { overwriteConfirmation: null });
 
   failure = new WorkspaceApplyConflictError('WORKSPACE_APPLY_COURSE_EDITED', { items: [{ node_id: NODE_CHAPTER, kind: 'chapter', title: 'Chương 1' }],
