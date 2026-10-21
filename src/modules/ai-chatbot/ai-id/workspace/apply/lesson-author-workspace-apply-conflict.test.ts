@@ -153,6 +153,12 @@ const SNAPSHOT = lessonAuthorSourceSnapshotHash({ tenantId: TENANT, courseId: CO
 
 interface Script {
   locks: Set<string>;
+  /** Wakes an Apply waiting for a course lock once a transaction ends. */
+  waiting?: Array<() => void>;
+  /** The course lock wait runs out (PostgreSQL lock_timeout, 55P03). */
+  lockTimesOut?: boolean;
+  /** Any other database failure of the course lock statement. */
+  lockFailure?: string;
   calls: Array<{ sql: string; params: unknown[] }>;
   courseGate?: Promise<void>;
   courseMissing?: boolean;
@@ -175,10 +181,16 @@ function scriptedDb(script: Script) {
       if (sql.includes('FROM modules m WHERE')) return one({ id: id(40), is_active: true });
       if (sql.includes('FROM tenant_modules tm')) return one({ is_enabled: !script.coursesModuleOff });
       if (sql.startsWith('SET LOCAL')) return none;
-      if (sql.includes('pg_try_advisory_xact_lock')) {
+      if (sql.includes('pg_advisory_xact_lock')) {
+        // PostgreSQL semantics: wait while another transaction holds the key,
+        // until lock_timeout cancels the statement.
         const key = String(params[0]);
-        if (script.locks.has(key)) return one({ acquired: false });
-        script.locks.add(key); held.push(key); return one({ acquired: true });
+        if (script.lockFailure) throw Object.assign(new Error('lock statement failed'), { code: script.lockFailure });
+        while (script.locks.has(key)) {
+          if (script.lockTimesOut) throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+          await new Promise<void>(resolve => (script.waiting ??= []).push(resolve));
+        }
+        script.locks.add(key); held.push(key); return one({ pg_advisory_xact_lock: '' });
       }
       if (sql.includes('SELECT id,display_name FROM courses')) {
         if (script.courseGate) await script.courseGate;
@@ -215,27 +227,73 @@ function scriptedDb(script: Script) {
         parent_id: ROOT, sort_order: 3, deleted: true, workspace_id: WORKSPACE, workspace_node_id: NODE_CHAPTER, generated_by: 'lesson_author_ai' });
       throw new Error(`unexpected SQL in test: ${sql.slice(0, 80)}`);
     } } as unknown as GenerationJobSql;
-    try { return await work(tx); } finally { for (const key of held) script.locks.delete(key); }
+    try { return await work(tx); } finally {
+      for (const key of held) script.locks.delete(key);
+      for (const wake of (script.waiting ?? []).splice(0)) wake();
+    }
   } };
 }
 const target = (userId: string) => ({ tenantId: TENANT, userId, courseId: COURSE, conversationId: CONVERSATION, workspaceId: WORKSPACE,
   nodeId: NODE_CHAPTER, operationId: OPERATION });
 
-test('two Applies on the same course never run together: the second gets the busy answer', async () => {
+const COURSE_LOCK_WAIT = "SET LOCAL lock_timeout = '20000ms'";
+const APPLY_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '3000ms'";
+
+test('a second Apply of the same course waits for the first one and then runs, never together with it', async () => {
   let open!: () => void;
   const script: Script = { locks: new Set(), calls: [], courseGate: new Promise<void>(resolve => { open = resolve; }), courseMissing: true };
   const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
   const first = repository.apply(actor(CREATOR), target(CREATOR), 7);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(script.locks.size, 1, 'first Apply holds the course lock');
-  await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_COURSE_BUSY' });
+  let secondSettled = false;
+  const second = repository.apply(actor(EDITOR), target(EDITOR), 7).finally(() => { secondSettled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(secondSettled, false, 'the second Apply waits in line instead of being refused at once');
+  assert.equal(script.calls.filter(call => call.sql.includes('SELECT id,display_name FROM courses')).length, 1,
+    'only the first Apply has gone past the course lock');
   open();
   await assert.rejects(first, { code: 'WORKSPACE_APPLY_NOT_FOUND' });
+  await assert.rejects(second, { code: 'WORKSPACE_APPLY_NOT_FOUND' }, 'the second one ran after the first released the lock');
   assert.equal(script.locks.size, 0, 'released with the transaction');
-  script.courseGate = undefined;
-  await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_NOT_FOUND' }, 'free again');
-  const lockKeys = script.calls.filter(call => call.sql.includes('pg_try_advisory_xact_lock')).map(call => call.params[0]);
-  assert.deepEqual(new Set(lockKeys), new Set([`course:${TENANT}:${COURSE}`]));
+  const sqls = script.calls.map(call => call.sql);
+  const lockCalls = script.calls.filter(call => call.sql.includes('pg_advisory_xact_lock'));
+  assert.equal(lockCalls.length, 2);
+  assert.deepEqual(new Set(lockCalls.map(call => call.params[0])), new Set([`course:${TENANT}:${COURSE}`]));
+  assert.equal(sqls.some(sql => sql.includes('pg_try_advisory_xact_lock')), false, 'never the refuse-at-once lock');
+  // Each Apply: bounded wait, lock, then the short lock timeout is back before
+  // any course row is read (the second Apply's restore runs only once it holds the lock).
+  const lockAts = sqls.flatMap((sql, index) => sql.includes('pg_advisory_xact_lock') ? [index] : []);
+  for (const index of lockAts) {
+    assert.equal(sqls[index - 1], COURSE_LOCK_WAIT, 'the wait has a time limit');
+    assert.equal(sqls[index + 1], APPLY_LOCK_TIMEOUT, 'the short lock timeout is restored right after');
+    assert.match(sqls[index + 2] ?? '', /SELECT id,display_name FROM courses/);
+  }
+  assert.equal(sqls.some(sql => sql.startsWith('SET LOCAL') && ![COURSE_LOCK_WAIT, APPLY_LOCK_TIMEOUT].includes(sql)), false);
+});
+
+test('an Apply whose bounded wait runs out gets the busy answer and runs nothing else', async () => {
+  const script: Script = { locks: new Set([`course:${TENANT}:${COURSE}`]), calls: [], lockTimesOut: true };
+  const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
+  await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_COURSE_BUSY' });
+  const sqls = script.calls.map(call => call.sql);
+  const lockAt = sqls.findIndex(sql => sql.includes('pg_advisory_xact_lock'));
+  assert.equal(sqls[lockAt - 1], COURSE_LOCK_WAIT, 'the wait has a time limit');
+  assert.equal(sqls.length, lockAt + 1, 'nothing runs after the wait ran out');
+});
+
+test('any other failure of the course lock statement is not reported as busy', async () => {
+  const script: Script = { locks: new Set(), calls: [], lockFailure: '57014' };
+  const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
+  const logged: unknown[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args); };
+  try {
+    await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_UNAVAILABLE' });
+  } finally { console.error = original; }
+  assert.equal(logged.length, 1, 'logged once as a persistence failure');
+  assert.match(JSON.stringify(logged[0]), /"failure_stage":"course_lock"/);
+  assert.match(JSON.stringify(logged[0]), /"sqlstate":"57014"/);
 });
 
 test('a staff member without course edit rights cannot Apply, before any lock is taken', async () => {
@@ -243,7 +301,7 @@ test('a staff member without course edit rights cannot Apply, before any lock is
   const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
   await assert.rejects(repository.apply(actor(NO_EDIT), target(NO_EDIT), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' });
   await assert.rejects(repository.apply(actor(EDITOR), target(CREATOR), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' }, 'actor is never taken from the body');
-  assert.equal(script.calls.some(call => call.sql.includes('pg_try_advisory_xact_lock')), false);
+  assert.equal(script.calls.some(call => call.sql.includes('advisory_xact_lock')), false);
 });
 
 test('a tenant whose courses module is turned off cannot Apply, before any lock is taken', async () => {
@@ -251,7 +309,7 @@ test('a tenant whose courses module is turned off cannot Apply, before any lock 
   const repository = createWorkspaceApplyRepository({ db: scriptedDb(script) });
   await assert.rejects(repository.apply(actor(EDITOR), target(EDITOR), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' });
   await assert.rejects(repository.apply(actor(SUPERUSER, 'superuser'), target(SUPERUSER), 7), { code: 'WORKSPACE_APPLY_FORBIDDEN' }, 'superuser too');
-  assert.equal(script.calls.some(call => call.sql.includes('pg_try_advisory_xact_lock')), false);
+  assert.equal(script.calls.some(call => call.sql.includes('advisory_xact_lock')), false);
   assert.equal(script.calls.some(call => call.sql.includes('ai_chatbot')), false, 'never the AI module');
 });
 test('another editor applies the creator\'s session; a deleted course block stops it without overwriting anything', async () => {

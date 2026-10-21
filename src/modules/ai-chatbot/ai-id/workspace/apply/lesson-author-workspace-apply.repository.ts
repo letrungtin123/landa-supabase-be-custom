@@ -46,6 +46,14 @@ export interface WorkspaceApplySharedAuditEvent {
 }
 /** Per-course Apply lock key, shared with workspace admission/creation. */
 export const workspaceCourseLockKey = (tenantId: string, courseId: string) => `course:${tenantId}:${courseId}`;
+/** Bounded wait for the per-course Apply lock: Applies of one course (other
+ * chapters, other sessions) queue behind the running one instead of being
+ * refused at once. Only a wait that runs out answers busy. */
+const COURSE_APPLY_LOCK_WAIT = "SET LOCAL lock_timeout = '20000ms'";
+/** Lock timeout of every other statement of the Apply transaction. */
+const APPLY_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '3000ms'";
+/** PostgreSQL lock_not_available: lock_timeout cancelled the wait. */
+const LOCK_NOT_AVAILABLE = '55P03';
 type Row = Record<string, any>;
 const integer = (v: unknown): number => {
   const n = typeof v === 'number' ? v : typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v) ? Number(v) : NaN;
@@ -78,10 +86,18 @@ export function createWorkspaceApplyRepository(deps: { db: GenerationJobDatabase
         failureStage = 'authorization';
         // Fresh course-editor authority of the ACTOR (target.userId === user.id).
         if (!await createWorkspaceAuthority(user).canEdit(tx, target)) throw new WorkspaceApplyError('WORKSPACE_APPLY_FORBIDDEN');
-        await tx.query("SET LOCAL lock_timeout = '3000ms'");
-        // Layer 1: one Apply per course at a time; a concurrent Apply gets a clear busy answer.
-        const locked = await tx.query(`SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`, [workspaceCourseLockKey(target.tenantId, target.courseId)]);
-        if (locked.rows[0]?.acquired !== true) throw new WorkspaceApplyError('WORKSPACE_APPLY_COURSE_BUSY');
+        // Layer 1: one Apply per course at a time. A concurrent Apply waits in
+        // line (bounded); a wait that runs out gets a clear busy answer.
+        failureStage = 'course_lock';
+        await tx.query(COURSE_APPLY_LOCK_WAIT);
+        try {
+          await tx.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [workspaceCourseLockKey(target.tenantId, target.courseId)]);
+        } catch (error) {
+          if ((error as { code?: unknown } | null)?.code === LOCK_NOT_AVAILABLE) throw new WorkspaceApplyError('WORKSPACE_APPLY_COURSE_BUSY');
+          throw error;
+        }
+        await tx.query(APPLY_LOCK_TIMEOUT);
+        failureStage = 'authorization';
         const course = await tx.query(`SELECT id,display_name FROM courses WHERE id=$1 AND tenant_id=$2 AND deleted_at IS NULL FOR UPDATE`, [target.courseId, target.tenantId]);
         if (course.rows.length !== 1) throw new WorkspaceApplyError('WORKSPACE_APPLY_NOT_FOUND');
         // Shared sessions: any course editor of the tenant may Apply; workspace
