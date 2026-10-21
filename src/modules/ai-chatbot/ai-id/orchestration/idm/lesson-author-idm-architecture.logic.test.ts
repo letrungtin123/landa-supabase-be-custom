@@ -492,6 +492,11 @@ test('IDM finalization adds the excluded facts to the chapter receipts and recor
     { code: 'ORCHESTRATION_V2_FINALIZATION_INCOMPLETE' });
   assert.throws(() => finalizeOrchestrationV2Course({ ...input, idm_accounting: { ...accounting, noise: 2 } }),
     { code: 'ORCHESTRATION_V2_FINALIZATION_INCOMPLETE' });
+  // K2 (QC A5/A6): no Nice to Know and no Hold any more; those facts are Remove and the run still finalizes.
+  const withoutHoldOrNiceToKnow = { ...accounting, nice_to_know: 0, hold: 0, remove: 2 };
+  const k2 = finalizeOrchestrationV2Course({ ...input, idm_accounting: withoutHoldOrNiceToKnow, assessment_obligations: [] });
+  assert.equal(k2.contract, 'orchestration-course-finalization-v2');
+  if (k2.contract === 'orchestration-course-finalization-v2') assert.deepEqual(k2.idm_accounting, withoutHoldOrNiceToKnow);
   // QC course 234653: 32/32 deterministic fallback units ended `ready`. More than half (or all) fail the
   // finalizer, so the run ends needs_action with every unit kept for review and Apply.
   const withOrigins = (unit_count: number, whole_fallback_count: number) => finalizeOrchestrationV2Course({

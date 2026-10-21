@@ -110,6 +110,18 @@ test('char_count, emptiness and the confirm rule', () => {
   assert.equal(orgContextConfirmIssue(stored), null);
 });
 
+test('K3: learner_groups [] (every dashboard save, every new draft) is a valid, confirmable profile', () => {
+  const saved = ok(profile({ learner_groups: [], glossary: [{ term: 'Phiếu', meaning: 'Mẫu yêu cầu' }] }));
+  assert.deepEqual(saved.learner_groups, []);
+  assert.equal(orgContextConfirmIssue(saved), null);
+  // An old confirmed profile that still lists groups stays readable; the next save simply sends [].
+  const old = ok(profile({ learner_groups: [{ name: 'Bán hàng', description: 'Nhân viên mới' }] }));
+  assert.deepEqual(ok({ ...old, learner_groups: [] }).learner_groups, []);
+  const wire = buildOrganizationContext(3, saved);
+  assert.deepEqual(readOrganizationContext(JSON.parse(JSON.stringify(wire)), 'oc', throwPath).profile.learner_groups, []);
+  assert.deepEqual(readStoredOrganizationContext(JSON.parse(JSON.stringify(wire)))?.profile.learner_groups, []);
+});
+
 test('profile_hash is the shared canonical hash and does not depend on key order', () => {
   const stored = ok(profile());
   const reordered = Object.fromEntries(Object.entries(stored).reverse()) as unknown as OrgContextProfileV1;

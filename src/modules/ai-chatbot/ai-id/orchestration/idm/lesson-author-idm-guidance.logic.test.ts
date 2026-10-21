@@ -43,6 +43,22 @@ test('guidance lists every Hold item with the Must Dos it blocks, held objective
   assert.deepEqual(buildIdmAuthorGuidance(idmFixture().design).pending_objectives, []);
 });
 
+test('K2: no Hold item, no blocked Must Do and no Nice to Know give empty guidance lists, never a refusal', () => {
+  // QC A5/A6: the AI service now always sends hold_items: [] and blocked_must_do_ids: [], and stores a
+  // nice_to_know row as remove. The stored design reads, and every guidance list is simply empty.
+  const design = structuredClone(idmFixture().design);
+  design.hold_items = [];
+  design.blocked_must_do_ids = [];
+  for (const row of design.blueprint) if (row.classification === 'nice_to_know') row.classification = 'remove';
+  for (const item of design.dispositions) if (item.disposition === 'nice_to_know') item.disposition = 'remove';
+  const stored = JSON.parse(JSON.stringify(rehashIdmDesign(design)));
+  assert.deepEqual(readIdmAuthorGuidance(stored), { hold_items: [], pending_objectives: [], nice_to_know: [] });
+  const notes = readIdmAuthorNotesGuidance(stored);
+  assert.ok(notes);
+  assert.deepEqual([notes.hold_items, notes.pending_objectives, notes.nice_to_know], [[], [], []]);
+  assert.deepEqual(notes.sme_questions, idmAuthorSmeQuestions(rehashIdmDesign(design)));
+});
+
 test('guidance is null for legacy runs and for a stored design this reader cannot verify', () => {
   assert.equal(readIdmAuthorGuidance(null), null);
   assert.equal(readIdmAuthorGuidance(undefined), null);
