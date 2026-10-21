@@ -11,6 +11,7 @@ import { createBotSchema, updateBotSchema } from './bot.validator.js';
 import * as botService from './bot.service.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../middleware/audit-log.js';
 import { botAvatarFileError } from './bot-avatar-upload.js';
+import { sendKbUsageClash } from './kb-usage.controller.js';
 
 /** Ids are UUIDs: anything else is simply not found (never a database error). */
 function botIdValid(req: Request, res: Response): boolean {
@@ -80,7 +81,7 @@ export async function updateBot(req: Request, res: Response): Promise<void> {
     if (!bot) { sendError(res, 'Bot không tồn tại', 404); return; }
     sendSuccess(res, bot);
   } catch (err) {
-    sendClientError(req, res, err, 'Chatbot');
+    if (!sendKbUsageClash(req, res, err)) sendClientError(req, res, err, 'Chatbot');
   }
 }
 

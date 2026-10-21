@@ -323,6 +323,18 @@
    "methods": [
     "GET"
    ],
+   "path": "/api/ai-chatbot/kb-usage-conflicts",
+   "stack": [
+    "permissionMiddleware",
+    "getKbUsageConflicts"
+   ],
+   "registered_by": "mountKbUsageRoutes(router,{viewPermission:checkPermission('ai_chatbot','can_view')})"
+  },
+  {
+   "kind": "route",
+   "methods": [
+    "GET"
+   ],
    "path": "/api/ai-chatbot/lesson-author/settings",
    "stack": [
     "permissionMiddleware",
@@ -1151,5 +1163,5 @@
    "source": "router.post('/chat/conversations/:id/messages',allowRuntimeChatTarget,lessonAuthorCourseEditor,lessonAuthorSessionOwnerOnly('id'),chatCtrl.sendMessage)"
   }
  ],
- "router_code_sha256": "0f1939aba54a00e5ea2049dc4d8f7397ce026771e0f531f3f5b282557b24893e"
+ "router_code_sha256": "06470b7840e16a80b55434361f5d36955a112d71b65b8641c95e73d1c14181d2"
 }

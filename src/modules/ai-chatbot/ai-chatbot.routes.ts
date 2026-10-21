@@ -41,6 +41,7 @@ import { createKbTempUpload } from './kb/kb-upload-storage.js';
 import * as botCtrl from './chat/bot.controller.js';
 import { parseBotAvatarUpload } from './chat/bot-avatar-upload.js';
 import * as chatCtrl from './chat/chat.controller.js';
+import { mountKbUsageRoutes } from './chat/kb-usage.routes.js';
 import * as transcriptCtrl from './ai-id/sources/lesson-author-transcription.controller.js';
 import { getAiOverviewController } from './ai-report/ai-report.controller.js';
 import { reportPdfHandlers } from './ai-report/report-pdf.controller.js';
@@ -241,6 +242,8 @@ router.get('/kb/:kbId/articles/:docId', checkPermission('ai_chatbot', 'can_view'
 router.get('/bots/assignments', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getAssignments);
 router.put('/bots/assignments', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.assignBot);
 router.delete('/bots/assignments/:target', checkPermission('ai_chatbot', 'can_edit'), chatCtrl.unassignBot);
+// Knowledge bases used in two or more places (admin page, learner page, AI ID): GET /kb-usage-conflicts.
+mountKbUsageRoutes(router, { viewPermission: checkPermission('ai_chatbot', 'can_view') });
 
 // ── Bot CRUD ──
 router.get('/lesson-author/settings', checkPermission('ai_chatbot', 'can_view'), chatCtrl.getLessonAuthorSettings);

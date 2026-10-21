@@ -2,7 +2,7 @@
 // Bot Service — Chatbot CRUD + Bot Personas
 // ═══════════════════════════════════════════════════════════════
 
-import { getClient, query } from '../../../config/database.js';
+import { getClient, query, withDatabaseTransaction } from '../../../config/database.js';
 import { appendAuditLog, type TransactionalAuditEntry } from '../../../middleware/audit-log.js';
 import { cacheJson, getCacheVersion } from '../../../config/cache.js';
 import { CACHE_TTL, cacheKeys, cacheVersions } from '../../../config/cache-keys.js';
@@ -11,6 +11,7 @@ import { uploadFile, buildStoragePath, buildFileName, deleteFileByUrl, deleteTen
 import type { CreateBotInput, UpdateBotInput } from './bot.validator.js';
 import { AppError } from '../../../middleware/error-handler.js';
 import { visibleKnowledgebaseSql } from '../kb/kb.repository.js';
+import { kbUsageGuard } from './kb-usage.service.js';
 import {
   INPUT_FILTER_CONFIG_KEY,
   ensureInputFilterInBotConfig,
@@ -167,6 +168,12 @@ export async function createBot(tenantId: string, input: CreateBotInput, userId:
 }
 
 export async function updateBot(id: string, tenantId: string, input: UpdateBotInput): Promise<Chatbot | null> {
+  // One transaction (nest-safe: joins the caller's audited one), so the exclusive knowledge base lock of a
+  // kb_id change is held until the UPDATE commits.
+  return withDatabaseTransaction(() => updateBotInTransaction(id, tenantId, input));
+}
+
+async function updateBotInTransaction(id: string, tenantId: string, input: UpdateBotInput): Promise<Chatbot | null> {
   // Validate kb_id if being changed
   if (input.kb_id !== undefined && input.kb_id !== null) {
     const kbCheck = await query<{ id: string }>(
@@ -176,6 +183,8 @@ export async function updateBot(id: string, tenantId: string, input: UpdateBotIn
     if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
       throw new AppError('Knowledge Base không tồn tại hoặc không thuộc tenant này', 404);
     }
+    // A bot serving the admin or learner page keeps its knowledge base exclusive (kb-usage.logic.ts).
+    await kbUsageGuard.assertBotKbChange(tenantId, id, input.kb_id);
   }
 
   const sets: string[] = [];

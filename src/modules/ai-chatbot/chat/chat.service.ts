@@ -11,6 +11,7 @@ import { invalidateTenantAiCaches } from '../../../config/cache-invalidation.js'
 import { AppError } from '../../../middleware/error-handler.js';
 import { CHAT_TARGETS, LESSON_AUTHOR_TARGET } from './chat.constants.js';
 import { visibleKnowledgebaseSql } from '../kb/kb.repository.js';
+import { kbUsageGuard } from './kb-usage.service.js';
 import type { ChatTarget } from './chat.constants.js';
 import type {
   ChatMessage,
@@ -233,25 +234,29 @@ async function getActiveBotFromDb(tenantId: string, target: ChatTarget): Promise
 export async function assignBot(tenantId: string, target: ChatTarget, botId: string): Promise<void> {
   if (!isValidUUID(botId)) throw new AppError('bot_id không hợp lệ', 400);
 
-  const botCheck = await query<{ id: string }>(
-    `SELECT id FROM chatbots WHERE id = $1 AND tenant_id = $2`,
-    [botId, tenantId],
-  );
-  if (!botCheck.rowCount || botCheck.rowCount === 0) {
-    throw new AppError('Bot không tồn tại, không thuộc tenant, hoặc đã bị tắt', 404);
-  }
+  // One transaction (nest-safe: joins the caller's audited one), so the exclusive knowledge base lock is held until the write commits.
+  await withDatabaseTransaction(async () => {
+    const botCheck = await query<{ id: string }>(
+      `SELECT id FROM chatbots WHERE id = $1 AND tenant_id = $2`,
+      [botId, tenantId],
+    );
+    if (!botCheck.rowCount || botCheck.rowCount === 0) {
+      throw new AppError('Bot không tồn tại, không thuộc tenant, hoặc đã bị tắt', 404);
+    }
+    await kbUsageGuard.assertBotAssignment(tenantId, target, botId);
 
-  await query(
-    `INSERT INTO tenant_bot_assignments (tenant_id, target, bot_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (tenant_id, target) DO UPDATE SET bot_id = $3, created_at = now()`,
-    [tenantId, target, botId],
-  );
+    await query(
+      `INSERT INTO tenant_bot_assignments (tenant_id, target, bot_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, target) DO UPDATE SET bot_id = $3, created_at = now()`,
+      [tenantId, target, botId],
+    );
 
-  if (target === LESSON_AUTHOR_TARGET) {
-    await resolveLessonAuthorPersonaForBot(tenantId, botId);
-  }
-  await invalidateTenantAiCaches(tenantId);
+    if (target === LESSON_AUTHOR_TARGET) {
+      await resolveLessonAuthorPersonaForBot(tenantId, botId);
+    }
+    await invalidateTenantAiCaches(tenantId);
+  });
 }
 
 export async function unassignBot(tenantId: string, target: ChatTarget): Promise<boolean> {
@@ -390,24 +395,29 @@ export async function listLessonAuthorSourceDocuments(
 export async function assignLessonAuthorKb(tenantId: string, kbId: string): Promise<void> {
   if (!isValidUUID(kbId)) throw new AppError('kb_id không hợp lệ', 400);
 
-  const kbCheck = await query<{ id: string }>(
-    `SELECT kb.id FROM knowledgebases kb WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}`,
-    [kbId, tenantId],
-  );
-  if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
-    throw new AppError('KB không tồn tại hoặc không thuộc tenant', 404);
-  }
+  // One transaction (nest-safe: joins the caller's audited one), so the exclusive knowledge base lock is held until the write commits.
+  await withDatabaseTransaction(async () => {
+    // The hidden AI ID organization context knowledge base is not found here: it is never assignable.
+    const kbCheck = await query<{ id: string }>(
+      `SELECT kb.id FROM knowledgebases kb WHERE kb.id = $1 AND kb.tenant_id = $2 AND ${visibleKnowledgebaseSql('kb')}`,
+      [kbId, tenantId],
+    );
+    if (!kbCheck.rowCount || kbCheck.rowCount === 0) {
+      throw new AppError('KB không tồn tại hoặc không thuộc tenant', 404);
+    }
+    await kbUsageGuard.assertAiIdKbAssignment(tenantId, kbId);
 
-  await query(
-    `INSERT INTO tenant_kb_assignments (tenant_id, target, kb_id, updated_at)
-     VALUES ($1, $2, $3, now())
-     ON CONFLICT (tenant_id, target)
-     DO UPDATE SET kb_id = $3, updated_at = now()`,
-    [tenantId, LESSON_AUTHOR_TARGET, kbId],
-  );
+    await query(
+      `INSERT INTO tenant_kb_assignments (tenant_id, target, kb_id, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (tenant_id, target)
+       DO UPDATE SET kb_id = $3, updated_at = now()`,
+      [tenantId, LESSON_AUTHOR_TARGET, kbId],
+    );
 
-  invalidateGeminiStoreNameCache(kbId);
-  await invalidateTenantAiCaches(tenantId);
+    invalidateGeminiStoreNameCache(kbId);
+    await invalidateTenantAiCaches(tenantId);
+  });
 }
 
 export async function unassignLessonAuthorKb(tenantId: string): Promise<boolean> {

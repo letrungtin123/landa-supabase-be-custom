@@ -31,6 +31,7 @@ import * as chatService from './chat.service.js';
 import { assertChatCourseAccess, ChatCourseScopeError } from './chat-course-scope.service.js';
 import * as botService from './bot.service.js';
 import * as kbService from '../kb/kb.service.js';
+import { sendKbUsageClash } from './kb-usage.controller.js';
 import { UUID_PATTERN, isUuid } from '../../../utils/uuid.js';
 
 // Chat answers streamed at once (H10): per tenant and in total, for the whole
@@ -165,7 +166,7 @@ export async function assignBot(req: Request, res: Response): Promise<void> {
       () => createTransactionalAuditEntry(req, 'UPDATE', 'bot_assignment', { code: 'chatbot.assignment.updated', context: { related_entity_name: bot?.name || bot_id, related_entity_type: 'chatbot' } }, target, bot?.name || bot_id),
     );
     sendSuccess(res, { message: 'Đã gán bot' });
-  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+  } catch (err) { if (!sendKbUsageClash(req, res, err)) sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function unassignBot(req: Request, res: Response): Promise<void> {
@@ -223,7 +224,7 @@ export async function assignLessonAuthorKb(req: Request, res: Response): Promise
       () => createTransactionalAuditEntry(req, 'UPDATE', 'lesson_author_kb_assignment', { code: 'knowledgebase.assignment.updated', context: { related_entity_name: kb?.name || kb_id, related_entity_type: 'knowledgebase' } }, tenantId, kb?.name || kb_id),
     );
     sendSuccess(res, { message: 'Đã gán KB chuyên gia bài học' });
-  } catch (err) { sendClientError(req, res, err, 'Chat'); }
+  } catch (err) { if (!sendKbUsageClash(req, res, err)) sendClientError(req, res, err, 'Chat'); }
 }
 
 export async function unassignLessonAuthorKb(req: Request, res: Response): Promise<void> {
