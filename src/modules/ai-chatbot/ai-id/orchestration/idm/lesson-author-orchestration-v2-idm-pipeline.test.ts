@@ -30,6 +30,7 @@ import {
   type OrchestrationV2RuntimeAuthorityReaders,
 } from '../lesson-author-orchestration-v2-execution.config.js';
 import { orchestrationV2Hash } from '../../shared/lesson-author-orchestration-v2.logic.js';
+import { lessonAuthorSessionTitleFromCourseTitle } from '../../shared/lesson-author-session-title.logic.js';
 import { createOrchestrationV2PlanningRepository } from '../steps/lesson-author-orchestration-v2-planning.repository.js';
 import { executeOrchestrationV2PlanningTask } from '../steps/lesson-author-orchestration-v2-planning.service.js';
 import {
@@ -390,6 +391,8 @@ function fanOutRows(sql: string, params: unknown[]): Array<Record<string, unknow
     return (JSON.parse(String(params[0])) as Array<{ id: string }>).map(row => ({ id: row.id }));
   }
   if (sql.includes("'architecture_progressed'")) return [{ sequence: 3 }];
+  // C1: the session takes the course title in the same transaction.
+  if (sql.includes('UPDATE chat_conversations c SET title=')) return [{ id: uuid(9) }];
   return undefined;
 }
 
@@ -437,6 +440,10 @@ test('IDM completeSkeleton stores payload.idm, block-scope catalogue and IDM sha
   // The snapshot facts were read for the invariant check, scoped to the run snapshot.
   const factRead = f.queries.find(query => query.sql.includes('char_length(fact_text)'))!;
   assert.deepEqual(factRead.params, [uuid(5), uuid(3), uuid(4), 'course-v1:idm+1']);
+  // C1: the IDM skeleton's course title names a session that still has the default title, last in the transaction.
+  assert.ok(f.queries.at(-1)!.sql.includes('UPDATE chat_conversations c SET title='));
+  assert.deepEqual(f.queries.at(-1)!.params, [uuid(3), uuid(4), 'course-v1:idm+1', 'Cuộc hội thoại mới',
+    lessonAuthorSessionTitleFromCourseTitle(fixture.skeleton.title)]);
 });
 
 test('IDM completeSkeleton fails with IDM_COURSE_DESIGN_INVALID before any durable write', async () => {

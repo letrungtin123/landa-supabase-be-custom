@@ -56,6 +56,7 @@ import type {
   createOrchestrationV2WorkerRepository,
 } from '../worker/lesson-author-orchestration-v2-worker.repository.js';
 import { UUID_PATTERN } from '../../../../../utils/uuid.js';
+import { thenAdoptSessionTitle } from './lesson-author-orchestration-v2-session-title.repository.js';
 import { OrchestrationV2PlanningRepositoryError } from './lesson-author-orchestration-v2-planning-repository.types.js';
 import type {
   OrchestrationV2ArchitectureExecutionInput, OrchestrationV2ChapterExecutionInput, OrchestrationV2PlanningAuthority,
@@ -409,7 +410,7 @@ export function createOrchestrationV2PlanningRepository(
     const artifactHash = orchestrationV2Hash(payload);
     await worker.succeed(lease, artifactHash, 'course-skeleton-v2', response.usage ?? {}, {
       artifact_kind: 'course_skeleton', artifact_hash: artifactHash, payload, validation_contract: 'course-skeleton-v2',
-    }, settleProvider, { afterSuccess: fanOutChapterTasks(lease, plan) },
+    }, settleProvider, { afterSuccess: thenAdoptSessionTitle(fanOutChapterTasks(lease, plan), lease, response.skeleton.title) },
     { mode: response.usage_source === 'reserved_upper_bound' ? 'reserved_upper_bound' : 'provider' });
   }
 
@@ -439,7 +440,7 @@ export function createOrchestrationV2PlanningRepository(
     await worker.succeed(lease, artifactHash, 'course-skeleton-v2', response.usage ?? {}, {
       artifact_kind: 'course_skeleton', artifact_hash: artifactHash, payload, validation_contract: 'course-skeleton-v2',
     }, settleProvider, {
-      afterSuccess: fanOutChapterTasks(lease, plan),
+      afterSuccess: thenAdoptSessionTitle(fanOutChapterTasks(lease, plan), lease, response.skeleton.title),
     }, { mode: response.usage_source === 'reserved_upper_bound' ? 'reserved_upper_bound' : 'provider' });
   }
 
