@@ -91,7 +91,10 @@ export type OrgContextStateView = { enabled: false } | {
 };
 
 const IDLE: OrgContextDistillView = { status: 'idle', requested_at: null, finished_at: null, error_code: null };
-const PROFILE_ENTITY = 'lesson_author_org_context';
+// audit_logs.entity_type is the DB enum audit_entity_type, which has no organization-context value: an
+// unknown value fails the insert (22P02) and with it the whole change. The profile belongs to the tenant, so its
+// events are recorded on the tenant; the event code says what happened.
+const PROFILE_ENTITY = 'tenant';
 const fail = (code: ConstructorParameters<typeof OrgContextError>[0], details?: Record<string, unknown>): never => {
   throw new OrgContextError(code, details);
 };

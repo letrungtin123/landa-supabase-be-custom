@@ -284,7 +284,7 @@ test('distill request: revision, running draft, learned documents and AI points 
   assert.deepEqual(queued, { revision: 1, distill: { status: 'queued', requested_at: '2026-10-20T02:00:00.000Z',
     finished_at: null, error_code: null } });
   assert.deepEqual(f.audits.map(entry => [entry.event.code, entry.entityType]),
-    [['lesson_author.org_context.distill_requested', 'lesson_author_org_context']]);
+    [['lesson_author.org_context.distill_requested', 'tenant']]);
   await assert.rejects(f.service.requestDistill(actor, { expected_revision: 1, locale: 'vi' }),
     codeOf('ORG_CONTEXT_DISTILL_RUNNING'));
   await assert.rejects(f.service.saveProfile(actor, { expected_revision: 1, profile: PROFILE, confirm: false }),
@@ -382,4 +382,31 @@ test('state: unread documents count learned files the latest AI draft did not re
   assert.ok(state.enabled);
   assert.equal(state.profile.unread_document_count, 1);
   assert.deepEqual(state.documents.map(doc => doc.status).sort(), ['error', 'learned', 'learned']);
+});
+
+// audit_logs.entity_type is the PostgreSQL enum audit_entity_type: a value outside it fails the insert (22P02)
+// and with it the whole change, which a fake database cannot show. These are its values (local + prod 226,
+// 21/10/2026); a new one needs a SQL file first.
+const AUDIT_ENTITY_TYPES = new Set(['auth', 'user', 'tenant', 'tenant_modules', 'org_group', 'sub_group', 'team',
+  'permission_group', 'course', 'enrollment', 'document', 'help_doc', 'course_category', 'notification', 'course_block',
+  'course_asset', 'help_folder', 'help_page', 'document_category', 'team_member', 'team_course', 'team_category',
+  'user_permission_groups', 'user_tenants', 'permission_matrix', 'permission_group_members', 'course_modal_config',
+  'section_modal_config', 'module', 'course_category_course', 'knowledgebase', 'kb_document', 'chatbot',
+  'prompt_template', 'bot_persona', 'email_template', 'tenant_role_labels', 'tenant_group_labels', 'tenant_smtp_config',
+  'sso_config', 'course_mentor_section', 'assignment', 'assignment_submission', 'branding_image', 'dashboard_content',
+  'badge_setting', 'bot_assignment', 'lesson_author_kb_assignment', 'lesson_author_job', 'team_course_category',
+  'course_deletion_job', 'user_deletion_job', 'news_post', 'news_asset', 'report_summary', 'report_pdf']);
+
+test('every audit entry of the organization context uses a value of the audit_entity_type enum', async () => {
+  const f = fixture();
+  await f.service.saveProfile(actor, { expected_revision: 0, profile: PROFILE, confirm: false });
+  await f.service.saveProfile(actor, { expected_revision: 1, profile: PROFILE, confirm: true });
+  await f.service.restoreProfile(actor, { expected_revision: 2, version: 1 });
+  f.addDoc('learned');
+  await f.service.requestDistill(actor, { expected_revision: 3, locale: 'vi' });
+  assert.deepEqual(f.audits.map(entry => entry.event.code), ['lesson_author.org_context.profile_saved',
+    'lesson_author.org_context.profile_confirmed', 'lesson_author.org_context.profile_restored',
+    'lesson_author.org_context.distill_requested']);
+  for (const entry of f.audits) assert.ok(AUDIT_ENTITY_TYPES.has(entry.entityType), `${entry.event.code}: ${entry.entityType}`);
+  assert.deepEqual([...new Set(f.audits.map(entry => [entry.entityType, entry.entityId].join(' ')))], [`tenant ${TENANT}`]);
 });

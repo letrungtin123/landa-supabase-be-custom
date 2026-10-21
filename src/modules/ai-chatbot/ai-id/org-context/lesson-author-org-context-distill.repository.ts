@@ -72,9 +72,10 @@ export function createOrgContextDistillRepository(db: OrgContextDb) {
 
     /** A failed attempt: queued again (status only) or failed for good with its code. */
     async finishFailed(tenantId: string, leaseToken: string, status: 'queued' | 'failed', errorCode: string): Promise<boolean> {
-      const result = await db.query(`UPDATE lesson_author_org_context_states SET distill_status=$3,distill_error_code=$4,
+      // $3 is read twice (column and comparison): one explicit type, or PostgreSQL refuses the statement (42P08).
+      const result = await db.query(`UPDATE lesson_author_org_context_states SET distill_status=$3::varchar,distill_error_code=$4,
           distill_lease_token=NULL,distill_lease_until=NULL,
-          distill_finished_at=CASE WHEN $3='failed' THEN now() ELSE distill_finished_at END,updated_at=now()
+          distill_finished_at=CASE WHEN $3::varchar='failed' THEN now() ELSE distill_finished_at END,updated_at=now()
         WHERE tenant_id=$1 AND distill_status='running' AND distill_lease_token=$2::uuid`,
       [tenantId, leaseToken, status, errorCode]);
       return result.rowCount === 1;

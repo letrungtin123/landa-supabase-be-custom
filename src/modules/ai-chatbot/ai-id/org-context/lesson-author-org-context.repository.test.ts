@@ -116,3 +116,25 @@ test('the drafting worker claims one row with SKIP LOCKED under the tenant fence
   assert.match(r.calls[3]!.sql, /revision=revision\+1,current_version=\$3/);
   assert.doesNotMatch(r.calls[4]!.sql, /revision/);
 });
+
+// PostgreSQL deduces one type per parameter: a parameter read twice as different types (a varchar column and a
+// text comparison) refuses the statement with 42P08, which a fake database cannot show. Every statement of both
+// repositories that reads a parameter more than once must cast each read.
+test('a parameter read twice in one statement is cast at every read (PostgreSQL 42P08)', async () => {
+  const statements: string[] = [];
+  const db = { query: async (text: string) => { statements.push(text); return { rows: [], rowCount: 1 } as never; } };
+  const distill = createOrgContextDistillRepository(db);
+  await distill.finishFailed('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'failed', 'SERVICE_BUSY');
+  await distill.finishFailed('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'queued', 'SERVICE_BUSY');
+  assert.ok(statements.length >= 2);
+  for (const text of statements) {
+    const reads = new Map<string, string[]>();
+    for (const match of text.matchAll(/\$(\d+)(::[a-z_]+(?:\[\])?)?/g)) {
+      reads.set(match[1], [...(reads.get(match[1]) ?? []), match[2] ?? '']);
+    }
+    for (const [parameter, casts] of reads) {
+      if (casts.length > 1) assert.ok(casts.every(cast => cast !== '') && new Set(casts).size === 1,
+        `$${parameter} is read ${casts.length} times with casts ${JSON.stringify(casts)} in: ${text}`);
+    }
+  }
+});
