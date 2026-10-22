@@ -635,7 +635,9 @@ test('offline IDM-2 chain: snapshot rows → Node request → Python course desi
     assert.equal(payload.idm.project_context.course_description, null);
     assert.deepEqual(payload.idm.project_context, (idmRequest as { project_context: unknown }).project_context);
     assert.equal(payload.idm.purpose?.profile, 'compliance');
-    assert.equal(payload.scopes.length, 10);
+    // K2 (QC A5): the two formerly held blocks are taught, so they have block scopes too (10 before).
+    assert.equal(payload.scopes.length, 12);
+    assert.deepEqual([payload.idm.hold_items, payload.idm.blocked_must_do_ids], [[], []]);
     assert.deepEqual(payload.shard_plans.map(plan => [plan.chapter_key, plan.shard_count, plan.source_scope_ids]),
       payload.skeleton.chapters.map(chapter => [chapter.chapter_key, 1, chapter.source_scope_ids]));
     const insert = f.queries.find(query => query.sql.includes('INSERT INTO lesson_author_workspace_v2_tasks'))!;

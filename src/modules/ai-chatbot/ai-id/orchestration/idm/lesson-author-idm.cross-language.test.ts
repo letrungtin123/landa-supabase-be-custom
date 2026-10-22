@@ -3,10 +3,7 @@ import test from 'node:test';
 import { IDM_CONTRACT_VERSION } from '../../contracts/lesson-author-idm.contract.js';
 import { IDM_BRIDGE_AVAILABLE, idmGoldenSource } from './lesson-author-idm.fixture.js';
 import { hash, runChain, type Row } from './lesson-author-idm-chain.fixture.js';
-import {
-  ORCHESTRATION_V2_COURSE_CONTRACT,
-  ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT,
-} from '../finalize/lesson-author-orchestration-v2-finalization.logic.js';
+import { ORCHESTRATION_V2_COURSE_CONTRACT } from '../finalize/lesson-author-orchestration-v2-finalization.logic.js';
 import type { OrchestrationV2ChapterShardPlan } from '../../contracts/lesson-author-orchestration-v2-rag-contract.logic.js';
 
 /**
@@ -47,12 +44,13 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     const golden = idmGoldenSource();
     const result = await runChain(t, golden, { hold_lessons: [] });
     const { publication, finalization, apply, chain, design } = result;
-    // The golden course: 3 chapter shards, lesson offsets 0/2/3, 46 course facts of 61, 15 accounted outside.
+    // The golden course: 3 chapter shards, lesson offsets 0/2/3, 52 course facts of 61, 9 accounted outside.
+    // K2 (QC A5/A6): the 6 facts of the two former Hold blocks are taught; Nice to Know is stored as Remove.
     assert.equal((result.plans as OrchestrationV2ChapterShardPlan[]).length, 3);
     assert.deepEqual(result.shardRequests.map(request => (request.idm_module_context as Row).lesson_index_offset),
       [0, 2, 3]);
-    assert.equal(result.assembly.admitted_fact_count, 46);
-    assert.equal(result.assembly.idm?.excluded_fact_count, 15);
+    assert.equal(result.assembly.admitted_fact_count, 52);
+    assert.equal(result.assembly.idm?.excluded_fact_count, 9);
     assert.equal(publication.admitted_fact_count, 61);
 
     // (a) Every workspace node content honours the UI contract (§4.1).
@@ -76,16 +74,35 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     assert.deepEqual(chapters.map(node => node.baseline?.implementation_notes),
       design.modules.map(module => design.notes.modules[module.module_key]));
     const lessons = publication.nodes.filter(node => node.kind === 'lesson');
-    assert.equal(lessons.length, 5);
+    // K2: lsn_005 is now the practice of the former Hold block cb_0010, lsn_006 the job aid (5 lessons before).
+    assert.equal(lessons.length, 6);
     assert.ok(lessons.every(node => typeof node.baseline?.implementation_notes === 'string'
       && node.baseline.implementation_notes.startsWith(design.notes.lessons[`lsn_00${lessons.indexOf(node) + 1}`]!)));
+    // QC A1/A5 (AI lane): the bridge's offline writer answers a generic explanation and a generic html, and has no
+    // repair answer. Where they miss the new W5 checks (an explanation over the length limit; the practice unit of
+    // the former Hold block, which must be a worksheet) Python falls back to its structured unit, marked for review;
+    // every other unit is the writer's.
+    const fallbacks: Array<[string, unknown]> = [];
     for (const artifact of chain.unitArtifacts) {
       const payload = artifact.payload as Row;
       const quality = (payload.generated_unit as Row).idm_quality as Row;
       assert.ok(quality, 'generated_unit keeps idm_quality');
       assert.equal((payload.nodes as Row[])[0]!.content.implementation_notes, quality.author_note || null);
-      assert.equal(payload.content_origin, 'provider_validated');
+      if (payload.content_origin === 'provider_validated') continue;
+      assert.equal(payload.content_origin, 'structured_fallback');
+      assert.equal(payload.quality_state, 'review_required');
+      fallbacks.push([(payload.nodes as Row[])[0]!.path as string, quality.deterministic_codes]);
+      // K1: the fallback explanation is laid out in lines: the principle, then one "X - ..." line per option.
+      for (const component of (payload.generated_unit as Row).components as Row[]) {
+        if (component.type !== 'problem') continue;
+        const explanation = /<p>([^<]*)<\/p>/.exec(String(component.data))![1]!.split('\n');
+        const options = String(component.data).match(/<choice /g)!.length;
+        assert.equal(explanation.length, options + 1);
+        assert.deepEqual(explanation.slice(1).map(line => line.slice(0, 4)), ['A - ', 'B - ', 'C - ', 'D - '].slice(0, options));
+      }
     }
+    assert.deepEqual(fallbacks, [['chapter_1.lesson_1.unit_1', ['IDM_W5_EXPLANATION_LENGTH']],
+      ['chapter_3.lesson_2.unit_1', ['IDM_W5_WORKSHEET_INCOMPLETE']]]);
 
     // (b) accounted-for: allocated = covered = admitted = 61.
     assert.equal(finalization.contract, ORCHESTRATION_V2_COURSE_CONTRACT);
@@ -93,13 +110,14 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     assert.deepEqual([finalization.completion.admitted_fact_count, finalization.completion.allocated_fact_count,
       finalization.completion.covered_fact_count], [61, 61, 61]);
     assert.deepEqual(finalization.idm_accounting,
-      { course: 36, reference_job_aid: 10, nice_to_know: 1, remove: 4, hold: 6, noise: 4 });
-    assert.equal(result.receipts.reduce((sum, receipt) => sum + receipt.allocated_fact_count, 0), 46);
+      { course: 42, reference_job_aid: 10, nice_to_know: 0, remove: 5, hold: 0, noise: 4 });
+    assert.equal(result.receipts.reduce((sum, receipt) => sum + receipt.allocated_fact_count, 0), 52);
     assert.ok(chain.sql.some(sql => sql.includes('INSERT INTO lesson_author_workspace_v2_completion_receipts')));
 
     // (c) contract_hash / brief_hash parity: Python accepted every Node contract (UnitGenerationContractV2
     // re-hashes it, storyboard.parse_brief re-hashes the brief) and answered from the brief.
-    assert.equal(result.contracts.length, 7);
+    // K2: one more unit, the practice of the former Hold block (lsn_005).
+    assert.equal(result.contracts.length, 8);
     for (const contract of result.contracts) {
       const { contract_hash: contractHash, ...base } = contract;
       assert.equal(contractHash, hash(base));
@@ -111,17 +129,39 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       assert.equal(brief.fidelity_mode, design.purpose!.fidelity_mode);
     }
     // QLT-5 D: the FAQ unit (lsn_003 unit 2) carries the W4 FAQ plan and its W1 material, and Python accepted it.
-    // QLT-8: the FAQ floor adds one more FAQ (a quarter of a module's learning units), with its own plan.
-    const faqBriefs = result.contracts.map(contract => contract.idm_unit_brief!).filter(brief => brief.faq_material);
-    assert.equal(faqBriefs.length, 2);
+    // QLT-8: the FAQ floor adds FAQs (a quarter of a module's learning units), each with its own plan; with K2's
+    // extra practice unit in chapter 3 it adds two (one before).
+    const faqBriefs = result.contracts.map(contract => contract.idm_unit_brief!)
+      .filter(brief => brief.components.some(slot => slot.type === 'la_faq'));
+    assert.ok(faqBriefs.every(brief => brief.faq_material));
+    assert.equal(faqBriefs.length, 3);
     const plans = faqBriefs.map(brief => brief.components.find(slot => slot.type === 'la_faq')!.faq_items!
       .map(item => [item.question_type, item.origin]));
     const planned = plans.findIndex(plan => JSON.stringify(plan) === JSON.stringify(
       [['common_mistake', 'source'], ['what_if', 'source'], ['common_mistake', 'distractor']]));
     assert.ok(planned >= 0);
     assert.equal(faqBriefs[planned]!.faq_material!.blocks[0]!.support_role, 'common_mistake');
-    const added = faqBriefs[1 - planned]!.components.find(slot => slot.type === 'la_faq')!;
-    assert.ok(added.title.startsWith('Hỏi đáp: ') && added.faq_items!.length >= 2);
+    for (const [index, brief] of faqBriefs.entries()) {
+      if (index === planned) continue;
+      const added = brief.components.find(slot => slot.type === 'la_faq')!;
+      assert.ok(added.title.startsWith('Hỏi đáp: ') && added.faq_items!.length >= 2);
+    }
+    // Owner 2026-10-22: a unit without an FAQ whose blocks carry a contradictory, unclear or outdated source point
+    // sends only those blocks with their issues; Python taught it, marked it for review and its author note quotes
+    // the facts in a plain sentence.
+    const flagged = result.contracts.filter(contract => contract.idm_unit_brief!.faq_material
+      && !contract.idm_unit_brief!.components.some(slot => slot.type === 'la_faq'));
+    assert.ok(flagged.length > 0);
+    for (const contract of flagged) {
+      const material = contract.idm_unit_brief!.faq_material!;
+      assert.deepEqual(material.practices, []);
+      assert.ok(material.blocks.every(block => block.gaps.length === 0 && block.sme_questions.length === 0
+        && block.issues.some(issue => ['conflict', 'unclear', 'outdated'].includes(issue.type))));
+      const artifact = chain.unitArtifacts.find(item => ((item.payload as Row).nodes as Row[])[0]!.path === contract.unit_path)!;
+      assert.equal((artifact.payload as Row).quality_state, 'review_required');
+      assert.match(String((((artifact.payload as Row).generated_unit as Row).idm_quality as Row).author_note),
+        /Tài liệu (ghi khác nhau|ghi chưa rõ|có thể đã cũ) ở phần “[^”]+”: “[^”]+”.*Hãy kiểm tra trước khi áp dụng./);
+    }
     // QLT-9: every single-choice slot carries its W4 key letter to Python, which accepted the briefs.
     const problems = result.contracts.flatMap(contract => contract.idm_unit_brief!.components)
       .filter(slot => slot.type === 'problem');
@@ -142,6 +182,15 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
     assert.equal(design.purpose?.profile, 'compliance');
     assert.equal(design.purpose?.fidelity_mode, 'keep');
     assert.ok(design.notes.course.includes('Mục đích khoá học: Quy trình, quy định, tuân thủ, an toàn'));
+    // Owner 2026-10-22: the course note names the source points to check, one sentence each quoting the facts
+    // (the golden source: 24 h vs 48 h, and an outdated CRM step), and has no Hold, Nice to Know or SME section.
+    const checks = design.notes.course.split('\n• ')
+      .find(section => section.startsWith('Chỗ tài liệu cần kiểm tra trước khi áp dụng:'))!.split('\n  - ').slice(1);
+    assert.equal(checks.length, 2);
+    assert.ok(checks.every(line => /^Tài liệu (ghi khác nhau|có thể đã cũ) ở phần “[^”]+”: “/.test(line)
+      && line.endsWith('Hãy kiểm tra trước khi áp dụng.')));
+    assert.doesNotMatch(design.notes.course, /Hold|Nice to Know|SME|chuyên gia/);
+    assert.deepEqual([design.hold_items, design.blocked_must_do_ids], [[], []]);
 
     // (d) Apply compile parity: the Apply identity (with notes) equals the published inventory.
     assert.equal(apply.inventory_hash, publication.inventory_hash);
@@ -177,7 +226,7 @@ test('IDM cross-language chain reaches ready with accounted-for facts, hash pari
       [1, editedUnit.title, unitNode.content.implementation_notes]);
   });
 
-test('IDM cross-language chain with a held practice ends needs_action through the assessment obligation',
+test('IDM cross-language chain in instructional design mode; a held practice no longer opens an obligation (K2)',
   { skip: IDM_BRIDGE_AVAILABLE ? false : 'landa-ai-rag/.venv-dev or tests/idm_contract_bridge.py is not available',
     timeout: 300_000 }, async t => {
     const golden = idmGoldenSource();
@@ -198,12 +247,13 @@ test('IDM cross-language chain with a held practice ends needs_action through th
       assert.deepEqual([brief.design_mode, brief.target_audience, brief.purpose_summary],
         ['instructional_design', 'Nhân viên chăm sóc khách hàng mới', coursePurpose]);
     }
-    assert.equal(assembly.assessment_obligation_count, 1);
-    assert.equal(chain.obligationRows.length, 1);
-    assert.equal(chain.obligationRows[0]!.unit_path, 'chapter_1.lesson_2.unit_1');
-    assert.equal(finalization.contract, ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT);
-    if (finalization.contract !== ORCHESTRATION_V2_COURSE_REVIEW_CONTRACT) return;
-    assert.equal(finalization.review.open_assessment_obligation_count, 1);
-    assert.deepEqual([finalization.review.allocated_fact_count, finalization.review.covered_fact_count], [61, 61]);
-    assert.ok(chain.sql.some(sql => sql.includes('failure_code=\'ASSESSMENT_REVIEW_REQUIRED\'')));
+    // K2 (QC A5, owner 2026-10-22): the AI never holds a block or a practice. The golden module answer that holds
+    // lsn_002's practice (bridge option hold_lessons) is designed with its practice, so no assessment obligation is
+    // opened and the run finalizes ready (before: one obligation on chapter_1.lesson_2.unit_1, needs_action).
+    assert.equal(assembly.assessment_obligation_count, 0);
+    assert.equal(chain.obligationRows.length, 0);
+    assert.equal(finalization.contract, ORCHESTRATION_V2_COURSE_CONTRACT);
+    if (finalization.contract !== ORCHESTRATION_V2_COURSE_CONTRACT) return;
+    assert.deepEqual([finalization.completion.allocated_fact_count, finalization.completion.covered_fact_count], [61, 61]);
+    assert.equal(chain.sql.some(sql => sql.includes('failure_code=\'ASSESSMENT_REVIEW_REQUIRED\'')), false);
   });

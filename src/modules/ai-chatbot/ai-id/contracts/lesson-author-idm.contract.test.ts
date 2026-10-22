@@ -351,8 +351,12 @@ test('Python golden course design parses in Node with hash, scope-key and invari
     const view = assertIdmCourseDesignInvariants({ design, skeleton: envelope.skeleton,
       sourceSnapshotHash: golden.snapshot_hash, snapshotFacts: golden.facts.map(fact => ({
         fact_key: fact.fact_key, fact_chars: idmTextLength(fact.fact_text) })) });
+    // K2 (QC A5/A6, owner 2026-10-22): nothing is held (the 6 facts of the former Hold block are taught in a practice
+    // unit) and Nice to Know is stored as Remove (its fact moves to remove).
     assert.deepEqual(view.dispositionCounts,
-      { course: 36, reference_job_aid: 10, nice_to_know: 1, remove: 4, hold: 6, noise: 4 });
+      { course: 42, reference_job_aid: 10, nice_to_know: 0, remove: 5, hold: 0, noise: 4 });
+    assert.deepEqual([design.hold_items, design.blocked_must_do_ids], [[], []]);
+    assert.equal(design.blocks.flatMap(block => block.sme_questions).length, 0, 'no question for an SME anywhere');
     assert.equal(design.project_context.course_title_hint, 'Xử lý khiếu nại khách hàng');
     // QLT-5: Python answers contract 2 with the description it was sent and the purpose it designed for.
     assert.equal(design.idm_contract_version, IDM_CONTRACT_VERSION);
@@ -365,7 +369,8 @@ test('Python golden course design parses in Node with hash, scope-key and invari
     assert.deepEqual(plan.chapter_tasks.map(task => [task.task_key, task.shard_plan?.source_scope_ids.length]), [
       ['architecture:chapter:chapter-1:shard:1', 3],
       ['architecture:chapter:chapter-2:shard:1', 2],
-      ['architecture:chapter:chapter-3:shard:1', 5],
+      // K2: the two formerly held blocks are taught in chapter 3 (cb_0012 in lsn_004, cb_0010 its own practice lsn_005).
+      ['architecture:chapter:chapter-3:shard:1', 7],
     ]);
     // A tampered design is rejected even if the envelope is otherwise valid.
     const tampered = structuredClone(response.idm) as Mutable;
