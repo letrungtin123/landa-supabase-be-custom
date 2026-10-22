@@ -371,6 +371,10 @@ add('queue bulk deletion in use by AI ID', () =>
   withMutable(inUseByAiId, rowsWhen(/WHERE id = ANY\(\$1\) AND kb_id = \$2 AND tenant_id = \$3\s+AND status <> 'learning'/, [ROW, { ...ROW, id: DOC_2 }])),
 );
 add('delete document in use by AI ID', () => kb.deleteDocument(DOC, KB, TENANT), withMutable(inUseByAiId));
+add('queue kb deletion in use by AI ID', () =>
+  kb.queueKnowledgebaseDeletion(KB, TENANT),
+  both(noRowsWhen(TRANSITION), rowsWhen(/AS cnt FROM/, [{ cnt: 0 }]), rowsWhen(/AS in_use/, [{ in_use: true }])),
+);
 add('bulk delete in use by AI ID', () => kb.bulkDeleteDocuments([DOC, DOC_2], KB, TENANT), withMutable(inUseByAiId));
 add('queue retry', () => kb.queueDocumentRetry([DOC, DOC_2], KB, TENANT), mutable);
 add('queue retry none', () => kb.queueDocumentRetry([DOC], KB, TENANT), withMutable(noRowsWhen(/SET status = 'learning', error_reason = NULL/)));

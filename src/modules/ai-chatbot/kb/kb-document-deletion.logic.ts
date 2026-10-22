@@ -52,6 +52,28 @@ export class KbDocumentInUseByAiIdError extends AppError {
   }
 }
 
+export const KB_IN_USE_BY_AI_ID_CODE = 'KB_IN_USE_BY_AI_ID';
+
+/** DELETE /kb/:id refused: an active AI ID run still designs a course from documents of this knowledge base. */
+export class KbInUseByAiIdError extends AppError {
+  constructor() {
+    super(KbInUseByAiIdError.text('vi'), 409, KB_IN_USE_BY_AI_ID_CODE);
+    this.name = 'KbInUseByAiIdError';
+  }
+
+  static text(locale: 'vi' | 'en'): string {
+    return locale === 'en'
+      ? 'AI ID is designing a course from documents of this knowledge base, so it cannot be deleted yet. '
+        + 'Please try again when AI ID has finished.'
+      : 'AI ID đang dùng tài liệu của Kho tri thức này để soạn khoá học nên chưa xoá được. '
+        + 'Vui lòng thử lại khi AI ID soạn xong.';
+  }
+
+  localized(locale: 'vi' | 'en'): string {
+    return KbInUseByAiIdError.text(locale);
+  }
+}
+
 /** Keeps database diagnostics server-side while the UI receives a stable error contract. */
 export function describeKbDocumentDeletionFailure(error: unknown, locale: 'vi' | 'en' = 'vi'): KbDocumentDeletionFailure {
   if (error instanceof KbDocumentInUseByAiIdError) {

@@ -31,3 +31,16 @@ export async function findSourceDocumentsInActiveRuns(db: Sql, input: {
   [input.tenantId, [...LESSON_AUTHOR_ACTIVE_V2_RUN_STATUSES], input.kbId, [...input.documentIds]]);
   return result.rows.map(row => ({ document_id: String(row.document_id), name: String(row.name) }));
 }
+
+/**
+ * Whether an AI ID workspace whose V2 run is still active designs from this knowledge base (its sources are
+ * documents of `w.kb_id`). The whole knowledge base must not be deleted then. Same index as above.
+ */
+export async function knowledgebaseHasActiveRuns(db: Sql, input: { tenantId: string; kbId: string }): Promise<boolean> {
+  const result = await db.query<{ in_use: boolean }>(`SELECT EXISTS (SELECT 1
+      FROM lesson_author_workspace_v2_runs r
+      JOIN lesson_author_workspaces w ON w.id=r.workspace_id AND w.tenant_id=r.tenant_id AND w.course_id=r.course_id
+      WHERE r.tenant_id=$1::uuid AND r.status=ANY($2::text[]) AND w.kb_id=$3::uuid) AS in_use`,
+  [input.tenantId, [...LESSON_AUTHOR_ACTIVE_V2_RUN_STATUSES], input.kbId]);
+  return result.rows[0]?.in_use === true;
+}

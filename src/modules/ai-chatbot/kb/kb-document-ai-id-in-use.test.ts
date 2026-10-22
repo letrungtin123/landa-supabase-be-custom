@@ -164,6 +164,33 @@ test('the AI ID source list marks documents in use and says whether the caller m
   assert.deepEqual((staff.out.body?.data as Array<Record<string, unknown>>).map(row => row.can_delete), [false, false]);
 });
 
+test('deleting a whole knowledge base an active AI ID run designs from is refused (409 KB_IN_USE_BY_AI_ID)', async t => {
+  const controller = await import('./kb.controller.js');
+  const KB_IN_USE = /AS in_use/;
+  for (const locale of [undefined, 'en'] as const) {
+    const statements = database(t, sql => KB_IN_USE.test(sql) ? [{ in_use: true }] : /AS cnt FROM/.test(sql) ? [{ cnt: 0 }] : undefined);
+    const { req, res, out } = call({ id: KB }, {}, locale ? { locale } : {});
+    await controller.deleteKb(req, res);
+    assert.equal(out.status, 409);
+    assert.deepEqual(out.body, { success: false, code: 'KB_IN_USE_BY_AI_ID', message: locale === 'en'
+      ? 'AI ID is designing a course from documents of this knowledge base, so it cannot be deleted yet. Please try again when AI ID has finished.'
+      : 'AI ID đang dùng tài liệu của Kho tri thức này để soạn khoá học nên chưa xoá được. Vui lòng thử lại khi AI ID soạn xong.' });
+    const check = statements.find(({ sql }) => KB_IN_USE.test(sql))!;
+    assert.match(check.sql, /r\.tenant_id=\$1::uuid AND r\.status=ANY\(\$2::text\[\]\) AND w\.kb_id=\$3::uuid/);
+    assert.deepEqual(check.params, [TENANT, ['planning', 'executing', 'finalizing'], KB]);
+    const sqls = statements.map(({ sql }) => sql);
+    assert.ok(sqls.findIndex(sql => /FROM knowledgebases WHERE id = \$1 AND tenant_id = \$2 FOR UPDATE/.test(sql))
+      < sqls.findIndex(sql => KB_IN_USE.test(sql)), 'checked under the knowledge base row lock');
+    assert.equal(sqls.some(sql => /kb_operation_jobs|UPDATE lesson_author_blueprints/.test(sql)), false, 'nothing queued');
+    assert.equal(sqls.at(-1), 'ROLLBACK');
+  }
+  // No active run on it: queued as before.
+  database(t, sql => KB_IN_USE.test(sql) ? [{ in_use: false }] : /AS cnt FROM/.test(sql) ? [{ cnt: 0 }] : undefined);
+  const free = call({ id: KB });
+  await controller.deleteKb(free.req, free.res);
+  assert.equal(free.out.status, 202);
+});
+
 test('an empty page asks nothing about AI ID runs', async () => {
   const { findSourceDocumentsInActiveRuns } = await import('../ai-id/sources/lesson-author-source-in-use.repository.js');
   let asked = 0;

@@ -18,7 +18,7 @@ import { fixMulterFilename } from '../../../config/storage.js';
 import { withKbTempUploadCleanup } from './kb-upload-storage.js';
 import { KB_FAQ_SHEET_READ_CODE_PREFIX, KB_FAQ_SHEET_READ_ERRORS, KbFaqSheetReadError } from './kb-faq-sheet.logic.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../../middleware/audit-log.js';
-import { describeKbDocumentDeletionFailure } from './kb-document-deletion.logic.js';
+import { describeKbDocumentDeletionFailure, KB_IN_USE_BY_AI_ID_CODE, KbInUseByAiIdError } from './kb-document-deletion.logic.js';
 import { syncLessonAuthorTranscriptMessagesById } from '../ai-id/sources/lesson-author-transcription.service.js';
 
 function logKbDocumentDeletionFailure(
@@ -130,6 +130,10 @@ export async function deleteKb(req: Request, res: Response): Promise<void> {
     if (!queued) { sendError(res, 'Knowledge Base không tồn tại', 404); return; }
     sendSuccess(res, { queued: true }, 'Đã đưa Kho tri thức vào hàng đợi xoá an toàn', 202);
   } catch (err) {
+    if (err instanceof KbInUseByAiIdError) {
+      res.status(409).json({ success: false, code: KB_IN_USE_BY_AI_ID_CODE, message: err.localized(requestUiLocaleOf(req)) });
+      return;
+    }
     sendClientError(req, res, err, 'KnowledgeBase');
   }
 }

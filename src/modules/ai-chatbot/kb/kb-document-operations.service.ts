@@ -21,8 +21,10 @@ import { createKbRepository } from './kb.repository.js';
 import { assertKnowledgebaseMutable, assertNoActiveAiEngineTransition } from './kb-mutability.service.js';
 import { isRestoreActiveState } from './kb-restore.logic.js';
 import type { KbDocument } from './kb.types.js';
-import { KbDocumentInUseByAiIdError } from './kb-document-deletion.logic.js';
-import { findSourceDocumentsInActiveRuns } from '../ai-id/sources/lesson-author-source-in-use.repository.js';
+import { KbDocumentInUseByAiIdError, KbInUseByAiIdError } from './kb-document-deletion.logic.js';
+import {
+  findSourceDocumentsInActiveRuns, knowledgebaseHasActiveRuns,
+} from '../ai-id/sources/lesson-author-source-in-use.repository.js';
 
 const kbRepository = createKbRepository({ query });
 
@@ -395,6 +397,9 @@ export async function queueKnowledgebaseDeletion(id: string, tenantId: string): 
   const assignments = await kbRepository.countKbAssignments(id, tenantId);
   if ((bots?.cnt || 0) > 0) throw new AppError(`Không thể xoá KB — đang có ${bots!.cnt} bot sử dụng`, 409);
   if ((assignments?.cnt || 0) > 0) throw new AppError('Không thể xoá KB đang được gán cho chuyên gia bài học', 409);
+  // C4 for the whole knowledge base: an active AI ID run designs from its documents (e.g. the AI ID knowledge base
+  // was reassigned while the run was writing). Checked under the knowledge base row lock.
+  if (await knowledgebaseHasActiveRuns({ query }, { tenantId, kbId: id })) throw new KbInUseByAiIdError();
   await supersedeLessonAuthorBlueprintsForKnowledgebase(tenantId, id);
   await enqueueKbOperation({ tenantId, kbId: id, operation: 'knowledgebase_delete' });
   return true;
