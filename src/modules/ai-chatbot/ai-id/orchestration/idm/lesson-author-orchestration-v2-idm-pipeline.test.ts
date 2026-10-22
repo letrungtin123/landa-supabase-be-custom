@@ -393,6 +393,7 @@ function fanOutRows(sql: string, params: unknown[]): Array<Record<string, unknow
   if (sql.includes("'architecture_progressed'")) return [{ sequence: 3 }];
   // C1: the session takes the course title in the same transaction.
   if (sql.includes('UPDATE chat_conversations c SET title=')) return [{ id: uuid(9) }];
+  if (/^(SAVEPOINT|RELEASE SAVEPOINT) lesson_author_session_title$/.test(sql)) return [];
   return undefined;
 }
 
@@ -441,8 +442,9 @@ test('IDM completeSkeleton stores payload.idm, block-scope catalogue and IDM sha
   const factRead = f.queries.find(query => query.sql.includes('char_length(fact_text)'))!;
   assert.deepEqual(factRead.params, [uuid(5), uuid(3), uuid(4), 'course-v1:idm+1']);
   // C1: the IDM skeleton's course title names a session that still has the default title, last in the transaction.
-  assert.ok(f.queries.at(-1)!.sql.includes('UPDATE chat_conversations c SET title='));
-  assert.deepEqual(f.queries.at(-1)!.params, [uuid(3), uuid(4), 'course-v1:idm+1', 'Cuộc hội thoại mới',
+  assert.ok(f.queries.at(-2)!.sql.includes('UPDATE chat_conversations c SET title='));
+  assert.equal(f.queries.at(-1)!.sql, 'RELEASE SAVEPOINT lesson_author_session_title');
+  assert.deepEqual(f.queries.at(-2)!.params, [uuid(3), uuid(4), 'course-v1:idm+1', 'Cuộc hội thoại mới',
     lessonAuthorSessionTitleFromCourseTitle(fixture.skeleton.title)]);
 });
 

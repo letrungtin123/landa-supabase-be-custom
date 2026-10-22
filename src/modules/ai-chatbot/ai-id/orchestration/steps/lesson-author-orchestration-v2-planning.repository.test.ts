@@ -148,6 +148,7 @@ test('skeleton completion fans out deterministic chapter shards and leaves valid
     }
     if (sql.includes("'architecture_progressed'")) return [{ sequence: 3 }];
     if (sql.includes('UPDATE chat_conversations c SET title=')) return [{ id: uuid(9) }];
+    if (/^(SAVEPOINT|RELEASE SAVEPOINT) lesson_author_session_title$/.test(sql)) return [];
     assert.fail(`unexpected SQL: ${sql}`);
   });
   const artifacts: Array<Record<string, unknown>> = [];
@@ -176,11 +177,12 @@ test('skeleton completion fans out deterministic chapter shards and leaves valid
   assert.equal(insertedTasks.filter(task => task.kind === 'validate_architecture').length, 1);
   assert.equal(f.queries.filter(query => query.sql.includes("SET status='queued'")).length, 1);
   assert.equal(f.queries.filter(query => query.sql.includes('lesson_author_workspace_v2_dispatch_outbox')).length, 1);
-  assert.equal(f.queries.length, 7, 'fan-out query count (6) plus the session name must remain constant as shard count grows');
-  // C1: last, the session takes the AI course title while it still has the default one.
-  assert.match(f.queries[6]!.sql, /^UPDATE chat_conversations c SET title=\$5,updated_at=clock_timestamp\(\)/);
-  assert.match(f.queries[6]!.sql, /AND c\.target='lesson_author' AND c\.title=\$4/);
-  assert.deepEqual(f.queries[6]!.params, [uuid(3), uuid(4), 'course-v1:test+1+2026', 'Cuộc hội thoại mới', 'Course']);
+  assert.equal(f.queries.length, 9, 'fan-out query count (6) plus the session name (3) must remain constant as shard count grows');
+  // C1: last, under its own savepoint, the session takes the AI course title while it still has the default one.
+  assert.deepEqual(f.queries.slice(6).map(query => query.sql.split('\n')[0]), ['SAVEPOINT lesson_author_session_title',
+    'UPDATE chat_conversations c SET title=$5,updated_at=clock_timestamp()', 'RELEASE SAVEPOINT lesson_author_session_title']);
+  assert.match(f.queries[7]!.sql, /AND c\.target='lesson_author' AND c\.title=\$4/);
+  assert.deepEqual(f.queries[7]!.params, [uuid(3), uuid(4), 'course-v1:test+1+2026', 'Cuộc hội thoại mới', 'Course']);
 });
 
 test('last chapter completion promotes architecture validation through one durable outbox', async () => {

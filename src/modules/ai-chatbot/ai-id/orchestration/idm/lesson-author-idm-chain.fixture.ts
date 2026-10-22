@@ -168,6 +168,7 @@ export class Chain {
     if (sql.includes('INSERT INTO lesson_author_workspace_events')) return [{ sequence: ++this.events }];
     // C1: the course skeleton success names the session (it still has the default title here).
     if (sql.includes('UPDATE chat_conversations c SET title=')) return [{ id: CONVERSATION }];
+    if (/^(SAVEPOINT|RELEASE SAVEPOINT) lesson_author_session_title$/.test(sql)) return [];
     if (sql.includes('INSERT INTO lesson_author_workspace_v2_assessment_obligations')) {
       this.obligationRows = JSON.parse(String(params[0])) as Row[];
       return this.obligationRows.map(row => ({ id: row.id }));
