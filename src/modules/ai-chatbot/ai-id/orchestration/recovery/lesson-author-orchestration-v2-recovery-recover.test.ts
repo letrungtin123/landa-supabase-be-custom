@@ -80,6 +80,8 @@ interface State {
   other_active?: boolean;
   generations?: Row[];
   scope?: Row | null;
+  /** false: a source document of the workspace is gone (no row of it, learned, in the AI ID knowledge base). */
+  sources?: boolean;
 }
 
 function database(state: State, audit?: (event: OrchestrationV2RecoveryAuditEvent) => Promise<void>) {
@@ -99,6 +101,9 @@ function database(state: State, audit?: (event: OrchestrationV2RecoveryAuditEven
       return state.recorded ? [state.recorded] : [];
     }
     if (/lesson_author_session_deletion_jobs/.test(sql)) return [];
+    if (/SELECT cardinality\(w\.source_document_ids\) AS wanted/.test(sql)) {
+      return state.sources === false ? [{ wanted: 2, document_id: uuid(91) }] : [{ wanted: 2, document_id: uuid(91) }, { wanted: 2, document_id: uuid(92) }];
+    }
     if (/FROM lesson_author_workspace_v2_tasks t[\s\S]*FOR UPDATE OF t/.test(sql)) return taskRows(state.chapters, state.validate);
     if (/FROM lesson_author_workspace_v2_dependencies/.test(sql)) return dependencyRows(state.chapters);
     if (/FROM lesson_author_workspace_v2_recovery_tasks WHERE task_id=ANY/.test(sql)) return state.generations ?? [];
@@ -255,6 +260,26 @@ test('refusals under the lock: limit, other draft running, more lessons than che
   for (const f of [limit, grew, missing, component, done]) assert.deepEqual(writes(f.calls), []);
 });
 
+test('a rewrite whose source document was deleted is refused under the lock with a plain code; Continue still runs', async () => {
+  const gone = database({ chapters: [['succeeded', 'failed']], sources: false });
+  await assert.rejects(gone.repository.recover(owner, WORKSPACE, input()), { code: 'RECOVERY_SOURCE_DOCUMENT_MISSING' });
+  assert.deepEqual(writes(gone.calls), []);
+  assert.deepEqual(gone.events, ['BEGIN', 'ROLLBACK']);
+  // The sources are read after the plan, locked FOR SHARE (a deletion then waits and sees the executing run).
+  const sources = gone.calls.find(call => /AS wanted/.test(call.sql))!;
+  assert.match(sources.sql, /JOIN tenant_kb_assignments ka ON ka\.tenant_id=w\.tenant_id AND ka\.kb_id=w\.kb_id AND ka\.target='lesson_author'/);
+  assert.match(sources.sql, /d\.status='learned'\s+WHERE w\.id=\$1 AND w\.tenant_id=\$2 AND w\.course_id=\$3 ORDER BY d\.id FOR SHARE OF d$/);
+  assert.deepEqual(sources.params, [WORKSPACE, TENANT, COURSE]);
+  const order = gone.calls.map(call => call.sql);
+  assert.ok(order.findIndex(sql => /FOR UPDATE OF t/.test(sql)) < order.findIndex(sql => /AS wanted/.test(sql)));
+  // Continue re-runs only the free checks, which never read the sources.
+  const resume = database({ chapters: [['succeeded'], ['succeeded']], validate: { 1: 'failed' }, sources: false });
+  const resumed = await resume.repository.recover(owner, WORKSPACE, input({ request: { action: 'resume' }, max_ai_unit_count: 0,
+    estimated_cost_usd: 0 }));
+  assert.equal(resumed.action, 'resume');
+  assert.equal(resume.calls.some(call => /AS wanted/.test(call.sql)), false);
+});
+
 test('continue (resume) re-runs free work only: no scope, no AI unit, no cost', async () => {
   const f = database({ chapters: [['succeeded'], ['succeeded']], validate: { 1: 'failed' } });
   const result = await f.repository.recover(owner, WORKSPACE, input({ request: { action: 'resume' }, max_ai_unit_count: 0,
@@ -331,7 +356,8 @@ function service(overrides: Record<string, unknown> = {}, snapshotOverrides: Rec
     manifest_sealed: true, completion_receipt: false, review_receipt: false, workspace_status: 'needs_action', event_head: 42 },
   workspace_status: 'needs_action', event_head: 42, tasks, course_node: { node_id: COURSE_NODE, path: 'course' },
   runtime: { runtime_config_hash: 'c'.repeat(64), model: 'model' },
-  scope_node: { node_id: chapterNode(1), kind: 'chapter', path: 'chapter_1' }, recorded: false, ...snapshotOverrides };
+  scope_node: { node_id: chapterNode(1), kind: 'chapter', path: 'chapter_1' }, recorded: false, sources_available: true,
+  ...snapshotOverrides };
   const repository = {
     snapshot: async () => { calls.push('snapshot'); return snapshot; },
     stop: async () => assert.fail('no stop'),
@@ -374,6 +400,11 @@ test('service: gates, pre-checks without locks, AI points only for a rewrite', a
   const resume = service();
   await assert.rejects(resume.service.recover(author, target, { action: 'resume' }, command), { code: 'RECOVERY_NOTHING_TO_DO' });
   assert.deepEqual(resume.calls, ['snapshot']);
+  // A source document deleted after the stop: the rewrite is refused before any AI points check or lock.
+  const gone = service({}, { sources_available: false });
+  await assert.rejects(gone.service.recover(author, target, { action: 'regenerate', node_id: chapterNode(1) }, command),
+    { code: 'RECOVERY_SOURCE_DOCUMENT_MISSING' });
+  assert.deepEqual(gone.calls, ['snapshot']);
   // A recorded operation id skips every pre-check and replays in the transaction.
   const replay = service({ runtimeCurrent: async () => assert.fail('no runtime check on replay') },
     { recorded: true, event_head: 50, run: null });

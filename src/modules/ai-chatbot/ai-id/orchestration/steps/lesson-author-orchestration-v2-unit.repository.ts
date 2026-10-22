@@ -37,9 +37,13 @@ export interface OrchestrationV2UnitExecutionInput {
   contract: Readonly<OrchestrationV2UnitGenerationContract>;
 }
 
+/** Task/run failure code: a source document of the workspace is gone or not learned (no AI call was made). */
+export const ORCHESTRATION_V2_SOURCE_DOCUMENT_MISSING = 'ORCHESTRATION_V2_SOURCE_DOCUMENT_MISSING' as const;
+
 export class OrchestrationV2UnitRepositoryError extends Error {
   constructor(readonly code:
     | 'ORCHESTRATION_V2_UNIT_AUTHORITY_INVALID'
+    | typeof ORCHESTRATION_V2_SOURCE_DOCUMENT_MISSING
     | 'ORCHESTRATION_V2_UNIT_EVIDENCE_INVALID'
     | 'ORCHESTRATION_V2_UNIT_STATE_INVALID'
     | 'ORCHESTRATION_V2_UNIT_WRITE_UNCONFIRMED'
@@ -99,8 +103,9 @@ export function createOrchestrationV2UnitRepository(
       const documents = await tx.query(`SELECT id::text AS document_id,kb_id::text,name,type,status
         FROM kb_documents WHERE tenant_id=$1 AND kb_id=$2 AND id=ANY($3::uuid[]) AND status='learned'
         ORDER BY id FOR SHARE`, [lease.tenant_id, row.kb_id, row.source_document_ids]);
+      // A source deleted (or no longer learned) after the run stopped: a stable code the author can be told.
       if (documents.rows.length !== new Set(row.source_document_ids as string[]).size) {
-        fail('ORCHESTRATION_V2_UNIT_AUTHORITY_INVALID');
+        fail(ORCHESTRATION_V2_SOURCE_DOCUMENT_MISSING);
       }
       const artifacts = await tx.query(`SELECT a.artifact_kind,a.artifact_hash,a.payload
         FROM lesson_author_workspace_v2_artifacts a

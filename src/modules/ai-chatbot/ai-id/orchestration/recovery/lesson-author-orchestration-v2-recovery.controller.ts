@@ -55,6 +55,8 @@ export const ORCHESTRATION_V2_RECOVERY_ERRORS: Record<ExternalCode, readonly [nu
     'There are not enough AI points to rewrite. Please contact your administrator to buy more points.'],
   RECOVERY_UNAVAILABLE: [503, 'Chưa thể thực hiện lúc này. Vui lòng thử lại sau ít phút.',
     'This cannot be done right now. Please try again in a few minutes.'],
+  RECOVERY_SOURCE_DOCUMENT_MISSING: [409, 'Tài liệu nguồn của bản thiết kế này không còn dùng được (đã bị xoá hoặc Kho tri thức của AI ID đã đổi) nên không thể viết lại. Bạn có thể tự soạn nội dung hoặc tạo bản thiết kế mới.',
+    'The source documents of this design are no longer available (deleted, or the AI ID knowledge base changed), so it cannot be rewritten. You can write the content yourself or start a new design.'],
 };
 
 export interface OrchestrationV2RecoveryDiagnostic {

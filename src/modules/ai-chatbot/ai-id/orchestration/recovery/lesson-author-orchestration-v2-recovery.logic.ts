@@ -30,7 +30,7 @@ export const ORCHESTRATION_V2_RECOVERY_ERROR_CODES = [
   'RECOVERY_DISABLED', 'RECOVERY_FORBIDDEN', 'RECOVERY_INPUT_INVALID', 'RECOVERY_NOT_FOUND',
   'RECOVERY_STATE_CHANGED', 'RECOVERY_UNIT_HAS_CONTENT', 'RECOVERY_NOTHING_TO_DO', 'RECOVERY_LIMIT_REACHED',
   'RECOVERY_RUNTIME_CHANGED', 'RECOVERY_OTHER_RUN_ACTIVE', 'RECOVERY_IDEMPOTENCY_CONFLICT', 'RUN_STOP_NOT_ACTIVE',
-  'AI_CREDIT_INSUFFICIENT_FOR_RECOVERY', 'RECOVERY_UNAVAILABLE',
+  'AI_CREDIT_INSUFFICIENT_FOR_RECOVERY', 'RECOVERY_UNAVAILABLE', 'RECOVERY_SOURCE_DOCUMENT_MISSING',
 ] as const;
 export type OrchestrationV2RecoveryErrorCode = (typeof ORCHESTRATION_V2_RECOVERY_ERROR_CODES)[number];
 
@@ -55,7 +55,9 @@ export type OrchestrationV2RecoveryReason =
   | 'RECOVERY_NOTHING_TO_DO'
   | 'RECOVERY_LIMIT_REACHED'
   | 'RECOVERY_UNAVAILABLE'
-  | 'RUN_STOP_NOT_ACTIVE';
+  | 'RUN_STOP_NOT_ACTIVE'
+  /** A rewrite needs every source document still learned in the AI ID knowledge base (Continue does not). */
+  | 'RECOVERY_SOURCE_DOCUMENT_MISSING';
 
 export type OrchestrationV2RecoveryRunStatus = 'planning' | 'executing' | 'finalizing' | 'ready' | 'needs_action' | 'canceled';
 export type OrchestrationV2RecoveryTaskStatus = 'blocked' | 'queued' | 'running' | 'succeeded' | 'failed'
@@ -262,6 +264,7 @@ export function orchestrationV2RecoveryErrorFor(reason: OrchestrationV2RecoveryR
     case 'RECOVERY_RUNTIME_CHANGED': return 'RECOVERY_RUNTIME_CHANGED';
     case 'RECOVERY_DISABLED': return 'RECOVERY_DISABLED';
     case 'RECOVERY_UNAVAILABLE': return 'RECOVERY_UNAVAILABLE';
+    case 'RECOVERY_SOURCE_DOCUMENT_MISSING': return 'RECOVERY_SOURCE_DOCUMENT_MISSING';
     case 'RECOVERY_RUN_ACTIVE': case 'RECOVERY_DRAINING': case 'RUN_STOP_NOT_ACTIVE': return 'RECOVERY_STATE_CHANGED';
     case 'RECOVERY_NOT_SUPPORTED': case 'RECOVERY_RUN_COMPLETE': case 'RECOVERY_REVIEW_REQUIRED':
     case 'RECOVERY_PLANNING_INCOMPLETE': case 'RECOVERY_NOTHING_TO_DO': return 'RECOVERY_NOTHING_TO_DO';
@@ -318,6 +321,8 @@ export function describeOrchestrationV2Recovery(input: {
   stop_enabled: boolean;
   recovery_enabled: boolean;
   runtime_changed: boolean;
+  /** Every source document is still learned in the AI ID knowledge base; false blocks rewrites only. */
+  sources_available?: boolean;
 }): OrchestrationV2RecoveryView {
   const { run, tasks } = input;
   const blocker = orchestrationV2RecoveryRunBlocker(run, tasks);
@@ -329,7 +334,9 @@ export function describeOrchestrationV2Recovery(input: {
   const plan = (request: OrchestrationV2RecoveryRequest) => planOrchestrationV2Recovery({ run, tasks, request });
   const option = (request: OrchestrationV2RecoveryRequest) => {
     const result = plan(request);
-    return { ...gate(result.ok ? null : result.reason), plan: result.ok ? result.plan : null };
+    const missingSources = result.ok && request.action === 'regenerate' && input.sources_available === false;
+    return { ...gate(result.ok ? (missingSources ? 'RECOVERY_SOURCE_DOCUMENT_MISSING' : null) : result.reason),
+      plan: result.ok ? result.plan : null };
   };
   const stopReason = input.stop_enabled ? orchestrationV2StopReason(run) : 'RECOVERY_DISABLED';
   const units = tasks.filter(task => task.kind === 'generate_unit' && task.node_id

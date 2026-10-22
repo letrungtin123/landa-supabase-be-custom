@@ -64,7 +64,8 @@ export function createOrchestrationV2RecoveryService(deps: OrchestrationV2Recove
     const runtimeChanged = needsRuntime ? !await deps.runtimeCurrent(user.tenantId, snapshot.runtime!) : false;
     return describeOrchestrationV2Recovery({ run: snapshot.run, workspace_status: snapshot.workspace_status,
       event_head: snapshot.event_head, tasks: snapshot.tasks, course_node: snapshot.course_node,
-      stop_enabled: deps.stopEnabled(), recovery_enabled: recoveryEnabled, runtime_changed: runtimeChanged });
+      stop_enabled: deps.stopEnabled(), recovery_enabled: recoveryEnabled, runtime_changed: runtimeChanged,
+      sources_available: snapshot.sources_available });
   }
 
   async function stop(user: AuthUser & { tenantId: string }, target: OrchestrationV2RecoveryTarget, operationId: string)
@@ -98,6 +99,10 @@ export function createOrchestrationV2RecoveryService(deps: OrchestrationV2Recove
       const planned = planOrchestrationV2Recovery({ run: snapshot.run, tasks: snapshot.tasks,
         request: scope ? { action: 'regenerate', scope } : { action: 'resume' } });
       if (!planned.ok) throw new OrchestrationV2RecoveryError(orchestrationV2RecoveryErrorFor(planned.reason));
+      // A rewrite writes lessons from the source documents; Continue only re-runs the free checks.
+      if (planned.plan.ai_unit_count > 0 && !snapshot.sources_available) {
+        throw new OrchestrationV2RecoveryError('RECOVERY_SOURCE_DOCUMENT_MISSING');
+      }
       if (!snapshot.runtime || !await deps.runtimeCurrent(user.tenantId, snapshot.runtime)) {
         throw new OrchestrationV2RecoveryError('RECOVERY_RUNTIME_CHANGED');
       }

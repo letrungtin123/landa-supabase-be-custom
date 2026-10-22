@@ -193,6 +193,7 @@ test('snapshot: one read-only repeatable-read view of the run, its tasks and the
     if (/FROM lesson_author_workspace_v2_dependencies/.test(sql)) return [{ task_id: uuid(30), depends_on_task_id: uuid(29) }];
     if (/kind='course'/.test(sql)) return [{ node_id: uuid(40), canonical_path: 'course' }];
     if (/FROM lesson_author_workspace_v2_recovery_tasks WHERE task_id=ANY/.test(sql)) return [{ task_id: uuid(30), reopens: 2 }];
+    if (/AS wanted/.test(sql)) return [{ wanted: 1, document_id: uuid(50) }];
     return undefined;
   });
   const snapshot = await createOrchestrationV2RecoveryRepository({ db: f.db,
@@ -206,6 +207,8 @@ test('snapshot: one read-only repeatable-read view of the run, its tasks and the
   assert.equal(snapshot.scope_node, null);
   assert.deepEqual(snapshot.course_node, { node_id: uuid(40), path: 'course' });
   assert.deepEqual(snapshot.runtime, { runtime_config_hash: 'b'.repeat(64), model: 'gemini-test' });
+  // Every source document is still learned in the AI ID knowledge base (read without a lock).
+  assert.equal(snapshot.sources_available, true);
   assert.match(f.calls[0]!.sql, /REPEATABLE READ, READ ONLY/);
   assert.ok(f.calls.every(call => !/FOR UPDATE|FOR SHARE|pg_advisory/.test(call.sql)));
   assert.ok(f.calls.every(call => !/^\s*(UPDATE|INSERT|DELETE)/.test(call.sql)));

@@ -45,6 +45,8 @@ export interface OrchestrationV2RecoverySnapshot {
   scope_node: OrchestrationV2RecoveryScope | null;
   /** A recovery with this operation id is already recorded (the POST replays it). */
   recorded: boolean;
+  /** Every source document is still learned in the AI ID knowledge base (a rewrite needs them). */
+  sources_available: boolean;
 }
 
 export interface OrchestrationV2RecoveryActionResult {
@@ -167,6 +169,24 @@ export const RECOVERY_TASKS_SQL = `SELECT t.id::text AS task_id,t.ordinal,t.kind
   ORDER BY t.ordinal`;
 export const RECOVERY_DEPENDENCIES_SQL = `SELECT task_id::text,depends_on_task_id::text
   FROM lesson_author_workspace_v2_dependencies WHERE run_id=$1 ORDER BY task_id,depends_on_task_id`;
+
+/**
+ * Whether every source document of the workspace is still a learned document of its knowledge base and that
+ * knowledge base is still AI ID's (what the unit step requires). `lock` keeps them (FOR SHARE) until the
+ * recovery commits: once the run is executing again, a deletion sees it and is refused.
+ */
+async function sourcesAvailable(tx: GenerationJobSql, owner: WorkspaceReadOwner, workspaceId: string, lock: boolean)
+  : Promise<boolean> {
+  const result = await tx.query(`SELECT cardinality(w.source_document_ids) AS wanted,d.id::text AS document_id
+    FROM lesson_author_workspaces w
+    JOIN tenant_kb_assignments ka ON ka.tenant_id=w.tenant_id AND ka.kb_id=w.kb_id AND ka.target='lesson_author'
+    JOIN kb_documents d ON d.id=ANY(w.source_document_ids) AND d.tenant_id=w.tenant_id AND d.kb_id=w.kb_id
+      AND d.status='learned'
+    WHERE w.id=$1 AND w.tenant_id=$2 AND w.course_id=$3${lock ? ' ORDER BY d.id FOR SHARE OF d' : ''}`,
+  [workspaceId, owner.tenantId, owner.courseId]);
+  const wanted = result.rows.length ? integer(result.rows[0]!.wanted, 1, 5) : 0;
+  return wanted > 0 && new Set(result.rows.map(row => String(row.document_id))).size === wanted;
+}
 
 /** Reopens already recorded per task (its rewrite generation), batched for the whole run. */
 async function readGenerations(tx: GenerationJobSql, rows: Record<string, unknown>[]): Promise<Map<string, number>> {
@@ -366,7 +386,7 @@ export function createOrchestrationV2RecoveryRepository(deps: {
         : await readScopeNode(tx, owner, workspaceId, options.scopeNodeId);
       if (!run) {
         return { run: null, workspace_status: workspaceStatus, event_head: eventHead, tasks: [],
-          course_node: null, runtime: null, scope_node: scopeNode, recorded };
+          course_node: null, runtime: null, scope_node: scopeNode, recorded, sources_available: true };
       }
       const taskParams = [run.run_id, workspaceId, owner.tenantId, owner.courseId];
       const tasks = await tx.query(RECOVERY_TASKS_SQL, taskParams);
@@ -381,7 +401,7 @@ export function createOrchestrationV2RecoveryRepository(deps: {
         tasks: readRecoveryTasks(tasks.rows, dependencies.rows, await readGenerations(tx, tasks.rows)),
         course_node: courseRow ? { node_id: nullableId(courseRow.node_id)!, path: String(courseRow.canonical_path) } : null,
         runtime: { runtime_config_hash: String(row.runtime_config_hash), model: String(row.model) },
-        scope_node: scopeNode, recorded,
+        scope_node: scopeNode, recorded, sources_available: await sourcesAvailable(tx, owner, workspaceId, false),
       };
     });
   }
@@ -502,6 +522,9 @@ export function createOrchestrationV2RecoveryRepository(deps: {
       if (!planned.ok) fail(orchestrationV2RecoveryErrorFor(planned.reason));
       const plan = planned.ok ? planned.plan : fail('RECOVERY_UNAVAILABLE');
       if (plan.ai_unit_count > input.max_ai_unit_count) fail('RECOVERY_STATE_CHANGED');
+      if (plan.ai_unit_count > 0 && !await sourcesAvailable(tx, owner, workspaceId, true)) {
+        fail('RECOVERY_SOURCE_DOCUMENT_MISSING');
+      }
 
       // Course fence (C) before any AI token write and before reading other drafts of this course.
       await lockOrchestrationV2CourseFence(tx, owner.courseId);

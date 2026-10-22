@@ -280,9 +280,10 @@ test('every planner reason maps to one documented POST error', () => {
   const reasons: OrchestrationV2RecoveryReason[] = ['RECOVERY_DISABLED', 'RECOVERY_NOT_SUPPORTED', 'RECOVERY_RUN_ACTIVE',
     'RECOVERY_DRAINING', 'RECOVERY_RUN_COMPLETE', 'RECOVERY_REVIEW_REQUIRED', 'RECOVERY_PLANNING_INCOMPLETE',
     'RECOVERY_RUNTIME_CHANGED', 'RECOVERY_UNIT_HAS_CONTENT', 'RECOVERY_NOTHING_TO_DO', 'RECOVERY_LIMIT_REACHED',
-    'RECOVERY_UNAVAILABLE', 'RUN_STOP_NOT_ACTIVE'];
+    'RECOVERY_UNAVAILABLE', 'RUN_STOP_NOT_ACTIVE', 'RECOVERY_SOURCE_DOCUMENT_MISSING'];
   const mapped = Object.fromEntries(reasons.map(reason => [reason, orchestrationV2RecoveryErrorFor(reason)]));
   for (const code of Object.values(mapped)) assert.ok(ORCHESTRATION_V2_RECOVERY_ERROR_CODES.includes(code));
+  assert.equal(mapped.RECOVERY_SOURCE_DOCUMENT_MISSING, 'RECOVERY_SOURCE_DOCUMENT_MISSING');
   assert.equal(mapped.RECOVERY_DRAINING, 'RECOVERY_STATE_CHANGED');
   assert.equal(mapped.RECOVERY_RUN_ACTIVE, 'RECOVERY_STATE_CHANGED');
   assert.equal(mapped.RECOVERY_REVIEW_REQUIRED, 'RECOVERY_NOTHING_TO_DO');
@@ -326,6 +327,18 @@ test('describe: options follow the planner, the gates and the AI settings', () =
   const changed = describeOrchestrationV2Recovery({ ...input, runtime_changed: true });
   assert.equal(changed.regenerate.reason, 'RECOVERY_RUNTIME_CHANGED');
   assert.equal(changed.regenerate.available, false);
+
+  // A source document deleted after the stop: no rewrite is offered (the reason says why); Continue is unchanged.
+  const sourceless = describeOrchestrationV2Recovery({ ...input, sources_available: false });
+  assert.deepEqual([sourceless.regenerate.available, sourceless.regenerate.reason], [false, 'RECOVERY_SOURCE_DOCUMENT_MISSING']);
+  assert.deepEqual(sourceless.regenerate.course, { node_id: COURSE_NODE, available: false,
+    reason: 'RECOVERY_SOURCE_DOCUMENT_MISSING', unit_count: 2 });
+  assert.ok([...sourceless.regenerate.chapters, ...sourceless.regenerate.units]
+    .every(item => !item.available && item.reason === 'RECOVERY_SOURCE_DOCUMENT_MISSING'));
+  assert.deepEqual(sourceless.resume, view.resume);
+  const resumable = course([{ units: ['succeeded'] }], 'failed');
+  assert.deepEqual(describeOrchestrationV2Recovery({ ...input, tasks: resumable, sources_available: false }).resume,
+    describeOrchestrationV2Recovery({ ...input, tasks: resumable }).resume);
 
   const active = describeOrchestrationV2Recovery({ ...input, run: run({ status: 'executing', failure_code: null,
     finished_at: null, workspace_status: 'drafting' }), workspace_status: 'drafting' });
