@@ -392,6 +392,8 @@ export interface IdmFaqPracticeNoteV1 { practice_id: string; sentence: string; f
  * Mirror of Python `IdmFaqMaterialV1`: the raw material of a unit's FAQ (real confusions, never facts).
  * `open_questions` (QLT-7, contract 3): the SME questions of the lesson's Hold items and held practices, which the
  * FAQ must leave unanswered; absent when there is none, so a brief without them reads and hashes as before.
+ * A unit without an FAQ carries it only for its blocks with a source point to check (owner decision 2026-10-22):
+ * those blocks with their issues, no gaps, questions or practices (`idmFaqMaterial`).
  */
 export interface IdmFaqMaterialV1 {
   blocks: IdmFaqBlockNoteV1[];

@@ -206,7 +206,7 @@ test('IDM unit contract carries a sealed brief inside the contract hash; require
  * QLT-5 D: chapter 1, lesson 1, unit 1 of the fixture with an la_faq slot planned at W4, W1 notes on its block and a
  * held and an active practice in its lesson.
  */
-function idmFaqUnit() {
+function idmFaqUnit(adjust: (design: Mutable) => void = () => undefined) {
   const base = idmFixture();
   const design = structuredClone(base.design) as Mutable;
   const block = design.blocks[0];
@@ -214,6 +214,7 @@ function idmFaqUnit() {
   block.issues = [{ type: 'unclear', note: 'Ranh giới bước chưa rõ.', fact_keys: [block.fact_keys[0]] }];
   block.gaps = [{ type: 'missing_exception', note: 'Nguồn không nêu ngoại lệ.' }];
   block.sme_questions = ['Bước này có ngoại lệ nào không?'];
+  adjust(design);
   const fixture = { ...base, design: rehashIdmDesign(design as IdmCourseDesignV1) };
   const shards = idmShardFixtures(fixture);
   const first = shards[0]!;
@@ -251,7 +252,9 @@ function idmFaqUnit() {
   const chapter = assembly.architecture.chapters[0]!;
   return { fixture, faqItems, feedback,
     faq: contractOf('chapter_1.lesson_1.unit_1', chapter.lessons[0]!.units[0]!.source_scope_ids),
-    plain: contractOf('chapter_1.lesson_2.unit_1', chapter.lessons[1]!.units[0]!.source_scope_ids) };
+    plain: contractOf('chapter_1.lesson_2.unit_1', chapter.lessons[1]!.units[0]!.source_scope_ids),
+    second: contractOf('chapter_2.lesson_1.unit_1',
+      assembly.architecture.chapters[1]!.lessons[0]!.units[0]!.source_scope_ids) };
 }
 
 test('QLT-5 D: an FAQ unit brief carries the W4 FAQ plan and the W1 notes of its blocks; other briefs do not', () => {
@@ -275,6 +278,40 @@ test('QLT-5 D: an FAQ unit brief carries the W4 FAQ plan and the W1 notes of its
   const other = plain.idm_unit_brief!;
   assert.equal(Object.hasOwn(other, 'faq_material'), false);
   assert.ok(other.components.every(slot => !Object.hasOwn(slot, 'faq_items')));
+});
+
+test('owner 2026-10-22: a unit without an FAQ carries only its blocks with a source point to check, with their issues', () => {
+  // cb_0002 (chapter 1, lesson 2): a conflict and a duplicate; cb_0003 only too general; cb_0004 out of date.
+  const issue = (type: string, blockId: string, design: Mutable) => ({ type, note: `Ghi chú ${type}.`,
+    fact_keys: [design.blocks.find((block: Mutable) => block.block_id === blockId).fact_keys[0]] });
+  const adjust = (design: Mutable) => {
+    const blocks = new Map<string, Mutable>(design.blocks.map((block: Mutable) => [block.block_id, block]));
+    Object.assign(blocks.get('cb_0002')!, { issues: [issue('conflict', 'cb_0002', design), issue('duplicate', 'cb_0002', design)],
+      gaps: [{ type: 'missing_exception', note: 'Nguồn không nêu ngoại lệ.' }], sme_questions: ['Câu hỏi cũ?'] });
+    Object.assign(blocks.get('cb_0003')!, { issues: [issue('too_general', 'cb_0003', design)] });
+    Object.assign(blocks.get('cb_0004')!, { issues: [issue('outdated', 'cb_0004', design)] });
+  };
+  const { fixture, faq, plain, second } = idmFaqUnit(adjust);
+  const block = (blockId: string) => fixture.design.blocks.find(item => item.block_id === blockId)!;
+  const material = (blockId: string) => ({ block_id: blockId, name: block(blockId).name, intent: block(blockId).intent,
+    content_kind: block(blockId).content_kind, support_role: block(blockId).support_role, issues: block(blockId).issues,
+    gaps: [], sme_questions: [] });
+  // Only the flagged blocks and their issues (all of them); no gaps, questions or practices; the hash covers it.
+  assert.deepEqual(plain.idm_unit_brief!.faq_material, { blocks: [material('cb_0002')], practices: [] });
+  assert.deepEqual(second.idm_unit_brief!.faq_material, { blocks: [material('cb_0004')], practices: [] });
+  for (const contract of [plain, second]) {
+    const brief = contract.idm_unit_brief!;
+    assert.equal(brief.brief_hash, hash((({ brief_hash: _hash, ...rest }) => rest)(brief)));
+    assert.ok(brief.components.every(slot => slot.type !== 'la_faq' && !Object.hasOwn(slot, 'faq_items')));
+  }
+  // The FAQ unit is unchanged: every block with its notes, questions and practices.
+  assert.deepEqual(faq.idm_unit_brief!.faq_material, idmFaqUnit().faq.idm_unit_brief!.faq_material);
+  // A unit whose blocks only carry other issues gets no material at all (the brief keeps no key).
+  const none = idmFaqUnit(design => {
+    for (const item of design.blocks) item.issues = item.block_id === 'cb_0001' ? item.issues : [issue('too_detailed', item.block_id, design)];
+  });
+  assert.equal(Object.hasOwn(none.plain.idm_unit_brief!, 'faq_material'), false);
+  assert.equal(Object.hasOwn(none.second.idm_unit_brief!, 'faq_material'), false);
 });
 
 function unitResponse(contract: ReturnType<typeof idmUnit>['contract'], html: string, quality: unknown,

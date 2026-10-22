@@ -129,17 +129,25 @@ export function idmOutputBudgetFinding(brief: Pick<IdmUnitBriefV1, 'unit_segment
   return null;
 }
 
+/** Python `source_flags.FLAG_ISSUE_TYPES`: the W1 issues the author checks in the source ("Cần xem"). */
+export const IDM_SOURCE_FLAG_ISSUE_TYPES: ReadonlySet<string> = Object.freeze(new Set(['conflict', 'unclear', 'outdated']));
+
 /**
- * QLT-5 D (Python `IdmFaqMaterialV1`): the raw material of a unit's FAQ, only for a unit with an la_faq slot (null
- * otherwise, and the brief then has no `faq_material` key): what W1 found about each block of the unit (its role,
- * the source issues and gaps, the open SME questions) and the feedback focus of the lesson's practices, the "why
- * wrong" basis of the misconceptions behind their wrong options. Copied as stored, so the Python bounds hold.
- * QLT-7: `open_questions` adds the SME questions still open for the lesson (its held practices and the Hold items
- * of its Must Dos), which the FAQ must leave unanswered; the key is left out when there is none.
+ * QLT-5 D (Python `IdmFaqMaterialV1`): the raw material of a unit's FAQ, for a unit with an la_faq slot: what W1
+ * found about each block of the unit (its role, the source issues and gaps, the open SME questions) and the
+ * feedback focus of the lesson's practices, the "why wrong" basis of the misconceptions behind their wrong options.
+ * Copied as stored, so the Python bounds hold. QLT-7: `open_questions` adds the SME questions still open for the
+ * lesson (its held practices and the Hold items of its Must Dos), which the FAQ must leave unanswered; the key is
+ * left out when there is none.
+ *
+ * Owner decision 2026-10-22 (taught and flagged "Cần xem"): a unit without an la_faq slot whose blocks carry a
+ * contradictory, unclear or outdated issue gets the same key with only those blocks and their issues (no gaps, no
+ * questions, no practices). Python reads only their issues (`app.idm.source_flags.unit_flags`) and never gives this
+ * material to the writer. Any other unit gets null, and the brief then has no `faq_material` key, as before.
  */
 export function idmFaqMaterial(design: IdmCourseDesignV1, lesson: IdmLessonDesignV1,
   unit: IdmUnitDesignV1): IdmFaqMaterialV1 | null {
-  if (!unit.components.some(component => component.type === 'la_faq')) return null;
+  if (!unit.components.some(component => component.type === 'la_faq')) return idmSourceFlagMaterial(design, unit);
   const blocks = new Map(design.blocks.map(block => [block.block_id, block]));
   return {
     blocks: unit.block_ids.map(blockId => {
@@ -152,6 +160,20 @@ export function idmFaqMaterial(design: IdmCourseDesignV1, lesson: IdmLessonDesig
       .map(practice => ({ practice_id: practice.practice_id, sentence: practice.sentence,
         feedback_focus: { ...practice.feedback_focus } })),
     ...idmOpenQuestions(design, lesson),
+  };
+}
+
+/** The blocks of a unit without an FAQ that carry a source point to check, with their issues; null when none. */
+function idmSourceFlagMaterial(design: IdmCourseDesignV1, unit: IdmUnitDesignV1): IdmFaqMaterialV1 | null {
+  const blocks = new Map(design.blocks.map(block => [block.block_id, block]));
+  const flagged = unit.block_ids.map(blockId => blocks.get(blockId) ?? contractInvalid())
+    .filter(block => block.issues.some(issue => IDM_SOURCE_FLAG_ISSUE_TYPES.has(issue.type)));
+  if (flagged.length === 0) return null;
+  return {
+    blocks: flagged.map(block => ({ block_id: block.block_id, name: block.name, intent: block.intent,
+      content_kind: block.content_kind, support_role: block.support_role,
+      issues: block.issues.map(item => ({ ...item, fact_keys: [...item.fact_keys] })), gaps: [], sme_questions: [] })),
+    practices: [],
   };
 }
 
