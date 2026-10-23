@@ -96,7 +96,7 @@ test('deterministic index rejections keep their code and get a user-facing messa
     && error.message.startsWith('Định dạng tài liệu chưa được hỗ trợ'));
 });
 
-test('GET /v1/meta is HMAC-signed over GET and an empty body', async () => {
+test('GET /v1/meta is HMAC-signed (v2) over GET and an empty body', async () => {
   const meta = { service: 'landa-ai-rag', build_sha: 'abc123', contracts: { ...client.EXPECTED_RAG_SERVICE_CONTRACTS },
     schema_check: { status: 'ok' } };
   let seen: http.IncomingMessage | null = null;
@@ -112,9 +112,26 @@ test('GET /v1/meta is HMAC-signed over GET and an empty body', async () => {
   assert.equal(request.url, '/v1/meta');
   assert.equal(request.headers['content-length'], undefined);
   const timestamp = String(request.headers['x-landa-timestamp']);
-  const canonical = `${timestamp}\nGET\n/v1/meta\n${createHash('sha256').update('').digest('hex')}`;
+  const requestId = String(request.headers['x-landa-request-id']);
+  assert.match(requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(request.headers['x-landa-key-id'], 'kid-test');
+  assert.equal(request.headers['x-landa-signature-version'], '2');
+  const canonical = ['v2', 'kid-test', requestId, timestamp, 'GET', '/v1/meta',
+    createHash('sha256').update('').digest('hex')].join('\n');
   assert.equal(request.headers['x-landa-signature'],
     createHmac('sha256', 'test-secret-0123456789').update(canonical).digest('hex'));
+});
+
+test('every request gets its own request id', async () => {
+  const requestIds: string[] = [];
+  handler = (request, _body, response) => {
+    requestIds.push(String(request.headers['x-landa-request-id']));
+    response.end('{"deleted":true}');
+  };
+  await deleteDocument();
+  await deleteDocument();
+  assert.equal(requestIds.length, 2);
+  assert.notEqual(requestIds[0], requestIds[1]);
 });
 
 test('the index request carries the signed source URL only when there is one', () => {

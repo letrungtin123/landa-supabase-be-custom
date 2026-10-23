@@ -125,7 +125,10 @@ export function prepareRagRequest(
     agent: secure ? ragHttpAgents.https : ragHttpAgents.http, correlationId };
 }
 
-export function buildRagHmacHeaders(input: {
+/** Value of X-Landa-Signature-Version: the AI service checks a v2 signature (HMAC v2 spec). */
+export const RAG_HMAC_SIGNATURE_VERSION = '2';
+
+interface RagHmacInput {
   keyId: string;
   secret: string;
   timestamp: string;
@@ -133,14 +136,27 @@ export function buildRagHmacHeaders(input: {
   path: string;
   requestBody: string;
   requestId: string;
-}): Record<string, string> {
-  if (!input.keyId || !input.secret) return {};
+}
+
+/**
+ * The v2 canonical message: UTF-8 lines joined by \n, no trailing newline. The key id and the request
+ * id are signed too, so a captured request cannot be sent again under a fresh X-Landa-Request-Id
+ * (security audit 2026-10-24, M1). The path has no query string, like v1.
+ */
+export function ragHmacCanonicalMessage(input: Omit<RagHmacInput, 'secret'>): string {
   const bodyHash = createHash('sha256').update(input.requestBody, 'utf8').digest('hex');
-  const canonical = `${input.timestamp}\n${input.method.toUpperCase()}\n${input.path}\n${bodyHash}`;
+  return ['v2', input.keyId, input.requestId, input.timestamp, input.method.toUpperCase(), input.path, bodyHash]
+    .join('\n');
+}
+
+export function buildRagHmacHeaders(input: RagHmacInput): Record<string, string> {
+  if (!input.keyId || !input.secret) return {};
+  const canonical = ragHmacCanonicalMessage(input);
   return {
     'X-Landa-Key-Id': input.keyId,
     'X-Landa-Timestamp': input.timestamp,
     'X-Landa-Signature': createHmac('sha256', input.secret).update(canonical, 'utf8').digest('hex'),
+    'X-Landa-Signature-Version': RAG_HMAC_SIGNATURE_VERSION,
     'X-Landa-Request-Id': input.requestId,
   };
 }
