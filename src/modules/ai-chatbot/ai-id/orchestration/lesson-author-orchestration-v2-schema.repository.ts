@@ -27,7 +27,8 @@ export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_v2_dependency()': 'dd347f4d6cb80814bb57d87e136f9c3e',
   'guard_lesson_author_workspace_v2_artifact()': '4cf67dccee7c7e00c87041b4ae5a2bbe',
   'guard_lesson_author_workspace_v2_outbox()': 'e4fde4589943cd935ba9099582311fc8',
-  'guard_lesson_author_workspace_v2_completion()': '07e3c89e9b76064e92c259c9aa06077f',
+  // Completion receipt and attempt events: SQL 20261023_1500 (course purge).
+  'guard_lesson_author_workspace_v2_completion()': '6b8984c5871dcad237c1d81def4add8e',
   'guard_lesson_author_workspace()': '4d8a8428162110c8b60b64e39788771f',
   'guard_lesson_author_workspace_node()': '3e6fecf88368b46c1ee93b112056f026',
   'guard_lesson_author_workspace_revision()': 'b13f1a1a13b37e1e62e31b69ebf92e52',
@@ -37,7 +38,7 @@ export const ORCHESTRATION_V2_GUARDS = {
   'assert_lesson_author_workspace_run_commit()': '4f218179c17e8a1503104f3490e6dd18',
   'assert_lesson_author_workspace_v2_completion_commit()': 'c15968c86517171607deaa74e04a672d',
   'guard_lesson_author_workspace_quality_receipt()': '5bc4b48ab7aeb9ca73f9083edf6b3e62',
-  'guard_lesson_author_workspace_v2_attempt_event()': 'ab88535c99e05e44e48710752cdb27ac',
+  'guard_lesson_author_workspace_v2_attempt_event()': '26827842bb646c3fdd2763522190ca12',
   'capture_lesson_author_workspace_v2_task_attempt()': '9e7ea4a3cd98ea3552944b4f0551edd5',
   'assert_lesson_author_workspace_quality_commit()': '959e5b9037a13c97b3fd23a13229ab71',
   'guard_lesson_author_workspace_apply_quality_v2()': '5f83d38c95906246ed4b184bef2642ac',
@@ -47,6 +48,24 @@ export const ORCHESTRATION_V2_GUARDS = {
   'guard_lesson_author_workspace_v2_recovery_task()': 'ab343201149e008276311796abd53593',
   'assert_lesson_author_workspace_v2_recovery_commit()': 'e3ad484e7ac2030ec12cac8dff7e0b84',
 } as const;
+
+/**
+ * The bodies these two guards had before SQL 20261023_1500 (course purge),
+ * still accepted so this backend can be released before that file runs
+ * (expand). Remove once the file ran on every database (contract).
+ */
+export const ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL = {
+  'guard_lesson_author_workspace_v2_completion()': '07e3c89e9b76064e92c259c9aa06077f',
+  'guard_lesson_author_workspace_v2_attempt_event()': 'ab88535c99e05e44e48710752cdb27ac',
+} as const;
+
+/** True when `hash` is the reviewed body of the guard (or its accepted predecessor). */
+export function isAcceptedOrchestrationV2GuardHash(signature: unknown, hash: unknown): boolean {
+  if (typeof signature !== 'string' || typeof hash !== 'string') return false;
+  return ORCHESTRATION_V2_GUARDS[signature as keyof typeof ORCHESTRATION_V2_GUARDS] === hash
+    || ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL[
+      signature as keyof typeof ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL] === hash;
+}
 
 type TriggerContract = {
   table: (typeof ORCHESTRATION_V2_TABLES)[number];
@@ -214,7 +233,7 @@ export async function verifyOrchestrationV2Schema(db: GenerationJobSql) {
       FROM unnest($1::text[]) x(signature)
       LEFT JOIN pg_proc p ON p.oid=to_regprocedure('public.'||x.signature)`, [signatures]);
     if (functionResult.rows.length !== signatures.length || functionResult.rows.some((row) =>
-      ORCHESTRATION_V2_GUARDS[row.signature as keyof typeof ORCHESTRATION_V2_GUARDS] !== row.hash
+      !isAcceptedOrchestrationV2GuardHash(row.signature, row.hash)
       || row.definer !== false || row.browser_access !== false || row.can_execute !== true
       || JSON.stringify(row.proconfig) !== JSON.stringify(['search_path=pg_catalog, public']))) {
       throw new OrchestrationV2SchemaError('ORCHESTRATION_V2_SCHEMA_GUARD_DRIFT');

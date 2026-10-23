@@ -2,13 +2,19 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { ORCHESTRATION_V2_GUARDS } from '../../modules/ai-chatbot/ai-id/orchestration/lesson-author-orchestration-v2-schema.repository.js';
+import {
+  ORCHESTRATION_V2_GUARDS,
+  ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL,
+} from '../../modules/ai-chatbot/ai-id/orchestration/lesson-author-orchestration-v2-schema.repository.js';
 import {
   WORKSPACE_EXECUTION_GUARDS,
   WORKSPACE_FOUNDATION_GUARDS,
   WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES,
 } from '../../modules/ai-chatbot/ai-id/workspace/read/lesson-author-workspace-schema.repository.js';
-import { COURSE_PUBLISH_GOVERNANCE_FUNCTIONS } from '../../modules/course-authoring/course-publish-governance-schema.repository.js';
+import {
+  COURSE_PUBLISH_GOVERNANCE_FUNCTIONS,
+  COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL,
+} from '../../modules/course-authoring/course-publish-governance-schema.repository.js';
 import { MANUAL_SQL_DIRECTORY } from '../../test-support/manual-sql.js';
 
 // The md5 pins of guarded database functions that the startup checks compare
@@ -130,6 +136,12 @@ const PINS: Pin[] = [
   ...mapPins('WORKSPACE_EXECUTION_GUARDS', WORKSPACE_EXECUTION_GUARDS),
   ...mapPins('WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES', WORKSPACE_V2_EXECUTION_GUARD_OVERRIDES),
   ...mapPins('COURSE_PUBLISH_GOVERNANCE_FUNCTIONS', COURSE_PUBLISH_GOVERNANCE_FUNCTIONS),
+  // Predecessor bodies still accepted during the course purge SQL rollout (20261023_1500).
+  ...mapPins('ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL', ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL),
+  ...mapPins(
+    'COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL',
+    COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL,
+  ),
   ...chapterCheckpointPins(),
   ...durableBlueprintPins(),
 ];
@@ -146,7 +158,7 @@ async function generatedManifest(): Promise<Manifest> {
 
 test('the pins are found in every place that writes them', () => {
   const sources = new Set(PINS.map(pin => pin.source));
-  assert.equal(sources.size, 7);
+  assert.equal(sources.size, 9);
   assert.equal(PINS.filter(pin => pin.source === 'lesson-author-chapter-runtime.service.ts').length, 4);
   for (const pin of PINS) assert.match(pin.md5, /^[0-9a-f]{32}$/, `${pin.source} ${pin.signature}`);
 });

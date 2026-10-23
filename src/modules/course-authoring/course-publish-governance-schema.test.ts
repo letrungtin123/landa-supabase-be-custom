@@ -4,18 +4,24 @@ import test from 'node:test';
 import { manualSqlSkip, readManualSql } from '../../test-support/manual-sql.js';
 import {
   COURSE_PUBLISH_GOVERNANCE_FUNCTIONS,
+  COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL,
   COURSE_PUBLISH_GOVERNANCE_TABLES,
   coursePublishFunctionBodyHash,
+  isAcceptedCoursePublishGovernanceHash,
 } from './course-publish-governance-schema.repository.js';
 
 const sql = readManualSql('20261006_0900_course_publish_governance_cp5.sql');
 const applyRepository = readFileSync(new URL('../ai-chatbot/ai-id/workspace/apply/lesson-author-workspace-apply.repository.ts',
   import.meta.url), 'utf8');
 
-function functionBody(name: string): string {
-  const expression = new RegExp(`CREATE FUNCTION public\\.${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\([\\s\\S]*?\\)`
+// Functions replaced after the CP5 file, by the file that holds their reviewed body now.
+const coursePurgeGuards = readManualSql('20261023_1500_course_purge_deleted_course_guards.sql');
+const LATER_DEFINITIONS: Record<string, string> = { fence_course_publish_mutation: coursePurgeGuards };
+
+function functionBody(name: string, source = sql): string {
+  const expression = new RegExp(`CREATE (?:OR REPLACE )?FUNCTION public\\.${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\([\\s\\S]*?\\)`
     + `[\\s\\S]*?AS \\$(\\w+)\\$([\\s\\S]*?)\\$\\1\\$;`);
-  const match = expression.exec(sql);
+  const match = expression.exec(source);
   assert.ok(match, `missing SQL function ${name}`);
   return match[2]!;
 }
@@ -34,8 +40,38 @@ test('manual SQL is additive/private and keeps legacy Apply row fingerprints sta
 test('reviewed database guard bodies are pinned exactly', { skip: manualSqlSkip }, () => {
   for (const [signature, expected] of Object.entries(COURSE_PUBLISH_GOVERNANCE_FUNCTIONS)) {
     const name = signature.slice(0, signature.indexOf('('));
-    assert.equal(coursePublishFunctionBodyHash(functionBody(name)), expected, signature);
+    assert.equal(coursePublishFunctionBodyHash(functionBody(name, LATER_DEFINITIONS[name] ?? sql)), expected, signature);
   }
+  // The body accepted from before the course purge SQL is the reviewed CP5 body.
+  for (const [signature, expected] of Object.entries(COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL)) {
+    const name = signature.slice(0, signature.indexOf('('));
+    assert.equal(coursePublishFunctionBodyHash(functionBody(name)), expected, `${signature} (CP5)`);
+  }
+});
+
+test('the catalog check accepts the fence before and after the course purge SQL, and nothing else', () => {
+  const signature = 'fence_course_publish_mutation()';
+  assert.equal(isAcceptedCoursePublishGovernanceHash(signature, COURSE_PUBLISH_GOVERNANCE_FUNCTIONS[signature]), true);
+  assert.equal(isAcceptedCoursePublishGovernanceHash(signature,
+    COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL[signature]), true);
+  assert.equal(isAcceptedCoursePublishGovernanceHash(signature, 'ffffffffffffffffffffffffffffffff'), false);
+  assert.equal(isAcceptedCoursePublishGovernanceHash(signature, null), false);
+  // The predecessor is accepted only for its own function.
+  assert.equal(isAcceptedCoursePublishGovernanceHash('guard_course_publish_approval()',
+    COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL[signature]), false);
+  for (const [other, hash] of Object.entries(COURSE_PUBLISH_GOVERNANCE_FUNCTIONS)) {
+    assert.equal(isAcceptedCoursePublishGovernanceHash(other, hash), true, other);
+  }
+});
+
+test('course purge SQL skips the ledger bookkeeping only for a DELETE of a course being deleted', { skip: manualSqlSkip }, () => {
+  const fence = functionBody('fence_course_publish_mutation', coursePurgeGuards).replace(/\s+/g, ' ');
+  assert.match(fence, /SELECT tenant_id,deleted_at INTO v_tenant_id,v_course_deleted_at FROM public\.courses WHERE id=v_course_id;/);
+  assert.match(fence, /IF TG_OP='DELETE' AND v_course_deleted_at IS NOT NULL THEN RETURN OLD; END IF; PERFORM pg_advisory_xact_lock/);
+  // Everything after that early return is the CP5 body, unchanged.
+  const cp5 = functionBody('fence_course_publish_mutation').replace(/\s+/g, ' ');
+  const tail = (body: string) => body.slice(body.indexOf('PERFORM pg_advisory_xact_lock'));
+  assert.equal(tail(fence), tail(cp5));
 });
 
 test('publish and every structural mutation share one per-course transaction lock', { skip: manualSqlSkip }, () => {

@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { GenerationJobSql } from '../shared/lesson-author-generation-job.repository.js';
 import {
   ORCHESTRATION_V2_GUARDS,
+  ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL,
   ORCHESTRATION_V2_EXTERNAL_TRIGGERS,
   ORCHESTRATION_V2_COURSE_PUBLISH_EVIDENCE_TRIGGERS,
   ORCHESTRATION_V2_TABLES,
@@ -16,6 +17,8 @@ type Overrides = {
   fn?: Record<string, unknown>;
   triggers?: Array<Record<string, unknown>>;
   externalTriggers?: Array<Record<string, unknown>>;
+  /** The guard hashes the catalog reports (default: the pins). */
+  hashes?: Record<string, string>;
 };
 
 function catalog(overrides: Overrides = {}): GenerationJobSql {
@@ -28,7 +31,7 @@ function catalog(overrides: Overrides = {}): GenerationJobSql {
         })) };
       }
       if (sql.includes('FROM unnest($1::text[])')) {
-        return { rows: Object.entries(ORCHESTRATION_V2_GUARDS).map(([signature, hash]) => ({
+        return { rows: Object.entries(overrides.hashes ?? ORCHESTRATION_V2_GUARDS).map(([signature, hash]) => ({
           signature, proname: signature.slice(0, -2), definer: false,
           proconfig: ['search_path=pg_catalog, public'], hash,
           browser_access: false, can_execute: true, ...overrides.fn,
@@ -107,6 +110,24 @@ test('catalog verification fails closed for guard or trigger drift', async () =>
   await assert.rejects(
     verifyOrchestrationV2Schema(catalog({ externalTriggers: [] })),
     (error) => error instanceof OrchestrationV2SchemaError && error.code === 'ORCHESTRATION_V2_SCHEMA_TRIGGER_DRIFT',
+  );
+});
+
+test('catalog accepts the guard bodies from before the course purge SQL and still rejects any other body', async () => {
+  // Expand window: this backend may start before or after SQL 20261023_1500.
+  const before = { ...ORCHESTRATION_V2_GUARDS, ...ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL };
+  assert.equal((await verifyOrchestrationV2Schema(catalog({ hashes: before }))).status, 'CATALOG_VERIFIED');
+  for (const signature of Object.keys(ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL)) {
+    await assert.rejects(
+      verifyOrchestrationV2Schema(catalog({ hashes: { ...ORCHESTRATION_V2_GUARDS, [signature]: 'ffffffffffffffffffffffffffffffff' } })),
+      (error) => error instanceof OrchestrationV2SchemaError && error.code === 'ORCHESTRATION_V2_SCHEMA_GUARD_DRIFT',
+    );
+  }
+  // A predecessor hash is accepted only for its own guard.
+  await assert.rejects(
+    verifyOrchestrationV2Schema(catalog({ hashes: { ...ORCHESTRATION_V2_GUARDS,
+      'guard_lesson_author_workspace_v2_run()': ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL['guard_lesson_author_workspace_v2_completion()'] } })),
+    (error) => error instanceof OrchestrationV2SchemaError && error.code === 'ORCHESTRATION_V2_SCHEMA_GUARD_DRIFT',
   );
 });
 

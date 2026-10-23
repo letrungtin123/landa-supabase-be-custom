@@ -29,13 +29,31 @@ export const COURSE_PUBLISH_GOVERNANCE_FUNCTIONS = {
   'guard_course_publish_approval()': 'cbf4e8ce995350a1e72351c158a86a1f',
   'guard_course_publish_receipt()': '0445b536fa14002c653ce13657a5058b',
   'guard_course_publish_revision_ledger()': 'eb39f86d1d551f613c249dcc04c62ef6',
-  'fence_course_publish_mutation()': '56870786e889ae1f92f7b4165a474899',
+  // SQL 20261023_1500 (course purge): no ledger write while the course's deletion runs.
+  'fence_course_publish_mutation()': 'f580440336dc304da015d48c1c6a5acd',
   'fence_course_publish_evidence_mutation()': 'd308e04dfca22b6252a6476cd03a037a',
   'begin_course_publish_candidate(uuid,uuid,character varying,uuid,uuid)': '82bca74f6a131ab74d10b47a4a96e470',
   'finish_course_publish_candidate(uuid,uuid)': '2ea7b0c0aa9db725410c026d58bf3943',
   'assert_course_publish_candidate_commit()': '15223f87b59b03ec022cc8506c997271',
   'assert_course_publish_commit()': '579d92f89589f630fa6762374d22d31f',
 } as const;
+
+/**
+ * The body fence_course_publish_mutation() had before SQL 20261023_1500
+ * (course purge), still accepted so this backend can be released before that
+ * file runs (expand). Remove once the file ran on every database (contract).
+ */
+export const COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL = {
+  'fence_course_publish_mutation()': '56870786e889ae1f92f7b4165a474899',
+} as const;
+
+/** True when `hash` is the reviewed body of the function (or its accepted predecessor). */
+export function isAcceptedCoursePublishGovernanceHash(signature: unknown, hash: unknown): boolean {
+  if (typeof signature !== 'string' || typeof hash !== 'string') return false;
+  return COURSE_PUBLISH_GOVERNANCE_FUNCTIONS[signature as keyof typeof COURSE_PUBLISH_GOVERNANCE_FUNCTIONS] === hash
+    || COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL[
+      signature as keyof typeof COURSE_PUBLISH_GOVERNANCE_FUNCTIONS_BEFORE_COURSE_PURGE_SQL] === hash;
+}
 
 const CUSTOM_TRIGGERS = [
   ['course_publish_policies', 'trg_course_publish_policy_guard', 'guard_course_publish_policy', 31, false, false],
@@ -123,7 +141,7 @@ export async function verifyCoursePublishGovernanceSchema(sql: Sql = query) {
       FROM unnest($1::text[]) item(signature)
       LEFT JOIN pg_proc p ON p.oid=to_regprocedure('public.'||item.signature)`, [signatures]);
     if (functions.rows.length !== signatures.length || functions.rows.some(row =>
-      COURSE_PUBLISH_GOVERNANCE_FUNCTIONS[row.signature as keyof typeof COURSE_PUBLISH_GOVERNANCE_FUNCTIONS] !== row.hash
+      !isAcceptedCoursePublishGovernanceHash(row.signature, row.hash)
       || row.definer !== false || row.browser_access !== false || row.can_execute !== true
       || JSON.stringify(row.proconfig) !== JSON.stringify(['search_path=pg_catalog, public']))) {
       throw new CoursePublishGovernanceSchemaError('COURSE_PUBLISH_GOVERNANCE_SCHEMA_GUARD_DRIFT');
