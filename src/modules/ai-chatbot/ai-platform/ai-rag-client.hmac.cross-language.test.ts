@@ -76,8 +76,11 @@ async def main():
 asyncio.run(main())
 `;
 
-/** The verdict of the AI service's auth for each request, in order, in one process (one replay cache). */
-function pythonVerdicts(requests: CapturedRequest[]): string[] {
+/**
+ * The verdict of the AI service's auth for each request, in order, in one process (one replay cache), with v1
+ * signatures accepted (the transition default) or not.
+ */
+function pythonVerdicts(requests: CapturedRequest[], acceptV1: boolean): string[] {
   // Only this test's auth settings reach the AI settings (env_file=None): AI_RAG_* of the shell are dropped.
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AI_RAG_')));
   const out = spawnSync(AI_RAG_DEV_PYTHON, ['-X', 'utf8', '-B', '-c', VERIFY_SOURCE], {
@@ -85,7 +88,7 @@ function pythonVerdicts(requests: CapturedRequest[]): string[] {
     input: JSON.stringify(requests.map(request => ({ ...request, body: request.body.toString('base64') }))),
     encoding: 'utf8', timeout: 120_000, maxBuffer: 4_000_000,
     env: { ...inherited, PYTHONIOENCODING: 'utf-8', AI_RAG_AUTH_MODE: 'hmac', AI_RAG_SERVICE_TOKEN: '',
-      AI_RAG_SERVICE_HMAC_SECRETS: `${KEY_ID}:${SECRET}`, AI_RAG_HMAC_ACCEPT_V1_SIGNATURE: 'false' },
+      AI_RAG_SERVICE_HMAC_SECRETS: `${KEY_ID}:${SECRET}`, AI_RAG_HMAC_ACCEPT_V1_SIGNATURE: String(acceptV1) },
   });
   assert.equal(out.status, 0, out.error?.message ?? out.stderr);
   const lines = out.stdout.trim().split('\n');
@@ -119,26 +122,30 @@ test('the AI service accepts the v2 requests the client sends, and refuses repla
     assert.equal(meta!.body.length, 0);
     assert.ok(vietnamese!.body.length > vietnamese!.body.toString('utf8').length);
 
-    const verdicts = pythonVerdicts([
+    const requests = [
       first!,
       first!, // the same request again: its request id is spent
       withHeaders(second!, { 'x-landa-request-id': randomUUID() }), // M1: a captured request under a fresh id
       second!,
       { ...third!, body: Buffer.from(third!.body.toString('utf8').replace('333333333333', '333333333339')) },
       withHeaders(third!, { 'x-landa-key-id': 'kid-other' }),
-      withHeaders(fourth!, { 'x-landa-signature-version': null }), // read as v1, which this service refuses
+      withHeaders(fourth!, { 'x-landa-signature-version': null }), // read as v1: the v2 signature does not match
+      withHeaders(fourth!, { 'x-landa-signature-version': null, 'x-landa-request-id': randomUUID() }),
       withHeaders(fourth!, { 'x-landa-signature-version': '3' }),
-      fourth!, // refused only because of the changes above: its request id was not spent
+      fourth!, // accepted: the refusals above did not spend its request id
       meta!,
       vietnamese!,
-    ]);
+    ];
     const refused = 'rejected 401 UNAUTHORIZED';
-    assert.deepEqual(verdicts, [
-      'accepted', refused,
-      refused, 'accepted',
-      refused, refused,
-      refused, refused, 'accepted',
-      'accepted',
-      'accepted',
-    ]);
+    // While v1 is still accepted, a captured v2 request cannot be replayed as v1 either.
+    for (const acceptV1 of [false, true]) {
+      assert.deepEqual(pythonVerdicts(requests, acceptV1), [
+        'accepted', refused,
+        refused, 'accepted',
+        refused, refused,
+        refused, refused, refused, 'accepted',
+        'accepted',
+        'accepted',
+      ], `v1 accepted: ${acceptV1}`);
+    }
   });
