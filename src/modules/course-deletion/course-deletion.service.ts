@@ -25,10 +25,12 @@ import {
 import {
   createCourseDeletionRepository,
   type CourseDeletionDb,
+  type CourseDeletionRepository,
   type CourseReferenceTable,
   type DeleteJobRow,
 } from './course-deletion.repository.js';
-import { ASSET_BATCH_SIZE, DELETE_BATCH_SIZE } from './course-deletion.constants.js';
+import { ASSET_BATCH_SIZE, DELETE_BATCH_SIZE, FIRST_UUID } from './course-deletion.constants.js';
+import { describeDeletionError, tagDeletionStep, type CourseDeletionStep } from './course-deletion.logic.js';
 import {
   collectPathsFromBlocks,
   ensureCourseStorageManifest,
@@ -66,6 +68,16 @@ function emptyStats(): PurgeStats {
     rowsUpdated: 0,
     warnings: [],
   };
+}
+
+/** Runs one purge step; a failure keeps its error unchanged and records the step for last_error. */
+async function step<T>(name: CourseDeletionStep, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    tagDeletionStep(error, name);
+    throw error;
+  }
 }
 
 function addStats(total: PurgeStats, next: Partial<PurgeStats>): void {
@@ -229,7 +241,7 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
 export async function markJobRetryable(jobId: string, error: unknown): Promise<void> {
   const job = await deletionRepository.markJobRetryable({
     jobId,
-    message: (error instanceof Error ? error.message : String(error)).slice(0, 4000),
+    message: describeDeletionError(error),
     maxAttempts: env.DELETION_MAX_ATTEMPTS,
     retryBaseMs: env.DELETION_RETRY_BASE_MS,
     retryMaxMs: env.DELETION_RETRY_MAX_MS,
@@ -290,15 +302,64 @@ async function deleteAllCourseAssets(tenantId: string, courseId: string): Promis
 }
 
 /**
- * Full-course storage has already been enumerated into a durable manifest.
- * Delete every block in one database statement rather than repeatedly peeling
- * leaves: a deeply nested million-node tree otherwise degrades to one delete
- * round-trip per depth level. The production parent FK is ON DELETE CASCADE,
- * so deleting the complete course set in one statement is valid.
+ * Every block of the course, leaf first, `batchSize` per statement in id
+ * order. One statement for the whole course grew with the course (measured on
+ * a throwaway copy of the schema: 152,441 blocks 4.2 s, 604,441 blocks 21 s,
+ * every row lock in one transaction, against the pool's 30 s statement
+ * timeout that would make the job fail on every retry). A leaf has no child,
+ * so no batch cascades through the parent foreign key. A pass that reaches
+ * the end of the ids starts again for the blocks that became leaves; a pass
+ * that deletes nothing ends the loop (passes = tree depth + 1). Blocks left by
+ * a broken parent cycle go with the final DELETE of the course.
  */
+export async function deleteCourseBlocksLeafFirst(
+  repository: Pick<CourseDeletionRepository, 'deleteLeafCourseBlockBatch'>,
+  courseId: string,
+  batchSize: number,
+): Promise<number> {
+  let blocksDeleted = 0;
+  let deletedThisPass = 0;
+  let afterId = FIRST_UUID;
+  while (true) {
+    const batch = await repository.deleteLeafCourseBlockBatch(courseId, afterId, batchSize);
+    blocksDeleted += batch.deleted;
+    deletedThisPass += batch.deleted;
+    if (batch.deleted === batchSize && batch.lastId) {
+      afterId = batch.lastId;
+      continue;
+    }
+    if (deletedThisPass === 0) return blocksDeleted;
+    deletedThisPass = 0;
+    afterId = FIRST_UUID;
+  }
+}
+
+/** Full-course storage has already been enumerated into a durable manifest. */
 async function deleteAllCourseBlocks(courseId: string): Promise<Partial<PurgeStats>> {
-  const deleted = await deletionRepository.deleteAllCourseBlocks(courseId);
-  return { blocksDeleted: deleted || 0 };
+  return { blocksDeleted: await deleteCourseBlocksLeafFirst(deletionRepository, courseId, DELETE_BATCH_SIZE) };
+}
+
+/**
+ * AI ID workspaces, one per statement, before their chat conversations. A
+ * workspace takes its runs, drafts and evidence with it by cascade, so one
+ * statement deletes one workspace's tree instead of the trees of up to a
+ * batch of conversations (on the throwaway copy one statement of 30 cloned
+ * workspaces took 0.6 s). The guards of that evidence let the cascade through
+ * because the course's deletion was requested (SQL 20261023_1500).
+ */
+async function deleteCourseWorkspaces(job: DeleteJobRow): Promise<Partial<PurgeStats>> {
+  if (!await deletionRepository.tableExists('public.lesson_author_workspaces')) return {};
+  let linkedRowsDeleted = 0;
+  let afterId = FIRST_UUID;
+  while (true) {
+    const ids = await deletionRepository.selectCourseWorkspaceIdPage(job.tenant_id, job.course_id, afterId, DELETE_BATCH_SIZE);
+    for (const id of ids) {
+      linkedRowsDeleted += (await deletionRepository.deleteCourseWorkspace(id, job.tenant_id, job.course_id)) || 0;
+    }
+    if (ids.length < DELETE_BATCH_SIZE) return { linkedRowsDeleted };
+    afterId = ids[ids.length - 1];
+    await touchJobLease(job.id);
+  }
 }
 
 async function deleteLeafBlocksByRoot(
@@ -417,25 +478,33 @@ async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeSt
 async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
   const stats = emptyStats();
 
-  await deletionRepository.markCourseDeleteRunning(job.course_id, job.tenant_id);
+  await step('mark_running', () => deletionRepository.markCourseDeleteRunning(job.course_id, job.tenant_id));
 
   if (!await deletionRepository.courseExists(job.course_id, job.tenant_id)) return stats;
 
-  addStats(stats, await deleteAllCourseAssets(job.tenant_id, job.course_id));
+  // Every step is bounded per statement; the lease is renewed between steps
+  // so a long purge is never taken over by the sweeper.
+  addStats(stats, await step('assets', () => deleteAllCourseAssets(job.tenant_id, job.course_id)));
+  await touchJobLease(job.id);
+  addStats(stats, await step('ai_id_workspaces', () => deleteCourseWorkspaces(job)));
+  await touchJobLease(job.id);
   // Delete outbox rows while their related submission IDs still exist. Deleting
   // enrollments first would cascade submissions and merely SET NULL on outbox,
   // leaving the mail body (which may contain learner/course personal data).
-  addStats(stats, await deleteCourseLinkedRows(job.course_id));
-  // Section-modal rows are removed above, before the complete block set is
-  // deleted in one statement. This makes wide and deep course trees O(n), not
-  // O(n × depth), while retaining bounded memory in the application process.
-  addStats(stats, await deleteAllCourseBlocks(job.course_id));
-  const feedbackHistory = await deleteCourseReferenceInBatches('assignment_feedback_history', job.course_id);
+  addStats(stats, await step('linked_rows', () => deleteCourseLinkedRows(job.course_id)));
+  await touchJobLease(job.id);
+  // Section-modal rows are removed above, before the blocks are deleted leaf
+  // first in bounded batches.
+  addStats(stats, await step('blocks', () => deleteAllCourseBlocks(job.course_id)));
+  await touchJobLease(job.id);
+  const feedbackHistory = await step('assignment_feedback_history', () =>
+    deleteCourseReferenceInBatches('assignment_feedback_history', job.course_id));
   stats.linkedRowsDeleted += feedbackHistory;
-  stats.linkedRowsDeleted += await deletionRepository.purgeCourseBackupPii(job.course_id);
-  addStats(stats, await deleteEnrollmentsByCourse(job.tenant_id, job.course_id));
+  stats.linkedRowsDeleted += await step('backup_pii', () => deletionRepository.purgeCourseBackupPii(job.course_id));
+  addStats(stats, await step('enrollments', () => deleteEnrollmentsByCourse(job.tenant_id, job.course_id)));
+  await touchJobLease(job.id);
 
-  const deletedCourse = await deletionRepository.deleteCourse(job.course_id, job.tenant_id);
+  const deletedCourse = await step('course', () => deletionRepository.deleteCourse(job.course_id, job.tenant_id));
 
   if ((deletedCourse || 0) > 0) {
     await invalidateTenantBadgeCaches(job.tenant_id);
@@ -473,10 +542,13 @@ export async function runDeletionJob(jobId: string): Promise<void> {
   try {
     let stats: PurgeStats;
     if (job.target_type === 'course') {
-      const existingWarnings = await getRetainedStorageReferenceWarnings(job.id);
-      const discoveredWarnings = await ensureCourseStorageManifest(job);
-      const warnings = mergeRetainedStorageReferenceWarnings(existingWarnings, discoveredWarnings);
-      await persistRetainedStorageReferenceWarnings(job, warnings);
+      const warnings = await step('storage_manifest', async () => {
+        const existingWarnings = await getRetainedStorageReferenceWarnings(job.id);
+        const discoveredWarnings = await ensureCourseStorageManifest(job);
+        const merged = mergeRetainedStorageReferenceWarnings(existingWarnings, discoveredWarnings);
+        await persistRetainedStorageReferenceWarnings(job, merged);
+        return merged;
+      });
 
       // All database references are removed first. The durable manifest stays
       // intact across a storage failure, so a retry can safely re-run the
@@ -484,11 +556,11 @@ export async function runDeletionJob(jobId: string): Promise<void> {
       stats = await purgeCourse(job);
       stats.warnings = warnings;
       await touchJobLease(job.id);
-      stats.storageDeleteRequested += await deleteStorageManifest('course', job.id);
+      stats.storageDeleteRequested += await step('storage_drain', () => deleteStorageManifest('course', job.id));
     } else {
-      stats = await purgeBlock(job);
+      stats = await step('block_subtree', () => purgeBlock(job));
       await touchJobLease(job.id);
-      stats.storageDeleteRequested += await deleteStorageManifest('course', job.id);
+      stats.storageDeleteRequested += await step('storage_drain', () => deleteStorageManifest('course', job.id));
     }
 
     await markJobSucceeded(job.id, stats);
