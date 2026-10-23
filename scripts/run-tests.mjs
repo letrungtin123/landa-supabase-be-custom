@@ -15,11 +15,17 @@
 //   a module starts no timer or connection (src/config/import-side-effects.test.ts);
 //   a test that starts one stops it.
 //
+// - The cross-language suites are those with a test file that reaches
+//   src/test-support/ai-rag-python.ts through its relative imports: their
+//   tests run the Python of ../landa-ai-rag. CI runs them with that repo
+//   checked out and LANDA_REQUIRE_CROSS_LANGUAGE=1, so none is skipped.
+//
 // Usage: npm test                     every suite
 //        npm test -- test:news ...    only these suites
+//        npm test -- --cross-language only the cross-language suites
 //        npm test -- --list           the suites, without running them
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseDotenv } from 'dotenv';
@@ -40,6 +46,11 @@ const SCRIPTED_SUITES = {
 
 const TEST_FILE = /\.test\.(?:ts|mjs|cjs|js)$/;
 const TEST_DIRECTORIES = ['src', 'scripts'];
+
+/** The helper every cross-language test reaches (directly or through a fixture). */
+const AI_RAG_HARNESS = 'src/test-support/ai-rag-python.ts';
+// import … from './x.js', export … from './x.js', import './x.js' and import('./x.js').
+const RELATIVE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)['"](\.{1,2}\/[^'"]+)['"]/gm;
 
 const CLOSED_PORT = '127.0.0.1:1';
 const SERVICE_ENV = {
@@ -89,6 +100,50 @@ async function readSuites() {
     suites.set(name, files);
   }
   return suites;
+}
+
+const importsByFile = new Map();
+
+/** The repository files a file imports by relative path (./x.js is x.ts), read once. */
+function relativeImports(file) {
+  let imports = importsByFile.get(file);
+  if (!imports) {
+    const text = readFileSync(path.join(root, file), 'utf8');
+    imports = [];
+    for (const [, specifier] of text.matchAll(RELATIVE_IMPORT)) {
+      const base = path.posix.join(path.posix.dirname(file), specifier);
+      const found = [base.replace(/\.js$/, '.ts'), base, `${base}.ts`, `${base}/index.ts`].find(candidate => {
+        const absolute = path.join(root, candidate);
+        return existsSync(absolute) && statSync(absolute).isFile();
+      });
+      if (found) imports.push(found);
+    }
+    importsByFile.set(file, imports);
+  }
+  return imports;
+}
+
+/** Whether a test file reaches the AI repo helper through relative imports, at any depth. */
+function reachesAiRagHarness(testFile) {
+  const seen = new Set([testFile]);
+  const pending = [testFile];
+  while (pending.length > 0) {
+    for (const imported of relativeImports(pending.pop())) {
+      if (imported === AI_RAG_HARNESS) return true;
+      if (!seen.has(imported)) {
+        seen.add(imported);
+        pending.push(imported);
+      }
+    }
+  }
+  return false;
+}
+
+/** The suites with at least one test file that runs the Python of ../landa-ai-rag. */
+function crossLanguageSuites(suites) {
+  return [...suites]
+    .filter(([, files]) => files.some(file => existsSync(path.join(root, file)) && reachesAiRagHarness(file)))
+    .map(([name]) => name);
 }
 
 function checkEnvironment() {
@@ -167,7 +222,9 @@ function printSummary(results) {
 
 const args = process.argv.slice(2);
 const listOnly = args.includes('--list');
-const requested = args.filter(arg => arg !== '--list');
+const crossLanguageOnly = args.includes('--cross-language');
+const requested = args.filter(arg => arg !== '--list' && arg !== '--cross-language');
+if (crossLanguageOnly && requested.length > 0) fail('--cross-language chooses its own suites; name none');
 
 const suites = await readSuites();
 const covered = new Set([...suites.values()].flat());
@@ -175,10 +232,15 @@ const orphans = TEST_DIRECTORIES.flatMap(listTestFiles).filter(file => !covered.
 const missing = [...suites].flatMap(([name, files]) =>
   files.filter(file => !existsSync(path.join(root, file))).map(file => `${name}: ${file}`),
 );
+const crossLanguage = crossLanguageOnly ? crossLanguageSuites(suites) : null;
+// An empty choice means the helper moved or the imports changed shape: never pass with nothing run.
+if (crossLanguage?.length === 0) fail(`--cross-language: no test file reaches ${AI_RAG_HARNESS}`);
 
 if (listOnly) {
-  for (const [name, files] of suites) console.log(`${name} (${files.length} files)`);
-  for (const name of DATABASE_SUITES) console.log(`${name} (database, npm run test:integration)`);
+  for (const [name, files] of suites) {
+    if (!crossLanguage || crossLanguage.includes(name)) console.log(`${name} (${files.length} files)`);
+  }
+  if (!crossLanguage) for (const name of DATABASE_SUITES) console.log(`${name} (database, npm run test:integration)`);
 }
 if (orphans.length > 0) {
   console.error(`[run-tests] ${orphans.length} test files belong to no test:* script:\n  ${orphans.join('\n  ')}`);
@@ -188,10 +250,15 @@ if (listOnly) process.exit(orphans.length > 0 || missing.length > 0 ? 1 : 0);
 
 const unknown = requested.filter(name => !suites.has(name));
 if (unknown.length > 0) fail(`unknown or database suites: ${unknown.join(', ')}`);
-const selected = requested.length > 0 ? requested : [...suites.keys()];
+const selected = crossLanguage ?? (requested.length > 0 ? requested : [...suites.keys()]);
 if (selected.length === 0) fail('no test:* scripts found in package.json');
 
 const env = checkEnvironment();
+if (crossLanguage) {
+  const required =
+    env.LANDA_REQUIRE_CROSS_LANGUAGE === '1' ? '1 (a missing ../landa-ai-rag fails)' : 'unset (may skip)';
+  console.log(`[run-tests] cross-language suites; LANDA_REQUIRE_CROSS_LANGUAGE=${required}`);
+}
 console.log(`[run-tests] ${selected.length} suites; NODE_ENV=${env.NODE_ENV}; service URLs on ${CLOSED_PORT} (closed)`);
 const results = [];
 for (const name of selected) {

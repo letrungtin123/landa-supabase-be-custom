@@ -1,9 +1,10 @@
 # Typecheck, lint, tests and build of landa-backend on every push and pull
-# request to main and refactor branches. No secrets and no services: every
-# service URL points at a closed port, and the values env.ts requires are
-# placeholders. Tests that need the sibling checkouts (../supabase/manual_sql,
-# ../landa-ai-rag/.venv-dev) skip with their reason; database suites
-# (npm run test:integration) do not run here.
+# request to main and refactor branches. No services: every service URL points
+# at a closed port, and the values env.ts requires are placeholders. In the
+# backend job, tests that need the sibling checkouts (../supabase/manual_sql,
+# ../landa-ai-rag/.venv-dev) skip with their reason; the cross-language job
+# runs the ../landa-ai-rag ones (its only secret is a read-only token for that
+# repository). Database suites (npm run test:integration) do not run here.
 name: CI
 
 on:
@@ -64,3 +65,99 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # The Node <-> Python suites (npm test -- --cross-language: every suite with a
+  # test file that reaches src/test-support/ai-rag-python.ts) against the AI
+  # service repository, checked out next to this one with its dev virtualenv:
+  # the layout those tests expect (../landa-ai-rag/.venv-dev).
+  # LANDA_REQUIRE_CROSS_LANGUAGE=1: a missing repository, virtualenv or bridge
+  # file fails the suite instead of skipping its tests.
+  #
+  # landa-ai-rag is private. Repository settings (Settings -> Secrets and
+  # variables -> Actions), named like BACKEND_REPO_TOKEN of the AI service CI:
+  #   secrets.AI_RAG_REPO_TOKEN   fine-grained token with read-only Contents on
+  #                               that repository only. Without it the job only
+  #                               warns that nothing was tested.
+  #   vars.AI_RAG_REPOSITORY      default letrungtin123/landa-ai-rag-be-custom
+  #   vars.AI_RAG_REF             branch, tag or SHA to test against (default main)
+  cross-language:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci
+      REDIS_URL: redis://127.0.0.1:1
+      RABBITMQ_URL: amqp://ci:ci@127.0.0.1:1
+      SUPABASE_URL: http://127.0.0.1:1
+      AI_RAG_SERVICE_URL: http://127.0.0.1:1
+      SUPABASE_SERVICE_KEY: ci-placeholder-not-a-key
+      JWT_SECRET: ci-placeholder-not-a-secret
+      CORS_ORIGIN: http://localhost:5274
+      LANDA_REQUIRE_CROSS_LANGUAGE: '1'
+      HAS_AI_RAG_TOKEN: ${{ secrets.AI_RAG_REPO_TOKEN != '' }}
+    defaults:
+      run:
+        working-directory: landa-backend
+    steps:
+      - name: Cross-language tests not run (no AI_RAG_REPO_TOKEN)
+        if: env.HAS_AI_RAG_TOKEN != 'true'
+        working-directory: .
+        run: echo "::warning::secrets.AI_RAG_REPO_TOKEN is not set, so the Node <-> Python cross-language tests did not run"
+
+      - name: Checkout backend
+        if: env.HAS_AI_RAG_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: landa-backend
+          persist-credentials: false
+
+      - name: Checkout AI service next to it
+        if: env.HAS_AI_RAG_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ vars.AI_RAG_REPOSITORY || 'letrungtin123/landa-ai-rag-be-custom' }}
+          ref: ${{ vars.AI_RAG_REF || 'main' }}
+          token: ${{ secrets.AI_RAG_REPO_TOKEN }}
+          path: landa-ai-rag
+          persist-credentials: false
+
+      # The Node version prod 226 runs.
+      - if: env.HAS_AI_RAG_TOKEN == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: landa-backend/package-lock.json
+
+      # The Python of the AI service (.python-version, 3.12); same pin as its CI.
+      - if: env.HAS_AI_RAG_TOKEN == 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version-file: landa-ai-rag/.python-version
+          cache: pip
+          cache-dependency-path: |
+            landa-ai-rag/requirements.lock
+            landa-ai-rag/requirements-dev.lock
+
+      # The same install as the AI service CI: both locks are hash-locked and
+      # complete (--no-deps); pip check runs after the runtime lock.
+      - name: AI service .venv-dev from the hash-locked requirements
+        if: env.HAS_AI_RAG_TOKEN == 'true'
+        working-directory: landa-ai-rag
+        run: |
+          python -m venv .venv-dev
+          .venv-dev/bin/python -m pip install --require-hashes --no-deps -r requirements.lock
+          .venv-dev/bin/python -m pip check
+          .venv-dev/bin/python -m pip install --require-hashes --no-deps -r requirements-dev.lock
+
+      - if: env.HAS_AI_RAG_TOKEN == 'true'
+        run: npm ci
+
+      # env.ts exits without a .env file; the job env above wins over its values.
+      - name: .env from .env.example
+        if: env.HAS_AI_RAG_TOKEN == 'true'
+        run: cp .env.example .env
+
+      - name: Cross-language tests (Node <-> Python, none skipped)
+        if: env.HAS_AI_RAG_TOKEN == 'true'
+        run: npm test -- --cross-language
