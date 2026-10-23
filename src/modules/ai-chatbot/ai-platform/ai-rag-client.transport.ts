@@ -69,19 +69,28 @@ function requireRagServiceUrl(): string {
   if (!baseUrl) {
     throw new AppError('Dịch vụ AI RAG chưa được cấu hình trên máy chủ.', 503, 'AI_RAG_SERVICE_NOT_CONFIGURED');
   }
-  const hmacConfigured = Boolean(env.AI_RAG_SERVICE_HMAC_KEY_ID && env.AI_RAG_SERVICE_HMAC_SECRET);
+  // Only one of the two HMAC variables set: refused, never sent with the static token alone.
   const hmacPartiallyConfigured = Boolean(env.AI_RAG_SERVICE_HMAC_KEY_ID || env.AI_RAG_SERVICE_HMAC_SECRET);
-  if (hmacPartiallyConfigured && !hmacConfigured) {
+  if (hmacPartiallyConfigured && !isRagHmacConfigured()) {
     throw new AppError('Cấu hình chữ ký dịch vụ AI RAG chưa đầy đủ.', 503, 'AI_RAG_SERVICE_HMAC_NOT_CONFIGURED');
   }
-  if (env.isProduction && !getRagServiceToken() && !hmacConfigured) {
+  if (env.isProduction && !env.AI_RAG_SERVICE_TOKEN && !isRagHmacConfigured()) {
     throw new AppError('Dịch vụ AI RAG thiếu xác thực nội bộ trên máy chủ.', 503, 'AI_RAG_SERVICE_AUTH_NOT_CONFIGURED');
   }
   return baseUrl;
 }
 
-function getRagServiceToken(): string {
-  return env.AI_RAG_SERVICE_TOKEN;
+function isRagHmacConfigured(): boolean {
+  return Boolean(env.AI_RAG_SERVICE_HMAC_KEY_ID && env.AI_RAG_SERVICE_HMAC_SECRET);
+}
+
+/**
+ * The static X-Landa-AI-Service-Token, sent only when no HMAC key pair is configured. With HMAC every
+ * request is signed, and a captured request must not also carry a secret that never expires
+ * (security audit 2026-10-24, L2). AI_RAG_SERVICE_TOKEN is then unused and can be removed.
+ */
+function ragServiceStaticToken(): string {
+  return isRagHmacConfigured() ? '' : env.AI_RAG_SERVICE_TOKEN;
 }
 
 function isRagRequestTimeout(error: unknown): boolean {
@@ -176,6 +185,7 @@ async function requestRagJson(
     requestBody,
     requestId: randomUUID(),
   });
+  const staticToken = ragServiceStaticToken();
 
   return new Promise((resolve, reject) => {
     const req = transport.request(url, {
@@ -186,7 +196,7 @@ async function requestRagJson(
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(requestBody).toString(),
         } : {}),
-        ...(getRagServiceToken() ? { 'X-Landa-AI-Service-Token': getRagServiceToken() } : {}),
+        ...(staticToken ? { 'X-Landa-AI-Service-Token': staticToken } : {}),
         ...hmacHeaders,
         ...(prepared.correlationId ? { 'X-Correlation-Id': prepared.correlationId } : {}),
       },

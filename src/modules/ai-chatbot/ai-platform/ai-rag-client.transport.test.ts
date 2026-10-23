@@ -35,6 +35,7 @@ Object.assign(env as unknown as Record<string, unknown>, {
   AI_RAG_SERVICE_HMAC_SECRET: 'test-secret-0123456789',
 });
 const client = await import('./ai-rag-client.service.js');
+const { AppError } = await import('../../../middleware/error-handler.js');
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const deleteDocument = () => client.deleteRagDocument({
@@ -132,6 +133,68 @@ test('every request gets its own request id', async () => {
   await deleteDocument();
   assert.equal(requestIds.length, 2);
   assert.notEqual(requestIds[0], requestIds[1]);
+});
+
+/** Runs `send` with these auth settings, then restores the file's own (HMAC kid-test, no token). */
+async function withRagAuth<T>(settings: Record<string, string>, send: () => Promise<T>): Promise<T> {
+  const keys = ['AI_RAG_SERVICE_TOKEN', 'AI_RAG_SERVICE_HMAC_KEY_ID', 'AI_RAG_SERVICE_HMAC_SECRET'] as const;
+  const mutable = env as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(keys.map(key => [key, mutable[key]]));
+  Object.assign(mutable, settings);
+  try {
+    return await send();
+  } finally {
+    Object.assign(mutable, saved);
+  }
+}
+
+const AUTH_HEADERS = ['x-landa-ai-service-token', 'x-landa-key-id', 'x-landa-timestamp', 'x-landa-signature',
+  'x-landa-signature-version', 'x-landa-request-id'];
+
+async function sentAuthHeaders(settings: Record<string, string>): Promise<string[]> {
+  let seen: http.IncomingHttpHeaders = {};
+  handler = (request, _body, response) => {
+    seen = request.headers;
+    response.end('{"deleted":true}');
+  };
+  await withRagAuth(settings, deleteDocument);
+  return AUTH_HEADERS.filter(name => seen[name] !== undefined);
+}
+
+test('L2: with an HMAC key pair the static token is not sent, even when it is configured', async () => {
+  assert.deepEqual(await sentAuthHeaders({ AI_RAG_SERVICE_TOKEN: 'static-token-0123456789',
+    AI_RAG_SERVICE_HMAC_KEY_ID: 'kid-test', AI_RAG_SERVICE_HMAC_SECRET: 'test-secret-0123456789' }),
+  ['x-landa-key-id', 'x-landa-timestamp', 'x-landa-signature', 'x-landa-signature-version', 'x-landa-request-id']);
+});
+
+test('L2: without an HMAC key pair the static token is the only credential sent', async () => {
+  let token: string | undefined;
+  handler = (request, _body, response) => {
+    token = request.headers['x-landa-ai-service-token'] as string | undefined;
+    response.end('{"deleted":true}');
+  };
+  await withRagAuth({ AI_RAG_SERVICE_TOKEN: 'static-token-0123456789', AI_RAG_SERVICE_HMAC_KEY_ID: '',
+    AI_RAG_SERVICE_HMAC_SECRET: '' }, deleteDocument);
+  assert.equal(token, 'static-token-0123456789');
+  assert.deepEqual(await sentAuthHeaders({ AI_RAG_SERVICE_TOKEN: 'static-token-0123456789',
+    AI_RAG_SERVICE_HMAC_KEY_ID: '', AI_RAG_SERVICE_HMAC_SECRET: '' }), ['x-landa-ai-service-token']);
+});
+
+test('a half-configured HMAC key pair is refused before anything is sent, token or not', async () => {
+  let requests = 0;
+  handler = (_request, _body, response) => {
+    requests += 1;
+    response.end('{"deleted":true}');
+  };
+  for (const settings of [
+    { AI_RAG_SERVICE_TOKEN: 'static-token-0123456789', AI_RAG_SERVICE_HMAC_KEY_ID: 'kid-test',
+      AI_RAG_SERVICE_HMAC_SECRET: '' },
+    { AI_RAG_SERVICE_TOKEN: '', AI_RAG_SERVICE_HMAC_KEY_ID: '', AI_RAG_SERVICE_HMAC_SECRET: 'test-secret-0123456789' },
+  ]) {
+    await assert.rejects(withRagAuth(settings, deleteDocument), (error: unknown) => error instanceof AppError
+      && error.code === 'AI_RAG_SERVICE_HMAC_NOT_CONFIGURED' && error.statusCode === 503);
+  }
+  assert.equal(requests, 0);
 });
 
 test('the index request carries the signed source URL only when there is one', () => {
