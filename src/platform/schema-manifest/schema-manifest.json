@@ -271,14 +271,23 @@
     },
     "fence_course_publish_mutation()": {
       "latest": {
-        "file": "20261006_0900_course_publish_governance_cp5.sql",
-        "md5": "56870786e889ae1f92f7b4165a474899",
+        "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+        "md5": "f580440336dc304da015d48c1c6a5acd",
         "security_definer": false
       },
       "definitions": [
         {
           "file": "20261006_0900_course_publish_governance_cp5.sql",
           "md5": "56870786e889ae1f92f7b4165a474899"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+          "md5": "f580440336dc304da015d48c1c6a5acd"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards_ROLLBACK.sql",
+          "md5": "56870786e889ae1f92f7b4165a474899",
+          "rollback": true
         }
       ]
     },
@@ -687,8 +696,8 @@
     },
     "guard_lesson_author_workspace_v2_attempt_event()": {
       "latest": {
-        "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
-        "md5": "ab88535c99e05e44e48710752cdb27ac",
+        "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+        "md5": "26827842bb646c3fdd2763522190ca12",
         "security_definer": false
       },
       "definitions": [
@@ -699,19 +708,37 @@
         {
           "file": "20261006_1025_lesson_author_cp1_attempt_run_authority_hotfix.sql",
           "md5": "ab88535c99e05e44e48710752cdb27ac"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+          "md5": "26827842bb646c3fdd2763522190ca12"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards_ROLLBACK.sql",
+          "md5": "ab88535c99e05e44e48710752cdb27ac",
+          "rollback": true
         }
       ]
     },
     "guard_lesson_author_workspace_v2_completion()": {
       "latest": {
-        "file": "20261001_1100_lesson_author_orchestration_v2.sql",
-        "md5": "07e3c89e9b76064e92c259c9aa06077f",
+        "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+        "md5": "6b8984c5871dcad237c1d81def4add8e",
         "security_definer": false
       },
       "definitions": [
         {
           "file": "20261001_1100_lesson_author_orchestration_v2.sql",
           "md5": "07e3c89e9b76064e92c259c9aa06077f"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards.sql",
+          "md5": "6b8984c5871dcad237c1d81def4add8e"
+        },
+        {
+          "file": "20261023_1500_course_purge_deleted_course_guards_ROLLBACK.sql",
+          "md5": "07e3c89e9b76064e92c259c9aa06077f",
+          "rollback": true
         }
       ]
     },

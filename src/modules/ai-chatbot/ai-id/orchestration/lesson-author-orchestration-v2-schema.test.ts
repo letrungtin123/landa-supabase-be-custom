@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { manualSqlSkip, readManualSql } from '../../../../test-support/manual-sql.js';
-import { ORCHESTRATION_V2_GUARDS } from './lesson-author-orchestration-v2-schema.repository.js';
+import {
+  ORCHESTRATION_V2_GUARDS,
+  ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL,
+} from './lesson-author-orchestration-v2-schema.repository.js';
 
 const sql = readManualSql('20261001_1100_lesson_author_orchestration_v2.sql');
 const runningTaskGuardCorrection = readManualSql('20261001_1445_lesson_author_orchestration_v2_running_task_guard.sql');
@@ -21,6 +24,7 @@ const providerReplayEvidenceFence = readManualSql('20261006_1530_lesson_author_v
 const needsActionNodeEditGuard = readManualSql('20261006_1600_lesson_author_v2_needs_action_node_edit_guard.sql');
 const cp2bAssessmentObligations = readManualSql('20261005_1930_lesson_author_cp2b_assessment_obligations.sql');
 const authorRecovery = readManualSql('20261020_1500_lesson_author_v2_recovery.sql');
+const coursePurgeGuards = readManualSql('20261023_1500_course_purge_deleted_course_guards.sql');
 const executable = sql
   .split(/\r?\n/)
   .filter((line) => !line.trimStart().startsWith('--'))
@@ -51,7 +55,9 @@ test('reviewed guard hashes exactly match the manual SQL bodies', { skip: manual
     const cp2bGuard = cp2bAssessmentObligations.includes(`FUNCTION public.${name}()`);
     const cp1Guard = cp1QualityEvidence.includes(`FUNCTION public.${name}()`);
     const recoveryGuard = authorRecovery.includes(`FUNCTION public.${name}()`);
-    const source = recoveryGuard ? authorRecovery : needsActionNodeGuard ? needsActionNodeEditGuard
+    const coursePurgeGuard = coursePurgeGuards.includes(`FUNCTION public.${name}()`);
+    const source = coursePurgeGuard ? coursePurgeGuards : recoveryGuard ? authorRecovery
+      : needsActionNodeGuard ? needsActionNodeEditGuard
       : replayEvidenceGuard ? providerReplayEvidenceFence
       : capacityWakeGuard ? workConservingCapacityWake
       : assessmentAuthorityGuard ? assessmentAuthorityBackpressureHotfix
@@ -64,6 +70,31 @@ test('reviewed guard hashes exactly match the manual SQL bodies', { skip: manual
     const body = source.match(pattern)?.[1];
     assert.ok(body, `missing reviewed guard body: ${signature}`);
     assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'), expected);
+  }
+});
+
+test('guard hashes accepted from before the course purge SQL are the reviewed previous bodies', { skip: manualSqlSkip }, () => {
+  const previousSources: Record<string, string> = {
+    'guard_lesson_author_workspace_v2_completion()': sql,
+    'guard_lesson_author_workspace_v2_attempt_event()': cp1AttemptRunAuthorityHotfix,
+  };
+  assert.deepEqual(Object.keys(ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL).sort(), Object.keys(previousSources).sort());
+  for (const [signature, expected] of Object.entries(ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL)) {
+    const name = signature.slice(0, -2);
+    const pattern = new RegExp(`CREATE (?:OR REPLACE )?FUNCTION public\\.${name}\\(\\)[\\s\\S]*?AS \\$guard\\$\\r?\\n([\\s\\S]*?)\\r?\\n\\$guard\\$;`);
+    const body = previousSources[signature]!.match(pattern)?.[1];
+    assert.ok(body, `missing previous guard body: ${signature}`);
+    assert.equal(createHash('md5').update(body.replace(/\r/g, '').trim()).digest('hex'), expected);
+  }
+});
+
+test('course purge SQL lets only the DELETE of a course being deleted through the V2 evidence guards', { skip: manualSqlSkip }, () => {
+  const purge = coursePurgeGuards.replace(/\s+/g, ' ');
+  assert.match(purge, /IF TG_OP='DELETE' AND NOT EXISTS\(SELECT 1 FROM public\.courses c WHERE c\.id=OLD\.course_id AND c\.deleted_at IS NULL\) THEN RETURN OLD; END IF; IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'V2 completion receipt is immutable'/);
+  assert.match(purge, /IF EXISTS\(SELECT 1 FROM public\.lesson_author_workspace_v2_tasks WHERE id=OLD\.task_id\) AND EXISTS\(SELECT 1 FROM public\.courses c WHERE c\.id=OLD\.course_id AND c\.deleted_at IS NULL\) THEN RAISE EXCEPTION 'Attempt evidence cannot be deleted individually'/);
+  // The drift fence knows exactly the previous body and this file's body of each guard.
+  for (const signature of Object.keys(ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL) as Array<keyof typeof ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL>) {
+    assert.ok(purge.includes(`('${signature}', '${ORCHESTRATION_V2_GUARDS_BEFORE_COURSE_PURGE_SQL[signature]}', '${ORCHESTRATION_V2_GUARDS[signature]}')`), signature);
   }
 });
 
