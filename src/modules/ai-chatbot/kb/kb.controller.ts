@@ -179,6 +179,7 @@ export async function listDocuments(req: Request, res: Response): Promise<void> 
     search: req.query.search as string,
     status: req.query.status as string,
     type: req.query.type as string,
+    locale: requestUiLocaleOf(req),
   });
   sendSuccess(res, result);
 }

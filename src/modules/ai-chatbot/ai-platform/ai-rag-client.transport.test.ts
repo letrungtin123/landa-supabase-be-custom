@@ -36,6 +36,7 @@ Object.assign(env as unknown as Record<string, unknown>, {
 });
 const client = await import('./ai-rag-client.service.js');
 const { AppError } = await import('../../../middleware/error-handler.js');
+const { RAG_DOCUMENT_ERROR_TEXT } = await import('./ai-rag-document-error.logic.js');
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const deleteDocument = () => client.deleteRagDocument({
@@ -95,6 +96,18 @@ test('deterministic index rejections keep their code and get a user-facing messa
   await assert.rejects(deleteDocument(), (error: unknown) => error instanceof client.RagServiceError
     && error.code === 'DOCUMENT_TYPE_UNSUPPORTED' && error.statusCode === 422
     && error.message.startsWith('Định dạng tài liệu chưa được hỗ trợ'));
+});
+
+test('a document over an AI service limit gets the stored Vietnamese text that tells to split it', async () => {
+  handler = (_request, _body, response) => {
+    response.statusCode = 422;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ detail: { code: 'DOCUMENT_LIMIT_EXCEEDED',
+      message: 'Document exceeds a configured processing limit.' } }));
+  };
+  await assert.rejects(deleteDocument(), (error: unknown) => error instanceof client.RagServiceError
+    && error.code === 'DOCUMENT_LIMIT_EXCEEDED' && error.statusCode === 422
+    && error.message === RAG_DOCUMENT_ERROR_TEXT.DOCUMENT_LIMIT_EXCEEDED[0]);
 });
 
 test('GET /v1/meta is HMAC-signed (v2) over GET and an empty body', async () => {

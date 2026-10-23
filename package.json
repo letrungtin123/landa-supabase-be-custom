@@ -32,7 +32,7 @@
     "test:lesson-author-orchestration-v2": "node scripts/test-lesson-author-orchestration-v2.mjs",
     "test:tenant-data-quota": "tsx --test src/modules/tenants/tenant-data-quota.logic.test.ts src/modules/tenants/tenant-data-quota-ledger.logic.test.ts src/modules/tenants/tenant-data-quota-sql.characterization.test.ts",
     "test:tenants": "tsx --test src/modules/tenants/tenants-sql.characterization.test.ts",
-    "test:kb-operations": "tsx --test src/modules/ai-chatbot/kb/kb-operation.logic.test.ts src/modules/ai-chatbot/kb/kb-source-download-url.logic.test.ts src/modules/ai-chatbot/ai-platform/ai-rag-client.transport.test.ts src/modules/ai-chatbot/ai-platform/ai-rag-index-settlement.test.ts src/modules/ai-chatbot/kb/kb-document-deletion.logic.test.ts src/modules/ai-chatbot/kb/kb-sql.characterization.test.ts",
+    "test:kb-operations": "tsx --test src/modules/ai-chatbot/kb/kb-operation.logic.test.ts src/modules/ai-chatbot/kb/kb-source-download-url.logic.test.ts src/modules/ai-chatbot/ai-platform/ai-rag-client.transport.test.ts src/modules/ai-chatbot/ai-platform/ai-rag-document-error.logic.test.ts src/modules/ai-chatbot/kb/kb-document-error-reason.test.ts src/modules/ai-chatbot/ai-platform/ai-rag-index-settlement.test.ts src/modules/ai-chatbot/kb/kb-document-deletion.logic.test.ts src/modules/ai-chatbot/kb/kb-sql.characterization.test.ts",
     "test:ai-chatbot-kb-rules": "tsx --test src/modules/ai-chatbot/chat/kb-usage.test.ts src/modules/ai-chatbot/kb/kb-document-ai-id-in-use.test.ts",
     "test:tenant-data-quota:integration": "tsx src/scripts/test-tenant-data-quota-integration.ts",
     "backfill:tenant-data-quota-ownership": "tsx src/scripts/backfill-tenant-data-quota-ownership.ts",

@@ -9,6 +9,7 @@ import https from 'node:https';
 import { env } from '../../../config/env.js';
 import { AppError } from '../../../middleware/error-handler.js';
 import type { AiUsage } from './ai-engine.types.js';
+import { ragDocumentErrorStoredText } from './ai-rag-document-error.logic.js';
 
 export class RagServiceError extends AppError {
   public readonly diagnostics: Record<string, string | number>;
@@ -265,7 +266,7 @@ export async function sendRagJson<T>(
       const safeMessage = code === 'REQUEST_TOO_LARGE'
         ? 'Dữ liệu gửi sang dịch vụ AI vượt giới hạn cho phép.'
         : code === 'DOCUMENT_LIMIT_EXCEEDED'
-          ? 'Tài liệu vượt giới hạn xử lý an toàn. Vui lòng giảm dung lượng hoặc độ dài tài liệu.'
+          ? ragDocumentErrorStoredText('DOCUMENT_LIMIT_EXCEEDED')
           : code === 'SERVICE_BUSY'
             ? 'Dịch vụ AI đang bận. Vui lòng thử lại sau.'
             : RAG_INDEX_ERROR_MESSAGES[code] ?? (message || 'Dịch vụ AI RAG xử lý thất bại. Vui lòng thử lại.');

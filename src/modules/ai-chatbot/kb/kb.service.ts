@@ -29,6 +29,7 @@ import { createKbRepository } from './kb.repository.js';
 import { assertKnowledgebaseMutable } from './kb-mutability.service.js';
 import { assertDocumentsNotInUseByAiId, supersedeLessonAuthorBlueprintsForDocuments } from './kb-document-operations.service.js';
 import type { KbDocument, Knowledgebase } from './kb.types.js';
+import { ragDocumentErrorReasonFor, type RagDocumentErrorLocale } from '../ai-platform/ai-rag-document-error.logic.js';
 
 export type {
   EnqueueRestoreKnowledgebaseResult,
@@ -205,10 +206,12 @@ interface ListDocumentsOptions {
   search?: string;
   status?: string;
   type?: string;
+  /** Language of the error_reason the list returns (the request's X-UI-Locale). */
+  locale?: RagDocumentErrorLocale;
 }
 
 export async function listDocuments(opts: ListDocumentsOptions): Promise<{ data: KbDocument[]; total: number }> {
-  const { kbId, tenantId, page = 1, pageSize = 20, search, status, type } = opts;
+  const { kbId, tenantId, page = 1, pageSize = 20, search, status, type, locale = 'vi' } = opts;
   const offset = (page - 1) * pageSize;
 
   const rows = await kbRepository.selectDocumentPage({ kbId, tenantId, search, status, type }, pageSize, offset);
@@ -216,7 +219,7 @@ export async function listDocuments(opts: ListDocumentsOptions): Promise<{ data:
   const total = parseInt(rows[0]?.full_count ?? '0');
   const data = rows.map(r => {
     const { full_count: _fullCount, ...rest } = r;
-    return rest as unknown as KbDocument;
+    return { ...rest, error_reason: ragDocumentErrorReasonFor(rest.error_reason, locale) } as unknown as KbDocument;
   });
 
   return { data, total };
