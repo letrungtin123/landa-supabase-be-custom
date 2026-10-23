@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DELETION_JOB_PUBLIC_ERRORS,
   LAST_ERROR_MAX_LENGTH,
   deletionStepOf,
   describeDeletionError,
+  publicDeletionJobError,
   summarizeErrorContext,
   tagDeletionStep,
 } from './course-deletion.logic.js';
@@ -91,4 +93,18 @@ test('context summary handles empty, PL/pgSQL and unrecognised statement lines',
     'SQL statement UPDATE public.ai_token_reservations',
   );
   assert.equal(summarizeErrorContext('x'.repeat(500))!.length, 300);
+});
+
+test('the tenant sees a plain message per state and language, never the diagnostic', () => {
+  const diagnostic = 'Course x is being deleted [step=blocks; pg=23503; table=course_blocks]';
+  assert.equal(publicDeletionJobError(null, false, 'vi'), null);
+  assert.equal(publicDeletionJobError('', true, 'en'), null);
+  assert.equal(publicDeletionJobError(diagnostic, false, 'vi'), DELETION_JOB_PUBLIC_ERRORS.retrying[0]);
+  assert.equal(publicDeletionJobError(diagnostic, false, 'en'), DELETION_JOB_PUBLIC_ERRORS.retrying[1]);
+  assert.equal(publicDeletionJobError(diagnostic, true, 'vi'), DELETION_JOB_PUBLIC_ERRORS.failed[0]);
+  assert.equal(publicDeletionJobError(diagnostic, true, 'en'), DELETION_JOB_PUBLIC_ERRORS.failed[1]);
+  // Plain words for non-technical users: no codes, brackets or technical tokens.
+  for (const message of Object.values(DELETION_JOB_PUBLIC_ERRORS).flat()) {
+    assert.doesNotMatch(message, /\d{3,}|\[|=|_|job|SQL|pg\b|lease|course_/i, message);
+  }
 });

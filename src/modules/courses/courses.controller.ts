@@ -19,6 +19,7 @@ import {
   sectionModalQuerySchema,
 } from './courses.validator.js';
 import { sendSuccess, sendError } from '../../utils/response.js';
+import { requestUiLocaleOf } from '../../utils/client-error.js';
 import { createTransactionalAuditEntry, runAuditedTransaction } from '../../middleware/audit-log.js';
 
 export async function listController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -361,7 +362,7 @@ export async function getDeletionJobStatusController(req: Request, res: Response
   try {
     const tenantId = req.user!.tenantId;
     if (!tenantId) { sendError(res, 'tenant_id is required', 400); return; }
-    sendSuccess(res, await getCourseDeletionJobStatus(req.params.jobId, tenantId));
+    sendSuccess(res, await getCourseDeletionJobStatus(req.params.jobId, tenantId, requestUiLocaleOf(req)));
   } catch (err) { next(err); }
 }
 

@@ -30,7 +30,13 @@ import {
   type DeleteJobRow,
 } from './course-deletion.repository.js';
 import { ASSET_BATCH_SIZE, DELETE_BATCH_SIZE, FIRST_UUID } from './course-deletion.constants.js';
-import { describeDeletionError, tagDeletionStep, type CourseDeletionStep } from './course-deletion.logic.js';
+import { swallowAndLog } from '../../utils/best-effort.js';
+import {
+  describeDeletionError,
+  publicDeletionJobError,
+  tagDeletionStep,
+  type CourseDeletionStep,
+} from './course-deletion.logic.js';
 import {
   collectPathsFromBlocks,
   ensureCourseStorageManifest,
@@ -239,12 +245,20 @@ async function markJobSucceeded(jobId: string, stats: PurgeStats): Promise<void>
 }
 
 export async function markJobRetryable(jobId: string, error: unknown): Promise<void> {
+  const lastError = describeDeletionError(error);
   const job = await deletionRepository.markJobRetryable({
     jobId,
-    message: describeDeletionError(error),
+    message: lastError,
     maxAttempts: env.DELETION_MAX_ATTEMPTS,
     retryBaseMs: env.DELETION_RETRY_BASE_MS,
     retryMaxMs: env.DELETION_RETRY_MAX_MS,
+  });
+  // Operators read the detail here and in the job row; the tenant API shows a plain message.
+  console.warn('[CourseDelete] attempt_failed', {
+    event: 'course_deletion.attempt_failed',
+    deletion_job_id: jobId,
+    terminal: job?.is_terminal ?? null,
+    last_error: lastError,
   });
   if (!job?.is_terminal || !job.course_id) return;
   if (job.target_type === 'course') {
@@ -358,7 +372,7 @@ async function deleteCourseWorkspaces(job: DeleteJobRow): Promise<Partial<PurgeS
     }
     if (ids.length < DELETE_BATCH_SIZE) return { linkedRowsDeleted };
     afterId = ids[ids.length - 1];
-    await touchJobLease(job.id);
+    await renewLeaseBetweenSteps(job.id);
   }
 }
 
@@ -441,6 +455,16 @@ async function touchJobLease(jobId: string): Promise<void> {
   await deletionRepository.touchJobLease(jobId, JOB_LEASE_SECONDS);
 }
 
+/**
+ * Lease renewal between two purge steps. A failed renewal (a transient
+ * database error) is recorded and does not stop the purge: the 60 s heartbeat
+ * renews again and the 15-minute lease covers the gap, and a database that is
+ * really gone fails the next purge statement, which ends the run as before.
+ */
+async function renewLeaseBetweenSteps(jobId: string): Promise<void> {
+  await touchJobLease(jobId).catch(swallowAndLog('course_deletion.lease_renewal'));
+}
+
 async function deleteCourseLinkedRows(courseId: string): Promise<Partial<PurgeStats>> {
   const directCourseTables: readonly CourseReferenceTable[] = [
     'notification_email_jobs',
@@ -485,24 +509,24 @@ async function purgeCourse(job: DeleteJobRow): Promise<PurgeStats> {
   // Every step is bounded per statement; the lease is renewed between steps
   // so a long purge is never taken over by the sweeper.
   addStats(stats, await step('assets', () => deleteAllCourseAssets(job.tenant_id, job.course_id)));
-  await touchJobLease(job.id);
+  await renewLeaseBetweenSteps(job.id);
   addStats(stats, await step('ai_id_workspaces', () => deleteCourseWorkspaces(job)));
-  await touchJobLease(job.id);
+  await renewLeaseBetweenSteps(job.id);
   // Delete outbox rows while their related submission IDs still exist. Deleting
   // enrollments first would cascade submissions and merely SET NULL on outbox,
   // leaving the mail body (which may contain learner/course personal data).
   addStats(stats, await step('linked_rows', () => deleteCourseLinkedRows(job.course_id)));
-  await touchJobLease(job.id);
+  await renewLeaseBetweenSteps(job.id);
   // Section-modal rows are removed above, before the blocks are deleted leaf
   // first in bounded batches.
   addStats(stats, await step('blocks', () => deleteAllCourseBlocks(job.course_id)));
-  await touchJobLease(job.id);
+  await renewLeaseBetweenSteps(job.id);
   const feedbackHistory = await step('assignment_feedback_history', () =>
     deleteCourseReferenceInBatches('assignment_feedback_history', job.course_id));
   stats.linkedRowsDeleted += feedbackHistory;
   stats.linkedRowsDeleted += await step('backup_pii', () => deletionRepository.purgeCourseBackupPii(job.course_id));
   addStats(stats, await step('enrollments', () => deleteEnrollmentsByCourse(job.tenant_id, job.course_id)));
-  await touchJobLease(job.id);
+  await renewLeaseBetweenSteps(job.id);
 
   const deletedCourse = await step('course', () => deletionRepository.deleteCourse(job.course_id, job.tenant_id));
 
@@ -555,11 +579,11 @@ export async function runDeletionJob(jobId: string): Promise<void> {
       // idempotent object removal after the database transaction has committed.
       stats = await purgeCourse(job);
       stats.warnings = warnings;
-      await touchJobLease(job.id);
+      await renewLeaseBetweenSteps(job.id);
       stats.storageDeleteRequested += await step('storage_drain', () => deleteStorageManifest('course', job.id));
     } else {
       stats = await step('block_subtree', () => purgeBlock(job));
-      await touchJobLease(job.id);
+      await renewLeaseBetweenSteps(job.id);
       stats.storageDeleteRequested += await step('storage_drain', () => deleteStorageManifest('course', job.id));
     }
 
@@ -603,8 +627,14 @@ export async function retryTerminalCourseDeletionJob(jobId: string, tenantId: st
   await afterCommit(() => publishDeleteJob(job.id));
 }
 
-export async function getCourseDeletionJobStatus(jobId: string, tenantId: string) {
+/**
+ * The job as the tenant sees it: last_error is a plain message in the request
+ * language, never the operator detail (step, SQLSTATE, table, constraint,
+ * function names) that stays in course_deletion_jobs.last_error.
+ */
+export async function getCourseDeletionJobStatus(jobId: string, tenantId: string, locale: 'vi' | 'en' = 'vi') {
   const result = await deletionRepository.selectJobStatus<PurgeStats>(jobId, tenantId);
   if (result.rowCount === 0) throw new AppError('Deletion job not found', 404);
-  return result.rows[0];
+  const job = result.rows[0];
+  return { ...job, last_error: publicDeletionJobError(job.last_error, job.is_terminal, locale) };
 }

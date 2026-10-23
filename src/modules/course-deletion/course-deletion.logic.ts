@@ -3,7 +3,7 @@
 // last_error text a failed job keeps, so the next failure is diagnosable
 // without guessing (PostgreSQL code, table, constraint, context) and without
 // row data: the error `detail` (key values) and SQL statement text are never
-// copied.
+// copied. That text is for operators; the tenant API shows a plain message.
 // ═══════════════════════════════════════════════════════════════
 
 /** The steps of a deletion job, in the order a course job runs them. */
@@ -20,6 +20,30 @@ export type CourseDeletionStep =
   | 'course'
   | 'block_subtree'
   | 'storage_drain';
+
+/**
+ * [Vietnamese, English] of what the tenant API shows for a job that failed
+ * at least once. The detailed last_error (step, SQLSTATE, table, constraint,
+ * function) names the internal schema: it stays in the job row and the
+ * server log, for operators only.
+ */
+export const DELETION_JOB_PUBLIC_ERRORS = {
+  retrying: [
+    'Việc xóa chưa hoàn tất. Hệ thống sẽ tự thử lại.',
+    'The deletion is not finished yet. It will be retried automatically.',
+  ],
+  failed: [
+    'Việc xóa không thành công sau nhiều lần thử. Quản trị viên cần cho chạy lại.',
+    'The deletion did not succeed after several attempts. An administrator needs to run it again.',
+  ],
+} as const;
+
+/** The plain message the tenant API returns in place of last_error (null while the job has no error). */
+export function publicDeletionJobError(lastError: string | null, isTerminal: boolean, locale: 'vi' | 'en'): string | null {
+  if (!lastError) return null;
+  const [vi, en] = DELETION_JOB_PUBLIC_ERRORS[isTerminal ? 'failed' : 'retrying'];
+  return locale === 'en' ? en : vi;
+}
 
 /** course_deletion_jobs.last_error keeps at most this many characters (unchanged limit). */
 export const LAST_ERROR_MAX_LENGTH = 4000;
