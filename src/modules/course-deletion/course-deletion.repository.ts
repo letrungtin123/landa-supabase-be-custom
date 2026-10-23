@@ -566,11 +566,61 @@ export function createCourseDeletionRepository(db: CourseDeletionDb) {
       return result.rowCount;
     },
 
-    async deleteAllCourseBlocks(courseId: string): Promise<number | null> {
+    /**
+     * Deletes up to `limit` leaf blocks of the course whose id follows `afterId`,
+     * in id order, and returns how many went and the last id. A leaf has no
+     * child, so the parent foreign key never cascades from this statement.
+     * OFFSET 0 keeps the child check a per-candidate index probe: as an
+     * anti-join PostgreSQL merged it with the whole parent index, read from
+     * its start on every batch (153 ms of a 163 ms batch half-way through a
+     * 152,441-block course, measured; 3 ms with the probe).
+     */
+    async deleteLeafCourseBlockBatch(courseId: string, afterId: string, limit: number): Promise<{ deleted: number; lastId: string | null }> {
+      const result = await db.query<{ deleted: number; last_id: string | null }>(
+        `WITH doomed AS (
+           SELECT b.id
+           FROM course_blocks b
+           WHERE b.course_id = $1
+             AND b.id > $2::uuid
+             AND NOT EXISTS (
+               SELECT 1 FROM course_blocks child WHERE child.parent_id = b.id OFFSET 0
+             )
+           ORDER BY b.id
+           LIMIT $3
+         ),
+         gone AS (
+           DELETE FROM course_blocks b
+           USING doomed
+           WHERE b.id = doomed.id
+           RETURNING b.id
+         )
+         SELECT count(*)::int AS deleted,
+                (SELECT g.id FROM gone g ORDER BY g.id DESC LIMIT 1) AS last_id
+         FROM gone`,
+        [courseId, afterId, limit],
+      );
+      return { deleted: Number(result.rows[0]?.deleted ?? 0), lastId: result.rows[0]?.last_id ?? null };
+    },
+
+    /** Keyset page of the course's AI ID workspace ids after `afterId` (a UUID). */
+    async selectCourseWorkspaceIdPage(tenantId: string, courseId: string, afterId: string, limit: number): Promise<string[]> {
+      const result = await db.query<{ id: string }>(
+        `SELECT id
+         FROM lesson_author_workspaces
+         WHERE tenant_id = $1::uuid AND course_id = $2 AND id > $3::uuid
+         ORDER BY id
+         LIMIT $4`,
+        [tenantId, courseId, afterId, limit],
+      );
+      return result.rows.map((row) => row.id);
+    },
+
+    /** Deletes one AI ID workspace of the course; its runs, drafts and evidence go with it by cascade. */
+    async deleteCourseWorkspace(workspaceId: string, tenantId: string, courseId: string): Promise<number | null> {
       const result = await db.query(
-        `DELETE FROM course_blocks
-         WHERE course_id = $1`,
-        [courseId],
+        `DELETE FROM lesson_author_workspaces
+         WHERE id = $1::uuid AND tenant_id = $2::uuid AND course_id = $3`,
+        [workspaceId, tenantId, courseId],
       );
       return result.rowCount;
     },

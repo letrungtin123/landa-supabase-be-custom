@@ -21,12 +21,10 @@ import {
   type CourseDeletionDb,
   type DeleteJobRow,
 } from './course-deletion.repository.js';
-import { ASSET_BATCH_SIZE, DELETE_BATCH_SIZE } from './course-deletion.constants.js';
+import { ASSET_BATCH_SIZE, DELETE_BATCH_SIZE, FIRST_UUID } from './course-deletion.constants.js';
 
 /** Statements on the pool (they join the current transaction, if any). */
 const deletionRepository = createCourseDeletionRepository({ query } satisfies CourseDeletionDb);
-
-const FIRST_UUID = '00000000-0000-0000-0000-000000000000';
 
 export interface RetainedStorageReferenceWarning {
   code: 'course_deletion.storage_reference_retained';
