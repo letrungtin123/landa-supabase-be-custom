@@ -76,8 +76,8 @@ jobs:
   # landa-ai-rag is private. Repository settings (Settings -> Secrets and
   # variables -> Actions), named like BACKEND_REPO_TOKEN of the AI service CI:
   #   secrets.AI_RAG_REPO_TOKEN   fine-grained token with read-only Contents on
-  #                               that repository only. Without it the job only
-  #                               warns that nothing was tested.
+  #                               that repository only. Without it the job fails:
+  #                               a green check must mean the tests ran.
   #   vars.AI_RAG_REPOSITORY      default letrungtin123/landa-ai-rag-be-custom
   #   vars.AI_RAG_REF             branch, tag or SHA to test against (default main)
   cross-language:
@@ -99,10 +99,12 @@ jobs:
       run:
         working-directory: landa-backend
     steps:
-      - name: Cross-language tests not run (no AI_RAG_REPO_TOKEN)
+      - name: Cross-language tests cannot run (no AI_RAG_REPO_TOKEN)
         if: env.HAS_AI_RAG_TOKEN != 'true'
         working-directory: .
-        run: echo "::warning::secrets.AI_RAG_REPO_TOKEN is not set, so the Node <-> Python cross-language tests did not run"
+        run: |
+          echo "::error::secrets.AI_RAG_REPO_TOKEN is not set, so the Node <-> Python cross-language tests cannot run"
+          exit 1
 
       - name: Checkout backend
         if: env.HAS_AI_RAG_TOKEN == 'true'
